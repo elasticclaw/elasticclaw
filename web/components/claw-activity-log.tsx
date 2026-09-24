@@ -228,7 +228,20 @@ function parseActivity(message: ApiMessage): AgentActivity | null {
   }
 }
 
-const WORKFLOW_EFFECT_PHASES: ReadonlySet<string> = new Set(["planned", "started", "finished", "assigned"])
+// The runtime phase allow-list is derived from the WorkflowEffectEvent["phase"]
+// union via an exhaustive Record: adding a phase to the union without listing
+// it here is a compile error, so the parser can never drift from the contract.
+const WORKFLOW_EFFECT_PHASES: Record<WorkflowEffectEvent["phase"], true> = {
+  planned: true,
+  started: true,
+  dispatched: true,
+  finished: true,
+  assigned: true,
+}
+
+function isWorkflowEffectPhase(value: unknown): value is WorkflowEffectEvent["phase"] {
+  return typeof value === "string" && value in WORKFLOW_EFFECT_PHASES
+}
 
 // parseWorkflowEffectEvent decodes the hub-authored "workflow:effect:<json>"
 // format. The payload is validated field by field so a malformed row degrades
@@ -241,17 +254,17 @@ function parseWorkflowEffectEvent(message: ApiMessage): WorkflowEffectEvent | nu
   } catch {
     return null
   }
-  if (!isRecord(parsed) || typeof parsed.kind !== "string" ||
-    typeof parsed.phase !== "string" || !WORKFLOW_EFFECT_PHASES.has(parsed.phase)) {
+  if (!isRecord(parsed) || typeof parsed.kind !== "string" || !isWorkflowEffectPhase(parsed.phase)) {
     return null
   }
   return {
     kind: parsed.kind,
-    phase: parsed.phase as WorkflowEffectEvent["phase"],
+    phase: parsed.phase,
     status: optionalString(parsed, "status"),
     attempt: optionalNumber(parsed, "attempt"),
     definition_path: optionalString(parsed, "definition_path"),
     command: optionalString(parsed, "command"),
+    task_id: optionalString(parsed, "task_id"),
     exit_code: optionalNumber(parsed, "exit_code"),
     succeeded: typeof parsed.succeeded === "boolean" ? parsed.succeeded : undefined,
     stdout: optionalString(parsed, "stdout"),
