@@ -9389,7 +9389,7 @@ func renderResumeStageContext(stageID, label, instructions string) string {
 	return block
 }
 
-const defaultSessionResumeStateCheck = "run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it (your repositories live under ~/workspace)"
+const defaultSessionResumeStateCheck = "in each repository you work in, run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it"
 
 func mergeSessionResume(workspace, workflow *types.SessionResumeConfig) types.SessionResumeConfig {
 	var out types.SessionResumeConfig
