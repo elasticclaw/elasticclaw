@@ -78,11 +78,12 @@ type FileReadResp struct {
 // session_preserved edges. Old bridges may send only a session_key or no payload;
 // old hubs ignore the added fields.
 type SessionRecoveryEdge struct {
-	SessionKey         string         `json:"session_key,omitempty"`
-	PreviousSessionKey string         `json:"previous_session_key,omitempty"`
-	Reason             string         `json:"reason,omitempty"`
-	TranscriptPath     string         `json:"transcript_path,omitempty"`
-	Digest             *SessionDigest `json:"digest,omitempty"`
+	InterruptedMessageID string         `json:"interrupted_message_id,omitempty"`
+	SessionKey           string         `json:"session_key,omitempty"`
+	PreviousSessionKey   string         `json:"previous_session_key,omitempty"`
+	Reason               string         `json:"reason,omitempty"`
+	TranscriptPath       string         `json:"transcript_path,omitempty"`
+	Digest               *SessionDigest `json:"digest,omitempty"`
 }
 
 type SessionDigest struct {

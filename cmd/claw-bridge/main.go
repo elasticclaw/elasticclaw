@@ -39,7 +39,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -158,10 +157,11 @@ const (
 )
 
 type queuedMsg struct {
-	kind     queuedKind
-	content  string
-	control  hubMsg
-	queuedAt time.Time
+	kind      queuedKind
+	content   string
+	messageID string
+	control   hubMsg
+	queuedAt  time.Time
 }
 
 type msgQueue struct {
@@ -226,10 +226,10 @@ func (q *msgQueue) enqueueLocked(m queuedMsg) {
 }
 
 // pushInput queues an unprocessed user message (subject to TTL).
-func (q *msgQueue) pushInput(content string) {
+func (q *msgQueue) pushInput(messageID, content string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.enqueueLocked(queuedMsg{kind: queuedInput, content: content, queuedAt: time.Now()})
+	q.enqueueLocked(queuedMsg{kind: queuedInput, messageID: messageID, content: content, queuedAt: time.Now()})
 }
 
 // pushReply queues a completed agent reply awaiting delivery (never expires).
@@ -289,7 +289,7 @@ func (q *msgQueue) drain() []queuedMsg {
 // replayQueued delivers queued entries after reconnect. Completed replies,
 // notices, and recovery edges are written directly to the hub; only unprocessed
 // inputs re-run a turn.
-func replayQueued(queue *msgQueue, deliver func(role, content string) error, deliverControl func(hubMsg) error, runTurn func(content string)) {
+func replayQueued(queue *msgQueue, deliver func(role, content string) error, deliverControl func(hubMsg) error, runTurn func(messageID, content string)) {
 	for _, m := range queue.drain() {
 		switch m.kind {
 		case queuedReply, queuedNotice:
@@ -303,7 +303,7 @@ func replayQueued(queue *msgQueue, deliver func(role, content string) error, del
 				queue.requeue(m)
 			}
 		default: // queuedInput
-			runTurn(m.content)
+			runTurn(m.messageID, m.content)
 		}
 	}
 }
@@ -906,7 +906,7 @@ func (l *sessionTranscriptLog) reset(key string) {
 }
 
 func (l *sessionTranscriptLog) noteAssistant(text string) {
-	text = strings.TrimSpace(sanitizeActivityTextLimit(text, 0))
+	text = sanitizeSessionDigestText(text)
 	if text == "" {
 		return
 	}
@@ -931,8 +931,8 @@ func (l *sessionTranscriptLog) noteTool(a agentActivity) {
 	if phase != "running" && phase != "start" && phase != "started" && phase != "in_progress" && !isToolTerminalPhase(phase) {
 		return
 	}
-	args := sanitizeActivityTextLimit(firstNonEmpty(a.Command, a.Path, a.URL, a.Detail), 0)
-	tool := sanitizeActivityTextLimit(a.Tool, 0)
+	args := sanitizeSessionDigestText(firstNonEmpty(a.Command, a.Path, a.URL, a.Detail))
+	tool := sanitizeSessionDigestText(a.Tool)
 	key := a.CallID
 	if key == "" {
 		key = tool + "\x00" + args
@@ -1220,109 +1220,27 @@ func sanitizeActivityTextLimit(value string, max int) string {
 	if value == "" {
 		return ""
 	}
-	value = activityURLUserinfo.ReplaceAllString(value, "${1}[redacted]@")
-	value = redactActivitySecretAssignments(value)
-	value = redactActivityPrefix(value, "Bearer ", "Bearer [redacted]")
+	replacers := []struct {
+		prefix string
+		value  string
+	}{
+		{"Bearer ", "Bearer [redacted]"},
+		{"token=", "token=[redacted]"},
+		{"access_token=", "access_token=[redacted]"},
+		{"api_key=", "api_key=[redacted]"},
+		{"OPENAI_API_KEY=", "OPENAI_API_KEY=[redacted]"},
+		{"ANTHROPIC_API_KEY=", "ANTHROPIC_API_KEY=[redacted]"},
+		{"FIREWORKS_API_KEY=", "FIREWORKS_API_KEY=[redacted]"},
+		{"GITHUB_TOKEN=", "GITHUB_TOKEN=[redacted]"},
+		{"GH_TOKEN=", "GH_TOKEN=[redacted]"},
+	}
+	for _, r := range replacers {
+		value = redactActivityPrefix(value, r.prefix, r.value)
+	}
 	if max > 0 && len(value) > max {
 		value = truncateUTF8Prefix(value, max-3) + "..."
 	}
 	return value
-}
-
-// Match complete assignment keys, including JSON keys and HTTP headers. The
-// boundary excludes path components so ordinary paths are not treated as keys.
-var activitySecretAssignment = regexp.MustCompile(`(?i)(^|[^a-z0-9_./-])(?:\\?["'])?([a-z0-9_.-]+)(?:\\?["'])?\s*[:=]\s*`)
-var activityURLUserinfo = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s?#@]+@`)
-var activityCamelWord = regexp.MustCompile(`([a-z0-9])([A-Z])`)
-var activityCamelAcronym = regexp.MustCompile(`([A-Z]+)([A-Z][a-z])`)
-var activitySourceLine = regexp.MustCompile(`^[0-9]+:`)
-
-func activitySecretKey(key string) bool {
-	key = activityCamelAcronym.ReplaceAllString(key, "${1}_${2}")
-	key = activityCamelWord.ReplaceAllString(key, "${1}_${2}")
-	parts := strings.FieldsFunc(strings.ToLower(key), func(r rune) bool {
-		return r == '_' || r == '-' || r == '.'
-	})
-	for i, part := range parts {
-		switch part {
-		case "token", "secret", "password", "passwd", "apikey", "credential", "credentials", "auth", "authorization", "oauth":
-			return true
-		case "api", "access", "private":
-			if i+1 < len(parts) && parts[i+1] == "key" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func redactActivitySecretAssignments(value string) string {
-	var out strings.Builder
-	offset := 0
-	for _, match := range activitySecretAssignment.FindAllStringSubmatchIndex(value, -1) {
-		start := match[1]
-		key := value[match[4]:match[5]]
-		if !activitySecretKey(key) {
-			continue
-		}
-		// A filename followed by a line number is a source location, not a key.
-		separator := strings.TrimSpace(value[match[5]:start])
-		if strings.Contains(key, ".") && separator == ":" && activitySourceLine.MatchString(value[start:]) {
-			continue
-		}
-		if start < offset {
-			continue // An assignment inside a previously redacted quoted value.
-		}
-		out.WriteString(value[offset:start])
-		// Keep the scheme in Authorization headers, but redact its credential.
-		for _, scheme := range []string{"Bearer", "Basic"} {
-			if len(value)-start > len(scheme) && strings.EqualFold(value[start:start+len(scheme)], scheme) && strings.ContainsRune(" \t", rune(value[start+len(scheme)])) {
-				out.WriteString(scheme + " ")
-				start += len(scheme)
-				for start < len(value) && (value[start] == ' ' || value[start] == '\t') {
-					start++
-				}
-				break
-			}
-		}
-		out.WriteString("[redacted]")
-		offset = activitySecretValueEnd(value, start)
-	}
-	out.WriteString(value[offset:])
-	return out.String()
-}
-
-func activitySecretValueEnd(value string, start int) int {
-	end := start
-	// JSON embedded in a shell argument can escape the quotes themselves.
-	if end+1 < len(value) && value[end] == '\\' && (value[end+1] == '"' || value[end+1] == '\'') {
-		delimiter := value[end : end+2]
-		for end += 2; end < len(value); end++ {
-			if strings.HasPrefix(value[end:], delimiter) && value[end-1] != '\\' {
-				return end + 2
-			}
-		}
-		return end
-	}
-	if end < len(value) && (value[end] == '"' || value[end] == '\'') {
-		quote := value[end]
-		end++
-		for end < len(value) {
-			if value[end] == '\\' && end+1 < len(value) {
-				end += 2
-				continue
-			}
-			end++
-			if value[end-1] == quote {
-				break
-			}
-		}
-		return end
-	}
-	for end < len(value) && !strings.ContainsRune(" \t\r\n&;,}\"'", rune(value[end])) {
-		end++
-	}
-	return end
 }
 
 func truncateResult(value string, max int) string {
@@ -1349,7 +1267,21 @@ func redactActivityPrefix(value, prefix, replacement string) string {
 			break
 		}
 		start := offset + idx
-		end := activitySecretValueEnd(value, start+len(prefix))
+		end := start + len(prefix)
+		if end < len(value) && (value[end] == '"' || value[end] == '\'') {
+			q := value[end]
+			end++
+			for end < len(value) && value[end] != q {
+				end++
+			}
+			if end < len(value) {
+				end++
+			}
+		} else {
+			for end < len(value) && value[end] != ' ' && value[end] != '&' && value[end] != '"' && value[end] != '\'' {
+				end++
+			}
+		}
 		value = value[:start] + replacement + value[end:]
 		offset = start + len(replacement)
 	}
@@ -1382,16 +1314,17 @@ type gatewaySession struct {
 	// and therefore lost the transcript. runHubLoop installs it for the active
 	// hub connection; it is nil during startup and in focused tests.
 	onSessionReplacedMu sync.Mutex
-	onSessionReplaced   func(previousKey string)
+	onSessionReplaced   func(previousKey, interruptedMessageID string)
 
 	// pending req/res tracking (reqID → response channel)
 	pendMu  sync.Mutex
 	pending map[string]chan gwFrame
 
 	// in-flight message tracking (one at a time, serialised by sendMu)
-	sendMu   sync.Mutex
-	infMu    sync.RWMutex
-	inFlight *inFlightState
+	sendMu        sync.Mutex
+	infMu         sync.RWMutex
+	inFlight      *inFlightState
+	turnMessageID string // hub input ID, protected by infMu
 
 	// context usage (0-100), updated after each turn
 	ctxMu        sync.RWMutex
@@ -1506,18 +1439,18 @@ func (gs *gatewaySession) setSessionKey(key string) {
 	}
 }
 
-func (gs *gatewaySession) setOnSessionReplaced(fn func(previousKey string)) {
+func (gs *gatewaySession) setOnSessionReplaced(fn func(previousKey, interruptedMessageID string)) {
 	gs.onSessionReplacedMu.Lock()
 	gs.onSessionReplaced = fn
 	gs.onSessionReplacedMu.Unlock()
 }
 
-func (gs *gatewaySession) notifySessionReplaced(previousKey string) {
+func (gs *gatewaySession) notifySessionReplaced(previousKey, interruptedMessageID string) {
 	gs.onSessionReplacedMu.Lock()
 	fn := gs.onSessionReplaced
 	gs.onSessionReplacedMu.Unlock()
 	if fn != nil {
-		fn(previousKey)
+		fn(previousKey, interruptedMessageID)
 	}
 }
 
@@ -1795,12 +1728,12 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			}
 			log.Printf("[gateway] read error: %v — reconnecting", err)
 
-			gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
-
-			// Fail any in-flight message
+			// Capture identity before failing the turn: its reply may start the next input.
 			gs.infMu.RLock()
+			interruptedMessageID := gs.turnMessageID
 			inf := gs.inFlight
 			gs.infMu.RUnlock()
+			gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
 			if inf != nil {
 				deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway disconnected")})
 			}
@@ -1825,7 +1758,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					continue
 				}
 				if replacedSession {
-					gs.notifySessionReplaced(previousKey)
+					gs.notifySessionReplaced(previousKey, interruptedMessageID)
 				}
 				log.Printf("[gateway] reconnected and re-subscribed")
 				break
@@ -2868,7 +2801,7 @@ func buildSessionRecoveryEdge(gs *gatewaySession, agentErr error, outcome string
 	return edge
 }
 
-func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySession, writeActivity func(agentActivity), writeHub func(hubMsg) error, queue *msgQueue) bool {
+func reportSessionRecovery(agentErr error, messageID string, reply *string, gwSession *gatewaySession, writeActivity func(agentActivity), writeHub func(hubMsg) error, queue *msgQueue) bool {
 	currentKey := gwSession.getSessionKey()
 	outcome := sessionRecoveryOutcome(agentErr, currentKey)
 	if outcome == "preserved" {
@@ -2883,7 +2816,9 @@ func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySess
 		// lock across a network write. A reconnect can still replace the session in
 		// this tiny gap; that is acceptable because continuation prompts require git
 		// status before repeating work, while locking during I/O would be riskier.
-		payload, _ := json.Marshal(buildSessionRecoveryEdge(gwSession, agentErr, outcome))
+		recovery := buildSessionRecoveryEdge(gwSession, agentErr, outcome)
+		recovery.InterruptedMessageID = messageID
+		payload, _ := json.Marshal(recovery)
 		edge := hubMsg{Type: "session_preserved", Payload: payload}
 		if err := writeHub(edge); err != nil {
 			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
@@ -2897,7 +2832,9 @@ func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySess
 		}
 		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
 		*reply = ""
-		keyPayload, _ := json.Marshal(buildSessionRecoveryEdge(gwSession, agentErr, outcome))
+		recovery := buildSessionRecoveryEdge(gwSession, agentErr, outcome)
+		recovery.InterruptedMessageID = messageID
+		keyPayload, _ := json.Marshal(recovery)
 		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
 		if err := writeHub(edge); err != nil {
 			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
@@ -2920,10 +2857,13 @@ func sessionLockConflictProbeBudget() time.Duration {
 
 // SendMessage sends a user message to the persistent session, streams chunks
 // via onChunk, and returns the full response text.
-func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
+func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
 	// Serialise: only one message in flight at a time
 	gs.sendMu.Lock()
 	defer gs.sendMu.Unlock()
+	gs.infMu.Lock()
+	gs.turnMessageID = messageID
+	gs.infMu.Unlock()
 
 	delays := []time.Duration{2 * time.Second, 5 * time.Second}
 	gatewayRetried := false
@@ -2963,7 +2903,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			}
 			if reconnected {
 				if replacedSession {
-					gs.notifySessionReplaced(previousKey)
+					gs.notifySessionReplaced(previousKey, messageID)
 				}
 				gatewayRetried = true
 				log.Printf("[gateway] retrying message after reconnecting closed gateway connection")
@@ -5322,11 +5262,11 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			Payload: mustJSON(map[string]interface{}{"role": role, "content": content}),
 		})
 	}
-	runTurn := func(content string) {
+	runTurn := func(messageID, content string) {
 		go func(c string) {
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 			defer agentCancel()
-			reply, agentErr := gwSession.SendMessage(agentCtx, c, func(chunk string) {
+			reply, agentErr := gwSession.SendMessage(agentCtx, c, messageID, func(chunk string) {
 				_ = writeHub(hubMsg{
 					Type:    "chunk",
 					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": chunk}),
@@ -5335,7 +5275,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				writeActivity(activity)
 			})
 			if agentErr != nil {
-				if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub, queue) {
+				if !reportSessionRecovery(agentErr, messageID, &reply, gwSession, writeActivity, writeHub, queue) {
 					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
 				}
 			}
@@ -5359,10 +5299,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	// Capture this connection's writer. If this hub connection has died by the
 	// time a gateway reconnect replaces the session, the callback queues the
 	// edge for replay instead of writing through a newer connection implicitly.
-	gwSession.setOnSessionReplaced(func(previousKey string) {
+	gwSession.setOnSessionReplaced(func(previousKey, interruptedMessageID string) {
 		activityMessage := "OpenClaw session was replaced after gateway reconnect; waiting for the hub to resume the task (reason=gateway_reconnect)"
 		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
-		keyPayload, _ := json.Marshal(buildSessionRecoveryEdge(gwSession, &sessionRotatedError{reason: types.SessionLossReasonGatewayReconnect, previousKey: previousKey}, "rotated"))
+		recovery := buildSessionRecoveryEdge(gwSession, &sessionRotatedError{reason: types.SessionLossReasonGatewayReconnect, previousKey: previousKey}, "rotated")
+		recovery.InterruptedMessageID = interruptedMessageID
+		keyPayload, _ := json.Marshal(recovery)
 		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
 		if err := writeHub(edge); err != nil {
 			log.Printf("[bridge] session replacement edge write failed, queuing for replay: %v", err)
@@ -5463,7 +5405,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				}
 				if !gwSession.IsReady() {
 					log.Printf("[bridge] gateway not ready, queuing message for later")
-					queue.pushInput(content)
+					queue.pushInput(id, content)
 					return
 				}
 
@@ -5472,7 +5414,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 
 				log.Printf("[bridge] → openclaw: %q", content[:min(len(content), 80)])
 
-				reply, agentErr := gwSession.SendMessage(agentCtx, content, func(chunk string) {
+				reply, agentErr := gwSession.SendMessage(agentCtx, content, id, func(chunk string) {
 					_ = writeHub(hubMsg{
 						Type: "chunk",
 						Payload: mustJSON(map[string]interface{}{
@@ -5485,7 +5427,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub, queue) {
+					if !reportSessionRecovery(agentErr, id, &reply, gwSession, writeActivity, writeHub, queue) {
 						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
 					}
 				} else {

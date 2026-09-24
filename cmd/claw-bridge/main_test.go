@@ -2042,7 +2042,7 @@ func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
 			queue := &msgQueue{}
 			reply := "partially completed reply"
 			var messages []hubMsg
-			handled := reportSessionRecovery(preserved, &reply, gs, func(agentActivity) {}, func(msg hubMsg) error {
+			handled := reportSessionRecovery(preserved, "input-1", &reply, gs, func(agentActivity) {}, func(msg hubMsg) error {
 				messages = append(messages, msg)
 				return nil
 			}, queue)
@@ -2059,7 +2059,7 @@ func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
 			if err := json.Unmarshal(messages[0].Payload, &edge); err != nil {
 				t.Fatal(err)
 			}
-			if edge.Reason != types.SessionLossReasonLockConflict || edge.PreviousSessionKey != "session-1" {
+			if edge.Reason != types.SessionLossReasonLockConflict || edge.PreviousSessionKey != "session-1" || edge.InterruptedMessageID != "input-1" {
 				t.Fatalf("edge = %#v", edge)
 			}
 			wantKey := ""
@@ -2088,7 +2088,7 @@ func TestReportSessionRecoveryQueuesFailedEdgeForReplay(t *testing.T) {
 				gs.sessionKey = "session-2"
 			}
 			reply := "partial"
-			if !reportSessionRecovery(err, &reply, gs, func(agentActivity) {}, func(hubMsg) error { return errString("hub disconnected") }, queue) {
+			if !reportSessionRecovery(err, "input-1", &reply, gs, func(agentActivity) {}, func(hubMsg) error { return errString("hub disconnected") }, queue) {
 				t.Fatal("recovery was not handled")
 			}
 			if len(queue.msgs) != 1 || queue.msgs[0].kind != queuedControl || queue.msgs[0].control.Type != wantType {
@@ -2098,8 +2098,12 @@ func TestReportSessionRecoveryQueuesFailedEdgeForReplay(t *testing.T) {
 			replayQueued(queue, func(string, string) error { return nil }, func(msg hubMsg) error {
 				replayed = append(replayed, msg)
 				return nil
-			}, func(string) { t.Fatal("replay must not rerun the user turn") })
-			if len(replayed) != 1 || replayed[0].Type != wantType {
+			}, func(string, string) { t.Fatal("replay must not rerun the user turn") })
+			var edge types.SessionRecoveryEdge
+			if len(replayed) == 1 {
+				_ = json.Unmarshal(replayed[0].Payload, &edge)
+			}
+			if len(replayed) != 1 || replayed[0].Type != wantType || edge.InterruptedMessageID != "input-1" {
 				t.Fatalf("replayed edges = %#v, want one %s edge", replayed, wantType)
 			}
 		})
@@ -2117,7 +2121,7 @@ func TestReplayQueuedDeliversRecoveryEdgeBeforeEmptyReply(t *testing.T) {
 	}, func(msg hubMsg) error {
 		deliveries = append(deliveries, "edge:"+msg.Type)
 		return nil
-	}, func(string) { t.Fatal("replay must not rerun the user turn") })
+	}, func(string, string) { t.Fatal("replay must not rerun the user turn") })
 	if got, want := strings.Join(deliveries, ","), "edge:session_preserved,reply:"; got != want {
 		t.Fatalf("replay order = %q, want %q", got, want)
 	}
@@ -2235,7 +2239,7 @@ func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	}
 	go gs.readLoop(ctx)
 
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil {
 		t.Fatal("SendMessage returned nil error")
 	}
@@ -2381,7 +2385,7 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 	}
 	go gs.readLoop(ctx)
 
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil {
 		t.Fatal("SendMessage returned nil error")
 	}
@@ -2478,7 +2482,7 @@ func TestGatewaySessionPreservesSessionAfterMidTurnLockConflictProbe(t *testing.
 	defer conn.CloseNow()
 	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), sessionErr) {
 		t.Fatalf("SendMessage error = %v, want original lock conflict", err)
 	}
@@ -2562,7 +2566,7 @@ func TestGatewaySessionProbeRechecksConcurrentRotationAfterSuccess(t *testing.T)
 	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
 		t.Fatalf("SendMessage error = %v, want rotation only", err)
 	}
@@ -2643,7 +2647,7 @@ func TestGatewaySessionProbeDetectsConcurrentRotation(t *testing.T) {
 	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
 		t.Fatalf("SendMessage error = %v, want rotation only", err)
 	}
@@ -2705,7 +2709,7 @@ func TestGatewaySessionLockConflictAlreadyRotatedSkipsAbortAndProbe(t *testing.T
 	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
 		t.Fatalf("SendMessage error = %v, want rotation only", err)
 	}
@@ -2781,7 +2785,7 @@ func TestGatewaySessionProbesAfterTurnContextExpires(t *testing.T) {
 	defer conn.CloseNow()
 	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(connCtx)
-	_, err = gs.SendMessage(turnCtx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(turnCtx, "continue the task", "", nil, nil)
 	select {
 	case <-probed:
 	default:
@@ -2904,7 +2908,7 @@ func TestGatewaySessionRetriesSameSessionAfterLockConflictSendError(t *testing.T
 	}
 	go gs.readLoop(ctx)
 
-	reply, err := gs.SendMessage(ctx, "continue the task", nil, nil)
+	reply, err := gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err != nil {
 		t.Fatalf("SendMessage returned error: %v", err)
 	}
@@ -3032,7 +3036,7 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 	}
 	go gs.readLoop(ctx)
 
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil {
 		t.Fatal("SendMessage returned nil error")
 	}
@@ -3148,7 +3152,7 @@ func testGatewaySessionAcceptedTurnDeadline(t *testing.T, recovery string) {
 	go gs.readLoop(readCtx)
 	sendCtx, cancelSend := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancelSend()
-	_, err = gs.SendMessage(sendCtx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(sendCtx, "continue the task", "", nil, nil)
 	if !errors.Is(err, context.DeadlineExceeded) || sessionLossReason(err) != types.SessionLossReasonTurnTimeout {
 		t.Fatalf("error = %v, reason = %q", err, sessionLossReason(err))
 	}
@@ -3567,7 +3571,7 @@ func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) 
 		pending:    make(map[string]chan gwFrame),
 	}
 	replaced := make(chan types.SessionRecoveryEdge, 1)
-	gs.setOnSessionReplaced(func(previousKey string) {
+	gs.setOnSessionReplaced(func(previousKey, interruptedMessageID string) {
 		replaced <- buildSessionRecoveryEdge(gs, &sessionRotatedError{reason: types.SessionLossReasonGatewayReconnect, previousKey: previousKey}, "rotated")
 	})
 	go gs.readLoop(ctx)
@@ -3846,12 +3850,12 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 		pending:    make(map[string]chan gwFrame),
 	}
 	replaced := make(chan struct{}, 1)
-	gs.setOnSessionReplaced(func(previousKey string) { replaced <- struct{}{} })
+	gs.setOnSessionReplaced(func(previousKey, interruptedMessageID string) { replaced <- struct{}{} })
 	go gs.readLoop(ctx)
 
 	var chunks []string
 	start := time.Now()
-	reply, err := gs.SendMessage(ctx, "hi", func(chunk string) {
+	reply, err := gs.SendMessage(ctx, "hi", "", func(chunk string) {
 		chunks = append(chunks, chunk)
 	}, nil)
 	if err != nil {
@@ -4064,7 +4068,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 		pending:    make(map[string]chan gwFrame),
 	}
 	replaced := make(chan types.SessionRecoveryEdge, 1)
-	gs.setOnSessionReplaced(func(previousKey string) {
+	gs.setOnSessionReplaced(func(previousKey, interruptedMessageID string) {
 		replaced <- buildSessionRecoveryEdge(gs, &sessionRotatedError{reason: types.SessionLossReasonGatewayReconnect, previousKey: previousKey}, "rotated")
 	})
 
@@ -4099,7 +4103,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 	}
 	resultCh := make(chan sendResult, 1)
 	go func() {
-		reply, err := gs.SendMessage(ctx, "hi", func(string) {}, nil)
+		reply, err := gs.SendMessage(ctx, "hi", "", func(string) {}, nil)
 		resultCh <- sendResult{reply, err}
 	}()
 
@@ -4157,7 +4161,7 @@ func TestMsgQueueReplyNeverExpires(t *testing.T) {
 
 func TestMsgQueueExpiredInputBecomesNotice(t *testing.T) {
 	q := &msgQueue{}
-	q.pushInput("stale user input")
+	q.pushInput("", "stale user input")
 	q.msgs[0].queuedAt = time.Now().Add(-2 * msgQueueTTL)
 
 	out := q.drain()
@@ -4182,7 +4186,7 @@ func TestMsgQueueExpiredInputBecomesNotice(t *testing.T) {
 func TestMsgQueueOverflowEvictsOldestInputAndSurfacesNotice(t *testing.T) {
 	q := &msgQueue{}
 	for i := 0; i < msgQueueMax+5; i++ {
-		q.pushInput(fmt.Sprintf("input-%d", i))
+		q.pushInput("", fmt.Sprintf("input-%d", i))
 	}
 	if len(q.msgs) != msgQueueMax {
 		t.Fatalf("expected queue capped at %d, got %d", msgQueueMax, len(q.msgs))
@@ -4226,7 +4230,7 @@ func TestReplayQueuedDeliversReplyWithoutRerun(t *testing.T) {
 		delivered = append(delivered, content)
 		return nil
 	}
-	runTurn := func(content string) {
+	runTurn := func(messageID, content string) {
 		t.Fatalf("runTurn must not be called for a completed reply (content=%q)", content)
 	}
 
@@ -4245,7 +4249,7 @@ func TestReplayQueuedRequeuesReplyOnDeliverFailure(t *testing.T) {
 	deliver := func(role, content string) error {
 		return errString("hub write failed")
 	}
-	runTurn := func(content string) {
+	runTurn := func(messageID, content string) {
 		t.Fatalf("runTurn must not be called")
 	}
 
@@ -4264,7 +4268,7 @@ func TestReplayQueuedRequeuesReplyOnDeliverFailure(t *testing.T) {
 
 func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
 	q := &msgQueue{}
-	q.pushInput("do the work")
+	q.pushInput("input-1", "do the work")
 
 	var deliverCalled bool
 	deliver := func(role, content string) error {
@@ -4272,7 +4276,10 @@ func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
 		return nil
 	}
 	var ran []string
-	runTurn := func(content string) {
+	runTurn := func(messageID, content string) {
+		if messageID != "input-1" {
+			t.Fatalf("replayed input ID = %q", messageID)
+		}
 		ran = append(ran, content)
 	}
 
@@ -4481,7 +4488,7 @@ func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
 	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	go func() { _, _ = gs.SendMessage(ctx, "continue the task", nil, nil) }()
+	go func() { _, _ = gs.SendMessage(ctx, "continue the task", "", nil, nil) }()
 	select {
 	case got := <-abortKey:
 		if got != "session-1" {
