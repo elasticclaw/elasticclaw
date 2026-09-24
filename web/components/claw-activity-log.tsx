@@ -13,7 +13,9 @@ const activityPageSize = 100
 
 interface ActivityLogFetcher {
   fetchInitial: () => Promise<ApiMessage[]>
-  fetchOlder: (before: string) => Promise<ApiMessage[]>
+  // beforeId pairs with before as a compound (created_at, id) cursor so a page
+  // boundary inside a same-timestamp group cannot skip its remaining rows.
+  fetchOlder: (before: string, beforeId?: string) => Promise<ApiMessage[]>
 }
 
 export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?: ActivityLogFetcher }) {
@@ -27,7 +29,7 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
   const activeFetcher: ActivityLogFetcher | null = useMemo(() => {
     return fetcher || (clawId ? {
       fetchInitial: () => fetchActivityMessages(clawId, { limit: activityPageSize, order: "desc" }),
-      fetchOlder: (before: string) => fetchActivityMessages(clawId, { before, limit: activityPageSize, order: "desc" }),
+      fetchOlder: (before, beforeId) => fetchActivityMessages(clawId, { before, beforeId, limit: activityPageSize, order: "desc" }),
     } : null)
   }, [fetcher, clawId])
 
@@ -58,13 +60,16 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
 
   const loadOlder = async () => {
     if (!activeFetcher) return
-    const before = messages[0]?.created_at
-    if (!before || loadingOlder) return
+    const oldest = messages[0]
+    if (!oldest?.created_at || loadingOlder) return
     setLoadingOlder(true)
     setError(null)
     try {
-      const page = await activeFetcher.fetchOlder(before)
-      setMessages((current) => [...page.reverse(), ...current])
+      const page = await activeFetcher.fetchOlder(oldest.created_at, oldest.id)
+      setMessages((current) => {
+        const seen = new Set(current.map((message) => message.id))
+        return [...page.reverse().filter((message) => !seen.has(message.id)), ...current]
+      })
       setHasOlder(page.length === activityPageSize)
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) setAccessDenied(true)
