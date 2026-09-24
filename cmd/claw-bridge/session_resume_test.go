@@ -174,7 +174,7 @@ func TestResolveSessionTranscriptPath(t *testing.T) {
 }
 
 func TestSessionTranscriptLogRedactsSecretAssignments(t *testing.T) {
-	keys := []string{"token", "client_SECRET", "password", "db_passwd", "api_key", "apikey", "x-api-key", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "private_key", "credential", "Authorization"}
+	keys := []string{"token", "client_SECRET", "password", "db_passwd", "api_key", "apikey", "x-api-key", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "private_key", "credential", "credentials", "Authorization", "auth", "oauth", "apiKey", "clientSecret", "accessKey", "privateKey", "clientOAuthToken", "client.APIKey"}
 	forms := []string{`%s=SENSITIVE_VALUE`, `%s: SENSITIVE_VALUE`, `"%s":"SENSITIVE_VALUE"`, `'%s': 'SENSITIVE_VALUE'`, `%s="SENSITIVE_VALUE"`, `%s='SENSITIVE_VALUE'`, `"%s":SENSITIVE_VALUE`, `'%s': SENSITIVE_VALUE`, `%s: "SENSITIVE_VALUE"`, `%s: 'SENSITIVE_VALUE'`}
 	for _, key := range keys {
 		for _, form := range forms {
@@ -197,6 +197,17 @@ func TestSessionTranscriptLogRedactsSecretAssignments(t *testing.T) {
 func TestSanitizeActivityTextSecretAssignmentBoundaries(t *testing.T) {
 	for _, tt := range []struct{ input, want string }{
 		{`{"api_key":"SENSITIVE_VALUE","path":"/workspace/main.go"}`, `{"api_key":[redacted],"path":"/workspace/main.go"}`},
+		{"{\"api_key\":\n \"SENSITIVE_VALUE\"}", "{\"api_key\":\n [redacted]}"},
+		{"{\"api_key\" \r\n\t: \r\n\t\"SENSITIVE_VALUE\"}", "{\"api_key\" \r\n\t: \r\n\t[redacted]}"},
+		{`curl -d "{\"api_key\":\"SENSITIVE_VALUE\"}"`, `curl -d "{\"api_key\":[redacted]}"`},
+		{`curl -d "{\"api_key\":\"first\\\"SENSITIVE_VALUE\",\"path\":\"main.go\"}"`, `curl -d "{\"api_key\":[redacted],\"path\":\"main.go\"}"`},
+		{`https://user:secret@host/path`, `https://[redacted]@host/path`},
+		{`https://x-access-token:ghs_xxx@github.com/org/repo.git`, `https://[redacted]@github.com/org/repo.git`},
+		{`curl https://user:secret@host/a https://x-access-token:ghs_xxx@github.com/org/repo`, `curl https://[redacted]@host/a https://[redacted]@github.com/org/repo`},
+		{"git log --author=ana", "git log --author=ana"},
+		{"Co-Authored-By: X", "Co-Authored-By: X"},
+		{"auth.go:12: msg", "auth.go:12: msg"},
+		{"max_tokens=4096 tokens=4096 maxTokens=4096", "max_tokens=4096 tokens=4096 maxTokens=4096"},
 		{"x-api-key: SENSITIVE_VALUE\nContent-Type: application/json", "x-api-key: [redacted]\nContent-Type: application/json"},
 		{"Authorization: Basic SENSITIVE_VALUE", "Authorization: Basic [redacted]"},
 		{"Authorization:\tBasic\tSENSITIVE_VALUE", "Authorization:\tBasic [redacted]"},

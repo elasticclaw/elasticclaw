@@ -1220,6 +1220,7 @@ func sanitizeActivityTextLimit(value string, max int) string {
 	if value == "" {
 		return ""
 	}
+	value = activityURLUserinfo.ReplaceAllString(value, "${1}[redacted]@")
 	value = redactActivitySecretAssignments(value)
 	value = redactActivityPrefix(value, "Bearer ", "Bearer [redacted]")
 	if max > 0 && len(value) > max {
@@ -1230,13 +1231,45 @@ func sanitizeActivityTextLimit(value string, max int) string {
 
 // Match complete assignment keys, including JSON keys and HTTP headers. The
 // boundary excludes path components so ordinary paths are not treated as keys.
-var activitySecretAssignment = regexp.MustCompile(`(?i)(^|[^a-z0-9_./-])(["']?[a-z0-9_.-]*(?:token|secret|password|passwd|api_key|apikey|api-key|access_key|private_key|credential|auth)[a-z0-9_.-]*["']?[ \t]*[:=][ \t]*)`)
+var activitySecretAssignment = regexp.MustCompile(`(?i)(^|[^a-z0-9_./-])(?:\\?["'])?([a-z0-9_.-]+)(?:\\?["'])?\s*[:=]\s*`)
+var activityURLUserinfo = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s?#@]+@`)
+var activityCamelWord = regexp.MustCompile(`([a-z0-9])([A-Z])`)
+var activityCamelAcronym = regexp.MustCompile(`([A-Z]+)([A-Z][a-z])`)
+var activitySourceLine = regexp.MustCompile(`^[0-9]+:`)
+
+func activitySecretKey(key string) bool {
+	key = activityCamelAcronym.ReplaceAllString(key, "${1}_${2}")
+	key = activityCamelWord.ReplaceAllString(key, "${1}_${2}")
+	parts := strings.FieldsFunc(strings.ToLower(key), func(r rune) bool {
+		return r == '_' || r == '-' || r == '.'
+	})
+	for i, part := range parts {
+		switch part {
+		case "token", "secret", "password", "passwd", "apikey", "credential", "credentials", "auth", "authorization", "oauth":
+			return true
+		case "api", "access", "private":
+			if i+1 < len(parts) && parts[i+1] == "key" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 func redactActivitySecretAssignments(value string) string {
 	var out strings.Builder
 	offset := 0
 	for _, match := range activitySecretAssignment.FindAllStringSubmatchIndex(value, -1) {
 		start := match[1]
+		key := value[match[4]:match[5]]
+		if !activitySecretKey(key) {
+			continue
+		}
+		// A filename followed by a line number is a source location, not a key.
+		separator := strings.TrimSpace(value[match[5]:start])
+		if strings.Contains(key, ".") && separator == ":" && activitySourceLine.MatchString(value[start:]) {
+			continue
+		}
 		if start < offset {
 			continue // An assignment inside a previously redacted quoted value.
 		}
@@ -1261,6 +1294,16 @@ func redactActivitySecretAssignments(value string) string {
 
 func activitySecretValueEnd(value string, start int) int {
 	end := start
+	// JSON embedded in a shell argument can escape the quotes themselves.
+	if end+1 < len(value) && value[end] == '\\' && (value[end+1] == '"' || value[end+1] == '\'') {
+		delimiter := value[end : end+2]
+		for end += 2; end < len(value); end++ {
+			if strings.HasPrefix(value[end:], delimiter) && value[end-1] != '\\' {
+				return end + 2
+			}
+		}
+		return end
+	}
 	if end < len(value) && (value[end] == '"' || value[end] == '\'') {
 		quote := value[end]
 		end++
