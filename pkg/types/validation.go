@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/robfig/cron/v3"
 )
@@ -206,6 +207,9 @@ func (w *WorkflowConfig) Validate() error {
 	if strings.TrimSpace(w.Name) == "" {
 		return fmt.Errorf("workflow name is required")
 	}
+	if err := validateSessionResume("workflow", w.Name, w.SessionResume); err != nil {
+		return err
+	}
 	if w.Integration != "" && !validWorkflowIntegrations[w.Integration] {
 		return fmt.Errorf("workflow %q: invalid integration %q (must be one of: linear, shortcut, github-issues, jira, github, external, cron)", w.Name, w.Integration)
 	}
@@ -262,6 +266,32 @@ func (w *WorkflowConfig) Validate() error {
 		if strings.TrimSpace(stage.ID) == "" {
 			return fmt.Errorf("workflow %q: stages[%d].id is required", w.Name, i)
 		}
+	}
+	return nil
+}
+
+func validateSessionResume(scope, name string, cfg *SessionResumeConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.ReadFiles) > 10 {
+		return fmt.Errorf("%s %q: session_resume.read_files has more than 10 entries", scope, name)
+	}
+	for i, file := range cfg.ReadFiles {
+		if strings.TrimSpace(file) == "" {
+			return fmt.Errorf("%s %q: session_resume.read_files[%d] cannot be empty", scope, name, i)
+		}
+		if utf8.RuneCountInString(file) > 256 || strings.ContainsAny(file, "\r\n") || strings.HasPrefix(file, "/") {
+			return fmt.Errorf("%s %q: session_resume.read_files[%d] is invalid", scope, name, i)
+		}
+		for _, part := range strings.Split(file, "/") {
+			if part == ".." {
+				return fmt.Errorf("%s %q: session_resume.read_files[%d] is invalid", scope, name, i)
+			}
+		}
+	}
+	if utf8.RuneCountInString(cfg.StateCheck) > 2000 {
+		return fmt.Errorf("%s %q: session_resume.state_check exceeds 2000 characters", scope, name)
 	}
 	return nil
 }

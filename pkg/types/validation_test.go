@@ -1169,3 +1169,60 @@ func floatPtr(f float64) *float64 {
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
+
+func TestWorkflowConfigValidateSessionResume(t *testing.T) {
+	testSessionResumeValidation(t, "workflow", func(cfg *SessionResumeConfig) error {
+		return (&WorkflowConfig{Name: "resume", SessionResume: cfg}).Validate()
+	})
+}
+
+func TestWorkspaceConfigValidateSessionResume(t *testing.T) {
+	testSessionResumeValidation(t, "workspace", func(cfg *SessionResumeConfig) error {
+		return (&WorkspaceConfig{Name: "resume", SessionResume: cfg}).Validate()
+	})
+}
+
+func testSessionResumeValidation(t *testing.T, scope string, validate func(*SessionResumeConfig) error) {
+	t.Helper()
+	tenFiles := make([]string, 10)
+	for i := range tenFiles {
+		tenFiles[i] = "NOTES.md"
+	}
+	tests := []struct {
+		name string
+		cfg  *SessionResumeConfig
+		want string
+	}{
+		{name: "omitted"},
+		{name: "empty", cfg: &SessionResumeConfig{}},
+		{name: "relative files", cfg: &SessionResumeConfig{ReadFiles: []string{"NOTES.md", "docs/PLAN.md", "./state.txt", "notes..md"}}},
+		{name: "ten files", cfg: &SessionResumeConfig{ReadFiles: tenFiles}},
+		{name: "too many files", cfg: &SessionResumeConfig{ReadFiles: append(append([]string{}, tenFiles...), "extra")}, want: "session_resume.read_files has more than 10 entries"},
+		{name: "blank file", cfg: &SessionResumeConfig{ReadFiles: []string{"NOTES.md", " \t"}}, want: "session_resume.read_files[1] cannot be empty"},
+		{name: "absolute path", cfg: &SessionResumeConfig{ReadFiles: []string{"/etc/state"}}, want: "session_resume.read_files[0] is invalid"},
+		{name: "parent path", cfg: &SessionResumeConfig{ReadFiles: []string{"../state"}}, want: "session_resume.read_files[0] is invalid"},
+		{name: "embedded parent", cfg: &SessionResumeConfig{ReadFiles: []string{"docs/../state"}}, want: "session_resume.read_files[0] is invalid"},
+		{name: "trailing parent", cfg: &SessionResumeConfig{ReadFiles: []string{"docs/.."}}, want: "session_resume.read_files[0] is invalid"},
+		{name: "newline", cfg: &SessionResumeConfig{ReadFiles: []string{"notes\nmore"}}, want: "session_resume.read_files[0] is invalid"},
+		{name: "carriage return", cfg: &SessionResumeConfig{ReadFiles: []string{"notes\rmore"}}, want: "session_resume.read_files[0] is invalid"},
+		{name: "file at character limit", cfg: &SessionResumeConfig{ReadFiles: []string{strings.Repeat("界", 256)}}},
+		{name: "file exceeds character limit", cfg: &SessionResumeConfig{ReadFiles: []string{strings.Repeat("界", 257)}}, want: "session_resume.read_files[0] is invalid"},
+		{name: "state check at character limit", cfg: &SessionResumeConfig{StateCheck: strings.Repeat("界", 2000)}},
+		{name: "state check exceeds character limit", cfg: &SessionResumeConfig{StateCheck: strings.Repeat("界", 2001)}, want: "session_resume.state_check exceeds 2000 characters"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validate(tt.cfg)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v", err)
+				}
+				return
+			}
+			want := scope + ` "resume": ` + tt.want
+			if err == nil || err.Error() != want {
+				t.Fatalf("Validate() = %v, want %q", err, want)
+			}
+		})
+	}
+}

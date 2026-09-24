@@ -787,12 +787,13 @@ type RetentionConfig struct {
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.
 // Durations use Go duration strings. Empty values receive conservative defaults.
 type LivenessConfig struct {
-	Enabled                *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	OfflineGrace           string `yaml:"offline_grace,omitempty" json:"offlineGrace,omitempty"`
-	ProvisioningMaxAge     string `yaml:"provisioning_max_age,omitempty" json:"provisioningMaxAge,omitempty"`
-	ClaimTTL               string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
-	ReaperInterval         string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
-	GatewayUnhealthyChecks *int   `yaml:"gateway_unhealthy_checks,omitempty" json:"gatewayUnhealthyChecks,omitempty"`
+	SessionLossMaxConsecutive *int   `yaml:"session_loss_max_consecutive,omitempty" json:"sessionLossMaxConsecutive,omitempty"`
+	Enabled                   *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	OfflineGrace              string `yaml:"offline_grace,omitempty" json:"offlineGrace,omitempty"`
+	ProvisioningMaxAge        string `yaml:"provisioning_max_age,omitempty" json:"provisioningMaxAge,omitempty"`
+	ClaimTTL                  string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
+	ReaperInterval            string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
+	GatewayUnhealthyChecks    *int   `yaml:"gateway_unhealthy_checks,omitempty" json:"gatewayUnhealthyChecks,omitempty"`
 	// GatewayUnhealthyReconnectGrace is how long after a bridge registers its
 	// unhealthy heartbeats are ignored, so a gateway that is merely still
 	// starting does not spend the claw's escalation budget.

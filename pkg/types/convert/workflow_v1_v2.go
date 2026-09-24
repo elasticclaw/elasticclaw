@@ -135,6 +135,9 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 	if len(wf.Volumes) > 0 {
 		appendWarning(&warnings, "volumes: %d v1 volume(s) not represented in workflow v2 schema yet", len(wf.Volumes))
 	}
+	if wf.SessionResume != nil {
+		appendWarning(&warnings, "session_resume: not represented in workflow v2 schema yet")
+	}
 	if wf.ConcurrencyGroup != "" {
 		appendWarning(&warnings, "concurrency_group %q: not represented in workflow v2 schema yet", wf.ConcurrencyGroup)
 	}

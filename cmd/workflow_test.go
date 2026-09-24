@@ -583,3 +583,28 @@ func TestRunWorkflowV2CronRunsUsesCronEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkflowFileRejectsSessionResumeParentPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resume.yaml")
+	if err := os.WriteFile(path, []byte(`name: resume
+session_resume:
+  read_files: ["../x"]
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      inject: Start work
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workflows, err := readWorkflowFiles([]string{path})
+	if err != nil {
+		t.Fatalf("readWorkflowFiles: %v", err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("got %d workflows, want 1", len(workflows))
+	}
+	if err := workflows[0].Validate(); err == nil || !strings.Contains(err.Error(), "session_resume.read_files[0]") {
+		t.Fatalf("Validate() = %v, want invalid session resume path", err)
+	}
+}
