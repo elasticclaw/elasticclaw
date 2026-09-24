@@ -212,6 +212,49 @@ func TestAgentControlIsTypedDeduplicatedAndAttemptBound(t *testing.T) {
 	}
 }
 
+func TestAgentTaskFailurePersistsReasonAndClearsCurrentTask(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-agent-failure")
+	attempt, err := store.StartAttempt(context.Background(), "run-agent-failure", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO workflow_v2_agent_tasks(
+		id,run_id,effect_id,attempt_id,state,state_version,status,instructions,heartbeat_deadline,deadline,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,'running',?,?,?,?,?)`, "task-failure", "run-agent-failure", "", attempt.ID, "building", 1,
+		"implement", now.Add(2*time.Minute).UnixMilli(), now.Add(time.Hour).UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET current_task_id=? WHERE id=?`, "task-failure", "run-agent-failure"); err != nil {
+		t.Fatal(err)
+	}
+	version := uint64(1)
+	receipt, err := store.ApplyAgentControl(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "failed-task", Kind: typesv2.MessageAgentTaskFailed,
+		RunID: "run-agent-failure", AttemptID: attempt.ID, TaskID: "task-failure", ExpectedStateVersion: &version,
+		Payload: json.RawMessage(`{"task":{"error":"gateway disconnected"}}`),
+	})
+	if err != nil || receipt.Disposition != typesv2.DispositionAccepted {
+		t.Fatalf("failure receipt = %#v, err=%v", receipt, err)
+	}
+	var status, reason, currentTaskID string
+	if err := db.QueryRow(`SELECT status,terminal_reason FROM workflow_v2_agent_tasks WHERE id='task-failure'`).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT current_task_id FROM workflow_v2_runs WHERE id='run-agent-failure'`).Scan(&currentTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(typesv2.AgentTaskFailed) || reason != "gateway disconnected" || currentTaskID != "" {
+		t.Fatalf("task status/reason/current task = %q/%q/%q", status, reason, currentTaskID)
+	}
+	inspection, err := store.InspectRun(context.Background(), "run-agent-failure")
+	if err != nil || len(inspection.AgentTasks) != 1 || inspection.AgentTasks[0].TerminalReason != reason {
+		t.Fatalf("inspection = %#v, err=%v", inspection.AgentTasks, err)
+	}
+}
+
 func TestDuplicateHeartbeatDoesNotExtendTaskLiveness(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
