@@ -54,13 +54,23 @@ type HubMessage struct {
 // UI consumers can render command output, receipts, and task detail.
 const WorkflowEffectFormatPrefix = "workflow:effect:"
 
+// Workflow effect event phases, the lifecycle points a run-log line can mark.
+// Emitters must use these constants; the web parser validates against the
+// same set (derived from its WorkflowEffectEvent["phase"] union).
+const (
+	WorkflowEffectPhasePlanned    = "planned"
+	WorkflowEffectPhaseStarted    = "started"
+	WorkflowEffectPhaseDispatched = "dispatched"
+	WorkflowEffectPhaseFinished   = "finished"
+	WorkflowEffectPhaseAssigned   = "assigned"
+)
+
 // WorkflowEffectEvent describes one effect or agent-task lifecycle point for a
 // workflow v2 run, embedded in run-log messages behind
-// WorkflowEffectFormatPrefix. Phase is "planned", "started", "dispatched",
-// "assigned", or "finished": dispatched marks that a durable task was handed
-// off (correlated by TaskID) — the authoritative completion arrives as a
-// separate "finished" line; receipts contribute ExitCode/Succeeded/Stdout/
-// Stderr/Error.
+// WorkflowEffectFormatPrefix. Phase is one of the WorkflowEffectPhase*
+// constants: dispatched marks that a durable task was handed off (correlated
+// by TaskID) — the authoritative completion arrives as a separate finished
+// line; receipts contribute ExitCode/Succeeded/Stdout/Stderr/Error.
 type WorkflowEffectEvent struct {
 	Kind           string `json:"kind"`
 	Phase          string `json:"phase"`
