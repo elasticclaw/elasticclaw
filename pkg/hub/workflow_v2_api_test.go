@@ -935,6 +935,81 @@ func TestWorkflowV2RunLogsCompoundCursorSurvivesTieGroups(t *testing.T) {
 	}
 }
 
+func TestWorkflowV2RunLogsAggregateActivityAcrossAttemptClaws(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            "run-multiclaw",
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2ExecAPIWorkspace),
+		WorkflowYAML:  []byte(workflowV2ExecAPIWorkflow),
+		InitialClawID: "claw-first",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestClaw(t, db, "claw-first")
+	insertTestClaw(t, db, "claw-second")
+	base := time.Now().UTC()
+	insertActivityAt := func(id, clawID, content string, at time.Time) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+			id, clawID, "test-tenant-id", "activity", content, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertActivityAt("msg-mc-1", "claw-first", "activity from the first claw", base.Add(time.Minute))
+
+	// The run retries onto a second claw, which writes its own activity.
+	finish := base.Add(2 * time.Minute).UnixMilli()
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET status='failed', finished_at=? WHERE id=?`,
+		finish, run.CurrentAttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_attempts(
+		id,run_id,claw_id,number,status,started_at,heartbeat_at,finished_at,reason)
+		VALUES(?,?,?,2,'active',?,?,0,'retry')`,
+		"attempt-2-multiclaw", run.ID, "claw-second", finish, finish); err != nil {
+		t.Fatal(err)
+	}
+	insertActivityAt("msg-mc-2", "claw-second", "activity from the second claw", base.Add(3*time.Minute))
+
+	fetchActivityContents := func(path string) []string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body = %s", path, rr.Code, rr.Body.String())
+		}
+		var messages []types.HubMessage
+		if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
+			t.Fatal(err)
+		}
+		var contents []string
+		for _, m := range messages {
+			if m.Role == "activity" {
+				contents = append(contents, m.Content)
+			}
+		}
+		return contents
+	}
+
+	runLogs := fetchActivityContents("/api/v2/workflow-runs/run-multiclaw/logs")
+	if len(runLogs) != 2 || !slices.Contains(runLogs, "activity from the first claw") || !slices.Contains(runLogs, "activity from the second claw") {
+		t.Fatalf("run-level activity = %v, want both claws' rows", runLogs)
+	}
+	attempt1 := fetchActivityContents("/api/v2/workflow-runs/run-multiclaw/attempts/" + run.CurrentAttemptID + "/logs")
+	if len(attempt1) != 1 || attempt1[0] != "activity from the first claw" {
+		t.Fatalf("attempt 1 activity = %v, want only the first claw's row", attempt1)
+	}
+	attempt2 := fetchActivityContents("/api/v2/workflow-runs/run-multiclaw/attempts/attempt-2-multiclaw/logs")
+	if len(attempt2) != 1 || attempt2[0] != "activity from the second claw" {
+		t.Fatalf("attempt 2 activity = %v, want only the second claw's row", attempt2)
+	}
+}
+
 func TestWorkflowV2RunLogsIncludeEffectTaskAndExecOutcomeLines(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	seedWorkflowV2ExecRun(t, s, db, "run-logs-effects", "claw-logs-effects")

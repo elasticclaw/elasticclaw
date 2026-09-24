@@ -209,7 +209,7 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 
 	eventID := uuid.NewString()
 	provenance := typesv2.EvidenceProvenance{Producer: string(ProducerEngine), ObservedAt: now}
-	if err := insertEvent(ctx, tx, eventID, runID, "", "workflow.run.created", nil, 0,
+	if err := insertEvent(ctx, tx, eventID, runID, "", "workflow.run.created", "", nil, 0,
 		typesv2.DispositionAccepted, "", ProducerEngine, provenance, nil, nil, now); err != nil {
 		return Run{}, err
 	}
@@ -378,7 +378,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	// mutation callback may add trusted payload/facts and is authorized again
 	// below after it runs.
 	if disposition, reason := authorizeEvent(input); disposition != "" {
-		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.AttemptID, input.ExpectedStateVersion,
 			stored.StateVersion, disposition, reason, input.Producer, input.Provenance, input.Payload, input.Facts, now); err != nil {
 			return EventResult{}, err
 		}
@@ -396,7 +396,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	// stale_state disposition.
 	if input.ExpectedStateVersion != nil && *input.ExpectedStateVersion != stored.StateVersion {
 		reason := fmt.Sprintf("expected state version %d, current version is %d", *input.ExpectedStateVersion, stored.StateVersion)
-		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.AttemptID, input.ExpectedStateVersion,
 			stored.StateVersion, typesv2.DispositionStaleState, reason, input.Producer, input.Provenance,
 			input.Payload, input.Facts, now); err != nil {
 			return EventResult{}, err
@@ -426,7 +426,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 
 	disposition, reason := authorizeEvent(input)
 	if disposition != "" {
-		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.AttemptID, input.ExpectedStateVersion,
 			stored.StateVersion, disposition, reason, input.Producer, input.Provenance, input.Payload, input.Facts, now); err != nil {
 			return EventResult{}, err
 		}
@@ -439,7 +439,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		return EventResult{EventID: input.ID, Disposition: disposition, Reason: reason, Run: stored}, nil
 	}
 
-	if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+	if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.AttemptID, input.ExpectedStateVersion,
 		stored.StateVersion, typesv2.DispositionAccepted, "", input.Producer, input.Provenance, input.Payload, input.Facts, now); err != nil {
 		return EventResult{}, err
 	}
@@ -711,7 +711,7 @@ func (s *Store) ApplyCommand(ctx context.Context, runID string, commandName stri
 func insertCommandEvent(ctx context.Context, tx *sql.Tx, runID string, input CommandInput,
 	commandName string, observedVersion uint64, disposition typesv2.ControlDisposition, reason string, now time.Time) error {
 	return insertEvent(ctx, tx, input.ID, runID, input.MessageID, "operator.command."+commandName,
-		input.ExpectedStateVersion, observedVersion, disposition, reason, ProducerOperator, input.Provenance,
+		"", input.ExpectedStateVersion, observedVersion, disposition, reason, ProducerOperator, input.Provenance,
 		nil, nil, now)
 }
 
@@ -1057,7 +1057,7 @@ func deepMerge(target, overlay map[string]interface{}) map[string]interface{} {
 	return target
 }
 
-func insertEvent(ctx context.Context, tx *sql.Tx, id, runID, messageID, kind string, expected *uint64, observed uint64,
+func insertEvent(ctx context.Context, tx *sql.Tx, id, runID, messageID, kind string, attemptID string, expected *uint64, observed uint64,
 	disposition typesv2.ControlDisposition, reason string, producer Producer, provenance typesv2.EvidenceProvenance,
 	payload, facts map[string]interface{}, now time.Time) error {
 	payloadJSON, err := marshalObject(payload)
@@ -1077,9 +1077,9 @@ func insertEvent(ctx context.Context, tx *sql.Tx, id, runID, messageID, kind str
 		expectedValue = *expected
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_events(
-		id,run_id,message_id,kind,expected_state_version,observed_state_version,disposition,reason,
+		id,run_id,message_id,kind,attempt_id,expected_state_version,observed_state_version,disposition,reason,
 		producer,provenance_json,payload_json,facts_json,received_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, runID, messageID, kind, expectedValue, observed, string(disposition), reason,
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, runID, messageID, kind, attemptID, expectedValue, observed, string(disposition), reason,
 		string(producer), provenanceJSON, payloadJSON, factsJSON, now.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("record event: %w", err)
