@@ -209,6 +209,24 @@ func TestTaskCancellationIsRegisteredBeforeExecutionStarts(t *testing.T) {
 	}
 }
 
+func TestTerminalTaskClearsBridgeSnapshotIdentity(t *testing.T) {
+	store := openTestBridgeControlStore(t)
+	binding := workflowControlBinding{RunID: "run-terminal", AttemptID: "attempt-terminal"}
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor.binding = &binding
+	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID,
+		State: "building", StateVersion: 3, CurrentTask: &typesv2.AgentTask{ID: "task-terminal"}}
+
+	supervisor.clearTaskSnapshot(binding, "task-terminal")
+	if supervisor.snapshot.CurrentTask != nil {
+		t.Fatalf("snapshot current task = %#v", supervisor.snapshot.CurrentTask)
+	}
+	stored, found, err := store.snapshot(binding)
+	if err != nil || !found || stored.CurrentTask != nil {
+		t.Fatalf("stored snapshot = %#v, found=%v, err=%v", stored, found, err)
+	}
+}
+
 func TestBridgeRejectsTaskAssignmentOlderThanAuthoritativeSnapshot(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-stale-task", AttemptID: "attempt-stale-task"}

@@ -559,6 +559,7 @@ func updateBoundTask(ctx context.Context, tx *sql.Tx, runID string, input EventI
 	}
 	status := ""
 	finished := int64(0)
+	terminalReason := ""
 	switch typesv2.ControlMessageKind(input.Kind) {
 	case typesv2.MessageAgentTaskStarted:
 		status = string(typesv2.AgentTaskRunning)
@@ -583,11 +584,12 @@ func updateBoundTask(ctx context.Context, tx *sql.Tx, runID string, input EventI
 		status, finished = string(typesv2.AgentTaskCompleted), now.UnixMilli()
 	case typesv2.MessageAgentTaskFailed:
 		status, finished = string(typesv2.AgentTaskFailed), now.UnixMilli()
+		terminalReason = agentTaskFailureReason(input.Payload)
 	default:
 		return nil
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_agent_tasks SET status=?,last_heartbeat_at=?,updated_at=?,finished_at=?
-		WHERE id=? AND run_id=? AND attempt_id=? AND status IN ('assigned','running')`, status, now.UnixMilli(), now.UnixMilli(), finished,
+	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_agent_tasks SET status=?,last_heartbeat_at=?,updated_at=?,finished_at=?,terminal_reason=?
+		WHERE id=? AND run_id=? AND attempt_id=? AND status IN ('assigned','running')`, status, now.UnixMilli(), now.UnixMilli(), finished, terminalReason,
 		input.TaskID, runID, input.AttemptID)
 	if err != nil {
 		return err
@@ -607,4 +609,13 @@ func updateBoundTask(ctx context.Context, tx *sql.Tx, runID string, input EventI
 		}
 	}
 	return nil
+}
+
+func agentTaskFailureReason(payload map[string]interface{}) string {
+	task, ok := payload["task"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	reason, _ := task["error"].(string)
+	return strings.TrimSpace(reason)
 }

@@ -579,6 +579,7 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 	activeCancellation *activeTaskCancellation) {
 	defer func() {
 		cancel()
+		s.clearTaskSnapshot(binding, task.ID)
 		s.unregisterTaskCancellation(task.ID, activeCancellation)
 	}()
 	claimed, err := s.store.setIncomingStatus(assignmentMessageID, "accepted", "running")
@@ -601,7 +602,9 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 		return
 	}
 	heartbeatDone := make(chan struct{})
+	heartbeatStopped := make(chan struct{})
 	go func() {
+		defer close(heartbeatStopped)
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -619,6 +622,7 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 	prompt := workflowV2TaskPrompt(task)
 	response, sendErr := gateway.SendMessage(taskCtx, prompt, func(string) {}, func(agentActivity) {})
 	close(heartbeatDone)
+	<-heartbeatStopped
 	if sendErr != nil {
 		s.finishTask(binding, assignmentMessageID, task, typesv2.MessageAgentTaskFailed, sendErr.Error())
 		return
@@ -752,6 +756,18 @@ func (s *controlSupervisor) updateTaskSnapshot(binding workflowControlBinding, t
 	s.snapshot.CurrentTask = &copyTask
 	s.snapshot.State = task.State
 	s.snapshot.StateVersion = task.StateVersion
+	snapshot := *s.snapshot
+	_ = s.store.saveSnapshot(snapshot)
+}
+
+func (s *controlSupervisor) clearTaskSnapshot(binding workflowControlBinding, taskID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.binding == nil || !s.binding.equal(binding) || s.snapshot == nil ||
+		s.snapshot.CurrentTask == nil || s.snapshot.CurrentTask.ID != taskID {
+		return
+	}
+	s.snapshot.CurrentTask = nil
 	snapshot := *s.snapshot
 	_ = s.store.saveSnapshot(snapshot)
 }
