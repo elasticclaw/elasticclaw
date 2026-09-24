@@ -38,6 +38,7 @@ func newSessionLossFixture(t *testing.T, max *int) sessionLossFixture {
 
 func (f sessionLossFixture) output(t *testing.T, content string, at time.Time) {
 	t.Helper()
+	f.s.recordSessionLossCompletedTurn(f.clawID, content)
 	if _, err := f.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), f.clawID, "test-tenant-id", "claw", content, at); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +252,7 @@ func TestSessionLossLoopGuardRecordsOperatorEvent(t *testing.T) {
 		return err == nil && strings.Contains(detail, `"sessionLossStreak":3`) && strings.Contains(detail, `"sessionLossReason":"turn_timeout"`) && strings.Contains(detail, `"pipelineStage":"implement"`) && strings.Contains(detail, `"noProgressPaused":true`)
 	}, "session-loss operator event")
 	// Further losses while paused neither advance the streak nor notify twice.
-	if !f.s.sessionLossLoopGuard(f.clawID, types.SessionLossReasonTurnTimeout, "") {
+	if !f.s.sessionLossLoopGuard(f.clawID, types.SessionLossReasonTurnTimeout, "", "") {
 		t.Fatal("paused guard allowed injection")
 	}
 	if streak, _, paused := f.state(t); streak != 3 || !paused {
@@ -285,7 +286,7 @@ func TestSessionLossLoopGuardState(t *testing.T) {
 				insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "run-session-unit", AttemptID: "attempt-session-unit", ClawID: id, TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "generic", StartedAt: epochMillis(now())})
 			}
 			for i := 0; i < 2; i++ {
-				if s.sessionLossLoopGuard(id, types.SessionLossReasonTurnTimeout, "") {
+				if s.sessionLossLoopGuard(id, types.SessionLossReasonTurnTimeout, "", "") {
 					t.Fatal("guard paused too early")
 				}
 			}
@@ -330,7 +331,7 @@ func TestSessionLossLoopGuardState(t *testing.T) {
 				s.claws[id] = &clawConn{id: id, tenantID: "test-tenant-id"}
 				s.mu.Unlock()
 			}
-			if got := s.sessionLossLoopGuard(id, types.SessionLossReasonTurnTimeout, ""); got != wantPause {
+			if got := s.sessionLossLoopGuard(id, types.SessionLossReasonTurnTimeout, "", ""); got != wantPause {
 				t.Fatalf("guard=%v want %v", got, wantPause)
 			}
 			if streak, mark, paused := f.state(t); streak != wantStreak || paused != wantPause || (wantStreak > 0 && mark == "") {
@@ -357,9 +358,9 @@ func TestSessionLossLoopGuardIgnoresInterruptedOutput(t *testing.T) {
 			f := newSessionLossFixture(t, nil)
 			for i := 1; i <= 3; i++ {
 				f.cc.mu.Lock()
-				f.cc.streamingMsgID = "interrupted-output"
+				f.cc.streamingMsgID = fmt.Sprintf("interrupted-output-%d", i)
 				f.cc.mu.Unlock()
-				if _, err := f.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,'test-tenant-id','claw',?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content, created_at=excluded.created_at`, "interrupted-output", f.clawID, fmt.Sprintf("Partial output %d", i), now()); err != nil {
+				if _, err := f.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,'test-tenant-id','claw',?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content, created_at=excluded.created_at`, fmt.Sprintf("interrupted-output-%d", i), f.clawID, fmt.Sprintf("Partial output %d", i), now()); err != nil {
 					t.Fatal(err)
 				}
 				f.expireThrottle(t)
@@ -373,13 +374,21 @@ func TestSessionLossLoopGuardInterruptedOutputState(t *testing.T) {
 	for _, finalized := range []bool{false, true} {
 		t.Run(fmt.Sprintf("finalized=%v", finalized), func(t *testing.T) {
 			s, db, id := newSessionResumeTestServer(t)
-			cc := &clawConn{id: id, tenantID: "test-tenant-id", streamingMsgID: "partial"}
+			cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true}
 			s.claws[id] = cc
 			f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
 			f.output(t, "Initial completed step", now().Add(-time.Hour))
 			for i := 1; i <= 3; i++ {
+				cc.streamingMsgID = fmt.Sprintf("partial-%d", i)
 				if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,'test-tenant-id','claw',?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content, created_at=excluded.created_at`, cc.streamingMsgID, id, fmt.Sprintf("Partial output %d", i), now()); err != nil {
 					t.Fatal(err)
+				}
+				cc.streamingBuf.WriteString(fmt.Sprintf("Partial output %d", i))
+				if err := s.flushStreamingSegment(id, "test-tenant-id", cc); err != nil {
+					t.Fatal(err)
+				}
+				if cc.streamingMsgID != "" {
+					t.Fatal("activity did not clear the current streaming ID")
 				}
 				if finalized && i == 3 {
 					f.output(t, "Completed next step", now().Add(-time.Minute))
@@ -423,14 +432,14 @@ func TestSessionLossLoopGuardFailsOpen(t *testing.T) {
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if s.sessionLossLoopGuard(id, types.SessionLossReasonUnknown, "") {
+		if s.sessionLossLoopGuard(id, types.SessionLossReasonUnknown, "", "") {
 			t.Fatal("guard failed closed")
 		}
 	})
 }
 
 func TestPausedSessionLossRecordsPendingNotice(t *testing.T) {
-	for _, path := range []string{"rotated", "preserved", "guard"} {
+	for _, path := range []string{"rotated", "preserved"} {
 		t.Run(path, func(t *testing.T) {
 			s, db, id := newSessionResumeTestServer(t)
 			cc := &clawConn{id: id, tenantID: "test-tenant-id", lastTurnFinishedAt: now()}
@@ -443,18 +452,228 @@ func TestPausedSessionLossRecordsPendingNotice(t *testing.T) {
 				s.noteSessionLoss(cc, id, "new-key", "session_rotated", types.SessionRecoveryEdge{}, "")
 			case "preserved":
 				s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{}, "")
-			case "guard":
-				if !s.sessionLossLoopGuard(id, types.SessionLossReasonUnknown, "") {
-					t.Fatal("paused guard allowed resume")
-				}
 			}
 			var notice string
-			if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, id).Scan(&notice); err != nil || notice != s.sessionLossPendingNoticeFor(id) {
+			if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, id).Scan(&notice); err != nil || notice == "" {
 				t.Fatalf("notice=%q err=%v", notice, err)
+			}
+			if path == "preserved" {
+				if strings.Contains(notice, "no memory") || !strings.Contains(notice, "history are intact") {
+					t.Fatalf("incorrect preserved notice: %s", notice)
+				}
+			} else if !strings.Contains(notice, "no memory") {
+				t.Fatalf("missing lost-session notice: %s", notice)
 			}
 			f := sessionLossFixture{s: s, db: db, clawID: id}
 			if f.count(t, sessionRotatedResumePrefix)+f.count(t, sessionPreservedContinuationPrefix) != 0 {
 				t.Fatal("paused claw received a resume")
+			}
+		})
+	}
+}
+
+// Expire the real pending callback deterministically, without making heartbeat
+// tests wait for the production grace period.
+func expireHeartbeatSessionLoss(t *testing.T, s *Server, cc *clawConn, clawID string) {
+	t.Helper()
+	var pending *pendingHeartbeatSessionLoss
+	eventuallyWatchdog(t, func() bool {
+		cc.mu.RLock()
+		defer cc.mu.RUnlock()
+		for _, loss := range cc.pendingHeartbeatLosses {
+			pending = loss
+			return true
+		}
+		return false
+	}, "heartbeat grace scheduled")
+	pending.timer.Stop()
+	s.finishHeartbeatSessionLoss(cc, clawID, pending)
+}
+
+func TestSessionLossHeartbeatEdgeOrdering(t *testing.T) {
+	for _, source := range []string{"gateway_session_key", "restart_count"} {
+		for _, order := range []string{"heartbeat first", "edge first", "grace expires"} {
+			t.Run(source+"/"+order, func(t *testing.T) {
+				s, db, id := newSessionResumeTestServer(t)
+				cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
+				s.claws[id] = cc
+				edge := types.SessionRecoveryEdge{SessionKey: "replacement", Reason: types.SessionLossReasonTurnTimeout, TranscriptPath: "/tmp/lost.jsonl", Digest: &types.SessionDigest{AssistantMessages: []string{"Recovered bounded step"}}}
+				f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
+				var pending *pendingHeartbeatSessionLoss
+				if order != "edge first" {
+					s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{}, "")
+					cc.mu.RLock()
+					pending = cc.pendingHeartbeatLosses[edge.SessionKey]
+					cc.mu.RUnlock()
+					if pending == nil || f.count(t, restartResumePrefix) != 0 {
+						t.Fatal("heartbeat did not wait for edge metadata")
+					}
+					t.Cleanup(func() { pending.timer.Stop() })
+				}
+				if order == "heartbeat first" {
+					cc.mu.Lock()
+					cc.finishTurnLocked()
+					cc.mu.Unlock()
+					// Another heartbeat detection must not bypass the grace just
+					// because the interrupted turn has now sent its empty final.
+					s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{}, "")
+					if f.count(t, restartResumePrefix) != 0 {
+						t.Fatal("second heartbeat bypassed the grace")
+					}
+				}
+				if order == "grace expires" {
+					// The bridge's empty terminal message may arrive in the window.
+					cc.mu.Lock()
+					cc.finishTurnLocked()
+					cc.mu.Unlock()
+					expireHeartbeatSessionLoss(t, s, cc, id)
+				}
+				s.noteSessionLoss(cc, id, edge.SessionKey, "session_rotated", edge, "")
+				s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{}, "")
+				if pending != nil {
+					// A timer callback already racing with Stop must also be harmless.
+					s.finishHeartbeatSessionLoss(cc, id, pending)
+				}
+				if got := f.count(t, restartResumePrefix) + f.count(t, sessionRotatedResumePrefix); got != 1 {
+					t.Fatalf("got %d resumes for one incident", got)
+				}
+				prefix := sessionRotatedResumePrefix
+				if order == "grace expires" {
+					prefix = restartResumePrefix
+				}
+				prompt := sessionResumePrompt(t, db, id, prefix)
+				if order != "grace expires" {
+					for _, want := range []string{"per-turn run limit", "/tmp/lost.jsonl", "Recovered bounded step"} {
+						if !strings.Contains(prompt, want) {
+							t.Fatalf("edge metadata missing %q: %s", want, prompt)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSessionLossInterruptedStreamingActivityBeforeEdge(t *testing.T) {
+	for _, kind := range []string{"session_rotated", "session_preserved"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newSessionLossFixture(t, nil)
+			var previousID string
+			for i := 1; i <= 3; i++ {
+				f.expireThrottle(t)
+				partial := fmt.Sprintf("Partial step %d", i)
+				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "chunk", Payload: map[string]string{"content": partial}}); err != nil {
+					t.Fatal(err)
+				}
+				var streamID string
+				eventuallyWatchdog(t, func() bool {
+					return f.db.QueryRow(`SELECT id FROM messages WHERE claw_id=? AND content=?`, f.clawID, partial).Scan(&streamID) == nil
+				}, "new partial persisted")
+				if streamID == previousID {
+					t.Fatal("interrupted turns reused a streaming ID")
+				}
+				previousID = streamID
+				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "agent_activity", Payload: map[string]string{"kind": kind, "message": "Turn interrupted"}}); err != nil {
+					t.Fatal(err)
+				}
+				eventuallyWatchdog(t, func() bool {
+					f.cc.mu.RLock()
+					defer f.cc.mu.RUnlock()
+					return f.cc.streamingMsgID == "" && f.cc.streamingSplit
+				}, "activity flushed partial before edge")
+				f.send(t, kind, i, i, min(i, 2))
+				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "message", Payload: types.HubMessage{Content: ""}}); err != nil {
+					t.Fatal(err)
+				}
+				eventuallyWatchdog(t, func() bool {
+					f.cc.mu.RLock()
+					defer f.cc.mu.RUnlock()
+					return !f.cc.streamingSplit
+				}, "empty final processed")
+			}
+		})
+	}
+}
+
+func TestSessionLossCompletedReplyProgress(t *testing.T) {
+	for _, outcome := range []string{"completed", "split completed", "empty", "bridge error", "interrupted"} {
+		t.Run(outcome, func(t *testing.T) {
+			f := newSessionLossFixture(t, nil)
+			before := f.s.sessionLossProgressMark(f.clawID)
+			f.cc.mu.Lock()
+			f.cc.awaitingResponse = true
+			f.cc.mu.Unlock()
+			if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "Streamed work"}}); err != nil {
+				t.Fatal(err)
+			}
+			if outcome == "split completed" {
+				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "agent_activity", Payload: map[string]string{"kind": "tool", "tool": "exec", "phase": "start"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reply := "Completed bounded step"
+			switch outcome {
+			case "empty":
+				reply = ""
+			case "bridge error":
+				reply = types.BridgeErrorPrefix + " failed"
+			case "interrupted":
+				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "session_preserved", Payload: types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "message", Payload: types.HubMessage{Content: reply}}); err != nil {
+				t.Fatal(err)
+			}
+			// A following chunk is processed only after all final-message writes.
+			if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "Next turn sentinel"}}); err != nil {
+				t.Fatal(err)
+			}
+			eventuallyWatchdog(t, func() bool {
+				var n int
+				return f.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content='Next turn sentinel'`, f.clawID).Scan(&n) == nil && n == 1
+			}, "terminal message processed")
+			changed := f.s.sessionLossProgressMark(f.clawID) != before
+			if want := outcome == "completed" || outcome == "split completed"; changed != want {
+				t.Fatalf("progress changed=%v for %s", changed, outcome)
+			}
+		})
+	}
+}
+
+func TestSessionLossGuardPauseRetainsTriggeringRecoveryContext(t *testing.T) {
+	for _, preserved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("preserved=%v", preserved), func(t *testing.T) {
+			s, db, id := newSessionResumeTestServer(t)
+			f := sessionLossFixture{s: s, db: db, clawID: id}
+			edge := types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout, TranscriptPath: "/tmp/triggering-loss.jsonl", Digest: &types.SessionDigest{AssistantMessages: []string{"Triggering loss context"}}}
+			seedSessionResumeMessage(t, db, id, "user", "Implement the requested fix", now())
+			for i := 0; i < 3; i++ {
+				f.expireThrottle(t)
+				if preserved {
+					s.enqueueSessionPreservedContinuation(id, edge, "")
+				} else {
+					s.enqueueSessionLostResume(id, sessionRotatedResumePrefix, fmt.Sprintf("loss-%d", i), edge, "")
+				}
+			}
+			var notice string
+			if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, id).Scan(&notice); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"per-turn run limit", "/tmp/triggering-loss.jsonl"} {
+				if !strings.Contains(notice, want) {
+					t.Fatalf("pause omitted triggering context %q: %s", want, notice)
+				}
+			}
+			if preserved {
+				if strings.Contains(notice, "no memory") || !strings.Contains(notice, "history are intact") {
+					t.Fatal(notice)
+				}
+			} else if !strings.Contains(notice, "Triggering loss context") || !strings.Contains(notice, "Implement the requested fix") {
+				t.Fatal(notice)
+			}
+			if _, _, paused := f.state(t); !paused || f.count(t, sessionRotatedResumePrefix)+f.count(t, sessionPreservedContinuationPrefix) != 2 {
+				t.Fatal("third loss did not pause without injecting")
 			}
 		})
 	}

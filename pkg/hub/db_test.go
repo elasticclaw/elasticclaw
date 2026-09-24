@@ -302,6 +302,7 @@ func TestSessionLossColumnsMigration(t *testing.T) {
 			}
 			for _, column := range []struct{ name, kind, def string }{
 				{"session_loss_streak", "INTEGER", "0"},
+				{"session_loss_completed_turns", "INTEGER", "0"},
 				{"session_loss_progress_mark", "TEXT", "''"},
 			} {
 				var kind, def string

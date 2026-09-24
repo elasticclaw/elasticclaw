@@ -6,53 +6,45 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 type sessionLossQuerier interface {
-	Query(string, ...any) (*sql.Rows, error)
 	QueryRow(string, ...any) *sql.Row
 }
 
-// sessionLossProgressMark uses stage and authored output, independent of the
-// workspace's tools. Row identity distinguishes messages with equal timestamps.
+// sessionLossProgressMark counts only completed replies, never persisted stream
+// segments. The durable counter survives activity flushes and hub reconnects.
 func (s *Server) sessionLossProgressMark(clawID string) string {
 	mark, _, _ := readSessionLossProgressMark(s.db, clawID, "")
 	return mark
 }
 
-func readSessionLossProgressMark(q sessionLossQuerier, clawID, interruptedMsgID string) (mark, stage string, err error) {
-	if err = q.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
-		return
+func readSessionLossProgressMark(q sessionLossQuerier, clawID, _ string) (mark, stage string, err error) {
+	var completed int64
+	err = q.QueryRow(`SELECT pipeline_stage, session_loss_completed_turns FROM claws WHERE id=?`, clawID).Scan(&stage, &completed)
+	if err == nil {
+		mark = stage + "|" + strconv.FormatInt(completed, 10)
 	}
-	mark = stage + "|"
-	rows, err := q.Query(`SELECT content, created_at, rowid FROM messages WHERE claw_id=? AND role='claw' AND id <> ? ORDER BY created_at DESC, rowid DESC LIMIT 50`, clawID, interruptedMsgID)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var content string
-		var at time.Time
-		var rowID int64
-		if err = rows.Scan(&content, &at, &rowID); err != nil {
-			return
-		}
-		content = strings.TrimSpace(content)
-		if content != "" && !strings.HasPrefix(content, types.BridgeErrorPrefix) && !strings.HasPrefix(content, types.BridgeReplayErrorPrefix) {
-			mark += at.UTC().Format(time.RFC3339Nano) + "|" + strconv.FormatInt(rowID, 10)
-			return
-		}
-	}
-	err = rows.Err()
 	return
+}
+
+func (s *Server) recordSessionLossCompletedTurn(clawID, reply string) {
+	reply = strings.TrimSpace(reply)
+	if reply == "" || strings.HasPrefix(reply, types.BridgeErrorPrefix) || strings.HasPrefix(reply, types.BridgeReplayErrorPrefix) {
+		return
+	}
+	s.noProgressMu.Lock()
+	defer s.noProgressMu.Unlock()
+	if _, err := s.db.Exec(`UPDATE claws SET session_loss_completed_turns=session_loss_completed_turns+1 WHERE id=?`, clawID); err != nil {
+		log.Printf("[watchdog] record completed turn for %s: %v", shortID(clawID), err)
+	}
 }
 
 // sessionLossLoopGuard counts only eligible, unthrottled recoveries. Progress
 // resets the streak; reaching the limit pauses delivery until human input.
-func (s *Server) sessionLossLoopGuard(clawID, reason, interruptedMsgID string) bool {
+func (s *Server) sessionLossLoopGuard(clawID, reason, interruptedMsgID, recoveryNotice string) bool {
 	max := s.livenessSettings().sessionLossMax
 	if max <= 0 {
 		return false
@@ -76,9 +68,10 @@ func (s *Server) sessionLossLoopGuard(clawID, reason, interruptedMsgID string) b
 		return false
 	}
 	if paused {
-		// Release the transaction before resolving hints and storing the notice.
 		_ = tx.Rollback()
-		s.recordPausedSessionLossNotice(clawID, "session-loss resume")
+		if recoveryNotice != "" {
+			s.recordPausedSessionLossNotice(clawID, "session-loss resume", recoveryNotice)
+		}
 		return true
 	}
 	mark, stage, err := readSessionLossProgressMark(tx, clawID, interruptedMsgID)
@@ -92,8 +85,11 @@ func (s *Server) sessionLossLoopGuard(clawID, reason, interruptedMsgID string) b
 		streak++
 	}
 	// Latch the pause in the same transaction as the progress check, so a
-	// stage change or authored message cannot land between checking and pausing.
-	if _, err := tx.Exec(`UPDATE claws SET session_loss_streak=?, session_loss_progress_mark=?, no_progress_paused=? WHERE id=?`, streak, mark, boolInt(streak >= max), clawID); err != nil {
+	// stage change or completed reply cannot land between checking and pausing.
+	// Save the recovery context atomically, before a human can see the pause.
+	if _, err := tx.Exec(`UPDATE claws SET session_loss_streak=?, session_loss_progress_mark=?, no_progress_paused=?,
+		pending_session_loss_notice=CASE WHEN ? AND pending_session_loss_notice='' THEN ? ELSE pending_session_loss_notice END
+		WHERE id=?`, streak, mark, boolInt(streak >= max), streak >= max && recoveryNotice != "", recoveryNotice+"\n\n", clawID); err != nil {
 		log.Printf("[watchdog] session-loss guard for %s: %v", shortID(clawID), err)
 		return false
 	}
