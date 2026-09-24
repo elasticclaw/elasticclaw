@@ -98,11 +98,13 @@ export interface AgentActivity {
 /** Structured payload behind "workflow:effect:<json>" run-log messages (workflow v2). */
 export interface WorkflowEffectEvent {
   kind: string
-  phase: "planned" | "started" | "finished" | "assigned"
+  phase: "planned" | "started" | "dispatched" | "finished" | "assigned"
   status?: string
   attempt?: number
   definition_path?: string
   command?: string
+  /** Correlation id from the assignment receipt; the authoritative "finished" line arrives separately. */
+  task_id?: string
   exit_code?: number
   succeeded?: boolean
   stdout?: string

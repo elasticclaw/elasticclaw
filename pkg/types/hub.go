@@ -56,8 +56,11 @@ const WorkflowEffectFormatPrefix = "workflow:effect:"
 
 // WorkflowEffectEvent describes one effect or agent-task lifecycle point for a
 // workflow v2 run, embedded in run-log messages behind
-// WorkflowEffectFormatPrefix. Phase is "planned", "started", "assigned", or
-// "finished"; receipts contribute ExitCode/Succeeded/Stdout/Stderr/Error.
+// WorkflowEffectFormatPrefix. Phase is "planned", "started", "dispatched",
+// "assigned", or "finished": dispatched marks that a durable task was handed
+// off (correlated by TaskID) — the authoritative completion arrives as a
+// separate "finished" line; receipts contribute ExitCode/Succeeded/Stdout/
+// Stderr/Error.
 type WorkflowEffectEvent struct {
 	Kind           string `json:"kind"`
 	Phase          string `json:"phase"`
@@ -65,6 +68,7 @@ type WorkflowEffectEvent struct {
 	Attempt        int    `json:"attempt,omitempty"`
 	DefinitionPath string `json:"definition_path,omitempty"`
 	Command        string `json:"command,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
 	ExitCode       *int   `json:"exit_code,omitempty"`
 	Succeeded      *bool  `json:"succeeded,omitempty"`
 	Stdout         string `json:"stdout,omitempty"`

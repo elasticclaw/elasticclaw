@@ -575,8 +575,11 @@ func TestWorkflowV2AttemptLogsAreScopedToTheAttemptSession(t *testing.T) {
 	if got := effectLines(attempt1, "exec.run", "started"); got != 1 {
 		t.Fatalf("attempt 1 exec.run starts = %d, want 1", got)
 	}
-	if got := effectLines(attempt1, "exec.run", "finished"); got != 2 {
-		t.Fatalf("attempt 1 exec.run finishes = %d, want 2 (assignment + outcome)", got)
+	if got := effectLines(attempt1, "exec.run", "dispatched"); got != 1 {
+		t.Fatalf("attempt 1 exec.run dispatched = %d, want 1 (assignment)", got)
+	}
+	if got := effectLines(attempt1, "exec.run", "finished"); got != 1 {
+		t.Fatalf("attempt 1 exec.run finished = %d, want 1 (outcome only — the assignment is a separate dispatched line)", got)
 	}
 	if got := effectLines(attempt1, "agent.task", "assigned"); got != 1 {
 		t.Fatalf("attempt 1 agent.task assigned = %d, want 1", got)
@@ -601,8 +604,11 @@ func TestWorkflowV2AttemptLogsAreScopedToTheAttemptSession(t *testing.T) {
 	if got := effectLines(attempt2, "exec.run", "started"); got != 0 {
 		t.Fatalf("attempt 2 exec.run starts = %d, want 0 (attempt 1 session)", got)
 	}
+	if got := effectLines(attempt2, "exec.run", "dispatched"); got != 0 {
+		t.Fatalf("attempt 2 exec.run dispatched = %d, want 0 (attempt 1 session)", got)
+	}
 	if got := effectLines(attempt2, "exec.run", "finished"); got != 0 {
-		t.Fatalf("attempt 2 exec.run finishes = %d, want 0 (attempt 1 session)", got)
+		t.Fatalf("attempt 2 exec.run finished = %d, want 0 (attempt 1 session)", got)
 	}
 	if got := effectLines(attempt2, "agent.task", "finished"); got != 0 {
 		t.Fatalf("attempt 2 agent.task finished = %d, want 0 (attempt 1 session)", got)
@@ -615,8 +621,11 @@ func TestWorkflowV2AttemptLogsAreScopedToTheAttemptSession(t *testing.T) {
 	if got := effectLines(runLogs, "agent.task", "assigned"); got != 2 {
 		t.Fatalf("run-level agent.task assigned = %d, want 2 (complete record)", got)
 	}
-	if got := effectLines(runLogs, "exec.run", "finished"); got != 2 {
-		t.Fatalf("run-level exec.run finishes = %d, want 2 (complete record)", got)
+	if got := effectLines(runLogs, "exec.run", "dispatched"); got != 1 {
+		t.Fatalf("run-level exec.run dispatched = %d, want 1 (complete record)", got)
+	}
+	if got := effectLines(runLogs, "exec.run", "finished"); got != 1 {
+		t.Fatalf("run-level exec.run finished = %d, want 1 (outcome only, complete record)", got)
 	}
 	if got := roleCount(runLogs, "state"); got != 2 {
 		t.Fatalf("run-level state transitions = %d, want 2 (complete record)", got)
@@ -942,8 +951,8 @@ func TestWorkflowV2RunLogsIncludeEffectTaskAndExecOutcomeLines(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var effectStarts, effectFinishes, execOutcomes, taskAssigned, taskFinished int
-	var outcome types.WorkflowEffectEvent
+	var effectStarts, effectDispatched, execOutcomes, taskAssigned, taskFinished int
+	var outcome, dispatched types.WorkflowEffectEvent
 	var assigned, finishedTask types.WorkflowEffectEvent
 	for _, m := range messages {
 		if m.Role != "effect" {
@@ -959,11 +968,12 @@ func TestWorkflowV2RunLogsIncludeEffectTaskAndExecOutcomeLines(t *testing.T) {
 			if event.Command != "make test" {
 				t.Fatalf("start command = %q", event.Command)
 			}
-		case event.Kind == "exec.run" && event.Phase == "finished" && event.Stdout != "":
+		case event.Kind == "exec.run" && event.Phase == "dispatched":
+			effectDispatched++
+			dispatched = event
+		case event.Kind == "exec.run" && event.Phase == "finished":
 			execOutcomes++
 			outcome = event
-		case event.Kind == "exec.run" && event.Phase == "finished":
-			effectFinishes++
 		case event.Kind == "agent.task" && event.Phase == "assigned":
 			taskAssigned++
 			assigned = event
@@ -972,8 +982,15 @@ func TestWorkflowV2RunLogsIncludeEffectTaskAndExecOutcomeLines(t *testing.T) {
 			finishedTask = event
 		}
 	}
-	if effectStarts != 1 || effectFinishes != 1 {
-		t.Fatalf("effect starts = %d, assignment finishes = %d (want 1 each)", effectStarts, effectFinishes)
+	if effectStarts != 1 || effectDispatched != 1 {
+		t.Fatalf("effect starts = %d, dispatched = %d (want 1 each)", effectStarts, effectDispatched)
+	}
+	var assignmentTaskID string
+	if err := db.QueryRow(`SELECT json_extract(receipt_json, '$.task_id') FROM workflow_v2_effect_attempts`).Scan(&assignmentTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if dispatched.TaskID != assignmentTaskID {
+		t.Fatalf("dispatched task_id = %q, want assignment task %q", dispatched.TaskID, assignmentTaskID)
 	}
 	if execOutcomes != 1 {
 		t.Fatalf("exec outcome lines = %d, want 1", execOutcomes)

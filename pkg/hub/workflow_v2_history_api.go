@@ -14,6 +14,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
 // handleWorkflowV2Runs handles GET /api/v2/workspaces/{workspace}/workflows/{workflow}/runs
@@ -618,6 +619,22 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 		if !lifecycleVisible(window, cursor, time.UnixMilli(attemptFinished.Int64).UTC(), finishID) {
 			continue
 		}
+		if dispatchedEffectKinds[kind] && attemptStatus.String == string(workflowv2.EffectSucceeded) {
+			// A succeeded attempt for these kinds only records that a durable
+			// task was dispatched (receipt: task_id, message_id). The
+			// authoritative completion arrives separately — as the projected
+			// exec outcome event or the agent task lifecycle — so this line is
+			// labeled "dispatched" and never rendered as a second completion.
+			msgs, err = appendWorkflowEffectLogMessage(msgs, finishID, clawID, tenantID,
+				fmt.Sprintf("%s effect dispatched (attempt %d)", kind, attempt),
+				types.WorkflowEffectEvent{Kind: kind, Phase: "dispatched", Status: "dispatched", Attempt: attempt,
+					DefinitionPath: definitionPath, TaskID: receiptTaskID(receiptJSON.String)},
+				time.UnixMilli(attemptFinished.Int64))
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
 		event := types.WorkflowEffectEvent{Kind: kind, Phase: "finished", Status: attemptStatus.String, Attempt: attempt,
 			DefinitionPath: definitionPath, Command: command}
 		content := fmt.Sprintf("%s effect %s (attempt %d)", kind, attemptStatus.String, attempt)
@@ -808,6 +825,28 @@ func effectCommand(payloadJSON string) string {
 	}
 	command, _ := payload["command"].(string)
 	return command
+}
+
+// dispatchedEffectKinds are effect kinds whose succeeded attempt only records
+// that a durable task was handed off: exec.run and dependency.update complete
+// via a separate control event, and agent.task via the task lifecycle. Their
+// success lines are labeled "dispatched" (with the receipt's task_id) so one
+// execution never renders as two completions.
+var dispatchedEffectKinds = map[string]bool{
+	typesv2.EffectExecRun:          true,
+	typesv2.EffectDependencyUpdate: true,
+	"agent.task":                   true,
+}
+
+// receiptTaskID extracts the durable task id from a dispatched effect's
+// assignment receipt for correlation with the authoritative outcome lines.
+func receiptTaskID(receiptJSON string) string {
+	var receipt map[string]interface{}
+	if err := json.Unmarshal([]byte(receiptJSON), &receipt); err != nil {
+		return ""
+	}
+	taskID, _ := receipt["task_id"].(string)
+	return taskID
 }
 
 // applyReceiptToEffectEvent copies known receipt fields (exec.run and
