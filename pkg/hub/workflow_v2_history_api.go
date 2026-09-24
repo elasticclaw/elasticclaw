@@ -226,75 +226,6 @@ func (s *Server) queryWorkflowV2TransitionsForClaw(ctx context.Context, tenantID
 	return msgs, rows.Err()
 }
 
-// queryActivityMessages returns activity messages for a claw, applying the same
-// filtering and authorization used by /api/messages/{clawID}/activity.
-func (s *Server) queryActivityMessages(w http.ResponseWriter, r *http.Request, clawID string) {
-	if !s.canViewMessages(w, r, tenantFromCtx(r), clawID) {
-		return
-	}
-
-	from := r.URL.Query().Get("from")
-	to := r.URL.Query().Get("to")
-	before := r.URL.Query().Get("before")
-	limit := parsePositiveLimit(r, 200, 500)
-	order := strings.ToLower(r.URL.Query().Get("order"))
-	if order != "desc" {
-		order = "asc"
-	}
-
-	fromParsed, ok := requireTimeCursor(w, from)
-	if !ok {
-		return
-	}
-	toParsed, ok := requireTimeCursor(w, to)
-	if !ok {
-		return
-	}
-	beforeParsed, ok := requireTimeCursor(w, before)
-	if !ok {
-		return
-	}
-
-	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), COALESCE(user_login,''), created_at
-		FROM messages
-		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
-	args := []interface{}{clawID, tenantFromCtx(r)}
-	if fromParsed != nil {
-		query += ` AND created_at > ?`
-		args = append(args, *fromParsed)
-	}
-	if toParsed != nil {
-		query += ` AND created_at < ?`
-		args = append(args, *toParsed)
-	}
-	if beforeParsed != nil {
-		query += ` AND created_at < ?`
-		args = append(args, *beforeParsed)
-	}
-	if order == "desc" {
-		query += ` ORDER BY created_at DESC LIMIT ?`
-	} else {
-		query += ` ORDER BY created_at ASC LIMIT ?`
-	}
-	args = append(args, limit)
-
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "fetch activity logs")
-		return
-	}
-	defer rows.Close()
-	msgs, err := scanHubMessages(rows)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "fetch activity logs")
-		return
-	}
-	if msgs == nil {
-		msgs = []types.HubMessage{}
-	}
-	jsonOK(w, msgs)
-}
-
 // queryWorkflowRunLogs returns agent activity messages merged with workflow state
 // transition entries for a v2 run. This lets the UI logs view show when the run
 // entered each state, not just agent.task messages.
@@ -592,7 +523,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 			if attemptCount == 0 && lifecycleVisible(window, cursor, time.UnixMilli(effectCreated).UTC(), "effect-"+effectID) {
 				msgs, err = appendWorkflowEffectLogMessage(msgs, "effect-"+effectID, clawID, tenantID,
 					fmt.Sprintf("%s effect planned (waiting for worker)", kind),
-					types.WorkflowEffectEvent{Kind: kind, Phase: "planned", Status: effectStatus, DefinitionPath: definitionPath, Command: command},
+					types.WorkflowEffectEvent{Kind: kind, Phase: types.WorkflowEffectPhasePlanned, Status: effectStatus, DefinitionPath: definitionPath, Command: command},
 					time.UnixMilli(effectCreated))
 				if err != nil {
 					return nil, err
@@ -605,7 +536,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 		if lifecycleVisible(window, cursor, time.UnixMilli(attemptStarted.Int64).UTC(), startID) {
 			msgs, err = appendWorkflowEffectLogMessage(msgs, startID, clawID, tenantID,
 				fmt.Sprintf("%s effect started (attempt %d)", kind, attempt),
-				types.WorkflowEffectEvent{Kind: kind, Phase: "started", Status: "running", Attempt: attempt,
+				types.WorkflowEffectEvent{Kind: kind, Phase: types.WorkflowEffectPhaseStarted, Status: "running", Attempt: attempt,
 					DefinitionPath: definitionPath, Command: command},
 				time.UnixMilli(attemptStarted.Int64))
 			if err != nil {
@@ -627,7 +558,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 			// labeled "dispatched" and never rendered as a second completion.
 			msgs, err = appendWorkflowEffectLogMessage(msgs, finishID, clawID, tenantID,
 				fmt.Sprintf("%s effect dispatched (attempt %d)", kind, attempt),
-				types.WorkflowEffectEvent{Kind: kind, Phase: "dispatched", Status: "dispatched", Attempt: attempt,
+				types.WorkflowEffectEvent{Kind: kind, Phase: types.WorkflowEffectPhaseDispatched, Status: types.WorkflowEffectPhaseDispatched, Attempt: attempt,
 					DefinitionPath: definitionPath, TaskID: receiptTaskID(receiptJSON.String)},
 				time.UnixMilli(attemptFinished.Int64))
 			if err != nil {
@@ -635,7 +566,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 			}
 			continue
 		}
-		event := types.WorkflowEffectEvent{Kind: kind, Phase: "finished", Status: attemptStatus.String, Attempt: attempt,
+		event := types.WorkflowEffectEvent{Kind: kind, Phase: types.WorkflowEffectPhaseFinished, Status: attemptStatus.String, Attempt: attempt,
 			DefinitionPath: definitionPath, Command: command}
 		content := fmt.Sprintf("%s effect %s (attempt %d)", kind, attemptStatus.String, attempt)
 		receiptError := applyReceiptToEffectEvent(receiptJSON.String, &event)
@@ -714,7 +645,7 @@ func execOutcomeEvent(kind, factsJSON string) (types.WorkflowEffectEvent, string
 		value, _ := facts[factPrefix+key].(string)
 		return value
 	}
-	event := types.WorkflowEffectEvent{Kind: effectKind, Phase: "finished"}
+	event := types.WorkflowEffectEvent{Kind: effectKind, Phase: types.WorkflowEffectPhaseFinished}
 	if succeeded, ok := facts[factPrefix+"succeeded"].(bool); ok {
 		event.Succeeded = &succeeded
 	}
@@ -776,7 +707,7 @@ func (s *Server) appendWorkflowV2AgentTaskLogs(ctx context.Context, msgs []types
 		if !cursor.excludes(time.UnixMilli(created).UTC(), assignedID) {
 			msgs, err = appendWorkflowEffectLogMessage(msgs, assignedID, clawID, tenantID,
 				"agent task assigned",
-				types.WorkflowEffectEvent{Kind: "agent.task", Phase: "assigned", Status: status, Instructions: instructions},
+				types.WorkflowEffectEvent{Kind: "agent.task", Phase: types.WorkflowEffectPhaseAssigned, Status: status, Instructions: instructions},
 				time.UnixMilli(created))
 			if err != nil {
 				return nil, err
@@ -795,7 +726,7 @@ func (s *Server) appendWorkflowV2AgentTaskLogs(ctx context.Context, msgs []types
 		}
 		msgs, err = appendWorkflowEffectLogMessage(msgs, finishID, clawID, tenantID,
 			content,
-			types.WorkflowEffectEvent{Kind: "agent.task", Phase: "finished", Status: status, TerminalReason: terminalReason},
+			types.WorkflowEffectEvent{Kind: "agent.task", Phase: types.WorkflowEffectPhaseFinished, Status: status, TerminalReason: terminalReason},
 			time.UnixMilli(finished))
 		if err != nil {
 			return nil, err
