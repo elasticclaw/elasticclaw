@@ -37,19 +37,24 @@ func sanitizeSessionDigestText(value string) string {
 	value = digestURLUserinfo.ReplaceAllString(value, "${1}[redacted]@")
 	lines := strings.Split(value, "\n")
 	blockIndent := -1
-	pendingValue, pem := false, false
+	pendingValue := false
+	pemEnd := ""
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
 		indent := len(line) - len(trimmed)
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if pem || pendingValue || (blockIndent >= 0 && (indent > blockIndent || strings.HasPrefix(trimmed, "-----BEGIN"))) {
-			if strings.Contains(line, "-----BEGIN") {
-				pem = true
+		if strings.Contains(line, "-----BEGIN") || pemEnd != "" || pendingValue || (blockIndent >= 0 && indent > blockIndent) {
+			if start := strings.Index(line, "-----BEGIN"); start >= 0 && pemEnd == "" {
+				label := line[start+len("-----BEGIN"):]
+				pemEnd = "-----END"
+				if end := strings.Index(label, "-----"); end >= 0 {
+					pemEnd += label[:end] + "-----"
+				}
 			}
-			if strings.Contains(line, "-----END") {
-				pem = false
+			if pemEnd != "" && strings.Contains(line, pemEnd) {
+				pemEnd = ""
 			}
 			pendingValue = strings.Trim(line, " \t\r\\\"':=") == ""
 			lines[i] = line[:indent] + "[redacted]"
@@ -67,7 +72,6 @@ func sanitizeSessionDigestText(value string) string {
 			}
 			rest := strings.TrimLeft(line[match[1]:], " \t\r\\\"':=")
 			pendingValue = rest == ""
-			pem = strings.HasPrefix(rest, "-----BEGIN") && !strings.Contains(rest, "-----END")
 			// Also cover indented values after a colon, YAML block scalars, and
 			// multiline quoted values. Over-redaction here is intentional.
 			blockIndent = indent

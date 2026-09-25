@@ -23,7 +23,7 @@ func TestActivityAndDigestRedaction(t *testing.T) {
 		{"ApiKey X", "ApiKey X", "ApiKey [redacted]"},
 		{"private_key: |\n  -----BEGIN PRIVATE KEY-----\n  SECRET\n  -----END PRIVATE KEY-----\nnext: safe", "private_key: |\n  -----BEGIN PRIVATE KEY-----\n  SECRET\n  -----END PRIVATE KEY-----\nnext: safe", "private_key [redacted]\n  [redacted]\n  [redacted]\n  [redacted]\nnext: safe"},
 		{"private_key: >\n  SECRET\nnext: safe", "private_key: >\n  SECRET\nnext: safe", "private_key [redacted]\n  [redacted]\nnext: safe"},
-		{"private_key: -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nnext: safe", "private_key: -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nnext: safe", "private_key [redacted]\n[redacted]\n[redacted]\nnext: safe"},
+		{"private_key: -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nnext: safe", "private_key: -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nnext: safe", "[redacted]\n[redacted]\n[redacted]\nnext: safe"},
 		{"api_key:\nSECRET\nnext: safe", "api_key:\nSECRET\nnext: safe", "api_key [redacted]\n[redacted]\nnext: safe"},
 		{"{\"api_key\":\n \"SECRET\"}", "{\"api_key\":\n \"SECRET\"}", "{\"api_key [redacted]\n [redacted]"},
 		{"{\"api_key\" \r\n\t: \r\n\t\"SECRET\"}", "{\"api_key\" \r\n\t: \r\n\t\"SECRET\"}", "{\"api_key [redacted]\n\t[redacted]\n\t[redacted]"},
@@ -54,6 +54,10 @@ func TestActivityAndDigestRedaction(t *testing.T) {
 
 func TestSessionDigestRedactsMultilineSecrets(t *testing.T) {
 	for _, input := range []string{
+		"-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----",
+		"prefix: -----BEGIN RSA PRIVATE KEY-----\nSECRET\n-----END RSA PRIVATE KEY-----",
+		"note -----BEGIN CERTIFICATE-----\nSECRET\n-----END CERTIFICATE-----",
+		"-----BEGIN PRIVATE KEY-----\n-----END CERTIFICATE-----\nSECRET\n-----END PRIVATE KEY-----",
 		"private_key: |\n-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----",
 		"private_key:\n-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----",
 		"password: \"first\n  SECRET\"",
@@ -61,7 +65,7 @@ func TestSessionDigestRedactsMultilineSecrets(t *testing.T) {
 		"token: |\n  SECRET\n\n  STILL_SECRET",
 	} {
 		t.Run(input, func(t *testing.T) {
-			if got := sanitizeSessionDigestText(input); strings.Contains(got, "SECRET") {
+			if got := sanitizeSessionDigestText(input + "\nnext: safe"); strings.Contains(got, "SECRET") || !strings.HasSuffix(got, "next: safe") {
 				t.Fatalf("multiline secret leaked: %q", got)
 			}
 		})
