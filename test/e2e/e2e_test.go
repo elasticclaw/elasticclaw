@@ -93,10 +93,14 @@ func runDockerWorkflowE2E(t *testing.T, waitForInference bool) {
 		var provider, providerID string
 		if agentID != "" {
 			provider, providerID = hub.agentProvider(cleanupCtx, t, agentID)
-			_ = hub.deleteAgent(cleanupCtx, agentID)
 		}
+		// Capture in-container evidence before deleteAgent/destroy removes the
+		// container and its logs with it.
 		if t.Failed() && provider == "docker" && providerID != "" {
 			dumpDockerAgentLogs(t, providerID)
+		}
+		if agentID != "" {
+			_ = hub.deleteAgent(cleanupCtx, agentID)
 		}
 		if providerID != "" {
 			destroyProviderInstanceByID(cleanupCtx, t, env, provider, providerID)
