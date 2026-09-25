@@ -6683,8 +6683,15 @@ func (s *Server) syncReplicatedVMs() {
 			// Skip the rest of the status update logic for this claw
 			continue
 		default:
-			// assigned, pending, etc — still coming up
-			newStatus = "provisioning"
+			// assigned, pending, etc — still coming up. A transient provider
+			// status (CMX briefly reports "updating" for an already-running VM)
+			// must not regress a claw that already advanced to starting: the
+			// conditional update below permits starting→provisioning, and the
+			// next "running" sighting would then fire a SECOND concurrent
+			// bootstrap — two bridges fighting over the hub connection and two
+			// gateways racing for port 18789, surfaced as "gateway process
+			// exited" on the in-flight turn.
+			newStatus = holdStartingOnTransientVMStatus(c.status)
 		}
 
 		// Only overwrite provisioning/starting statuses — never clobber hub-managed
@@ -6706,6 +6713,18 @@ func (s *Server) syncReplicatedVMs() {
 			}
 		}
 	}
+}
+
+// holdStartingOnTransientVMStatus maps a transient provider VM status (the
+// default branch of the poll loop: assigned, pending, updating, ...) to a claw
+// status. A claw already in "starting" has a bootstrap in flight; regressing
+// it to "provisioning" would re-arm the bootstrap trigger on the next
+// "running" sighting and launch a second concurrent bootstrap.
+func holdStartingOnTransientVMStatus(clawStatus string) string {
+	if clawStatus == "starting" {
+		return "starting"
+	}
+	return "provisioning"
 }
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────

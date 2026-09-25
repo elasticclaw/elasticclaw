@@ -3174,3 +3174,23 @@ func TestAgentActivityGenericReasoningUpsertsButToolEventsInsert(t *testing.T) {
 		t.Fatalf("upserted reasoning content unexpected: %q", latestReasoning)
 	}
 }
+
+func TestHoldStartingOnTransientVMStatus(t *testing.T) {
+	// Regression: CMX briefly reports "updating" for an already-running VM.
+	// Mapping that transient status to "provisioning" regressed a bootstrapping
+	// claw, and the next "running" poll sighting fired a second concurrent
+	// bootstrap — two bridges and two gateways racing for port 18789, surfaced
+	// as "gateway process exited" on the in-flight turn.
+	if got := holdStartingOnTransientVMStatus("starting"); got != "starting" {
+		t.Fatalf("holdStartingOnTransientVMStatus(starting) = %q, want starting (no regression while bootstrap is in flight)", got)
+	}
+	if got := holdStartingOnTransientVMStatus("provisioning"); got != "provisioning" {
+		t.Fatalf("holdStartingOnTransientVMStatus(provisioning) = %q, want provisioning", got)
+	}
+	// Hub-managed statuses never reach the poll loop's update (the conditional
+	// UPDATE excludes them), but the mapping must not invent a regression for
+	// them either.
+	if got := holdStartingOnTransientVMStatus("connected"); got != "provisioning" {
+		t.Fatalf("holdStartingOnTransientVMStatus(connected) = %q, want provisioning", got)
+	}
+}
