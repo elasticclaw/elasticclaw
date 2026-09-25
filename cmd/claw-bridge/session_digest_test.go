@@ -15,18 +15,18 @@ func TestActivityAndDigestRedaction(t *testing.T) {
 		{"env: API_KEY=SECRET", "env: api_key=[redacted]", "[redacted]"},
 		{"note: access_token=SECRET", "note: access_token=[redacted]", "[redacted]"},
 		{"user:token=SECRET", "user:token=[redacted]", "[redacted]"},
-		{"step:\n  GITHUB_TOKEN=SECRET", "step:\n  GITHUB_TOKEN=[redacted]", "step:\n  [redacted]"},
+		{"step:\n  GITHUB_TOKEN=SECRET", "step:\n  GITHUB_TOKEN=[redacted]", "step:\n[redacted]"},
 		{"Authorization: token ghp_SECRET", "Authorization: token ghp_SECRET", "[redacted]"},
 		{"Authorization: Token X", "Authorization: Token X", "[redacted]"},
 		{"Authorization: ApiKey X", "Authorization: ApiKey X", "[redacted]"},
 		{"Token X", "Token X", "[redacted]"},
 		{"ApiKey X", "ApiKey X", "[redacted]"},
-		{"private_key: |\n  -----BEGIN PRIVATE KEY-----\n  SECRET\n  -----END PRIVATE KEY-----\nnext: safe", "private_key: |\n  -----BEGIN PRIVATE KEY-----\n  SECRET\n  -----END PRIVATE KEY-----\nnext: safe", "[redacted]\n  [redacted]\n  [redacted]\n  [redacted]\nnext: safe"},
-		{"private_key: >\n  SECRET\nnext: safe", "private_key: >\n  SECRET\nnext: safe", "[redacted]\n  [redacted]\nnext: safe"},
-		{"private_key: -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nnext: safe", "private_key: -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nnext: safe", "[redacted]\n[redacted]\n[redacted]\nnext: safe"},
-		{"api_key:\nSECRET\nnext: safe", "api_key:\nSECRET\nnext: safe", "[redacted]\n[redacted]\nnext: safe"},
-		{"{\"api_key\":\n \"SECRET\"}", "{\"api_key\":\n \"SECRET\"}", "[redacted]\n [redacted]"},
-		{"{\"api_key\" \r\n\t: \r\n\t\"SECRET\"}", "{\"api_key\" \r\n\t: \r\n\t\"SECRET\"}", "[redacted]\n\t[redacted]\n\t[redacted]"},
+		{"private_key: |\n  -----BEGIN PRIVATE KEY-----\n  SECRET\n  -----END PRIVATE KEY-----\nnext: safe", "private_key: |\n  -----BEGIN PRIVATE KEY-----\n  SECRET\n  -----END PRIVATE KEY-----\nnext: safe", "[redacted]"},
+		{"private_key: >\n  SECRET\nnext: safe", "private_key: >\n  SECRET\nnext: safe", "[redacted]"},
+		{"private_key: -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nnext: safe", "private_key: -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----\nnext: safe", "[redacted]"},
+		{"api_key:\nSECRET\nnext: safe", "api_key:\nSECRET\nnext: safe", "[redacted]"},
+		{"{\"api_key\":\n \"SECRET\"}", "{\"api_key\":\n \"SECRET\"}", "[redacted]"},
+		{"{\"api_key\" \r\n\t: \r\n\t\"SECRET\"}", "{\"api_key\" \r\n\t: \r\n\t\"SECRET\"}", "[redacted]"},
 		{`GH_TOKEN="SECRET"`, `GH_TOKEN=[redacted]`, `[redacted]`},
 		{`GH_TOKEN='SECRET'`, `GH_TOKEN=[redacted]`, `[redacted]`},
 		{`GH_TOKEN="SECRET`, `GH_TOKEN=[redacted]`, `[redacted]`},
@@ -76,11 +76,14 @@ func TestSessionDigestRedactsMultilineSecrets(t *testing.T) {
 		"token='a' note=\"x\" secret='first\nSECRET'",
 		"PASSWORD=\"first\nlast\" API_KEY=\"second\nSECRET\" command",
 		"token='a\nb' c='d\nSECRET'",
+		"PASSWORD=\"first\nlast\" API_KEY=\\\nSECRET",
+		"{\"password\":\"safe\", \"api_key\":\n\"SECRET\"}",
+		"ok line\ntoken:\n\n\n  SECRET",
 		"PASSWORD=\\\n\\\n'first\nSECRET'",
 		"PASSWORD=\"first\nSECRET\\\"still\nSECRET\"",
 	} {
 		t.Run(input, func(t *testing.T) {
-			if got := sanitizeSessionDigestText(input + "\nnext: safe"); strings.Contains(got, "SECRET") || !strings.HasSuffix(got, "next: safe") {
+			if got := sanitizeSessionDigestText(input + "\nnext: safe"); strings.Contains(got, "SECRET") || !strings.HasSuffix(got, "[redacted]") {
 				t.Fatalf("multiline secret leaked: %q", got)
 			}
 		})

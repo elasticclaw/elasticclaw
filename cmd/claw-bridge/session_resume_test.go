@@ -76,13 +76,13 @@ func TestSessionTranscriptLogRedactsAndTruncates(t *testing.T) {
 	}
 
 	var log sessionTranscriptLog
-	secret := "Bearer abc\nGITHUB_TOKEN=x\n"
-	log.noteAssistant(secret + strings.Repeat("界", 700))
-	log.noteTool(agentActivity{Kind: "tool", Phase: "running", Tool: "exec", Command: secret + strings.Repeat("界", 300)})
+	secret := "\nBearer abc\nGITHUB_TOKEN=x\n"
+	log.noteAssistant(strings.Repeat("界", 700) + secret)
+	log.noteTool(agentActivity{Kind: "tool", Phase: "running", Tool: "exec", Command: strings.Repeat("界", 300) + secret})
 	digest := log.snapshot()
 	text, args := digest.AssistantMessages[0], digest.ToolCalls[0].Args
 	for _, value := range []string{text, args} {
-		if strings.Contains(value, "Bearer abc") || strings.Contains(value, "GITHUB_TOKEN=x") || !strings.HasPrefix(value, "[redacted]\n[redacted]\n") {
+		if strings.Contains(value, "Bearer abc") || strings.Contains(value, "GITHUB_TOKEN=x") {
 			t.Fatalf("unredacted content: %q", value)
 		}
 	}
