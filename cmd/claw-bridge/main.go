@@ -3159,8 +3159,8 @@ func installUserNPMPackage(spec string, opts ...string) error {
 	// the install dir — which is exactly what happens for an unprivileged
 	// runtime user after a scripts-disabled install.
 	flags := ""
-	for _, opt := range opts {
-		flags += " " + opt
+	if len(opts) > 0 {
+		flags = " " + strings.Join(opts, " ")
 	}
 	return runShell(fmt.Sprintf(
 		"npm install -g --prefix %s %s%s",
