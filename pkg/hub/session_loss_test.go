@@ -72,8 +72,10 @@ func (f sessionLossFixture) send(t *testing.T, kind string, n, wantStreak, wantP
 	t.Helper()
 	f.cc.mu.Lock()
 	f.cc.streamingStartedAt = now()
+	interrupted := f.cc.turnInputMessageID
 	f.cc.mu.Unlock()
-	if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: kind, Payload: types.SessionRecoveryEdge{SessionKey: fmt.Sprintf("key-%d", n), Reason: types.SessionLossReasonTurnTimeout}}); err != nil {
+	edge := types.SessionRecoveryEdge{SessionKey: fmt.Sprintf("key-%d", n), Reason: types.SessionLossReasonTurnTimeout, InterruptedMessageID: interrupted}
+	if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: kind, Payload: edge}); err != nil {
 		t.Fatal(err)
 	}
 	prefix := sessionRotatedResumePrefix
@@ -565,6 +567,10 @@ func TestSessionLossInterruptedStreamingActivityBeforeEdge(t *testing.T) {
 			for i := 1; i <= 3; i++ {
 				f.expireThrottle(t)
 				partial := fmt.Sprintf("Partial step %d", i)
+				f.cc.mu.Lock()
+				f.cc.awaitingResponse = true
+				f.cc.turnInputMessageID = fmt.Sprintf("input-%d", i)
+				f.cc.mu.Unlock()
 				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "chunk", Payload: map[string]string{"content": partial}}); err != nil {
 					t.Fatal(err)
 				}
@@ -599,7 +605,7 @@ func TestSessionLossInterruptedStreamingActivityBeforeEdge(t *testing.T) {
 }
 
 func TestSessionLossCompletedReplyProgress(t *testing.T) {
-	for _, outcome := range []string{"completed", "split completed", "empty final after stream", "empty", "bridge error", "interrupted"} {
+	for _, outcome := range []string{"completed", "split completed", "split empty final", "empty final after stream", "empty", "bridge error", "interrupted"} {
 		t.Run(outcome, func(t *testing.T) {
 			f := newSessionLossFixture(t, nil)
 			before := f.s.sessionLossProgressMark(f.clawID)
@@ -612,14 +618,14 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if outcome == "split completed" {
+			if outcome == "split completed" || outcome == "split empty final" {
 				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "agent_activity", Payload: map[string]string{"kind": "tool", "tool": "exec", "phase": "start"}}); err != nil {
 					t.Fatal(err)
 				}
 			}
 			reply := "Completed bounded step"
 			switch outcome {
-			case "empty", "empty final after stream":
+			case "empty", "empty final after stream", "split empty final":
 				reply = ""
 			case "bridge error":
 				reply = types.BridgeErrorPrefix + " failed"
@@ -642,7 +648,7 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 			changed := f.s.sessionLossProgressMark(f.clawID) != before
 			// The final message event sometimes arrives empty after a streamed
 			// reply; the streamed body is still a completed turn.
-			if want := outcome == "completed" || outcome == "split completed" || outcome == "empty final after stream"; changed != want {
+			if want := outcome == "completed" || outcome == "split completed" || outcome == "empty final after stream" || outcome == "split empty final"; changed != want {
 				t.Fatalf("progress changed=%v for %s", changed, outcome)
 			}
 		})

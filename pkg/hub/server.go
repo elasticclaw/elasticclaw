@@ -362,6 +362,7 @@ type clawConn struct {
 	streamingBuf           strings.Builder // accumulates chunks for current in-flight response
 	streamingMsgID         string          // pre-assigned message ID for the current stream
 	streamingSplit         bool            // true once activity has split this turn into multiple persisted segments
+	streamingSplitText     string          // last non-empty segment flushed by a split, for progress when the final event is empty
 	streamingStartedAt     time.Time       // when the current streaming turn started (zero if not streaming)
 	streamingTimeoutSent   bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent     bool            // true once the context-nearly-full warning has been injected this turn
@@ -552,6 +553,7 @@ func (cc *clawConn) resetTurnStateLocked() {
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
 	cc.streamingSplit = false
+	cc.streamingSplitText = ""
 	cc.streamingStartedAt = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
@@ -571,6 +573,9 @@ func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) er
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
 	cc.streamingSplit = true
+	if strings.TrimSpace(content) != "" {
+		cc.streamingSplitText = content
+	}
 	cc.mu.Unlock()
 
 	createdAt := now()
@@ -3440,6 +3445,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				skipPersist = cc.streamingSplit
 			}
 			completedNormally := !cc.sessionLossInterrupted
+			splitText := cc.streamingSplitText
 			cc.finishTurnLocked()
 			cc.forcedFinishCount = 0
 			cc.mu.Unlock()
@@ -3456,6 +3462,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				progressContent := hm.Content
 				if strings.TrimSpace(progressContent) == "" {
 					progressContent = turnContent
+				}
+				if strings.TrimSpace(progressContent) == "" {
+					// Text flushed by an earlier tool split still came from this turn.
+					progressContent = splitText
 				}
 				s.recordSessionLossCompletedTurn(clawID, progressContent)
 			}
