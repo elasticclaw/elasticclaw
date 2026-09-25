@@ -3058,6 +3058,10 @@ func TestGatewaySessionResetsAfterAcceptedTurnDeadline(t *testing.T) {
 	testGatewaySessionAcceptedTurnDeadline(t, "rotate")
 }
 
+func TestGatewaySessionAbortFailureAfterTurnDeadlineRotates(t *testing.T) {
+	testGatewaySessionAcceptedTurnDeadline(t, "abort-error")
+}
+
 func TestGatewaySessionPreservesSessionAfterAcceptedTurnDeadline(t *testing.T) {
 	testGatewaySessionAcceptedTurnDeadline(t, "preserve")
 }
@@ -3075,7 +3079,7 @@ func testGatewaySessionAcceptedTurnDeadline(t *testing.T, recovery string) {
 	var gs *gatewaySession
 	testDone := make(chan struct{})
 	idleChecked := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	conn := dialPipeGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			t.Error(err)
@@ -3116,8 +3120,8 @@ func testGatewaySessionAcceptedTurnDeadline(t *testing.T, recovery string) {
 		if recovery == "concurrent" {
 			gs.setSessionKey("session-2")
 		}
-		respond(abort, true, nil)
-		if recovery != "concurrent" {
+		respond(abort, recovery != "abort-error", nil)
+		if recovery != "concurrent" && recovery != "abort-error" {
 			for range sessionLockConflictRetryDelays {
 				respond(read("sessions.describe"), recovery == "preserve", nil)
 				if recovery == "preserve" {
@@ -3125,8 +3129,14 @@ func testGatewaySessionAcceptedTurnDeadline(t *testing.T, recovery string) {
 				}
 			}
 		}
-		if recovery == "rotate" {
-			respond(read("sessions.create"), true, mustJSON(map[string]string{"key": "session-2"}))
+		if recovery == "rotate" || recovery == "abort-error" {
+			req := read("sessions.create")
+			// If preservation is incorrectly attempted, describe would succeed.
+			if req.Method == "sessions.describe" {
+				respond(req, true, nil)
+				return
+			}
+			respond(req, true, mustJSON(map[string]string{"key": "session-2"}))
 			respond(read("sessions.subscribe"), true, nil)
 		} else {
 			idleCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -3139,20 +3149,20 @@ func testGatewaySessionAcceptedTurnDeadline(t *testing.T, recovery string) {
 		close(idleChecked)
 		<-testDone
 	}))
-	defer srv.Close()
 	defer close(testDone)
 	readCtx, stopRead := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopRead()
-	conn, _, err := websocket.Dial(readCtx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(readCtx)
 	sendCtx, cancelSend := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancelSend()
-	_, err = gs.SendMessage(sendCtx, "continue the task", "", nil, nil)
+	_, err := gs.SendMessage(sendCtx, "continue the task", "lost-input", nil, nil)
+	gs.infMu.Lock()
+	idleMessageID := gs.turnMessageID
+	gs.infMu.Unlock()
+	if idleMessageID != "" {
+		t.Fatalf("idle reconnect would report stale interrupted_message_id %q", idleMessageID)
+	}
 	if !errors.Is(err, context.DeadlineExceeded) || sessionLossReason(err) != types.SessionLossReasonTurnTimeout {
 		t.Fatalf("error = %v, reason = %q", err, sessionLossReason(err))
 	}

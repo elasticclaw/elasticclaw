@@ -2864,6 +2864,11 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 	gs.infMu.Lock()
 	gs.turnMessageID = messageID
 	gs.infMu.Unlock()
+	defer func() {
+		gs.infMu.Lock()
+		gs.turnMessageID = ""
+		gs.infMu.Unlock()
+	}()
 
 	delays := []time.Duration{2 * time.Second, 5 * time.Second}
 	gatewayRetried := false
@@ -2946,7 +2951,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 			if abortErr != nil {
 				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
 			}
-			if isSessionFileLockConflictError(err) || errors.Is(err, context.DeadlineExceeded) {
+			if isSessionFileLockConflictError(err) || (errors.Is(err, context.DeadlineExceeded) && abortErr == nil) {
 				origKey := turnKey
 				reason := types.SessionLossReasonLockConflict
 				if errors.Is(err, context.DeadlineExceeded) {
