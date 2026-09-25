@@ -57,7 +57,7 @@ func TestEnqueueSessionLostResumeIncludesLastSubstantiveClawProgress(t *testing.
 		t.Fatal(err)
 	}
 
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, "test-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "test-marker", types.SessionRecoveryEdge{})
 	var prompt string
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestEnqueueSessionLostResumeOmitsBridgeErrors(t *testing.T) {
 		}
 	}
 
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, "errors-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "errors-marker", types.SessionRecoveryEdge{})
 	var prompt string
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestEnqueueSessionLostResumeKeepsUppercaseErrorPrefixAsProgress(t *testing.
 	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`, "uppercase-progress", clawID, "test-tenant-id", "claw", progress); err != nil {
 		t.Fatal(err)
 	}
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, "uppercase-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "uppercase-marker", types.SessionRecoveryEdge{})
 	var prompt string
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestEnqueueSessionLostResumeFindsProgressBelowFiveBridgeErrors(t *testing.T
 		}
 	}
 
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, "error-burst-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "error-burst-marker", types.SessionRecoveryEdge{})
 	var prompt string
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
@@ -167,7 +167,7 @@ func TestEnqueueSessionLostResumeFindsProgressBelowUnicodeWhitespacePrefixedBrid
 			t.Fatal(err)
 		}
 	}
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, "whitespace-error-burst-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "whitespace-error-burst-marker", types.SessionRecoveryEdge{})
 	var prompt string
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestEnqueueSessionLostResumeSkipsWhitespaceAndFencesProgress(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, "fenced-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "fenced-marker", types.SessionRecoveryEdge{})
 	var prompt string
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestEnqueueSessionLostResumeTruncatesProgressAt1200Runes(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`, "long", clawID, "test-tenant-id", "claw", strings.Repeat("界", 2001)); err != nil {
 		t.Fatal(err)
 	}
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, "truncate-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "truncate-marker", types.SessionRecoveryEdge{})
 	var prompt string
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestEnqueueSessionPreservedContinuationSkipsDisconnectedOrUnbootstrappedCla
 			if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", tc.name, tc.status, tc.bootstrapOK); err != nil {
 				t.Fatal(err)
 			}
-			s.enqueueSessionPreservedContinuation(clawID, types.SessionRecoveryEdge{}, "")
+			s.enqueueSessionPreservedContinuation(clawID, types.SessionRecoveryEdge{})
 			var count int
 			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&count); err != nil {
 				t.Fatal(err)
@@ -250,11 +250,11 @@ func TestEnqueueSessionPreservedContinuationThrottlesAndLeavesMarkerLast(t *test
 	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "preserved", "connected", 1); err != nil {
 		t.Fatal(err)
 	}
-	s.enqueueSessionPreservedContinuation(clawID, types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionPreservedContinuation(clawID, types.SessionRecoveryEdge{})
 	// Second conflict inside the window: the throttle drops it. This is the
 	// documented limitation on sessionPreservedContinuationThrottle, pinned here
 	// so the behaviour is deliberate rather than accidental.
-	s.enqueueSessionPreservedContinuation(clawID, types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionPreservedContinuation(clawID, types.SessionRecoveryEdge{})
 
 	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? ORDER BY created_at`, clawID, sessionPreservedContinuationPrefix+"%")
 	if err != nil {
@@ -293,7 +293,7 @@ func TestEnqueueSessionPreservedContinuationAllowsNewWindow(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`, "old-preserved", clawID, "test-tenant-id", "hub", sessionPreservedContinuationPrefix+" old", expiredAt); err != nil {
 		t.Fatal(err)
 	}
-	s.enqueueSessionPreservedContinuation(clawID, types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionPreservedContinuation(clawID, types.SessionRecoveryEdge{})
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&count); err != nil {
 		t.Fatal(err)
@@ -939,6 +939,10 @@ func TestDeleteClawSoftDeletesAndHidesFromAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	pending := &pendingHeartbeatSessionLoss{key: "replacement", timer: time.NewTimer(time.Hour)}
+	t.Cleanup(func() { pending.timer.Stop() })
+	s.sessionLosses = map[string]*clawSessionLosses{"claw-1": {pending: map[string]*pendingHeartbeatSessionLoss{"replacement": pending}}}
+
 	req := httptest.NewRequest(http.MethodDelete, "/api/claws/claw-1", nil)
 	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
 	req.SetPathValue("id", "claw-1")
@@ -948,6 +952,14 @@ func TestDeleteClawSoftDeletesAndHidesFromAPI(t *testing.T) {
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected status %d, got %d", http.StatusNoContent, rec.Code)
+	}
+
+	if s.sessionLosses["claw-1"] != nil {
+		t.Fatal("deleted claw retained session-loss bookkeeping")
+	}
+	s.finishHeartbeatSessionLoss(&clawConn{}, "claw-1", pending)
+	if s.sessionLosses["claw-1"] != nil {
+		t.Fatal("stale callback recreated deleted claw bookkeeping")
 	}
 
 	var status string

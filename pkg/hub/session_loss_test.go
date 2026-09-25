@@ -155,7 +155,7 @@ func TestSessionLossLoopGuardIgnoresThrottledLosses(t *testing.T) {
 	f := newSessionLossFixture(t, nil)
 	f.send(t, "session_rotated", 1, 1, 1)
 	// Synchronous call makes the negative assertion independent of websocket timing.
-	f.s.noteSessionLoss(f.cc, f.clawID, "key-2", "session_rotated", types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout}, "")
+	f.s.noteSessionLoss(f.cc, f.clawID, "key-2", "session_rotated", types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout})
 	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, sessionRotatedResumePrefix) != 1 {
 		t.Fatalf("throttled loss counted: streak=%d paused=%v", streak, paused)
 	}
@@ -252,7 +252,7 @@ func TestSessionLossLoopGuardRecordsOperatorEvent(t *testing.T) {
 		return err == nil && strings.Contains(detail, `"sessionLossStreak":3`) && strings.Contains(detail, `"sessionLossReason":"turn_timeout"`) && strings.Contains(detail, `"pipelineStage":"implement"`) && strings.Contains(detail, `"noProgressPaused":true`)
 	}, "session-loss operator event")
 	// Further losses while paused neither advance the streak nor notify twice.
-	if !f.s.sessionLossLoopGuard(f.clawID, types.SessionLossReasonTurnTimeout, "", "") {
+	if !f.s.sessionLossLoopGuard(f.clawID, types.SessionLossReasonTurnTimeout, "") {
 		t.Fatal("paused guard allowed injection")
 	}
 	if streak, _, paused := f.state(t); streak != 3 || !paused {
@@ -286,7 +286,7 @@ func TestSessionLossLoopGuardState(t *testing.T) {
 				insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "run-session-unit", AttemptID: "attempt-session-unit", ClawID: id, TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "generic", StartedAt: epochMillis(now())})
 			}
 			for i := 0; i < 2; i++ {
-				if s.sessionLossLoopGuard(id, types.SessionLossReasonTurnTimeout, "", "") {
+				if s.sessionLossLoopGuard(id, types.SessionLossReasonTurnTimeout, "") {
 					t.Fatal("guard paused too early")
 				}
 			}
@@ -331,7 +331,7 @@ func TestSessionLossLoopGuardState(t *testing.T) {
 				s.claws[id] = &clawConn{id: id, tenantID: "test-tenant-id"}
 				s.mu.Unlock()
 			}
-			if got := s.sessionLossLoopGuard(id, types.SessionLossReasonTurnTimeout, "", ""); got != wantPause {
+			if got := s.sessionLossLoopGuard(id, types.SessionLossReasonTurnTimeout, ""); got != wantPause {
 				t.Fatalf("guard=%v want %v", got, wantPause)
 			}
 			if streak, mark, paused := f.state(t); streak != wantStreak || paused != wantPause || (wantStreak > 0 && mark == "") {
@@ -394,7 +394,7 @@ func TestSessionLossLoopGuardInterruptedOutputState(t *testing.T) {
 					f.output(t, "Completed next step", now().Add(-time.Minute))
 				}
 				f.expireThrottle(t)
-				s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout}, cc.streamingMsgID)
+				s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout})
 			}
 			wantStreak, wantPrompts := 3, 2
 			if finalized {
@@ -417,10 +417,10 @@ func TestSessionLossLoopGuardFailsOpen(t *testing.T) {
 			}
 			prefix := sessionRotatedResumePrefix
 			if kind == "rotated" {
-				s.enqueueSessionLostResume(id, prefix, "fail-open", types.SessionRecoveryEdge{}, "")
+				s.enqueueSessionLostResume(id, prefix, "fail-open", types.SessionRecoveryEdge{})
 			} else {
 				prefix = sessionPreservedContinuationPrefix
-				s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{}, "")
+				s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{})
 			}
 			if prompt := sessionResumePrompt(t, db, id, prefix); !strings.HasPrefix(prompt, prefix) {
 				t.Fatal("guard failure dropped resume")
@@ -432,7 +432,7 @@ func TestSessionLossLoopGuardFailsOpen(t *testing.T) {
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if s.sessionLossLoopGuard(id, types.SessionLossReasonUnknown, "", "") {
+		if s.sessionLossLoopGuard(id, types.SessionLossReasonUnknown, "") {
 			t.Fatal("guard failed closed")
 		}
 	})
@@ -449,9 +449,9 @@ func TestPausedSessionLossRecordsPendingNotice(t *testing.T) {
 			}
 			switch path {
 			case "rotated":
-				s.noteSessionLoss(cc, id, "new-key", "session_rotated", types.SessionRecoveryEdge{}, "")
+				s.noteSessionLoss(cc, id, "new-key", "session_rotated", types.SessionRecoveryEdge{})
 			case "preserved":
-				s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{}, "")
+				s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{})
 			}
 			var notice string
 			if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, id).Scan(&notice); err != nil || notice == "" {
@@ -504,7 +504,7 @@ func TestSessionLossHeartbeatEdgeOrdering(t *testing.T) {
 				f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
 				var pending *pendingHeartbeatSessionLoss
 				if order != "edge first" {
-					s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{}, "")
+					s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{})
 					s.mu.RLock()
 					pending = s.sessionLosses[id].pending[edge.SessionKey]
 					s.mu.RUnlock()
@@ -519,7 +519,7 @@ func TestSessionLossHeartbeatEdgeOrdering(t *testing.T) {
 					cc.mu.Unlock()
 					// Another heartbeat detection must not bypass the grace just
 					// because the interrupted turn has now sent its empty final.
-					s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{}, "")
+					s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{})
 					if f.count(t, restartResumePrefix) != 0 {
 						t.Fatal("second heartbeat bypassed the grace")
 					}
@@ -531,8 +531,8 @@ func TestSessionLossHeartbeatEdgeOrdering(t *testing.T) {
 					cc.mu.Unlock()
 					expireHeartbeatSessionLoss(t, s, cc, id)
 				}
-				s.noteSessionLoss(cc, id, edge.SessionKey, "session_rotated", edge, "")
-				s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{}, "")
+				s.noteSessionLoss(cc, id, edge.SessionKey, "session_rotated", edge)
+				s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{})
 				if pending != nil {
 					// A timer callback already racing with Stop must also be harmless.
 					s.finishHeartbeatSessionLoss(cc, id, pending)
@@ -605,6 +605,7 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 			before := f.s.sessionLossProgressMark(f.clawID)
 			f.cc.mu.Lock()
 			f.cc.awaitingResponse = true
+			f.cc.turnInputMessageID = "input"
 			f.cc.mu.Unlock()
 			if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "Streamed work"}}); err != nil {
 				t.Fatal(err)
@@ -621,7 +622,7 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 			case "bridge error":
 				reply = types.BridgeErrorPrefix + " failed"
 			case "interrupted":
-				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "session_preserved", Payload: types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout}}); err != nil {
+				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "session_preserved", Payload: types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout, InterruptedMessageID: "input"}}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -654,9 +655,9 @@ func TestSessionLossGuardPauseRetainsTriggeringRecoveryContext(t *testing.T) {
 			for i := 0; i < 3; i++ {
 				f.expireThrottle(t)
 				if preserved {
-					s.enqueueSessionPreservedContinuation(id, edge, "")
+					s.enqueueSessionPreservedContinuation(id, edge)
 				} else {
-					s.enqueueSessionLostResume(id, sessionRotatedResumePrefix, fmt.Sprintf("loss-%d", i), edge, "")
+					s.enqueueSessionLostResume(id, sessionRotatedResumePrefix, fmt.Sprintf("loss-%d", i), edge)
 				}
 			}
 			var notice string
@@ -700,6 +701,7 @@ func TestSessionLossOnlyInterruptsObservedTurn(t *testing.T) {
 			if scenario == "error ended then edge" {
 				f.cc.mu.Lock()
 				f.cc.awaitingResponse = true
+				f.cc.turnInputMessageID = "input"
 				f.cc.mu.Unlock()
 				send("message", types.HubMessage{Content: types.BridgeErrorPrefix + " gateway disconnected"})
 				eventuallyWatchdog(t, func() bool {
@@ -711,13 +713,14 @@ func TestSessionLossOnlyInterruptsObservedTurn(t *testing.T) {
 			if scenario == "interrupted" {
 				f.cc.mu.Lock()
 				f.cc.awaitingResponse = true
+				f.cc.turnInputMessageID = "input"
 				f.cc.mu.Unlock()
 			}
 			if scenario == "idle heartbeat" {
 				send("heartbeat", map[string]any{"gateway_healthy": true, "restart_count": 0, "gateway_session_key": "old"})
 				send("heartbeat", map[string]any{"gateway_healthy": true, "restart_count": 1, "gateway_session_key": "loss"})
 			} else {
-				send("session_rotated", types.SessionRecoveryEdge{SessionKey: "loss"})
+				send("session_rotated", types.SessionRecoveryEdge{SessionKey: "loss", InterruptedMessageID: "input"})
 			}
 			eventuallyWatchdog(t, func() bool {
 				f.s.mu.RLock()
@@ -728,6 +731,7 @@ func TestSessionLossOnlyInterruptsObservedTurn(t *testing.T) {
 			before := f.s.sessionLossProgressMark(f.clawID)
 			f.cc.mu.Lock()
 			f.cc.awaitingResponse = true
+			f.cc.turnInputMessageID = "input"
 			f.cc.mu.Unlock()
 			reply := "Completed the recovery work"
 			send("message", types.HubMessage{Content: reply})
@@ -752,8 +756,8 @@ func TestSessionLossEdgeClaimsAllPendingKeys(t *testing.T) {
 			if scenario == "heartbeat after terminal" {
 				cc.finishTurnLocked()
 			}
-			s.noteSessionLoss(cc, id, "A", "restart_count", types.SessionRecoveryEdge{}, "")
-			s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{}, "")
+			s.noteSessionLoss(cc, id, "A", "restart_count", types.SessionRecoveryEdge{})
+			s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{})
 			s.mu.RLock()
 			var pending []*pendingHeartbeatSessionLoss
 			for _, loss := range s.sessionLosses[id].pending {
@@ -768,11 +772,11 @@ func TestSessionLossEdgeClaimsAllPendingKeys(t *testing.T) {
 				key = "C"
 			}
 			edge := types.SessionRecoveryEdge{SessionKey: key, Reason: types.SessionLossReasonTurnTimeout, TranscriptPath: "/tmp/lost.jsonl"}
-			s.noteSessionLoss(cc, id, key, "session_rotated", edge, "")
+			s.noteSessionLoss(cc, id, key, "session_rotated", edge)
 			f.expireThrottle(t) // A duplicate must be rejected without relying on throttling.
 			for _, loss := range pending {
 				s.finishHeartbeatSessionLoss(cc, id, loss)
-				s.noteSessionLoss(cc, id, loss.key, loss.source, types.SessionRecoveryEdge{}, "")
+				s.noteSessionLoss(cc, id, loss.key, loss.source, types.SessionRecoveryEdge{})
 			}
 			if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, restartResumePrefix)+f.count(t, sessionRotatedResumePrefix) != 1 {
 				t.Fatalf("incident counted more than once: streak=%d paused=%v", streak, paused)
@@ -790,9 +794,10 @@ func TestSessionLossGraceSurvivesWebSocketReconnect(t *testing.T) {
 			f := newSessionLossFixture(t, nil)
 			f.cc.mu.Lock()
 			f.cc.awaitingResponse = true
+			f.cc.turnInputMessageID = "input"
 			f.cc.deliveryInFlight = true
 			f.cc.mu.Unlock()
-			f.s.noteSessionLoss(f.cc, f.clawID, "replacement", "gateway_session_key", types.SessionRecoveryEdge{}, "")
+			f.s.noteSessionLoss(f.cc, f.clawID, "replacement", "gateway_session_key", types.SessionRecoveryEdge{})
 			f.s.mu.RLock()
 			pending := f.s.sessionLosses[f.clawID].pending["replacement"]
 			f.s.mu.RUnlock()
@@ -813,7 +818,7 @@ func TestSessionLossGraceSurvivesWebSocketReconnect(t *testing.T) {
 			}
 			conn := watchdogClaw(t, f.s, f.clawID)
 			f.expireThrottle(t)
-			edge := types.SessionRecoveryEdge{SessionKey: "replacement", Reason: types.SessionLossReasonTurnTimeout, TranscriptPath: "/tmp/reconnect.jsonl"}
+			edge := types.SessionRecoveryEdge{SessionKey: "replacement", Reason: types.SessionLossReasonTurnTimeout, TranscriptPath: "/tmp/reconnect.jsonl", InterruptedMessageID: "input"}
 			if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated", Payload: edge}); err != nil {
 				t.Fatal(err)
 			}
@@ -826,7 +831,15 @@ func TestSessionLossGraceSurvivesWebSocketReconnect(t *testing.T) {
 				return f.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content='Replay sentinel'`, f.clawID).Scan(&n) == nil && n == 1
 			}, "replayed edge processed")
 			f.s.finishHeartbeatSessionLoss(f.cc, f.clawID, pending)
-			if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, restartResumePrefix)+f.count(t, sessionRotatedResumePrefix) != 1 {
+			// When the grace window already expired, the heartbeat itself claimed
+			// the key with a metadata-less restart resume (streak untouched, since
+			// only edges count toward the streak); the later edge for that same
+			// key is then a duplicate and never reaches the loop guard.
+			wantStreak := 1
+			if expired {
+				wantStreak = 0
+			}
+			if streak, _, paused := f.state(t); streak != wantStreak || paused || f.count(t, restartResumePrefix)+f.count(t, sessionRotatedResumePrefix) != 1 {
 				t.Fatalf("reconnect duplicated incident: streak=%d paused=%v", streak, paused)
 			}
 			if !expired {
@@ -843,7 +856,7 @@ func TestSessionLossGraceExpiryWhileDisconnectedKeepsIncident(t *testing.T) {
 	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
 	s.claws[id] = cc
 	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
-	s.noteSessionLoss(cc, id, "replacement", "gateway_session_key", types.SessionRecoveryEdge{}, "")
+	s.noteSessionLoss(cc, id, "replacement", "gateway_session_key", types.SessionRecoveryEdge{})
 	s.mu.Lock()
 	pending := s.sessionLosses[id].pending["replacement"]
 	delete(s.claws, id)
@@ -867,7 +880,7 @@ func TestSessionLossGraceExpiryWhileDisconnectedKeepsIncident(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET status='connected' WHERE id=?`, id); err != nil {
 		t.Fatal(err)
 	}
-	s.noteSessionLoss(cc, id, "replacement", "session_rotated", types.SessionRecoveryEdge{}, "")
+	s.noteSessionLoss(cc, id, "replacement", "session_rotated", types.SessionRecoveryEdge{})
 	s.finishHeartbeatSessionLoss(cc, id, pending)
 	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, sessionRotatedResumePrefix) != 1 {
 		t.Fatalf("replayed incident lost or duplicated: streak=%d paused=%v", streak, paused)
@@ -886,14 +899,15 @@ func TestSessionLossDelayedEdgeDoesNotInterruptNextTurn(t *testing.T) {
 	cc.turnInputMessageID = "T2"
 	cc.streamingStartedAt = time.Now()
 	cc.streamingMsgID = "T2-output"
+	s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{})
 	s.noteSessionLoss(cc, id, "B", "session_rotated", types.SessionRecoveryEdge{
 		SessionKey: "B", PreviousSessionKey: "A", InterruptedMessageID: "T1",
-	}, "")
-	if cc.sessionLossInterrupted != 0 {
+	})
+	if cc.sessionLossInterrupted {
 		t.Fatal("T1's delayed loss interrupted T2")
 	}
 	// Match the terminal-response path: only non-interrupted replies count.
-	completedNormally := cc.sessionLossInterrupted != cc.sessionLossTurnSequence+1
+	completedNormally := !cc.sessionLossInterrupted
 	cc.finishTurnLocked()
 	if completedNormally {
 		s.recordSessionLossCompletedTurn(id, "Completed T2 successfully")
@@ -903,13 +917,13 @@ func TestSessionLossDelayedEdgeDoesNotInterruptNextTurn(t *testing.T) {
 	}
 	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
 	f.expireThrottle(t)
-	s.enqueueSessionRotatedResume(id, types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionRotatedResume(id, types.SessionRecoveryEdge{})
 	if streak, _, paused := f.state(t); streak != 1 || paused {
 		t.Fatalf("T2 did not reset loss streak: streak=%d paused=%v", streak, paused)
 	}
 }
 
-func TestInterruptSessionLossTurnUsesIdentityAndLegacyObservation(t *testing.T) {
+func TestInterruptSessionLossTurnUsesIdentity(t *testing.T) {
 	observed := time.Now()
 	for _, tc := range []struct {
 		name, messageID string
@@ -918,39 +932,44 @@ func TestInterruptSessionLossTurnUsesIdentityAndLegacyObservation(t *testing.T) 
 	}{
 		{"matching input", "T2", observed.Add(time.Second), true, true},
 		{"earlier input", "T1", observed.Add(-time.Second), true, false},
-		{"legacy already open", "", observed.Add(-time.Second), true, true},
+		{"legacy already open", "", observed.Add(-time.Second), true, false},
 		{"legacy later turn", "", observed.Add(time.Second), true, false},
 		{"idle", "T2", time.Time{}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cc := &clawConn{turnInputMessageID: "T2", awaitingResponse: tc.busy, streamingStartedAt: tc.started}
-			cc.interruptSessionLossTurnLocked(tc.messageID, observed)
-			if got := cc.sessionLossInterrupted != 0; got != tc.want {
+			cc.interruptSessionLossTurnLocked(tc.messageID)
+			if got := cc.sessionLossInterrupted; got != tc.want {
 				t.Fatalf("interrupted=%v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestSessionLossLateEdgeClaimsConsumedOldKey(t *testing.T) {
+func TestSessionLossHeartbeatOnlyThenDistinctEdge(t *testing.T) {
 	s, db, id := newSessionResumeTestServer(t)
-	max := 2
-	s.hubCfg.Liveness = &types.LivenessConfig{SessionLossMaxConsecutive: &max}
-	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
+	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, turnInputMessageID: "T1", deliveryInFlight: true}
 	s.claws[id] = cc
 	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
-	s.noteSessionLoss(cc, id, "A", "restart_count", types.SessionRecoveryEdge{}, "")
+	// Heartbeat observes A -> B without an enriched edge.
+	s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{})
 	expireHeartbeatSessionLoss(t, s, cc, id)
-	s.noteSessionLoss(cc, id, "B", "session_rotated", types.SessionRecoveryEdge{SessionKey: "B", PreviousSessionKey: "A", TranscriptPath: "/tmp/late.jsonl"}, "")
-	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, restartResumePrefix) != 1 || f.count(t, sessionRotatedResumePrefix) != 0 {
-		t.Fatalf("late edge counted or enriched consumed incident: streak=%d paused=%v", streak, paused)
+	if streak, _, paused := f.state(t); streak != 0 || paused || cc.sessionLossInterrupted || f.count(t, restartResumePrefix) != 1 {
+		t.Fatalf("heartbeat affected the loop guard: streak=%d paused=%v", streak, paused)
 	}
-	// A duplicate heartbeat must not turn the replacement into an old-key alias.
-	s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{}, "")
-	// A further B -> C rotation really is a second incident.
-	s.noteSessionLoss(cc, id, "C", "session_rotated", types.SessionRecoveryEdge{SessionKey: "C", PreviousSessionKey: "B"}, "")
-	if streak, _, paused := f.state(t); streak != 2 || !paused {
-		t.Fatalf("distinct subsequent loss was swallowed: streak=%d paused=%v", streak, paused)
+	// B -> C is a genuine loss, even though B was announced by the fallback.
+	edge := types.SessionRecoveryEdge{SessionKey: "C", PreviousSessionKey: "B", InterruptedMessageID: "T1"}
+	s.noteSessionLoss(cc, id, "C", "session_rotated", edge)
+	if streak, _, paused := f.state(t); streak != 1 || paused || !cc.sessionLossInterrupted || f.count(t, sessionRotatedResumePrefix) != 1 {
+		t.Fatalf("distinct edge was lost: streak=%d paused=%v", streak, paused)
+	}
+	f.expireThrottle(t)
+	// Announced keys survive reconnect, and a replay must not interrupt T2.
+	fresh := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, turnInputMessageID: "T2", deliveryInFlight: true}
+	s.claws[id] = fresh
+	s.noteSessionLoss(fresh, id, "C", "session_rotated", edge)
+	if streak, _, paused := f.state(t); streak != 1 || paused || fresh.sessionLossInterrupted || f.count(t, sessionRotatedResumePrefix) != 1 {
+		t.Fatalf("replayed edge was not a no-op: streak=%d paused=%v", streak, paused)
 	}
 }
 
@@ -958,7 +977,7 @@ func TestSessionLossOldKeyExpiryAfterRegistrationWaitsForReplay(t *testing.T) {
 	s, db, id := newSessionResumeTestServer(t)
 	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
 	s.claws[id] = cc
-	s.noteSessionLoss(cc, id, "A", "restart_count", types.SessionRecoveryEdge{}, "")
+	s.noteSessionLoss(cc, id, "A", "restart_count", types.SessionRecoveryEdge{})
 	pending := s.sessionLosses[id].pending["A"]
 	pending.timer.Stop()
 	t.Cleanup(func() { pending.timer.Stop() })
@@ -970,7 +989,7 @@ func TestSessionLossOldKeyExpiryAfterRegistrationWaitsForReplay(t *testing.T) {
 	if s.sessionLosses[id].pending["A"] != pending || f.count(t, restartResumePrefix) != 0 {
 		t.Fatal("fresh registration consumed the old-key incident before replay")
 	}
-	s.noteSessionLoss(fresh, id, "B", "session_rotated", types.SessionRecoveryEdge{SessionKey: "B", PreviousSessionKey: "A", TranscriptPath: "/tmp/replayed.jsonl"}, "")
+	s.noteSessionLoss(fresh, id, "B", "session_rotated", types.SessionRecoveryEdge{SessionKey: "B", PreviousSessionKey: "A", TranscriptPath: "/tmp/replayed.jsonl"})
 	s.finishHeartbeatSessionLoss(cc, id, pending)
 	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, sessionRotatedResumePrefix) != 1 {
 		t.Fatalf("replayed incident lost or duplicated: streak=%d paused=%v", streak, paused)
@@ -980,16 +999,74 @@ func TestSessionLossOldKeyExpiryAfterRegistrationWaitsForReplay(t *testing.T) {
 	}
 }
 
-func TestSessionLossRepeatedPreviousKeyIsOneIncident(t *testing.T) {
+func TestSessionLossRepeatedPreviousKeyDoesNotDeduplicate(t *testing.T) {
 	s, db, id := newSessionResumeTestServer(t)
 	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
 	s.claws[id] = cc
 	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
-	s.noteSessionLoss(cc, id, "B", "session_rotated", types.SessionRecoveryEdge{PreviousSessionKey: "A"}, "")
+	s.noteSessionLoss(cc, id, "B", "session_rotated", types.SessionRecoveryEdge{PreviousSessionKey: "A"})
 	f.expireThrottle(t)
-	// The reconnect notification can observe a newer key at emit time.
-	s.noteSessionLoss(cc, id, "C", "session_rotated", types.SessionRecoveryEdge{PreviousSessionKey: "A"}, "")
-	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, sessionRotatedResumePrefix) != 1 {
-		t.Fatalf("same previous key counted again: streak=%d paused=%v", streak, paused)
+	// Only the new key identifies a duplicate; the previous key is irrelevant.
+	s.noteSessionLoss(cc, id, "C", "session_rotated", types.SessionRecoveryEdge{PreviousSessionKey: "A"})
+	if streak, _, paused := f.state(t); streak != 2 || paused || f.count(t, sessionRotatedResumePrefix) != 2 {
+		t.Fatalf("different new key was suppressed: streak=%d paused=%v", streak, paused)
+	}
+}
+
+func TestSessionLossPendingTimerStops(t *testing.T) {
+	for _, status := range []string{"offline", "deleted"} {
+		t.Run(status, func(t *testing.T) {
+			s, db, id := newSessionResumeTestServer(t)
+			cc := &clawConn{id: id, awaitingResponse: true, deliveryInFlight: true}
+			s.claws[id] = cc
+			s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{})
+			pending := s.sessionLosses[id].pending["B"]
+			pending.timer.Stop()
+			delete(s.claws, id)
+			if _, err := db.Exec(`UPDATE claws SET status=? WHERE id=?`, status, id); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 4; i++ {
+				s.finishHeartbeatSessionLoss(cc, id, pending)
+				pending.timer.Stop()
+			}
+			if losses := s.sessionLosses[id]; losses != nil && (status == "deleted" || len(losses.pending) != 0) {
+				t.Fatal("timer retained the deleted claw or kept retrying while offline")
+			}
+			lastTimer := pending.timer
+			s.finishHeartbeatSessionLoss(cc, id, pending)
+			if pending.timer != lastTimer {
+				t.Fatal("stale callback re-armed the timer")
+			}
+		})
+	}
+}
+
+func TestSessionLossPreservedEdgeIdentityAndReplay(t *testing.T) {
+	s, db, id := newSessionResumeTestServer(t)
+	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, turnInputMessageID: "T2", deliveryInFlight: true}
+	s.claws[id] = cc
+	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
+	edge := types.SessionRecoveryEdge{SessionKey: "B", InterruptedMessageID: "T1", Reason: types.SessionLossReasonTurnTimeout}
+	s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{})
+	s.noteSessionLoss(cc, id, "B", "session_preserved", edge)
+	if cc.sessionLossInterrupted || f.count(t, restartResumePrefix) != 0 || f.count(t, sessionPreservedContinuationPrefix) != 1 {
+		t.Fatal("preserved edge interrupted T2 or duplicated the heartbeat resume")
+	}
+	if !strings.Contains(sessionResumePrompt(t, db, id, sessionPreservedContinuationPrefix), "per-turn run limit") {
+		t.Fatal("preserved edge metadata was lost")
+	}
+	f.expireThrottle(t)
+	// Even a replay naming the current turn must be a no-op for an announced key.
+	edge.InterruptedMessageID = "T2"
+	s.noteSessionLoss(cc, id, "B", "session_preserved", edge)
+	if streak, _, paused := f.state(t); streak != 1 || paused || cc.sessionLossInterrupted || f.count(t, sessionPreservedContinuationPrefix) != 1 {
+		t.Fatalf("preserved replay was not a no-op: streak=%d paused=%v", streak, paused)
+	}
+	// Without a new key, preserved edges retain their historical throttle behavior.
+	edge.SessionKey = ""
+	s.noteSessionLoss(cc, id, "", "session_preserved", edge)
+	if !cc.sessionLossInterrupted || f.count(t, sessionPreservedContinuationPrefix) != 2 {
+		t.Fatal("matching preserved edge did not interrupt its turn")
 	}
 }

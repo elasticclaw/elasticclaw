@@ -17,11 +17,11 @@ type sessionLossQuerier interface {
 // sessionLossProgressMark counts only completed replies, never persisted stream
 // segments. The durable counter survives activity flushes and hub reconnects.
 func (s *Server) sessionLossProgressMark(clawID string) string {
-	mark, _, _ := readSessionLossProgressMark(s.db, clawID, "")
+	mark, _, _ := readSessionLossProgressMark(s.db, clawID)
 	return mark
 }
 
-func readSessionLossProgressMark(q sessionLossQuerier, clawID, _ string) (mark, stage string, err error) {
+func readSessionLossProgressMark(q sessionLossQuerier, clawID string) (mark, stage string, err error) {
 	var completed int64
 	err = q.QueryRow(`SELECT pipeline_stage, session_loss_completed_turns FROM claws WHERE id=?`, clawID).Scan(&stage, &completed)
 	if err == nil {
@@ -44,7 +44,7 @@ func (s *Server) recordSessionLossCompletedTurn(clawID, reply string) {
 
 // sessionLossLoopGuard counts only eligible, unthrottled recoveries. Progress
 // resets the streak; reaching the limit pauses delivery until human input.
-func (s *Server) sessionLossLoopGuard(clawID, reason, interruptedMsgID, recoveryNotice string) bool {
+func (s *Server) sessionLossLoopGuard(clawID, reason, recoveryNotice string) bool {
 	max := s.livenessSettings().sessionLossMax
 	if max <= 0 {
 		return false
@@ -74,7 +74,7 @@ func (s *Server) sessionLossLoopGuard(clawID, reason, interruptedMsgID, recovery
 		}
 		return true
 	}
-	mark, stage, err := readSessionLossProgressMark(tx, clawID, interruptedMsgID)
+	mark, stage, err := readSessionLossProgressMark(tx, clawID)
 	if err != nil {
 		log.Printf("[watchdog] session-loss guard for %s: %v", shortID(clawID), err)
 		return false

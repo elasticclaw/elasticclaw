@@ -344,38 +344,37 @@ func (s *Server) gatewayUnhealthyCount(clawID string) int {
 type clawConn struct {
 	mu sync.RWMutex // protects mutable fields below
 
-	id                      string
-	tenantID                string
-	conn                    *websocket.Conn
-	tags                    []string        // cached from DB at registration time for access-control checks
-	contextUsage            int             // 0-100, updated from heartbeats
-	gatewayReady            bool            // true once bridge reports gateway session established
-	gatewayRestartCount     int             // cumulative bridge restarts reported by heartbeats
-	gatewaySessionKey       string          // last live gateway session key reported by heartbeat
-	gatewaySessionKeySeen   bool            // distinguishes the first live-key heartbeat from a loss
-	sessionLossTurnSequence uint64          // advances at each turn boundary
-	turnInputMessageID      string          // hub message that started the current turn
-	sessionLossInterrupted  uint64          // interrupted sessionLossTurnSequence + 1; zero means none
-	forcedFinishCount       int             // consecutive watchdog-forced streaming turn finishes
-	workflowStartPending    bool            // true while initial volume attach / wake is in flight
-	workflowStartDone       bool            // true once initial volume attach / wake has completed
-	workflowV2Controlled    bool            // typed control owns execution; conversation text is display-only
-	streamingBuf            strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID          string          // pre-assigned message ID for the current stream
-	streamingSplit          bool            // true once activity has split this turn into multiple persisted segments
-	streamingStartedAt      time.Time       // when the current streaming turn started (zero if not streaming)
-	streamingTimeoutSent    bool            // true once the 12-min timeout message has been injected this turn
-	contextWarningSent      bool            // true once the context-nearly-full warning has been injected this turn
-	awaitingResponse        bool            // true as soon as a prompt is delivered, before the first chunk/activity
-	noProgressPaused        bool            // automatic delivery is paused after repeated turns with unchanged progress
-	bridgeErrorStreak       int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
-	llmLimitedUntil         time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
-	lastTurnFinishedAt      time.Time       // when the last streaming turn ended (for post-restart resume window)
-	connectedAt             time.Time       // when this connection registered; immutable after registration
-	idleNotifiedAt          time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
-	turnBoundarySeen        bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
-	subagentsActiveAt       time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
-	subagentActiveCount     int             // subagent sessions with a run in flight per that heartbeat
+	id                     string
+	tenantID               string
+	conn                   *websocket.Conn
+	tags                   []string        // cached from DB at registration time for access-control checks
+	contextUsage           int             // 0-100, updated from heartbeats
+	gatewayReady           bool            // true once bridge reports gateway session established
+	gatewayRestartCount    int             // cumulative bridge restarts reported by heartbeats
+	gatewaySessionKey      string          // last live gateway session key reported by heartbeat
+	gatewaySessionKeySeen  bool            // distinguishes the first live-key heartbeat from a loss
+	turnInputMessageID     string          // hub message that started the current turn
+	sessionLossInterrupted bool            // the bridge identified this turn as interrupted
+	forcedFinishCount      int             // consecutive watchdog-forced streaming turn finishes
+	workflowStartPending   bool            // true while initial volume attach / wake is in flight
+	workflowStartDone      bool            // true once initial volume attach / wake has completed
+	workflowV2Controlled   bool            // typed control owns execution; conversation text is display-only
+	streamingBuf           strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID         string          // pre-assigned message ID for the current stream
+	streamingSplit         bool            // true once activity has split this turn into multiple persisted segments
+	streamingStartedAt     time.Time       // when the current streaming turn started (zero if not streaming)
+	streamingTimeoutSent   bool            // true once the 12-min timeout message has been injected this turn
+	contextWarningSent     bool            // true once the context-nearly-full warning has been injected this turn
+	awaitingResponse       bool            // true as soon as a prompt is delivered, before the first chunk/activity
+	noProgressPaused       bool            // automatic delivery is paused after repeated turns with unchanged progress
+	bridgeErrorStreak      int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
+	llmLimitedUntil        time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
+	lastTurnFinishedAt     time.Time       // when the last streaming turn ended (for post-restart resume window)
+	connectedAt            time.Time       // when this connection registered; immutable after registration
+	idleNotifiedAt         time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
+	turnBoundarySeen       bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
+	subagentsActiveAt      time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
+	subagentActiveCount    int             // subagent sessions with a run in flight per that heartbeat
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -512,21 +511,12 @@ func (cc *clawConn) applySubagentHeartbeatLocked(active *bool, count *int) {
 	}
 }
 
-// interruptSessionLossTurnLocked marks only the turn open at observation time.
-// A loss while idle must never affect the next delivered recovery turn.
-func (cc *clawConn) interruptSessionLossTurnLocked(messageID string, observedAt time.Time) string {
-	if !cc.isBusyLocked() {
-		return ""
+// interruptSessionLossTurnLocked marks only the turn identified by the bridge.
+// Old bridges without an input ID fail open rather than interrupting a later turn.
+func (cc *clawConn) interruptSessionLossTurnLocked(messageID string) {
+	if messageID != "" && messageID == cc.turnInputMessageID && cc.isBusyLocked() {
+		cc.sessionLossInterrupted = true
 	}
-	if messageID != "" {
-		if cc.turnInputMessageID != messageID {
-			return ""
-		}
-	} else if cc.streamingStartedAt.After(observedAt) {
-		return "" // An old bridge cannot identify the turn; never mark a later one.
-	}
-	cc.sessionLossInterrupted = cc.sessionLossTurnSequence + 1
-	return cc.streamingMsgID
 }
 
 // finishTurnLocked ends a turn that actually ran (or was force-finished):
@@ -557,8 +547,7 @@ func (cc *clawConn) abortTurnLocked() {
 
 func (cc *clawConn) resetTurnStateLocked() {
 	cc.awaitingResponse = false
-	cc.sessionLossTurnSequence++
-	cc.sessionLossInterrupted = 0
+	cc.sessionLossInterrupted = false
 	cc.turnInputMessageID = ""
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
@@ -2144,6 +2133,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			cc.conn.Close(websocket.StatusNormalClosure, "killed")
 			delete(s.claws, clawID)
 		}
+		s.clearSessionLossesLocked(clawID)
 		delete(s.gatewayUnhealthyCounts, clawID)
 		delete(s.gatewayEscalatedAt, clawID)
 		delete(s.gatewayGraceGrantedAt, clawID)
@@ -3101,7 +3091,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		if err := wsjson.Read(ctx, conn, &msg); err != nil {
 			return
 		}
-		observedAt := time.Now()
 		if msg.Type == "heartbeat" {
 			payload, _ := json.Marshal(msg.Payload)
 			var hb struct {
@@ -3191,12 +3180,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// it may describe a session established before this hub connected.
 						activeCC.gatewaySessionKey = *hb.GatewaySessionKey
 						activeCC.gatewaySessionKeySeen = true
-					}
-					if shouldNoteSessionLoss {
-						losses := s.sessionLosses[clawID]
-						if losses == nil || (!losses.announced[sessionLossKey] && len(losses.pending) == 0) {
-							activeCC.interruptSessionLossTurnLocked("", observedAt)
-						}
 					}
 					activeCC.gatewayRestartCount = s.gatewayRestartCounts[clawID]
 					// nil means field absent (old bridge) — treat as ready. The
@@ -3328,7 +3311,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				s.heartbeatWorkflowVolumeLeases(clawID)
 				if shouldNoteSessionLoss {
-					s.noteSessionLoss(cc, clawID, sessionLossKey, sessionLossSource, types.SessionRecoveryEdge{}, "")
+					s.noteSessionLoss(cc, clawID, sessionLossKey, sessionLossSource, types.SessionRecoveryEdge{})
 				}
 				if shouldEscalateGateway {
 					// Re-read the claw state before escalating: idle/completed claws
@@ -3456,7 +3439,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				hm.ID = uuid.New().String()
 				skipPersist = cc.streamingSplit
 			}
-			completedNormally := cc.sessionLossInterrupted != cc.sessionLossTurnSequence+1
+			completedNormally := !cc.sessionLossInterrupted
 			cc.finishTurnLocked()
 			cc.forcedFinishCount = 0
 			cc.mu.Unlock()
@@ -3679,23 +3662,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-		} else if msg.Type == "session_rotated" {
+		} else if msg.Type == "session_rotated" || msg.Type == "session_preserved" {
 			var edge types.SessionRecoveryEdge
 			raw, _ := json.Marshal(msg.Payload)
 			_ = json.Unmarshal(raw, &edge)
 			// Claim the incident before reading a terminal response or later heartbeat.
-			s.noteSessionLossWithPending(cc, clawID, edge.SessionKey, "session_rotated", edge, "", nil, observedAt)
-		} else if msg.Type == "session_preserved" {
-			var edge types.SessionRecoveryEdge
-			raw, _ := json.Marshal(msg.Payload)
-			_ = json.Unmarshal(raw, &edge)
-			// A preserved turn positively proves the transport reached the agent,
-			// even though it has no reply body to reach observeTurnOutcome.
-			cc.mu.Lock()
-			cc.bridgeErrorStreak = 0
-			interruptedMsgID := cc.interruptSessionLossTurnLocked(edge.InterruptedMessageID, observedAt)
-			cc.mu.Unlock()
-			go s.enqueueSessionPreservedContinuation(clawID, edge, interruptedMsgID)
+			s.noteSessionLoss(cc, clawID, edge.SessionKey, msg.Type, edge)
 		} else if msg.Type == "model_auth_sync" {
 			if !modelAuthAuthorized {
 				continue
@@ -9066,27 +9038,25 @@ func (s *Server) recordPausedSessionLossNotice(clawID, source, notice string) {
 const sessionLossEdgeGrace = 20 * time.Second
 
 type pendingHeartbeatSessionLoss struct {
-	key, source, interruptedMsgID string
-	turnOpenOrRecent              bool
-	timer                         *time.Timer
+	key, source      string
+	turnOpenOrRecent bool
+	timer            *time.Timer
+	retries          int
 }
 
 type clawSessionLosses struct {
 	announced map[string]bool
-	// Lost keys map to their replacement, or "" for a heartbeat fallback.
-	// B is new in A -> B; it must not suppress a separate B -> C incident.
-	lostKeys map[string]string
-	pending  map[string]*pendingHeartbeatSessionLoss
+	pending   map[string]*pendingHeartbeatSessionLoss
 }
 
 // noteSessionLoss coalesces heartbeat observations until the enriched edge (or
 // grace expiry) claims them. A restart heartbeat may still report the OLD key,
 // so all pending keys belong to that incident, not just the edge's new key.
-func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
-	s.noteSessionLossWithPending(cc, clawID, newKey, source, edge, interruptedMsgID, nil, time.Now())
+func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string, edge types.SessionRecoveryEdge) {
+	s.noteSessionLossWithPending(cc, clawID, newKey, source, edge, nil)
 }
 
-func (s *Server) noteSessionLossWithPending(cc *clawConn, clawID, newKey, source string, edge types.SessionRecoveryEdge, interruptedMsgID string, expired *pendingHeartbeatSessionLoss, observedAt time.Time) {
+func (s *Server) noteSessionLossWithPending(cc *clawConn, clawID, newKey, source string, edge types.SessionRecoveryEdge, expired *pendingHeartbeatSessionLoss) {
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
@@ -9095,40 +9065,46 @@ func (s *Server) noteSessionLossWithPending(cc *clawConn, clawID, newKey, source
 		s.sessionLosses = make(map[string]*clawSessionLosses)
 	}
 	losses := s.sessionLosses[clawID]
-	if losses == nil {
-		losses = &clawSessionLosses{announced: make(map[string]bool), lostKeys: make(map[string]string), pending: make(map[string]*pendingHeartbeatSessionLoss)}
-		s.sessionLosses[clawID] = losses
-	}
-	if expired != nil && losses.pending[newKey] != expired {
+	if expired != nil && (losses == nil || losses.pending[newKey] != expired) {
 		s.mu.Unlock()
-		return // An enriched edge or another timer already claimed this incident.
+		return // The incident was claimed or the claw was deleted.
+	}
+	if losses == nil {
+		losses = &clawSessionLosses{announced: make(map[string]bool), pending: make(map[string]*pendingHeartbeatSessionLoss)}
+		s.sessionLosses[clawID] = losses
 	}
 	activeCC := s.claws[clawID]
 	if expired != nil && (activeCC == nil || (activeCC != cc && time.Since(activeCC.connectedAt) < sessionLossEdgeGrace)) {
-		// Offline claws are ineligible for automatic resumes. Keep the incident
-		// pending through registration grace so replay can claim it after reconnect.
+		// Allow a bounded reconnect grace; offline claws must not retain timers forever.
+		if expired.retries >= 3 {
+			delete(losses.pending, newKey)
+			s.mu.Unlock()
+			return
+		}
+		expired.retries++
 		expired.timer = time.AfterFunc(sessionLossEdgeGrace, func() {
 			s.finishHeartbeatSessionLoss(cc, clawID, expired)
 		})
 		s.mu.Unlock()
 		return
 	}
-	duplicate := newKey != "" && losses.announced[newKey]
-	if source == "session_rotated" && edge.PreviousSessionKey != "" {
-		_, previousAnnounced := losses.lostKeys[edge.PreviousSessionKey]
-		duplicate = duplicate || previousAnnounced
+	if newKey != "" && losses.announced[newKey] {
+		s.mu.Unlock()
+		return
 	}
+	isEdge := source == "session_rotated" || source == "session_preserved"
 	cc.mu.Lock()
 	turnOpenOrRecent := cc.isBusyLocked() ||
 		(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
-	if !duplicate && source == "session_rotated" && len(losses.pending) == 0 {
-		interruptedMsgID = cc.interruptSessionLossTurnLocked(edge.InterruptedMessageID, observedAt)
+	if isEdge {
+		cc.interruptSessionLossTurnLocked(edge.InterruptedMessageID)
 	}
-	if interruptedMsgID == "" && source != "session_rotated" {
-		interruptedMsgID = cc.streamingMsgID
+	if source == "session_preserved" {
+		// A preserved turn proves the transport reached the agent even without a reply.
+		cc.bridgeErrorStreak = 0
 	}
 	cc.mu.Unlock()
-	if source == "session_rotated" || expired != nil {
+	if isEdge || expired != nil {
 		if expired != nil {
 			// Eligibility was captured when the loss was observed, not when
 			// this callback runs (possibly after reconnect or a new turn).
@@ -9139,18 +9115,13 @@ func (s *Server) noteSessionLossWithPending(cc *clawConn, clawID, newKey, source
 			delete(losses.pending, key)
 			if key != "" {
 				losses.announced[key] = true
-				if expired != nil {
-					losses.lostKeys[key] = ""
-				} else if key != newKey {
-					losses.lostKeys[key] = newKey
-				}
 			}
 			turnOpenOrRecent = turnOpenOrRecent || pending.turnOpenOrRecent
 		}
-	} else if !duplicate && (turnOpenOrRecent || len(losses.pending) > 0) {
+	} else if turnOpenOrRecent || len(losses.pending) > 0 {
 		// Allow metadata grace even after the interrupted terminal response.
 		if losses.pending[newKey] == nil {
-			pending := &pendingHeartbeatSessionLoss{key: newKey, source: source, interruptedMsgID: interruptedMsgID, turnOpenOrRecent: turnOpenOrRecent}
+			pending := &pendingHeartbeatSessionLoss{key: newKey, source: source, turnOpenOrRecent: turnOpenOrRecent}
 			losses.pending[newKey] = pending
 			pending.timer = time.AfterFunc(sessionLossEdgeGrace, func() {
 				s.finishHeartbeatSessionLoss(cc, clawID, pending)
@@ -9162,21 +9133,9 @@ func (s *Server) noteSessionLossWithPending(cc *clawConn, clawID, newKey, source
 	if newKey != "" {
 		losses.announced[newKey] = true
 	}
-	if source == "session_rotated" {
-		// A heartbeat may have announced the replacement as if it were the
-		// lost key. Resolve that ambiguity once the edge identifies both.
-		if losses.lostKeys[newKey] == "" {
-			delete(losses.lostKeys, newKey)
-		}
-		if edge.PreviousSessionKey != "" {
-			losses.lostKeys[edge.PreviousSessionKey] = newKey
-		}
-	} else if !duplicate && newKey != "" {
-		losses.lostKeys[newKey] = ""
-	}
 	s.mu.Unlock()
-	if duplicate {
-		log.Printf("[watchdog] skipping duplicate session loss for %s: session=%s source=%s", shortID(clawID), shortID(newKey), source)
+	if source == "session_preserved" {
+		s.enqueueSessionPreservedContinuation(clawID, edge)
 		return
 	}
 	if !turnOpenOrRecent {
@@ -9192,7 +9151,7 @@ func (s *Server) noteSessionLossWithPending(cc *clawConn, clawID, newKey, source
 		return
 	}
 	if source == "session_rotated" {
-		s.enqueueSessionRotatedResume(clawID, edge, interruptedMsgID)
+		s.enqueueSessionRotatedResume(clawID, edge)
 		return
 	}
 	// A live session key makes the marker stable across all reports of this
@@ -9203,11 +9162,28 @@ func (s *Server) noteSessionLossWithPending(cc *clawConn, clawID, newKey, source
 	if newKey == "" {
 		marker = "restart:" + uuid.NewString()
 	}
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, marker, edge, interruptedMsgID)
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, marker, edge)
+}
+
+func (s *Server) clearSessionLossesLocked(clawID string) {
+	if losses := s.sessionLosses[clawID]; losses != nil {
+		for _, pending := range losses.pending {
+			pending.timer.Stop()
+		}
+		delete(s.sessionLosses, clawID)
+	}
 }
 
 func (s *Server) finishHeartbeatSessionLoss(cc *clawConn, clawID string, pending *pendingHeartbeatSessionLoss) {
-	s.noteSessionLossWithPending(cc, clawID, pending.key, pending.source, types.SessionRecoveryEdge{}, pending.interruptedMsgID, pending, time.Now())
+	var status string
+	err := s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status)
+	if err == sql.ErrNoRows || status == "deleted" {
+		s.mu.Lock()
+		s.clearSessionLossesLocked(clawID)
+		s.mu.Unlock()
+		return
+	}
+	s.noteSessionLossWithPending(cc, clawID, pending.key, pending.source, types.SessionRecoveryEdge{}, pending)
 }
 
 // sessionRotatedResumeThrottle bounds the rotation → resume → rotation loop:
@@ -9234,7 +9210,7 @@ const sessionRotatedResumeThrottle = 10 * time.Minute
 // deleting genuine progress. Tracked in elasticclaw/elasticclaw#667.
 const sessionPreservedContinuationThrottle = 10 * time.Minute
 
-func (s *Server) enqueueSessionRotatedResume(clawID string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
+func (s *Server) enqueueSessionRotatedResume(clawID string, edge types.SessionRecoveryEdge) {
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
@@ -9251,10 +9227,10 @@ func (s *Server) enqueueSessionRotatedResume(clawID string, edge types.SessionRe
 		log.Printf("[watchdog] skipping session-rotated resume for %s: already resumed within %s", shortID(clawID), sessionRotatedResumeThrottle)
 		return
 	}
-	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()), edge, interruptedMsgID)
+	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()), edge)
 }
 
-func (s *Server) enqueueSessionPreservedContinuation(clawID string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
+func (s *Server) enqueueSessionPreservedContinuation(clawID string, edge types.SessionRecoveryEdge) {
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
@@ -9297,7 +9273,7 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string, edge types.S
 		s.recordPausedSessionLossNotice(clawID, "session-preserved continuation", prompt)
 		return
 	}
-	if s.sessionLossLoopGuard(clawID, edge.Reason, interruptedMsgID, prompt) {
+	if s.sessionLossLoopGuard(clawID, edge.Reason, prompt) {
 		return
 	}
 
@@ -9313,7 +9289,7 @@ func (s *Server) lastSubstantiveClawProgress(clawID string) (string, time.Time) 
 	return messages[0].content, messages[0].at
 }
 
-func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
+func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edge types.SessionRecoveryEdge) {
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
@@ -9407,7 +9383,7 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edge ty
 	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_count=0, idle_resume_at=0 WHERE id=?`, clawID); err != nil {
 		log.Printf("[watchdog] re-arm idle resume budget for %s: %v", shortID(clawID), err)
 	}
-	if s.sessionLossLoopGuard(clawID, edge.Reason, interruptedMsgID, b.String()) {
+	if prefix == sessionRotatedResumePrefix && s.sessionLossLoopGuard(clawID, edge.Reason, b.String()) {
 		return
 	}
 	s.injectHubMessageByID(clawID, b.String())

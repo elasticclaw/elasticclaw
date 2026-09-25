@@ -229,7 +229,7 @@ func TestEnqueueSessionLostResumeIncludesStageInstructions(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, id); err != nil {
 		t.Fatal(err)
 	}
-	s.enqueueSessionLostResume(id, restartResumePrefix, "stage-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(id, restartResumePrefix, "stage-marker", types.SessionRecoveryEdge{})
 	prompt := sessionResumePrompt(t, db, id, restartResumePrefix)
 	for _, want := range []string{"Current workflow stage: implement", "<<<STAGE_INSTRUCTIONS\nImplement AMA-200\nSTAGE_INSTRUCTIONS>>>"} {
 		if !strings.Contains(prompt, want) {
@@ -240,7 +240,7 @@ func TestEnqueueSessionLostResumeIncludesStageInstructions(t *testing.T) {
 
 func TestEnqueueSessionLostResumeWithoutPipelineOmitsStageBlock(t *testing.T) {
 	s, db, id := newSessionResumeTestServer(t)
-	s.enqueueSessionLostResume(id, restartResumePrefix, "no-stage-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(id, restartResumePrefix, "no-stage-marker", types.SessionRecoveryEdge{})
 	prompt := sessionResumePrompt(t, db, id, restartResumePrefix)
 	if strings.Contains(prompt, "Current workflow stage:") || strings.Contains(prompt, "STAGE_INSTRUCTIONS") {
 		t.Fatal(prompt)
@@ -253,7 +253,7 @@ func TestSessionPreservedContinuationIncludesStage(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, id); err != nil {
 		t.Fatal(err)
 	}
-	s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout}, "")
+	s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout})
 	prompt := sessionResumePrompt(t, db, id, sessionPreservedContinuationPrefix)
 	if !strings.Contains(prompt, "Current workflow stage: implement") || !strings.Contains(prompt, "Implement AMA-200") {
 		t.Fatal(prompt)

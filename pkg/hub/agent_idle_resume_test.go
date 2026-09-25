@@ -548,7 +548,7 @@ func TestEnqueueSessionLostResumeRearmsIdleResumeBudget(t *testing.T) {
 				t.Fatalf("seed claw: %v", err)
 			}
 
-			s.enqueueSessionLostResume(clawID, tc.prefix, "marker-"+tc.name, types.SessionRecoveryEdge{}, "")
+			s.enqueueSessionLostResume(clawID, tc.prefix, "marker-"+tc.name, types.SessionRecoveryEdge{})
 
 			at, count := clawIdleResumeState(t, db, clawID)
 			if count != 0 {
@@ -571,7 +571,7 @@ func TestEnqueueSessionLostResumeLeavesBudgetWhenClawIneligible(t *testing.T) {
 		t.Fatalf("seed claw: %v", err)
 	}
 
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, "ineligible-marker", types.SessionRecoveryEdge{}, "")
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "ineligible-marker", types.SessionRecoveryEdge{})
 
 	_, count := clawIdleResumeState(t, db, clawID)
 	if count != agentIdleResumeMaxAttempts {
