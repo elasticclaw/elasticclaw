@@ -82,7 +82,7 @@ func TestSessionTranscriptLogRedactsAndTruncates(t *testing.T) {
 	digest := log.snapshot()
 	text, args := digest.AssistantMessages[0], digest.ToolCalls[0].Args
 	for _, value := range []string{text, args} {
-		if strings.Contains(value, "Bearer abc") || strings.Contains(value, "GITHUB_TOKEN=x") || !strings.Contains(value, "Bearer [redacted]\nGITHUB_TOKEN [redacted]") {
+		if strings.Contains(value, "Bearer abc") || strings.Contains(value, "GITHUB_TOKEN=x") || !strings.HasPrefix(value, "[redacted]\n[redacted]\n") {
 			t.Fatalf("unredacted content: %q", value)
 		}
 	}
@@ -185,7 +185,7 @@ func TestSessionTranscriptLogRedactsSecretAssignments(t *testing.T) {
 				log.noteTool(agentActivity{Kind: "tool", Phase: "start", Tool: input, Command: input})
 				digest := log.snapshot()
 				for _, got := range []string{digest.AssistantMessages[0], digest.ToolCalls[0].Args, digest.ToolCalls[0].Tool} {
-					if strings.Contains(got, "SENSITIVE_VALUE") || !strings.Contains(got, "[redacted]") || !strings.Contains(got, key) {
+					if strings.Contains(got, "SENSITIVE_VALUE") || !strings.Contains(got, "[redacted]") {
 						t.Fatalf("secret assignment not redacted: %q", got)
 					}
 				}

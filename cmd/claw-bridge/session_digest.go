@@ -65,7 +65,11 @@ func sanitizeSessionDigestText(value string) string {
 			if pemEnd != "" && strings.Contains(line, pemEnd) {
 				pemEnd = ""
 			}
-			pendingValue = strings.Trim(line, " \t\r\\\"':=") == ""
+			pendingValue = strings.Trim(line, " \t\r\\\"':=") == "" || endsWithContinuation(line)
+			// A value continued onto this line may open a quote that closes later.
+			if value := strings.TrimLeft(line, " \t\r:="); value != "" && (value[0] == '"' || value[0] == '\'') && !hasUnescapedQuote(value[1:], value[0]) {
+				openQuote = value[:1]
+			}
 			lines[i] = line[:indent] + "[redacted]"
 			continue
 		}
@@ -80,7 +84,7 @@ func sanitizeSessionDigestText(value string) string {
 				continue
 			}
 			rest := strings.TrimLeft(line[match[1]:], " \t\r\\\"':=")
-			pendingValue = rest == ""
+			pendingValue = rest == "" || endsWithContinuation(line)
 			if value := digestAssignedValue(line[match[1]:]); value != "" && (value[0] == '"' || value[0] == '\'') {
 				if quote := value[:1]; !hasUnescapedQuote(value[1:], quote[0]) {
 					openQuote = quote
@@ -89,7 +93,9 @@ func sanitizeSessionDigestText(value string) string {
 			// Also cover indented values after a colon, YAML block scalars, and
 			// multiline quoted values. Over-redaction here is intentional.
 			blockIndent = indent
-			lines[i] = line[:match[1]] + " [redacted]"
+			// Redact the whole line: text before the key can hold the secret too
+			// (echo ghp_x | gh auth login), and so can an identifier that matched.
+			lines[i] = line[:indent] + "[redacted]"
 			break
 		}
 	}
@@ -121,4 +127,9 @@ func digestAssignedValue(afterKey string) string {
 		value = value[1:]
 	}
 	return strings.TrimLeft(value, " \t\r")
+}
+
+// endsWithContinuation reports a shell-style trailing backslash continuation.
+func endsWithContinuation(line string) bool {
+	return strings.HasSuffix(strings.TrimRight(line, " \t\r"), "\\")
 }
