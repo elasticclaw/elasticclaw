@@ -63,6 +63,8 @@ func TestSessionDigestRedactsMultilineSecrets(t *testing.T) {
 		"password: \"first\n  SECRET\"",
 		"password:\n\nSECRET",
 		"token: |\n  SECRET\n\n  STILL_SECRET",
+		"PASSWORD=\"first\nSECRET\"",
+		"api_key: 'first\nSECRET\nSECRET'",
 	} {
 		t.Run(input, func(t *testing.T) {
 			if got := sanitizeSessionDigestText(input + "\nnext: safe"); strings.Contains(got, "SECRET") || !strings.HasSuffix(got, "next: safe") {

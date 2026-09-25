@@ -39,9 +39,18 @@ func sanitizeSessionDigestText(value string) string {
 	blockIndent := -1
 	pendingValue := false
 	pemEnd := ""
+	openQuote := ""
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
 		indent := len(line) - len(trimmed)
+		// A quoted secret value that spans lines stays redacted until it closes.
+		if openQuote != "" {
+			if strings.Contains(line, openQuote) {
+				openQuote = ""
+			}
+			lines[i] = line[:indent] + "[redacted]"
+			continue
+		}
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -72,6 +81,11 @@ func sanitizeSessionDigestText(value string) string {
 			}
 			rest := strings.TrimLeft(line[match[1]:], " \t\r\\\"':=")
 			pendingValue = rest == ""
+			if value := strings.TrimLeft(line[match[1]:], " \t\r:="); value != "" && (value[0] == '"' || value[0] == '\'') {
+				if quote := value[:1]; !strings.Contains(value[1:], quote) {
+					openQuote = quote
+				}
+			}
 			// Also cover indented values after a colon, YAML block scalars, and
 			// multiline quoted values. Over-redaction here is intentional.
 			blockIndent = indent
