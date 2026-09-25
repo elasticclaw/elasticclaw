@@ -3456,19 +3456,19 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(turnContent) == "" {
 				turnContent = hm.Content
 			}
-			if completedNormally {
-				// An error reply still ends the turn with no progress; only fall
-				// back to the streamed body when the final event is empty.
-				progressContent := hm.Content
-				if strings.TrimSpace(progressContent) == "" {
-					progressContent = turnContent
-				}
+			// The bridge blanks the reply of a turn it lost, so a non-empty final
+			// reply is progress even for a turn marked interrupted (a retry that
+			// completed). Streamed or split text only counts for uninterrupted
+			// turns; an error reply never counts.
+			progressContent := hm.Content
+			if completedNormally && strings.TrimSpace(progressContent) == "" {
+				progressContent = turnContent
 				if strings.TrimSpace(progressContent) == "" {
 					// Text flushed by an earlier tool split still came from this turn.
 					progressContent = splitText
 				}
-				s.recordSessionLossCompletedTurn(clawID, progressContent)
 			}
+			s.recordSessionLossCompletedTurn(clawID, progressContent)
 			s.deleteStaleWatchdogNags(clawID)
 			// Drop empty messages — never store or broadcast
 			if strings.TrimSpace(turnContent) == "" {

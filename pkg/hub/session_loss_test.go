@@ -605,7 +605,7 @@ func TestSessionLossInterruptedStreamingActivityBeforeEdge(t *testing.T) {
 }
 
 func TestSessionLossCompletedReplyProgress(t *testing.T) {
-	for _, outcome := range []string{"completed", "split completed", "split empty final", "empty final after stream", "empty", "bridge error", "interrupted"} {
+	for _, outcome := range []string{"completed", "split completed", "split empty final", "empty final after stream", "empty", "bridge error", "interrupted", "interrupted then retried"} {
 		t.Run(outcome, func(t *testing.T) {
 			f := newSessionLossFixture(t, nil)
 			before := f.s.sessionLossProgressMark(f.clawID)
@@ -629,9 +629,13 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 				reply = ""
 			case "bridge error":
 				reply = types.BridgeErrorPrefix + " failed"
-			case "interrupted":
+			case "interrupted", "interrupted then retried":
 				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "session_preserved", Payload: types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout, InterruptedMessageID: "input"}}); err != nil {
 					t.Fatal(err)
+				}
+				if outcome == "interrupted" {
+					// The bridge blanks the reply of a turn it lost.
+					reply = ""
 				}
 			}
 			if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "message", Payload: types.HubMessage{Content: reply}}); err != nil {
@@ -648,7 +652,7 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 			changed := f.s.sessionLossProgressMark(f.clawID) != before
 			// The final message event sometimes arrives empty after a streamed
 			// reply; the streamed body is still a completed turn.
-			if want := outcome == "completed" || outcome == "split completed" || outcome == "empty final after stream" || outcome == "split empty final"; changed != want {
+			if want := outcome == "completed" || outcome == "split completed" || outcome == "empty final after stream" || outcome == "split empty final" || outcome == "interrupted then retried"; changed != want {
 				t.Fatalf("progress changed=%v for %s", changed, outcome)
 			}
 		})
@@ -744,10 +748,15 @@ func TestSessionLossOnlyInterruptsObservedTurn(t *testing.T) {
 			f.cc.turnInputMessageID = "input"
 			f.cc.mu.Unlock()
 			reply := "Completed the recovery work"
+			if scenario == "interrupted" {
+				// The bridge blanks the reply of the turn it lost.
+				reply = ""
+			}
 			send("message", types.HubMessage{Content: reply})
 			eventuallyWatchdog(t, func() bool {
-				var n int
-				return f.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, f.clawID, reply).Scan(&n) == nil && n == 1
+				f.cc.mu.RLock()
+				defer f.cc.mu.RUnlock()
+				return !f.cc.awaitingResponse
 			}, "reply processed")
 			if changed := f.s.sessionLossProgressMark(f.clawID) != before; changed != (scenario != "interrupted") {
 				t.Fatalf("progress changed=%v for %s", changed, scenario)
