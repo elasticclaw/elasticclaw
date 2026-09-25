@@ -93,6 +93,13 @@ func runDockerWorkflowE2E(t *testing.T, waitForInference bool) {
 		var provider, providerID string
 		if agentID != "" {
 			provider, providerID = hub.agentProvider(cleanupCtx, t, agentID)
+		}
+		// Capture in-container evidence before deleteAgent/destroy removes the
+		// container and its logs with it.
+		if t.Failed() && provider == "docker" && providerID != "" {
+			dumpDockerAgentLogs(t, providerID)
+		}
+		if agentID != "" {
 			_ = hub.deleteAgent(cleanupCtx, agentID)
 		}
 		if providerID != "" {
@@ -1038,6 +1045,22 @@ func assertNoWorkspaceVanishedError(ctx context.Context, t *testing.T, hub *hubP
 		if strings.Contains(m.Content, "WorkspaceVanishedError") || strings.Contains(m.Content, "workspace appears to have disappeared") {
 			t.Fatalf("agent %s reported workspace vanish: %s", agentID, m.Content)
 		}
+	}
+}
+
+// dumpDockerAgentLogs tails the in-container bridge and gateway logs into the
+// test output. Cleanup destroys the container, so without this the evidence
+// for in-container failures (e.g. "gateway process exited") is unrecoverable.
+func dumpDockerAgentLogs(t *testing.T, containerID string) {
+	t.Helper()
+	for _, name := range []string{"claw-bridge.log", "openclaw-gateway.log"} {
+		out, err := exec.Command("docker", "exec", containerID, "sh", "-lc",
+			`tail -n 400 "$HOME/`+name+`" 2>/dev/null || echo "<missing>"`).CombinedOutput()
+		if err != nil {
+			t.Logf("docker exec tail %s in %s failed: %v\n%s", name, containerID, err, out)
+			continue
+		}
+		t.Logf("=== container %s ~/%s (last 400 lines) ===\n%s", containerID, name, out)
 	}
 }
 

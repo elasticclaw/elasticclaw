@@ -4960,7 +4960,7 @@ export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
 LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status
 echo "npm=$NPM prefix=$PREFIX"
-if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; then
+if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" 2>&1; then
   hash -r
   echo ok > "$STATUS"
   echo "install done"
@@ -6683,8 +6683,15 @@ func (s *Server) syncReplicatedVMs() {
 			// Skip the rest of the status update logic for this claw
 			continue
 		default:
-			// assigned, pending, etc — still coming up
-			newStatus = "provisioning"
+			// assigned, pending, etc — still coming up. A transient provider
+			// status (CMX briefly reports "updating" for an already-running VM)
+			// must not regress a claw that already advanced to starting: the
+			// conditional update below permits starting→provisioning, and the
+			// next "running" sighting would then fire a SECOND concurrent
+			// bootstrap — two bridges fighting over the hub connection and two
+			// gateways racing for port 18789, surfaced as "gateway process
+			// exited" on the in-flight turn.
+			newStatus = holdStartingOnTransientVMStatus(c.status)
 		}
 
 		// Only overwrite provisioning/starting statuses — never clobber hub-managed
@@ -6706,6 +6713,18 @@ func (s *Server) syncReplicatedVMs() {
 			}
 		}
 	}
+}
+
+// holdStartingOnTransientVMStatus maps a transient provider VM status (the
+// default branch of the poll loop: assigned, pending, updating, ...) to a claw
+// status. A claw already in "starting" has a bootstrap in flight; regressing
+// it to "provisioning" would re-arm the bootstrap trigger on the next
+// "running" sighting and launch a second concurrent bootstrap.
+func holdStartingOnTransientVMStatus(clawStatus string) string {
+	if clawStatus == "starting" {
+		return "starting"
+	}
+	return "provisioning"
 }
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -9220,15 +9239,10 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 }
 
 // Queue streaming watchdog nudges for delivery after the active turn. Do not
-// reintroduce mid-turn status-channel injection: pinned OpenClaw
-// (cliversion.OpenClawVersion) treats it as session takeover and aborts the
-// in-flight turn with EmbeddedAttemptSessionTakeoverError without upstream
-// support.
-// Queue streaming watchdog nudges for delivery after the active turn. Do not
-// reintroduce mid-turn status-channel injection: pinned OpenClaw
-// (cliversion.OpenClawVersion) treats it as session takeover and aborts the
-// in-flight turn with EmbeddedAttemptSessionTakeoverError without upstream
-// support.
+// reintroduce mid-turn status-channel injection: on pinned OpenClaw
+// (cliversion.OpenClawVersion) a mid-turn send is admitted as a queued
+// follow-up turn rather than an error, but that changes nudge timing and turn
+// ordering mid-flight, so after-turn delivery remains the deliberate contract.
 func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 	if s.workflowV2OwnsExecution(cc) {
 		return

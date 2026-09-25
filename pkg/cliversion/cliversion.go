@@ -6,11 +6,11 @@ import (
 )
 
 const (
-	OpenClawVersion      = "2026.7.1-2"
-	OpenClawImageVersion = "2026.7.1"
+	OpenClawVersion      = "2026.9.4"
+	OpenClawImageVersion = "2026.9.4"
 	OpenClawImage        = "ghcr.io/openclaw/openclaw:" + OpenClawImageVersion
-	CodexPluginVersion   = "2026.7.1-1"
-	CodexCLIVersion      = "0.144.6"
+	CodexPluginVersion   = "2026.9.4"
+	CodexCLIVersion      = "0.153.4"
 	GrokCLIVersion       = "0.2.103"
 )
 
