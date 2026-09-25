@@ -74,6 +74,8 @@ func TestSessionDigestRedactsMultilineSecrets(t *testing.T) {
 		"export TOKEN=\\\n  SECRET",
 		"PASSWORD=\"a\" API_KEY=\"first\nSECRET\"",
 		"token='a' note=\"x\" secret='first\nSECRET'",
+		"PASSWORD=\"first\nlast\" API_KEY=\"second\nSECRET\" command",
+		"token='a\nb' c='d\nSECRET'",
 		"PASSWORD=\\\n\\\n'first\nSECRET'",
 		"PASSWORD=\"first\nSECRET\\\"still\nSECRET\"",
 	} {

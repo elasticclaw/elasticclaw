@@ -45,9 +45,8 @@ func sanitizeSessionDigestText(value string) string {
 		indent := len(line) - len(trimmed)
 		// A quoted secret value that spans lines stays redacted until it closes.
 		if openQuote != "" {
-			if hasUnescapedQuote(line, openQuote[0]) {
-				openQuote = ""
-			}
+			// Scan the whole line: it may close this quote and open another.
+			openQuote = quoteStateAfter(openQuote, line)
 			lines[i] = line[:indent] + "[redacted]"
 			continue
 		}
@@ -67,9 +66,7 @@ func sanitizeSessionDigestText(value string) string {
 			}
 			pendingValue = strings.Trim(line, " \t\r\\\"':=") == "" || endsWithContinuation(line)
 			// A value continued onto this line may open a quote that closes later.
-			if value := strings.TrimLeft(line, " \t\r:="); value != "" && (value[0] == '"' || value[0] == '\'') && !hasUnescapedQuote(value[1:], value[0]) {
-				openQuote = value[:1]
-			}
+			openQuote = quoteStateAfter("", line)
 			lines[i] = line[:indent] + "[redacted]"
 			continue
 		}
@@ -87,9 +84,7 @@ func sanitizeSessionDigestText(value string) string {
 			pendingValue = rest == "" || endsWithContinuation(line)
 			// Any quote still open at the end of the line (from this or a later
 			// assignment) keeps the following lines redacted until it closes.
-			if value := digestAssignedValue(line[match[1]:]); value != "" {
-				openQuote = unclosedQuote(value)
-			}
+			openQuote = quoteStateAfter("", line)
 			// Also cover indented values after a colon, YAML block scalars, and
 			// multiline quoted values. Over-redaction here is intentional.
 			blockIndent = indent
@@ -102,41 +97,13 @@ func sanitizeSessionDigestText(value string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-// hasUnescapedQuote reports whether s contains quote not preceded by a backslash.
-func hasUnescapedQuote(s string, quote byte) bool {
-	escaped := false
-	for i := 0; i < len(s); i++ {
-		switch {
-		case escaped:
-			escaped = false
-		case s[i] == '\\':
-			escaped = true
-		case s[i] == quote:
-			return true
-		}
+// quoteStateAfter returns the quote still open after scanning s, starting
+// with open already open ("" when none).
+func quoteStateAfter(open, s string) string {
+	var state byte
+	if open != "" {
+		state = open[0]
 	}
-	return false
-}
-
-// digestAssignedValue skips the key's own closing quote and the separator,
-// returning the text where the assigned value starts.
-func digestAssignedValue(afterKey string) string {
-	value := strings.TrimLeft(afterKey, "\\\"'")
-	value = strings.TrimLeft(value, " \t\r")
-	if value != "" && (value[0] == ':' || value[0] == '=') {
-		value = value[1:]
-	}
-	return strings.TrimLeft(value, " \t\r")
-}
-
-// endsWithContinuation reports a shell-style trailing backslash continuation.
-func endsWithContinuation(line string) bool {
-	return strings.HasSuffix(strings.TrimRight(line, " \t\r"), "\\")
-}
-
-// unclosedQuote returns the quote character left open at the end of s, if any.
-func unclosedQuote(s string) string {
-	var open byte
 	escaped := false
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
@@ -144,14 +111,19 @@ func unclosedQuote(s string) string {
 			escaped = false
 		case c == '\\':
 			escaped = true
-		case open == 0 && (c == '"' || c == '\''):
-			open = c
-		case c == open:
-			open = 0
+		case state == 0 && (c == '"' || c == '\''):
+			state = c
+		case c == state:
+			state = 0
 		}
 	}
-	if open == 0 {
+	if state == 0 {
 		return ""
 	}
-	return string(open)
+	return string(state)
+}
+
+// endsWithContinuation reports a shell-style trailing backslash continuation.
+func endsWithContinuation(line string) bool {
+	return strings.HasSuffix(strings.TrimRight(line, " \t\r"), "\\")
 }
