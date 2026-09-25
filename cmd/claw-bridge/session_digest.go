@@ -45,7 +45,7 @@ func sanitizeSessionDigestText(value string) string {
 		indent := len(line) - len(trimmed)
 		// A quoted secret value that spans lines stays redacted until it closes.
 		if openQuote != "" {
-			if strings.Contains(line, openQuote) {
+			if hasUnescapedQuote(line, openQuote[0]) {
 				openQuote = ""
 			}
 			lines[i] = line[:indent] + "[redacted]"
@@ -82,7 +82,7 @@ func sanitizeSessionDigestText(value string) string {
 			rest := strings.TrimLeft(line[match[1]:], " \t\r\\\"':=")
 			pendingValue = rest == ""
 			if value := strings.TrimLeft(line[match[1]:], " \t\r:="); value != "" && (value[0] == '"' || value[0] == '\'') {
-				if quote := value[:1]; !strings.Contains(value[1:], quote) {
+				if quote := value[:1]; !hasUnescapedQuote(value[1:], quote[0]) {
 					openQuote = quote
 				}
 			}
@@ -94,4 +94,20 @@ func sanitizeSessionDigestText(value string) string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// hasUnescapedQuote reports whether s contains quote not preceded by a backslash.
+func hasUnescapedQuote(s string, quote byte) bool {
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case s[i] == '\\':
+			escaped = true
+		case s[i] == quote:
+			return true
+		}
+	}
+	return false
 }
