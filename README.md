@@ -147,6 +147,7 @@ ElasticClaw Server owns policy. Providers own compute. OpenClaw owns the coding 
 - [Installation](https://elasticclaw.ai/docs/installation)
 - [Workspaces](https://elasticclaw.ai/docs/workspaces)
 - [Workflows](https://elasticclaw.ai/docs/workflows)
+- [Session resume hints (`session_resume`)](https://elasticclaw.ai/docs/workflows#session-resume-hints)
 - [Plan approval (`plan_gate`)](https://elasticclaw.ai/docs/workflows#plan-approval)
 - [Providers](https://elasticclaw.ai/docs/providers)
 - [GitHub integration](https://elasticclaw.ai/docs/github-integration)

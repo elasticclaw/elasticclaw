@@ -23,6 +23,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -1414,6 +1416,15 @@ func TestRestoreCLIModelAuthMigratesGrokOAuthToOpenClaw(t *testing.T) {
 }
 
 func TestSanitizeActivityTextRedactsRepeatedSecretPrefixes(t *testing.T) {
+	for _, input := range []string{`GH_TOKEN="secret"`, `GH_TOKEN='secret'`, `Bearer "abc"`, `GH_TOKEN="secret`} {
+		t.Run(input, func(t *testing.T) {
+			got := sanitizeActivityText(input)
+			if strings.Contains(got, "secret") || strings.Contains(got, "abc") || !strings.HasSuffix(got, "[redacted]") {
+				t.Fatalf("quoted secret leaked: %q", got)
+			}
+		})
+	}
+
 	input := `curl "https://api.example.com?access_token=abc&access_token=xyz" -H "Authorization: Bearer tok1" -H "X-Alt: Bearer tok2"`
 	got := sanitizeActivityText(input)
 	if strings.Contains(got, "abc") || strings.Contains(got, "xyz") || strings.Contains(got, "tok1") || strings.Contains(got, "tok2") {
@@ -2017,7 +2028,7 @@ func TestSessionRecoveryOutcome(t *testing.T) {
 }
 
 func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
-	preserved := &sessionPreservedError{err: errString("lock conflict"), key: "session-1"}
+	preserved := &sessionPreservedError{err: errString("lock conflict"), key: "session-1", reason: types.SessionLossReasonLockConflict}
 	for _, tt := range []struct {
 		name       string
 		currentKey string
@@ -2031,7 +2042,7 @@ func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
 			queue := &msgQueue{}
 			reply := "partially completed reply"
 			var messages []hubMsg
-			handled := reportSessionRecovery(preserved, &reply, gs, func(agentActivity) {}, func(msg hubMsg) error {
+			handled := reportSessionRecovery(preserved, "input-1", &reply, gs, func(agentActivity) {}, func(msg hubMsg) error {
 				messages = append(messages, msg)
 				return nil
 			}, queue)
@@ -2043,6 +2054,20 @@ func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
 			}
 			if len(messages) != 1 || messages[0].Type != tt.wantType {
 				t.Fatalf("hub messages = %#v, want one %q message", messages, tt.wantType)
+			}
+			var edge types.SessionRecoveryEdge
+			if err := json.Unmarshal(messages[0].Payload, &edge); err != nil {
+				t.Fatal(err)
+			}
+			if edge.Reason != types.SessionLossReasonLockConflict || edge.PreviousSessionKey != "session-1" || edge.InterruptedMessageID != "input-1" {
+				t.Fatalf("edge = %#v", edge)
+			}
+			wantKey := ""
+			if tt.wantType == "session_rotated" {
+				wantKey = tt.currentKey
+			}
+			if edge.SessionKey != wantKey {
+				t.Fatalf("edge key = %q, want %q", edge.SessionKey, wantKey)
 			}
 			// A successful live write is authoritative; replaying it would duplicate
 			// a continuation edge.
@@ -2063,7 +2088,7 @@ func TestReportSessionRecoveryQueuesFailedEdgeForReplay(t *testing.T) {
 				gs.sessionKey = "session-2"
 			}
 			reply := "partial"
-			if !reportSessionRecovery(err, &reply, gs, func(agentActivity) {}, func(hubMsg) error { return errString("hub disconnected") }, queue) {
+			if !reportSessionRecovery(err, "input-1", &reply, gs, func(agentActivity) {}, func(hubMsg) error { return errString("hub disconnected") }, queue) {
 				t.Fatal("recovery was not handled")
 			}
 			if len(queue.msgs) != 1 || queue.msgs[0].kind != queuedControl || queue.msgs[0].control.Type != wantType {
@@ -2073,8 +2098,12 @@ func TestReportSessionRecoveryQueuesFailedEdgeForReplay(t *testing.T) {
 			replayQueued(queue, func(string, string) error { return nil }, func(msg hubMsg) error {
 				replayed = append(replayed, msg)
 				return nil
-			}, func(string) { t.Fatal("replay must not rerun the user turn") })
-			if len(replayed) != 1 || replayed[0].Type != wantType {
+			}, func(string, string) { t.Fatal("replay must not rerun the user turn") })
+			var edge types.SessionRecoveryEdge
+			if len(replayed) == 1 {
+				_ = json.Unmarshal(replayed[0].Payload, &edge)
+			}
+			if len(replayed) != 1 || replayed[0].Type != wantType || edge.InterruptedMessageID != "input-1" {
 				t.Fatalf("replayed edges = %#v, want one %s edge", replayed, wantType)
 			}
 		})
@@ -2092,7 +2121,7 @@ func TestReplayQueuedDeliversRecoveryEdgeBeforeEmptyReply(t *testing.T) {
 	}, func(msg hubMsg) error {
 		deliveries = append(deliveries, "edge:"+msg.Type)
 		return nil
-	}, func(string) { t.Fatal("replay must not rerun the user turn") })
+	}, func(string, string) { t.Fatal("replay must not rerun the user turn") })
 	if got, want := strings.Join(deliveries, ","), "edge:session_preserved,reply:"; got != want {
 		t.Fatalf("replay order = %q, want %q", got, want)
 	}
@@ -2210,7 +2239,7 @@ func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	}
 	go gs.readLoop(ctx)
 
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil {
 		t.Fatal("SendMessage returned nil error")
 	}
@@ -2356,7 +2385,7 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 	}
 	go gs.readLoop(ctx)
 
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil {
 		t.Fatal("SendMessage returned nil error")
 	}
@@ -2453,7 +2482,7 @@ func TestGatewaySessionPreservesSessionAfterMidTurnLockConflictProbe(t *testing.
 	defer conn.CloseNow()
 	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), sessionErr) {
 		t.Fatalf("SendMessage error = %v, want original lock conflict", err)
 	}
@@ -2537,7 +2566,7 @@ func TestGatewaySessionProbeRechecksConcurrentRotationAfterSuccess(t *testing.T)
 	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
 		t.Fatalf("SendMessage error = %v, want rotation only", err)
 	}
@@ -2618,7 +2647,7 @@ func TestGatewaySessionProbeDetectsConcurrentRotation(t *testing.T) {
 	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
 		t.Fatalf("SendMessage error = %v, want rotation only", err)
 	}
@@ -2680,7 +2709,7 @@ func TestGatewaySessionLockConflictAlreadyRotatedSkipsAbortAndProbe(t *testing.T
 	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
 		t.Fatalf("SendMessage error = %v, want rotation only", err)
 	}
@@ -2756,7 +2785,7 @@ func TestGatewaySessionProbesAfterTurnContextExpires(t *testing.T) {
 	defer conn.CloseNow()
 	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(connCtx)
-	_, err = gs.SendMessage(turnCtx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(turnCtx, "continue the task", "", nil, nil)
 	select {
 	case <-probed:
 	default:
@@ -2879,7 +2908,7 @@ func TestGatewaySessionRetriesSameSessionAfterLockConflictSendError(t *testing.T
 	}
 	go gs.readLoop(ctx)
 
-	reply, err := gs.SendMessage(ctx, "continue the task", nil, nil)
+	reply, err := gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err != nil {
 		t.Fatalf("SendMessage returned error: %v", err)
 	}
@@ -3007,7 +3036,7 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 	}
 	go gs.readLoop(ctx)
 
-	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	_, err = gs.SendMessage(ctx, "continue the task", "", nil, nil)
 	if err == nil {
 		t.Fatal("SendMessage returned nil error")
 	}
@@ -3026,120 +3055,144 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 }
 
 func TestGatewaySessionResetsAfterAcceptedTurnDeadline(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testGatewaySessionAcceptedTurnDeadline(t, "rotate")
+}
 
+func TestGatewaySessionAbortFailureAfterTurnDeadlineRotates(t *testing.T) {
+	testGatewaySessionAcceptedTurnDeadline(t, "abort-error")
+}
+
+func TestGatewaySessionPreservesSessionAfterAcceptedTurnDeadline(t *testing.T) {
+	testGatewaySessionAcceptedTurnDeadline(t, "preserve")
+}
+
+func TestGatewaySessionProbeDetectsConcurrentRotationAfterTimeout(t *testing.T) {
+	testGatewaySessionAcceptedTurnDeadline(t, "concurrent")
+}
+
+func testGatewaySessionAcceptedTurnDeadline(t *testing.T, recovery string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+	var gs *gatewaySession
 	testDone := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	idleChecked := make(chan struct{})
+	conn := dialPipeGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
-			t.Errorf("accept websocket: %v", err)
+			t.Error(err)
 			return
 		}
 		defer conn.CloseNow()
-
-		readRequest := func(wantMethod string) (gwFrame, bool) {
+		read := func(method string) gwFrame {
 			var req gwFrame
 			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
-				t.Errorf("read %s request: %v", wantMethod, err)
-				return gwFrame{}, false
+				t.Errorf("read %s: %v", method, err)
+				return req
 			}
-			if req.Method != wantMethod {
-				t.Errorf("request method = %q, want %q", req.Method, wantMethod)
-				return gwFrame{}, false
+			if req.Method != method {
+				t.Errorf("method = %q, want %q", req.Method, method)
 			}
-			return req, true
+			return req
 		}
-
-		sendReq, ok := readRequest("sessions.send")
-		if !ok {
-			return
+		respond := func(req gwFrame, ok bool, payload json.RawMessage) {
+			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: req.ID, OK: ok, Payload: payload}); err != nil {
+				t.Error(err)
+			}
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
-			t.Errorf("accept sessions.send: %v", err)
-			return
+		respond(read("sessions.send"), true, nil)
+		for _, event := range []map[string]interface{}{
+			{"stream": "assistant", "sessionKey": "session-1", "data": map[string]string{"delta": "Investigated the failing test"}},
+			{"stream": "tool", "sessionKey": "session-1", "data": map[string]string{"phase": "start", "name": "exec", "command": "git status", "toolCallId": "call-1"}},
+		} {
+			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(event)}); err != nil {
+				t.Error(err)
+				return
+			}
 		}
-		// Do not emit a lifecycle result. The accepted turn must time out in
-		// sendMessageOnce before recovery aborts and rotates the session.
-
-		abortReq, ok := readRequest("sessions.abort")
-		if !ok {
-			return
+		abort := read("sessions.abort")
+		var params map[string]string
+		if err := json.Unmarshal(abort.Params, &params); err != nil || params["key"] != "session-1" {
+			t.Errorf("abort params = %s, error %v", abort.Params, err)
 		}
-		var abortParams map[string]string
-		if err := json.Unmarshal(abortReq.Params, &abortParams); err != nil {
-			t.Errorf("decode sessions.abort params: %v", err)
-			return
+		if recovery == "concurrent" {
+			gs.setSessionKey("session-2")
 		}
-		if abortParams["key"] != "session-1" {
-			t.Errorf("sessions.abort key = %q, want session-1", abortParams["key"])
-			return
+		respond(abort, recovery != "abort-error", nil)
+		if recovery != "concurrent" && recovery != "abort-error" {
+			for range sessionLockConflictRetryDelays {
+				respond(read("sessions.describe"), recovery == "preserve", nil)
+				if recovery == "preserve" {
+					break
+				}
+			}
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}); err != nil {
-			t.Errorf("abort timed-out session: %v", err)
-			return
+		if recovery == "rotate" || recovery == "abort-error" {
+			req := read("sessions.create")
+			// If preservation is incorrectly attempted, describe would succeed.
+			if req.Method == "sessions.describe" {
+				respond(req, true, nil)
+				return
+			}
+			respond(req, true, mustJSON(map[string]string{"key": "session-2"}))
+			respond(read("sessions.subscribe"), true, nil)
+		} else {
+			idleCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			var extra gwFrame
+			if err := wsjson.Read(idleCtx, conn, &extra); err == nil {
+				t.Errorf("unexpected %q after recovery", extra.Method)
+			}
 		}
-
-		createReq, ok := readRequest("sessions.create")
-		if !ok {
-			return
-		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
-			Type:    "res",
-			ID:      createReq.ID,
-			OK:      true,
-			Payload: mustJSON(map[string]string{"key": "session-2"}),
-		}); err != nil {
-			t.Errorf("create replacement session: %v", err)
-			return
-		}
-
-		subscribeReq, ok := readRequest("sessions.subscribe")
-		if !ok {
-			return
-		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}); err != nil {
-			t.Errorf("subscribe replacement session: %v", err)
-			return
-		}
-
+		close(idleChecked)
 		<-testDone
 	}))
-	defer srv.Close()
 	defer close(testDone)
-
 	readCtx, stopRead := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopRead()
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
-	conn, _, err := websocket.Dial(readCtx, wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
-	}
-	defer conn.CloseNow()
-
-	gs := &gatewaySession{
-		sessionKey: "session-1",
-		conn:       conn,
-		pending:    make(map[string]chan gwFrame),
-	}
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(readCtx)
-
 	sendCtx, cancelSend := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancelSend()
-	_, err = gs.SendMessage(sendCtx, "continue the task", nil, nil)
-	if err == nil {
-		t.Fatal("SendMessage returned nil error")
+	_, err := gs.SendMessage(sendCtx, "continue the task", "lost-input", nil, nil)
+	gs.infMu.Lock()
+	idleMessageID := gs.turnMessageID
+	gs.infMu.Unlock()
+	if idleMessageID != "" {
+		t.Fatalf("idle reconnect would report stale interrupted_message_id %q", idleMessageID)
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("SendMessage error = %v, want wrapped context deadline exceeded", err)
+	if !errors.Is(err, context.DeadlineExceeded) || sessionLossReason(err) != types.SessionLossReasonTurnTimeout {
+		t.Fatalf("error = %v, reason = %q", err, sessionLossReason(err))
 	}
-	if !strings.Contains(err.Error(), "session reset") {
-		t.Fatalf("SendMessage error = %q, want recovery notice", err)
+	if recovery == "preserve" {
+		if !isSessionPreservedError(err) || isSessionRotatedError(err) || gs.getSessionKey() != "session-1" || loadBridgeSession() != "" {
+			t.Fatalf("preservation failed: err=%v key=%q saved=%q", err, gs.getSessionKey(), loadBridgeSession())
+		}
+		edge := buildSessionRecoveryEdge(gs, err, "preserved")
+		if edge.Digest != nil || edge.PreviousSessionKey != "session-1" {
+			t.Fatalf("preserved edge = %#v", edge)
+		}
+	} else {
+		if !isSessionRotatedError(err) || isSessionPreservedError(err) || previousSessionKey(err) != "session-1" || gs.getSessionKey() != "session-2" {
+			t.Fatalf("rotation failed: err=%v key=%q", err, gs.getSessionKey())
+		}
+		edge := buildSessionRecoveryEdge(gs, err, "rotated")
+		if edge.Digest == nil || len(edge.Digest.AssistantMessages) != 1 || edge.Digest.AssistantMessages[0] != "Investigated the failing test" || len(edge.Digest.ToolCalls) != 1 || edge.Digest.ToolCalls[0].Args != "git status" {
+			t.Fatalf("lost session digest = %#v", edge.Digest)
+		}
+		if recovery == "rotate" && loadBridgeSession() != "session-2" {
+			t.Fatal("replacement key not persisted")
+		}
+		if recovery == "concurrent" && loadBridgeSession() != "" {
+			t.Fatal("concurrent replacement unexpectedly created a session")
+		}
 	}
-	if got := gs.getSessionKey(); got != "session-2" {
-		t.Fatalf("session key = %q, want session-2", got)
-	}
-	if got := loadBridgeSession(); got != "session-2" {
-		t.Fatalf("persisted session key = %q, want session-2", got)
+	select {
+	case <-idleChecked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("gateway recovery did not finish")
 	}
 }
 
@@ -3248,7 +3301,7 @@ func TestReconnectGatewayReportsStaleConnectionNoop(t *testing.T) {
 	stale := &websocket.Conn{}
 	gs := &gatewaySession{conn: current}
 
-	reconnected, replacedSession, err := gs.reconnectGateway(context.Background(), stale)
+	reconnected, replacedSession, _, err := gs.reconnectGateway(context.Background(), stale)
 	if err != nil {
 		t.Fatalf("reconnectGateway returned error: %v", err)
 	}
@@ -3289,7 +3342,7 @@ func TestReconnectGatewayWithTimeoutWhenChallengeNeverArrives(t *testing.T) {
 		pending: make(map[string]chan gwFrame),
 	}
 	started := time.Now()
-	_, _, err = gs.reconnectGatewayWithTimeout(context.Background(), current, 100*time.Millisecond)
+	_, _, _, err = gs.reconnectGatewayWithTimeout(context.Background(), current, 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("reconnectGatewayWithTimeout error = nil, want timeout")
 	}
@@ -3394,7 +3447,7 @@ func TestReconnectGatewayReportsReplacementWhenSessionMissing(t *testing.T) {
 		pending:    make(map[string]chan gwFrame),
 	}
 
-	reconnected, replacedSession, err := gs.reconnectGateway(ctx, nil)
+	reconnected, replacedSession, _, err := gs.reconnectGateway(ctx, nil)
 	if err != nil {
 		t.Fatalf("reconnectGateway returned error: %v", err)
 	}
@@ -3527,12 +3580,17 @@ func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) 
 		conn:       conn,
 		pending:    make(map[string]chan gwFrame),
 	}
-	replaced := make(chan struct{}, 1)
-	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
+	replaced := make(chan types.SessionRecoveryEdge, 1)
+	gs.setOnSessionReplaced(func(previousKey, interruptedMessageID string) {
+		replaced <- buildSessionRecoveryEdge(gs, &sessionRotatedError{reason: types.SessionLossReasonGatewayReconnect, previousKey: previousKey}, "rotated")
+	})
 	go gs.readLoop(ctx)
 
 	select {
-	case <-replaced:
+	case edge := <-replaced:
+		if edge.PreviousSessionKey != "session-1" || edge.SessionKey != "session-2" || edge.Reason != types.SessionLossReasonGatewayReconnect {
+			t.Fatalf("replacement edge = %#v", edge)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("readLoop's background reconnect did not announce a session replacement")
 	}
@@ -3802,12 +3860,12 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 		pending:    make(map[string]chan gwFrame),
 	}
 	replaced := make(chan struct{}, 1)
-	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
+	gs.setOnSessionReplaced(func(previousKey, interruptedMessageID string) { replaced <- struct{}{} })
 	go gs.readLoop(ctx)
 
 	var chunks []string
 	start := time.Now()
-	reply, err := gs.SendMessage(ctx, "hi", func(chunk string) {
+	reply, err := gs.SendMessage(ctx, "hi", "", func(chunk string) {
 		chunks = append(chunks, chunk)
 	}, nil)
 	if err != nil {
@@ -4019,8 +4077,10 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 		conn:       conn,
 		pending:    make(map[string]chan gwFrame),
 	}
-	replaced := make(chan struct{}, 1)
-	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
+	replaced := make(chan types.SessionRecoveryEdge, 1)
+	gs.setOnSessionReplaced(func(previousKey, interruptedMessageID string) {
+		replaced <- buildSessionRecoveryEdge(gs, &sessionRotatedError{reason: types.SessionLossReasonGatewayReconnect, previousKey: previousKey}, "rotated")
+	})
 
 	// reconnectGateway (subscribe/create/resubscribe) reads its own responses
 	// synchronously. Only the retried sessions.send needs readLoop. Wait for
@@ -4053,12 +4113,15 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 	}
 	resultCh := make(chan sendResult, 1)
 	go func() {
-		reply, err := gs.SendMessage(ctx, "hi", func(string) {}, nil)
+		reply, err := gs.SendMessage(ctx, "hi", "", func(string) {}, nil)
 		resultCh <- sendResult{reply, err}
 	}()
 
 	select {
-	case <-replaced:
+	case edge := <-replaced:
+		if edge.PreviousSessionKey != "session-1" || edge.SessionKey != "session-2" || edge.Reason != types.SessionLossReasonGatewayReconnect {
+			t.Fatalf("replacement edge = %#v", edge)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("SendMessage's reconnect did not announce a session replacement")
 	}
@@ -4108,7 +4171,7 @@ func TestMsgQueueReplyNeverExpires(t *testing.T) {
 
 func TestMsgQueueExpiredInputBecomesNotice(t *testing.T) {
 	q := &msgQueue{}
-	q.pushInput("stale user input")
+	q.pushInput("", "stale user input")
 	q.msgs[0].queuedAt = time.Now().Add(-2 * msgQueueTTL)
 
 	out := q.drain()
@@ -4133,7 +4196,7 @@ func TestMsgQueueExpiredInputBecomesNotice(t *testing.T) {
 func TestMsgQueueOverflowEvictsOldestInputAndSurfacesNotice(t *testing.T) {
 	q := &msgQueue{}
 	for i := 0; i < msgQueueMax+5; i++ {
-		q.pushInput(fmt.Sprintf("input-%d", i))
+		q.pushInput("", fmt.Sprintf("input-%d", i))
 	}
 	if len(q.msgs) != msgQueueMax {
 		t.Fatalf("expected queue capped at %d, got %d", msgQueueMax, len(q.msgs))
@@ -4177,7 +4240,7 @@ func TestReplayQueuedDeliversReplyWithoutRerun(t *testing.T) {
 		delivered = append(delivered, content)
 		return nil
 	}
-	runTurn := func(content string) {
+	runTurn := func(messageID, content string) {
 		t.Fatalf("runTurn must not be called for a completed reply (content=%q)", content)
 	}
 
@@ -4196,7 +4259,7 @@ func TestReplayQueuedRequeuesReplyOnDeliverFailure(t *testing.T) {
 	deliver := func(role, content string) error {
 		return errString("hub write failed")
 	}
-	runTurn := func(content string) {
+	runTurn := func(messageID, content string) {
 		t.Fatalf("runTurn must not be called")
 	}
 
@@ -4215,7 +4278,7 @@ func TestReplayQueuedRequeuesReplyOnDeliverFailure(t *testing.T) {
 
 func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
 	q := &msgQueue{}
-	q.pushInput("do the work")
+	q.pushInput("input-1", "do the work")
 
 	var deliverCalled bool
 	deliver := func(role, content string) error {
@@ -4223,7 +4286,10 @@ func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
 		return nil
 	}
 	var ran []string
-	runTurn := func(content string) {
+	runTurn := func(messageID, content string) {
+		if messageID != "input-1" {
+			t.Fatalf("replayed input ID = %q", messageID)
+		}
 		ran = append(ran, content)
 	}
 
@@ -4432,7 +4498,7 @@ func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
 	defer conn.CloseNow()
 	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
 	go gs.readLoop(ctx)
-	go func() { _, _ = gs.SendMessage(ctx, "continue the task", nil, nil) }()
+	go func() { _, _ = gs.SendMessage(ctx, "continue the task", "", nil, nil) }()
 	select {
 	case got := <-abortKey:
 		if got != "session-1" {

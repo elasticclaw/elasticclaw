@@ -445,8 +445,10 @@ func TestRestartMidTurnEnqueuesExactlyOneResume(t *testing.T) {
 		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
 		return n
 	}
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "one restart resume")
 	beat(2)
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 2 }, "second restart resume")
 }
 
@@ -478,6 +480,7 @@ func TestRestartCountResetMidTurnEnqueuesResume(t *testing.T) {
 	// bridge reports a reset counter mid-turn.
 	beat(5)
 	beat(0)
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after restart_count reset")
 	beat(0)
 	beat(0)
@@ -558,6 +561,7 @@ func TestFirstHeartbeatAfterHubBootDoesNotAutoResume(t *testing.T) {
 	}
 	// A genuine restart after the baseline still triggers auto-resume.
 	beat(4)
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after genuine restart")
 }
 
@@ -672,6 +676,7 @@ func TestHeartbeatUsesOnlyGatewaySessionKeyForSessionLoss(t *testing.T) {
 		t.Fatalf("resume count after snapshot-only heartbeat = %d, want 0", got)
 	}
 	beat(map[string]any{"restart_count": 0, "session_key": "snapshot-stale", "gateway_session_key": "live-new"})
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after live gateway key change")
 }
 
@@ -688,9 +693,9 @@ func TestSessionLossDeduplicatesAllDetectionPathsByNewKey(t *testing.T) {
 	cc.mu.Unlock()
 	// These calls represent restart_count, gateway_session_key, and the
 	// session_rotated bridge edge reporting the same replacement session.
-	s.noteSessionLoss(cc, clawID, "replacement-key", "restart_count")
-	s.noteSessionLoss(cc, clawID, "replacement-key", "gateway_session_key")
-	s.noteSessionLoss(cc, clawID, "replacement-key", "session_rotated")
+	s.noteSessionLoss(cc, clawID, "replacement-key", "restart_count", types.SessionRecoveryEdge{})
+	s.noteSessionLoss(cc, clawID, "replacement-key", "gateway_session_key", types.SessionRecoveryEdge{})
+	s.noteSessionLoss(cc, clawID, "replacement-key", "session_rotated", types.SessionRecoveryEdge{})
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND (content LIKE ? OR content LIKE ?)`, clawID, restartResumePrefix+"%", sessionRotatedResumePrefix+"%").Scan(&n); err != nil {
 		t.Fatal(err)
@@ -716,26 +721,61 @@ func TestSessionLossDifferentKeysAndMissingKeysDoNotDeduplicate(t *testing.T) {
 		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
 		return n
 	}
-	s.noteSessionLoss(cc, clawID, "replacement-one", "restart_count")
-	s.noteSessionLoss(cc, clawID, "replacement-two", "restart_count")
+	// These are independent losses with observable work between them. The
+	// loop guard separately covers repeated losses without new output.
+	progress := func() {
+		t.Helper()
+		s.recordSessionLossCompletedTurn(clawID, "Completed another bounded step")
+		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), clawID, "test-tenant-id", "claw", "Completed another bounded step", now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.noteSessionLoss(cc, clawID, "replacement-one", "restart_count", types.SessionRecoveryEdge{})
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
+	progress()
+	s.noteSessionLoss(cc, clawID, "replacement-two", "restart_count", types.SessionRecoveryEdge{})
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	if got := count(); got != 2 {
 		t.Fatalf("resume count for two replacement keys = %d, want 2", got)
 	}
 	// Old bridges omit the key. Preserve the pre-key behavior: each report is
 	// an independent incident rather than being collapsed by an empty key.
-	s.noteSessionLoss(cc, clawID, "", "restart_count")
-	s.noteSessionLoss(cc, clawID, "", "restart_count")
+	progress()
+	s.noteSessionLoss(cc, clawID, "", "restart_count", types.SessionRecoveryEdge{})
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
+	progress()
+	s.noteSessionLoss(cc, clawID, "", "restart_count", types.SessionRecoveryEdge{})
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	if got := count(); got != 4 {
 		t.Fatalf("resume count after two keyless reports = %d, want 4", got)
 	}
 }
 
 func TestIdleSessionLossNoticePrefixesNextMessageAndKeepsFirstNotice(t *testing.T) {
+	testSessionLossPendingNoticeDelivery(t, false)
+}
+
+func TestPausedSessionLossNoticePrefixesNextUserMessage(t *testing.T) {
+	testSessionLossPendingNoticeDelivery(t, true)
+}
+
+func testSessionLossPendingNoticeDelivery(t *testing.T, paused bool) {
+	t.Helper()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	workspace := &types.WorkspaceConfig{Name: "notice-ws", SessionResume: &types.SessionResumeConfig{ReadFiles: []string{"NOTES.md"}}}
+	if err := saveExternalWorkspace(workspace); err != nil {
+		t.Fatal(err)
+	}
+	workflow := &types.WorkflowConfig{Name: "notice-wf", PipelineYAML: "stages:\n  - id: working\n    entry: true\n", SessionResume: &types.SessionResumeConfig{StateCheck: "Run make status"}}
+	if err := saveExternalWorkflows(workspace.Name, []*types.WorkflowConfig{workflow}); err != nil {
+		t.Fatal(err)
+	}
+
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-idle-session-loss-notice"
 	conn := watchdogClaw(t, s, clawID)
 	cc := watchdogClawConn(t, s, clawID)
-	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, tags='["workspace:notice-ws","workflow:notice-wf"]',pipeline_stage='working' WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
 	}
 	cc.mu.Lock()
@@ -743,22 +783,39 @@ func TestIdleSessionLossNoticePrefixesNextMessageAndKeepsFirstNotice(t *testing.
 	cc.awaitingResponse = false
 	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
 	cc.mu.Unlock()
-	s.noteSessionLoss(cc, clawID, "idle-one", "gateway_session_key")
-	s.noteSessionLoss(cc, clawID, "idle-two", "restart_count")
+	if paused {
+		if !s.pauseAutomaticContinuation(clawID, "[hub] Automatic continuation paused for test") {
+			t.Fatal("could not pause claw")
+		}
+		cc.mu.Lock()
+		cc.lastTurnFinishedAt = now()
+		cc.mu.Unlock()
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated", Payload: types.SessionRecoveryEdge{SessionKey: "paused-new"}}); err != nil {
+			t.Fatal(err)
+		}
+		eventuallyWatchdog(t, func() bool {
+			var notice string
+			return db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice) == nil && notice != ""
+		}, "paused session-loss notice")
+	} else {
+		s.noteSessionLoss(cc, clawID, "idle-one", "gateway_session_key", types.SessionRecoveryEdge{})
+		s.noteSessionLoss(cc, clawID, "idle-two", "restart_count", types.SessionRecoveryEdge{})
+	}
 	var notice string
 	if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
 		t.Fatal(err)
 	}
-	if notice != sessionLossPendingNotice {
+	if (!paused && notice != s.sessionLossPendingNoticeFor(clawID)) || (paused && !strings.HasPrefix(notice, sessionRotatedResumePrefix)) || !strings.Contains(notice, "Run make status") || !strings.Contains(notice, "NOTES.md") || strings.Contains(notice, "git status") {
 		t.Fatalf("pending notice = %q, want first session-loss notice", notice)
 	}
 	var resumes int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&resumes); err != nil || resumes != 0 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND (content LIKE ? OR content LIKE ?)`, clawID, restartResumePrefix+"%", sessionRotatedResumePrefix+"%").Scan(&resumes); err != nil || resumes != 0 {
 		t.Fatalf("idle resume rows=%d err=%v, want 0", resumes, err)
 	}
 	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), clawID, "test-tenant-id", "user", "continue the task", now()); err != nil {
 		t.Fatal(err)
 	}
+	s.resumeNoProgressAfterUserInput(clawID)
 	s.sendNextQueuedMessage(cc)
 	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -782,7 +839,7 @@ func TestIdleSessionLossNoticePrefixesNextMessageAndKeepsFirstNotice(t *testing.
 	if err := json.Unmarshal(payload, &message); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := message.Content, sessionLossPendingNotice+"continue the task"; got != want {
+	if got, want := message.Content, notice+"continue the task"; got != want {
 		t.Fatalf("delivered content = %q, want %q", got, want)
 	}
 	if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
@@ -815,7 +872,7 @@ func TestIdleSessionLossNoticeDeliveryRearmsIdleResumeBudget(t *testing.T) {
 	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
 	cc.mu.Unlock()
 
-	s.noteSessionLoss(cc, clawID, "idle-budget-one", "restart_count")
+	s.noteSessionLoss(cc, clawID, "idle-budget-one", "restart_count", types.SessionRecoveryEdge{})
 
 	// The parking branch itself must not re-arm: no prompt went out, and the
 	// idle-claw policy says nothing wakes it here.

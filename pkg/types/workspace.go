@@ -18,42 +18,53 @@ type WorkspaceConfig struct {
 	WebhookSecrets []string             `yaml:"webhook_secrets,omitempty" json:"webhookSecrets,omitempty"`
 	Workflows      []*WorkflowConfig    `yaml:"-" json:"workflows,omitempty"`
 	Files          map[string]string    `yaml:"-" json:"files,omitempty"`
+	SessionResume  *SessionResumeConfig `yaml:"session_resume,omitempty" json:"sessionResume,omitempty"`
+}
+
+// SessionResumeConfig tunes recovery prompts after a lost or interrupted session.
+// Unconfigured prompts use the default git-based state check.
+type SessionResumeConfig struct {
+	// ReadFiles are workspace-relative files the agent should read first.
+	ReadFiles []string `yaml:"read_files,omitempty" json:"readFiles,omitempty"`
+	// StateCheck replaces the default git status / git log recovery instruction.
+	StateCheck string `yaml:"state_check,omitempty" json:"stateCheck,omitempty"`
 }
 
 // WorkflowConfig is the persisted workflow schema.
 type WorkflowConfig struct {
-	SchemaVersion       string            `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
-	Name                string            `yaml:"name" json:"name"`
-	RawConfig           string            `yaml:"-" json:"rawConfig,omitempty"`
-	Enabled             *bool             `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Integration         string            `yaml:"integration,omitempty" json:"integration,omitempty"`
-	Workspace           string            `yaml:"workspace,omitempty" json:"workspace,omitempty"`
-	Team                string            `yaml:"team,omitempty" json:"team,omitempty"`
-	TriggerStatus       string            `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"`
-	WorkingStatus       string            `yaml:"working_status,omitempty" json:"working_status,omitempty"`
-	FinishedStatus      string            `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`
-	TerminateOnLeave    bool              `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"`
-	Provider            string            `yaml:"provider,omitempty" json:"provider,omitempty"`
-	NamePattern         string            `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`
-	Tags                []string          `yaml:"tags,omitempty" json:"tags,omitempty"`
-	Color               string            `yaml:"color,omitempty" json:"color,omitempty"`
-	RunKind             string            `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`
-	AnalyticsEnabled    *bool             `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`
-	RequiresPR          *bool             `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`
-	Labels              []string          `yaml:"labels,omitempty" json:"labels,omitempty"`
-	ExcludeLabels       []string          `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
-	AssignedTo          string            `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
-	AllowedLabelers     []string          `yaml:"allowed_labelers,omitempty" json:"allowed_labelers,omitempty"`
-	SecretRefs          map[string]string `yaml:"secret_refs,omitempty" json:"secret_refs,omitempty"`
-	Volumes             []WorkflowVolume  `yaml:"volumes,omitempty" json:"volumes,omitempty"`
-	Inputs              []FactoryInput    `yaml:"inputs,omitempty" json:"inputs,omitempty"`
-	ConcurrencyGroup    string            `yaml:"concurrency_group,omitempty" json:"concurrency_group,omitempty"`
-	EnableManualTrigger bool              `yaml:"enable_manual_trigger,omitempty" json:"enable_manual_trigger,omitempty"`
-	Repos               []string          `yaml:"repos,omitempty" json:"repos,omitempty"`
-	TriggerRepos        []string          `yaml:"trigger_repos,omitempty" json:"trigger_repos,omitempty"`
-	Trigger             *WorkflowTrigger  `yaml:"trigger,omitempty" json:"trigger,omitempty"`
-	Stages              []WorkflowStage   `yaml:"stages,omitempty" json:"stages,omitempty"`
-	PipelineYAML        string            `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
+	SchemaVersion       string               `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`
+	Name                string               `yaml:"name" json:"name"`
+	RawConfig           string               `yaml:"-" json:"rawConfig,omitempty"`
+	Enabled             *bool                `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Integration         string               `yaml:"integration,omitempty" json:"integration,omitempty"`
+	Workspace           string               `yaml:"workspace,omitempty" json:"workspace,omitempty"`
+	Team                string               `yaml:"team,omitempty" json:"team,omitempty"`
+	TriggerStatus       string               `yaml:"trigger_status,omitempty" json:"trigger_status,omitempty"`
+	WorkingStatus       string               `yaml:"working_status,omitempty" json:"working_status,omitempty"`
+	FinishedStatus      string               `yaml:"finished_status,omitempty" json:"finished_status,omitempty"`
+	TerminateOnLeave    bool                 `yaml:"terminate_on_leave,omitempty" json:"terminate_on_leave,omitempty"`
+	Provider            string               `yaml:"provider,omitempty" json:"provider,omitempty"`
+	NamePattern         string               `yaml:"name_pattern,omitempty" json:"name_pattern,omitempty"`
+	Tags                []string             `yaml:"tags,omitempty" json:"tags,omitempty"`
+	Color               string               `yaml:"color,omitempty" json:"color,omitempty"`
+	RunKind             string               `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`
+	AnalyticsEnabled    *bool                `yaml:"analytics_enabled,omitempty" json:"analytics_enabled,omitempty"`
+	RequiresPR          *bool                `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`
+	Labels              []string             `yaml:"labels,omitempty" json:"labels,omitempty"`
+	ExcludeLabels       []string             `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
+	AssignedTo          string               `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
+	AllowedLabelers     []string             `yaml:"allowed_labelers,omitempty" json:"allowed_labelers,omitempty"`
+	SecretRefs          map[string]string    `yaml:"secret_refs,omitempty" json:"secret_refs,omitempty"`
+	Volumes             []WorkflowVolume     `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Inputs              []FactoryInput       `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+	ConcurrencyGroup    string               `yaml:"concurrency_group,omitempty" json:"concurrency_group,omitempty"`
+	EnableManualTrigger bool                 `yaml:"enable_manual_trigger,omitempty" json:"enable_manual_trigger,omitempty"`
+	Repos               []string             `yaml:"repos,omitempty" json:"repos,omitempty"`
+	TriggerRepos        []string             `yaml:"trigger_repos,omitempty" json:"trigger_repos,omitempty"`
+	Trigger             *WorkflowTrigger     `yaml:"trigger,omitempty" json:"trigger,omitempty"`
+	Stages              []WorkflowStage      `yaml:"stages,omitempty" json:"stages,omitempty"`
+	PipelineYAML        string               `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
+	SessionResume       *SessionResumeConfig `yaml:"session_resume,omitempty" json:"sessionResume,omitempty"`
 }
 
 // WorkflowVolume declares a hub-managed artifact-backed directory attached to
@@ -118,15 +129,15 @@ type WorkflowRun struct {
 }
 
 type GitHubIssuesWorkflowTrigger struct {
-	Event                string   `yaml:"event,omitempty" json:"event,omitempty"`
-	Repositories         []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
-	ExcludeRepositories  []string `yaml:"exclude_repositories,omitempty" json:"exclude_repositories,omitempty"`
-	States               []string `yaml:"states,omitempty" json:"states,omitempty"`
-	Labels               []string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	ExcludeLabels        []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
-	Labelers             []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
-	AssignedTo           string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
-	AgentStatusError     string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"`
+	Event               string   `yaml:"event,omitempty" json:"event,omitempty"`
+	Repositories        []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	ExcludeRepositories []string `yaml:"exclude_repositories,omitempty" json:"exclude_repositories,omitempty"`
+	States              []string `yaml:"states,omitempty" json:"states,omitempty"`
+	Labels              []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	ExcludeLabels       []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
+	Labelers            []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
+	AssignedTo          string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
+	AgentStatusError    string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"`
 }
 
 type LinearWorkflowTrigger struct {
@@ -189,6 +200,9 @@ func (w *WorkspaceConfig) Validate() error {
 	}
 	if err := validateRepositoryAccessList("repositories", w.Repositories, true); err != nil {
 		return fmt.Errorf("workspace %q: %w", w.Name, err)
+	}
+	if err := validateSessionResume("workspace", w.Name, w.SessionResume); err != nil {
+		return err
 	}
 	for _, workflow := range w.Workflows {
 		if workflow == nil {
