@@ -1888,6 +1888,9 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					activity.Result = nestedString(rawAgentPayload.Data, "result", "output", "stdout", "content", "text")
 				}
 				inf.resolveToolCall(&activity, time.Now())
+				// The digest applies its own stricter redaction; feeding it the
+				// feed-sanitized text would hide where a quoted secret starts.
+				rawActivity := activity
 				activity = cleanAgentActivity(activity)
 				if kind == "tool" && activity.Command == "" && activity.Path == "" && activity.URL == "" && activity.Detail == "" {
 					logMissingToolActivityDetail(agentPayload.Stream, activity.Phase, activity.Tool, rawAgentPayload.Data)
@@ -1899,7 +1902,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 						summarizeActivityPayload(rawAgentPayload.Data))
 				}
 				inf.noteActivity(activity)
-				gs.transcript.noteTool(activity)
+				gs.transcript.noteTool(rawActivity)
 				inf.emitActivity(activity)
 			}
 			if agentPayload.Stream == "lifecycle" {

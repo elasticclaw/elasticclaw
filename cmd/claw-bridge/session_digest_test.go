@@ -66,6 +66,9 @@ func TestSessionDigestRedactsMultilineSecrets(t *testing.T) {
 		"PASSWORD=\"first\nSECRET\"",
 		"api_key: 'first\nSECRET\nSECRET'",
 		"PASSWORD=\"first\\\"part\nSECRET\"",
+		"{\"password\": \"first\nSECRET\"}",
+		"\"api_key\":\"first\nSECRET\"",
+		"'token': 'first\nSECRET'",
 		"PASSWORD=\"first\nSECRET\\\"still\nSECRET\"",
 	} {
 		t.Run(input, func(t *testing.T) {

@@ -81,7 +81,7 @@ func sanitizeSessionDigestText(value string) string {
 			}
 			rest := strings.TrimLeft(line[match[1]:], " \t\r\\\"':=")
 			pendingValue = rest == ""
-			if value := strings.TrimLeft(line[match[1]:], " \t\r:="); value != "" && (value[0] == '"' || value[0] == '\'') {
+			if value := digestAssignedValue(line[match[1]:]); value != "" && (value[0] == '"' || value[0] == '\'') {
 				if quote := value[:1]; !hasUnescapedQuote(value[1:], quote[0]) {
 					openQuote = quote
 				}
@@ -110,4 +110,15 @@ func hasUnescapedQuote(s string, quote byte) bool {
 		}
 	}
 	return false
+}
+
+// digestAssignedValue skips the key's own closing quote and the separator,
+// returning the text where the assigned value starts.
+func digestAssignedValue(afterKey string) string {
+	value := strings.TrimLeft(afterKey, "\\\"'")
+	value = strings.TrimLeft(value, " \t\r")
+	if value != "" && (value[0] == ':' || value[0] == '=') {
+		value = value[1:]
+	}
+	return strings.TrimLeft(value, " \t\r")
 }
