@@ -599,7 +599,7 @@ func TestSessionLossInterruptedStreamingActivityBeforeEdge(t *testing.T) {
 }
 
 func TestSessionLossCompletedReplyProgress(t *testing.T) {
-	for _, outcome := range []string{"completed", "split completed", "empty", "bridge error", "interrupted"} {
+	for _, outcome := range []string{"completed", "split completed", "empty final after stream", "empty", "bridge error", "interrupted"} {
 		t.Run(outcome, func(t *testing.T) {
 			f := newSessionLossFixture(t, nil)
 			before := f.s.sessionLossProgressMark(f.clawID)
@@ -607,8 +607,10 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 			f.cc.awaitingResponse = true
 			f.cc.turnInputMessageID = "input"
 			f.cc.mu.Unlock()
-			if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "Streamed work"}}); err != nil {
-				t.Fatal(err)
+			if outcome != "empty" {
+				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "Streamed work"}}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if outcome == "split completed" {
 				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: "agent_activity", Payload: map[string]string{"kind": "tool", "tool": "exec", "phase": "start"}}); err != nil {
@@ -617,7 +619,7 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 			}
 			reply := "Completed bounded step"
 			switch outcome {
-			case "empty":
+			case "empty", "empty final after stream":
 				reply = ""
 			case "bridge error":
 				reply = types.BridgeErrorPrefix + " failed"
@@ -638,7 +640,9 @@ func TestSessionLossCompletedReplyProgress(t *testing.T) {
 				return f.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content='Next turn sentinel'`, f.clawID).Scan(&n) == nil && n == 1
 			}, "terminal message processed")
 			changed := f.s.sessionLossProgressMark(f.clawID) != before
-			if want := outcome == "completed" || outcome == "split completed"; changed != want {
+			// The final message event sometimes arrives empty after a streamed
+			// reply; the streamed body is still a completed turn.
+			if want := outcome == "completed" || outcome == "split completed" || outcome == "empty final after stream"; changed != want {
 				t.Fatalf("progress changed=%v for %s", changed, outcome)
 			}
 		})

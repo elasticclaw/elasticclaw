@@ -3443,10 +3443,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			cc.finishTurnLocked()
 			cc.forcedFinishCount = 0
 			cc.mu.Unlock()
-			if completedNormally {
-				s.recordSessionLossCompletedTurn(clawID, hm.Content)
-			}
-			s.deleteStaleWatchdogNags(clawID)
 			// Prefer the streamed buffer for the turn body: the final message
 			// event sometimes arrives empty while persistContent holds the
 			// full streamed response (including [DONE] and PR URLs).
@@ -3454,6 +3450,16 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(turnContent) == "" {
 				turnContent = hm.Content
 			}
+			if completedNormally {
+				// An error reply still ends the turn with no progress; only fall
+				// back to the streamed body when the final event is empty.
+				progressContent := hm.Content
+				if strings.TrimSpace(progressContent) == "" {
+					progressContent = turnContent
+				}
+				s.recordSessionLossCompletedTurn(clawID, progressContent)
+			}
+			s.deleteStaleWatchdogNags(clawID)
 			// Drop empty messages — never store or broadcast
 			if strings.TrimSpace(turnContent) == "" {
 				// Clear typing indicator first — always clear even if no queued messages
