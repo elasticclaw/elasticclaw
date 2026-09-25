@@ -1,6 +1,11 @@
 package cliversion
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"testing"
+)
 
 func TestPinnedOpenClawVersions(t *testing.T) {
 	if got, want := OpenClawVersion, "2026.9.4"; got != want {
@@ -29,6 +34,23 @@ func TestPinnedCodexPluginVersion(t *testing.T) {
 func TestPinnedGrokCLIVersion(t *testing.T) {
 	if GrokCLIVersion != "0.2.103" {
 		t.Fatalf("GrokCLIVersion = %q, want 0.2.103", GrokCLIVersion)
+	}
+}
+
+func TestAgentDockerfilePinMatchesOpenClawVersion(t *testing.T) {
+	// docker/agent.Dockerfile pre-installs OpenClaw with a hardcoded npm pin
+	// ("Keep in sync with pkg/cliversion OpenClawVersion"). Enforce that sync
+	// so the image cannot silently drift from the version bootstrap verifies.
+	data, err := os.ReadFile(filepath.Join("..", "..", "docker", "agent.Dockerfile"))
+	if err != nil {
+		t.Fatalf("read agent.Dockerfile: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^RUN npm install -g openclaw@(\S+)`).FindSubmatch(data)
+	if m == nil {
+		t.Fatal("agent.Dockerfile: no `npm install -g openclaw@<version>` pin found")
+	}
+	if got := string(m[1]); got != OpenClawVersion {
+		t.Fatalf("agent.Dockerfile pins openclaw@%s, want OpenClawVersion %s", got, OpenClawVersion)
 	}
 }
 

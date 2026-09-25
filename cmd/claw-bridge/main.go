@@ -4387,7 +4387,7 @@ func runBootstrap() error {
 
 	// Step 9: Wait for the gateway state database (device identity readiness)
 	if err := waitForGatewayStateDB(); err != nil {
-		return fmt.Errorf("waitForDeviceJSON: %w", err)
+		return fmt.Errorf("waitForGatewayStateDB: %w", err)
 	}
 
 	// Step 10: finish Docker (Nix finisher was started early so daemon is ready

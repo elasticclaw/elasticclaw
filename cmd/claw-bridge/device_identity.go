@@ -74,7 +74,10 @@ func loadOrCreateDeviceIdentity(ctx context.Context) (*deviceIdentity, error) {
 	if err != nil {
 		return nil, err
 	}
-	dbPath := filepath.Join(root, "state", "openclaw.sqlite")
+	dbPath, err := openClawStateDBPath()
+	if err != nil {
+		return nil, err
+	}
 	// A retired 2026.7.x identity file makes upstream clients refuse to start;
 	// match that behavior instead of silently forking identities. Upstream's
 	// assertNoPendingLegacyIdentity resolves identity/device.json from the SAME
