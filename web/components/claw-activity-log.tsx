@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { AlertCircle, ChevronDown, Loader2 } from "lucide-react"
 import { ApiError, fetchActivityMessages } from "@/lib/api"
 import type { AgentActivity, ApiMessage, WorkflowEffectEvent } from "@/lib/types"
@@ -33,12 +33,18 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
     } : null)
   }, [fetcher, clawId])
 
+  // Generation token for the active fetcher: bumped whenever the fetcher
+  // changes (or the component unmounts) so an in-flight older-page response
+  // from a previous fetcher cannot merge into the new target's messages.
+  const fetcherGeneration = useRef(0)
+
   useEffect(() => {
     if (!activeFetcher) return
     let cancelled = false
     queueMicrotask(() => {
       if (cancelled) return
       setLoading(true)
+      setLoadingOlder(false)
       setMessages([])
       setAccessDenied(false)
       setError(null)
@@ -55,27 +61,35 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
         })
         .finally(() => { if (!cancelled) setLoading(false) })
     })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      fetcherGeneration.current += 1
+    }
   }, [activeFetcher])
 
   const loadOlder = async () => {
     if (!activeFetcher) return
     const oldest = messages[0]
     if (!oldest?.created_at || loadingOlder) return
+    const generation = fetcherGeneration.current
     setLoadingOlder(true)
     setError(null)
     try {
       const page = await activeFetcher.fetchOlder(oldest.created_at, oldest.id)
+      if (generation !== fetcherGeneration.current) return
       setMessages((current) => {
         const seen = new Set(current.map((message) => message.id))
         return [...page.reverse().filter((message) => !seen.has(message.id)), ...current]
       })
       setHasOlder(page.length === activityPageSize)
     } catch (err) {
+      if (generation !== fetcherGeneration.current) return
       if (err instanceof ApiError && err.status === 403) setAccessDenied(true)
       else setError(err instanceof Error ? err.message : "Unable to load older activity")
     } finally {
-      setLoadingOlder(false)
+      // A stale response leaves the spinner to the next fetcher's effect
+      // reset rather than clearing state it no longer owns.
+      if (generation === fetcherGeneration.current) setLoadingOlder(false)
     }
   }
 
