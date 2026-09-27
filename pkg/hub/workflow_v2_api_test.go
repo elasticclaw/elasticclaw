@@ -632,6 +632,110 @@ func TestWorkflowV2AttemptLogsAreScopedToTheAttemptSession(t *testing.T) {
 	}
 }
 
+// An effect attempt that fails before task materialization never gets a
+// materialize-time attempt stamp, so attempt views used to drop it entirely.
+// The claim-time attempt stamp must attribute it to the claiming attempt.
+func TestWorkflowV2AttemptLogsIncludePreMaterializationFailures(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	store := workflowv2.NewStore(db)
+
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            "run-premat-fail",
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2ExecAPIWorkspace),
+		WorkflowYAML:  []byte(workflowV2ExecAPIWorkflow),
+		InitialClawID: "claw-premat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestClaw(t, db, "claw-premat")
+
+	// Claim the exec effect, then fail it the way executeWorkflowV2Effect does
+	// when materialization errors: CompleteEffect with a permanent failure.
+	claim, err := store.ClaimEffect(context.Background(), "premat-worker", 5*time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	if err := store.CompleteEffect(context.Background(), workflowv2.CompleteEffectRequest{
+		EffectID: claim.Effect.ID, AttemptID: claim.AttemptID, Worker: "premat-worker",
+		Status: workflowv2.EffectPermanentFailed, Error: "run has no active attempt",
+	}); err != nil {
+		t.Fatalf("complete effect: %v", err)
+	}
+
+	// The claim must have stamped the run attempt on the effect attempt row.
+	var stamped string
+	if err := db.QueryRow(`SELECT attempt_id FROM workflow_v2_effect_attempts WHERE id=?`,
+		claim.AttemptID).Scan(&stamped); err != nil {
+		t.Fatal(err)
+	}
+	if stamped != run.CurrentAttemptID {
+		t.Fatalf("effect attempt attempt_id = %q, want claiming attempt %q", stamped, run.CurrentAttemptID)
+	}
+
+	fetchLogs := func(path string) []types.HubMessage {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body = %s", path, rr.Code, rr.Body.String())
+		}
+		var messages []types.HubMessage
+		if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
+			t.Fatal(err)
+		}
+		return messages
+	}
+
+	attemptLogs := fetchLogs("/api/v2/workflow-runs/run-premat-fail/attempts/" + run.CurrentAttemptID + "/logs")
+	var started, finished int
+	var failureSeen string
+	for _, m := range attemptLogs {
+		if m.Role != "effect" {
+			continue
+		}
+		event, ok := types.ParseWorkflowEffectFormat(m.Format)
+		if !ok || event.Kind != "exec.run" {
+			continue
+		}
+		switch event.Phase {
+		case "started":
+			started++
+		case "finished":
+			finished++
+			if event.Status == string(workflowv2.EffectPermanentFailed) {
+				failureSeen = m.Content
+			}
+		}
+	}
+	if started != 1 {
+		t.Fatalf("attempt view exec.run started = %d, want 1", started)
+	}
+	if finished != 1 {
+		t.Fatalf("attempt view exec.run finished = %d, want 1 (pre-materialization failure)", finished)
+	}
+	if !strings.Contains(failureSeen, "run has no active attempt") {
+		t.Fatalf("attempt view failure line = %q, want the completion error", failureSeen)
+	}
+
+	// A different attempt's view must not claim the failure.
+	if _, err := db.Exec(`INSERT INTO workflow_v2_attempts(
+		id,run_id,claw_id,number,status,started_at,heartbeat_at,finished_at,reason)
+		VALUES(?,?,?,2,'active',?,?,0,'')`,
+		"attempt-2-premat", run.ID, "claw-premat", time.Now().UTC().UnixMilli(), time.Now().UTC().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	other := fetchLogs("/api/v2/workflow-runs/run-premat-fail/attempts/attempt-2-premat/logs")
+	for _, m := range other {
+		if m.Role == "effect" {
+			t.Fatalf("unrelated attempt view contains effect line %q", m.Content)
+		}
+	}
+}
+
 func TestWorkflowV2AttemptLogsScopeActivityForReusedClaw(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	store := workflowv2.NewStore(db)
