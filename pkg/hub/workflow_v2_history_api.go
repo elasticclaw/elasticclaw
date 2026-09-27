@@ -538,9 +538,10 @@ func (s *Server) runAttemptClaws(ctx context.Context, runID string) ([]string, e
 // finish with its receipt (exec.run stdout/stderr, exit code, dependency update
 // results) embedded as a structured WorkflowEffectEvent. Attempt views (non-
 // empty attemptID) keep only lines from effect attempts exactly attributed to
-// that run attempt; unattributable lines (planned effects, claimed but never
-// materialized attempts) stay visible in the run-level view. Lines outside the
-// pagination cursor are skipped.
+// that run attempt — stamped at claim time, so failures before task
+// materialization are attributed too; unattributable lines (planned effects,
+// pre-migration rows with an empty attempt_id) stay visible in the run-level
+// view. Lines outside the pagination cursor are skipped.
 func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.HubMessage,
 	runID, clawID, tenantID, attemptID string, cursor logCursor) ([]types.HubMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
