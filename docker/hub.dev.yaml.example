@@ -48,7 +48,7 @@ llm_keys:
   #
   # Other OpenAI-compatible providers remain supported, for example:
   # groq/llama-3.3-70b-versatile, deepseek/deepseek-chat, or
-  # fireworks/accounts/fireworks/models/kimi-k2p6.
+  # fireworks/accounts/fireworks/models/glm-5p3.
 
 providers:
   docker:
