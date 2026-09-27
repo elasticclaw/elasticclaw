@@ -27,7 +27,7 @@ import (
 const (
 	userToken      = "e2e-user-token"
 	agentToken     = "e2e-agent-token"
-	defaultModel   = "fireworks/accounts/fireworks/models/kimi-k2p6"
+	defaultModel   = "fireworks/accounts/fireworks/models/glm-5p3"
 	defaultFixture = "elasticclaw/e2e-fixtures"
 	daytonaPrefix  = "ec-e2e"
 	cmxPrefix      = "ec-e2e-cmx"
