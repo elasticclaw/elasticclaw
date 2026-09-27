@@ -1472,6 +1472,76 @@ func TestMessageActivityEndpointCanReturnNewestActivities(t *testing.T) {
 	}
 }
 
+func TestMessageActivityCompoundCursorSurvivesTieGroups(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	// Three rows share one timestamp; with limit=2 the page boundary lands
+	// inside the tie group. A timestamp-only exclusive cursor would skip the
+	// group's remaining row permanently.
+	rows := []struct {
+		id string
+		at time.Time
+	}{
+		{"old-1", base.Add(time.Second)},
+		{"old-2", base.Add(2 * time.Second)},
+		{"tie-a", base.Add(3 * time.Second)},
+		{"tie-b", base.Add(3 * time.Second)},
+		{"tie-c", base.Add(3 * time.Second)},
+	}
+	for _, row := range rows {
+		if _, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at) VALUES(?,?,?,?,?,?,?)`,
+			row.id, "claw-1", "test-tenant-id", "activity", "tool", `activity:{"kind":"tool"}`, row.at,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fetch := func(query string) []types.HubMessage {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-1/activity?limit=2&order=desc"+query, nil)
+		req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+		rec := httptest.NewRecorder()
+		s.handleMessages(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var msgs []types.HubMessage
+		if err := json.NewDecoder(rec.Body).Decode(&msgs); err != nil {
+			t.Fatal(err)
+		}
+		return msgs
+	}
+
+	// Page 1: the two newest rows — the tie group's top two by (created_at, id).
+	page1 := fetch("")
+	if len(page1) != 2 || page1[0].ID != "tie-c" || page1[1].ID != "tie-b" {
+		t.Fatalf("page 1 = %#v, want [tie-c tie-b]", page1)
+	}
+
+	// Page 2 with the compound cursor: the boundary lands inside the tie group
+	// but must not skip tie-a.
+	oldest := page1[len(page1)-1]
+	page2 := fetch("&before=" + url.QueryEscape(oldest.CreatedAt.Format(time.RFC3339Nano)) + "&before_id=" + url.QueryEscape(oldest.ID))
+	if len(page2) != 2 || page2[0].ID != "tie-a" || page2[1].ID != "old-2" {
+		t.Fatalf("page 2 = %#v, want [tie-a old-2] (tie-group remainder must not be skipped)", page2)
+	}
+
+	// Page 3: the rest of the timeline.
+	oldest = page2[len(page2)-1]
+	page3 := fetch("&before=" + url.QueryEscape(oldest.CreatedAt.Format(time.RFC3339Nano)) + "&before_id=" + url.QueryEscape(oldest.ID))
+	if len(page3) != 1 || page3[0].ID != "old-1" {
+		t.Fatalf("page 3 = %#v, want [old-1]", page3)
+	}
+}
+
 func TestMessageTimelineIncludesActivityBeforeFirstConversationMessage(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	_, err := db.Exec(

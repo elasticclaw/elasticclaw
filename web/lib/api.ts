@@ -154,11 +154,12 @@ export async function fetchMessageTimeline(clawId: string, opts?: { before?: str
   return apiFetch<ApiMessage[]>(`/api/messages/${clawId}/timeline${qs}`)
 }
 
-export async function fetchActivityMessages(clawId: string, opts: { from?: string; to?: string; before?: string; limit?: number; order?: "asc" | "desc" }): Promise<ApiMessage[]> {
+export async function fetchActivityMessages(clawId: string, opts: { from?: string; to?: string; before?: string; beforeId?: string; limit?: number; order?: "asc" | "desc" }): Promise<ApiMessage[]> {
   const params = new URLSearchParams()
   if (opts.from) params.set('from', opts.from)
   if (opts.to) params.set('to', opts.to)
   if (opts.before) params.set('before', opts.before)
+  if (opts.beforeId) params.set('before_id', opts.beforeId)
   if (opts.limit) params.set('limit', String(opts.limit))
   if (opts.order) params.set('order', opts.order)
   const qs = params.toString() ? '?' + params.toString() : ''
@@ -403,15 +404,17 @@ export async function fetchV2WorkflowRunAttempts(runId: string): Promise<{ attem
   return apiFetch<{ attempts: WorkflowV2RunAttempt[]; count: number }>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts`)
 }
 
-export async function fetchV2WorkflowRunLogs(runId: string, before?: string): Promise<ApiMessage[]> {
+export async function fetchV2WorkflowRunLogs(runId: string, before?: string, beforeId?: string): Promise<ApiMessage[]> {
   const qs = new URLSearchParams({ limit: "100", order: "desc" })
   if (before) qs.set("before", before)
+  if (beforeId) qs.set("before_id", beforeId)
   return apiFetch<ApiMessage[]>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/logs?${qs.toString()}`)
 }
 
-export async function fetchV2WorkflowAttemptLogs(runId: string, attemptId: string, before?: string): Promise<ApiMessage[]> {
+export async function fetchV2WorkflowAttemptLogs(runId: string, attemptId: string, before?: string, beforeId?: string): Promise<ApiMessage[]> {
   const qs = new URLSearchParams({ limit: "100", order: "desc" })
   if (before) qs.set("before", before)
+  if (beforeId) qs.set("before_id", beforeId)
   return apiFetch<ApiMessage[]>(
     `/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts/${encodeURIComponent(attemptId)}/logs?${qs.toString()}`
   )
