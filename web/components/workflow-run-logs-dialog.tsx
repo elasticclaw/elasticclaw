@@ -24,7 +24,7 @@ export function WorkflowRunLogsDialog({ target }: { target: WorkflowRunLogTarget
       if (!clawId) return null
       return {
         fetchInitial: () => fetchActivityMessages(clawId, { limit: 500, order: "desc" }),
-        fetchOlder: (before: string) => fetchActivityMessages(clawId, { before, limit: 100, order: "desc" }),
+        fetchOlder: (before: string, beforeId?: string) => fetchActivityMessages(clawId, { before, beforeId, limit: 100, order: "desc" }),
       }
     }
     const runId = target.run.run_id

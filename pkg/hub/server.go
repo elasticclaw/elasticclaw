@@ -2547,6 +2547,7 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	before := r.URL.Query().Get("before")
+	beforeID := strings.TrimSpace(r.URL.Query().Get("before_id"))
 	limit := parsePositiveLimit(r, 200, 500)
 	order := strings.ToLower(r.URL.Query().Get("order"))
 	if order != "desc" {
@@ -2574,17 +2575,27 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 		}
 	}
 	if before != "" {
-		query += ` AND created_at < ?`
+		var beforeVal interface{}
 		if parsed := parseTimeCursor(before); parsed != nil {
-			args = append(args, *parsed)
+			beforeVal = *parsed
 		} else {
-			args = append(args, before)
+			beforeVal = before
+		}
+		if beforeID != "" {
+			// Compound cursor: (created_at, id) is a total order, so a page
+			// boundary inside a same-timestamp group does not skip the
+			// group's remaining rows on the next page.
+			query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+			args = append(args, beforeVal, beforeVal, beforeID)
+		} else {
+			query += ` AND created_at < ?`
+			args = append(args, beforeVal)
 		}
 	}
 	if order == "desc" {
-		query += ` ORDER BY created_at DESC LIMIT ?`
+		query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	} else {
-		query += ` ORDER BY created_at ASC LIMIT ?`
+		query += ` ORDER BY created_at ASC, id ASC LIMIT ?`
 	}
 	args = append(args, limit)
 
