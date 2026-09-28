@@ -111,8 +111,8 @@ func resolveActiveProvider(keys []*types.LLMKeyConfig, selectedKeyName string) s
 }
 
 // buildOpenClawProviderConfig returns a python snippet that patches
-// ~/.openclaw/openclaw.json with the agent default, gateway settings, and any
-// auth-profile compatibility writes needed after openclaw onboard.
+// ~/.openclaw/openclaw.json with the agent default and gateway settings.
+// Credentials are synced separately; see buildOpenClawAPIKeyAuthSyncShell.
 // selectedKeyName is used to pick the active key (falls back to default, then first).
 func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 	// Determine active key
@@ -131,44 +131,6 @@ func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName str
 	openAISelectedLiteral := "False"
 	if openAISelected {
 		openAISelectedLiteral = "True"
-	}
-
-	anthropicEnvVar := ""
-	if activeKey != nil && activeKey.Provider == "anthropic" {
-		anthropicEnvVar = activeKey.EnvVarName()
-	} else {
-		for _, k := range keys {
-			if k.Provider == "anthropic" {
-				anthropicEnvVar = k.EnvVarName()
-				break
-			}
-		}
-	}
-
-	anthropicPatch := ""
-	if anthropicEnvVar != "" {
-		anthropicPatch = fmt.Sprintf(`anthropic_key = os.environ.get('%s', '')
-if anthropic_key:
-    auth_path = os.path.expanduser('~/.openclaw/agents/main/agent/auth-profiles.json')
-    os.makedirs(os.path.dirname(auth_path), exist_ok=True)
-    try:
-        with open(auth_path) as f:
-            auth = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        auth = {}
-    profiles = auth.setdefault('profiles', {})
-    order = auth.setdefault('order', {})
-    profiles['anthropic:default'] = {
-        'provider': 'anthropic',
-        'mode': 'api_key',
-        'type': 'api_key',
-        'key': anthropic_key
-    }
-    anthropic_order = [p for p in order.get('anthropic', []) if p != 'anthropic:default']
-    order['anthropic'] = ['anthropic:default'] + anthropic_order
-    with open(auth_path, 'w') as f:
-        json.dump(auth, f, indent=2)
-`, anthropicEnvVar)
 	}
 
 	return fmt.Sprintf(`python3 << 'PYEOF'
@@ -296,7 +258,7 @@ if model.startswith('fireworks/'):
             'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
         }],
     }
-%sconfig.setdefault('gateway', {})['bind'] = 'loopback'
+config.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
 if gw_password:
@@ -305,13 +267,14 @@ if gw_password:
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
-PYEOF`, grokOAuthLiteral, codexSelectedLiteral, codexSelectedLiteral, openAISelectedLiteral, anthropicPatch)
+PYEOF`, grokOAuthLiteral, codexSelectedLiteral, codexSelectedLiteral, openAISelectedLiteral)
 }
 
 // buildOpenClawAPIKeyAuthSyncShell returns a shell snippet that persists
-// direct API-key auth into OpenClaw's current auth store. OpenClaw 2026.7.1-2
-// resolves agent auth from openclaw-agent.sqlite, so writing only the legacy
-// auth-profiles.json file is not enough for embedded agents.
+// direct API-key auth into OpenClaw's current auth store. OpenClaw 2026.9.4
+// refuses every auth read ("requires legacy credential migration") while an
+// Anthropic profile remains in the legacy auth-profiles.json, so the snippet
+// first strips those profiles, e.g. from sandboxes restored from a checkpoint.
 func buildOpenClawAPIKeyAuthSyncShell(keys []*types.LLMKeyConfig, selectedKeyName string) string {
 	activeKey := resolveActiveKey(keys, selectedKeyName)
 	if activeKey == nil || activeKey.Provider != "anthropic" || !llmKeyHasRequiredAPIKey(activeKey) {
@@ -319,6 +282,25 @@ func buildOpenClawAPIKeyAuthSyncShell(keys []*types.LLMKeyConfig, selectedKeyNam
 	}
 	envVar := activeKey.EnvVarName()
 	return fmt.Sprintf(`if [ -n "${%s:-}" ]; then
+  python3 - <<'PYEOF'
+import json, os
+path = os.path.expanduser('~/.openclaw/agents/main/agent/auth-profiles.json')
+try:
+    with open(path) as f:
+        auth = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    auth = None
+if isinstance(auth, dict):
+    profiles = auth.get('profiles') or {}
+    for name in [n for n, p in profiles.items() if isinstance(p, dict) and p.get('provider') == 'anthropic']:
+        profiles.pop(name)
+    (auth.get('order') or {}).pop('anthropic', None)
+    if profiles:
+        with open(path, 'w') as f:
+            json.dump(auth, f, indent=2)
+    else:
+        os.remove(path)
+PYEOF
   printf '%%s\n' "${%s}" | openclaw models auth paste-api-key --provider anthropic --profile-id anthropic:default
 fi`, envVar, envVar)
 }

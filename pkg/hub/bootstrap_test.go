@@ -552,6 +552,78 @@ func TestBuildOpenClawAPIKeyAuthSyncShellUsesAnthropicPasteAPIKey(t *testing.T) 
 	assertNotContains(t, shell, "sk-ant-test", "does not inline the secret value")
 }
 
+func TestBuildOpenClawAPIKeyAuthSyncShellStripsLegacyAnthropicProfiles(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+	shell := buildOpenClawAPIKeyAuthSyncShell(types.LLMKeysList{
+		{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test", Default: true},
+	}, "anthropic-main")
+
+	run := func(t *testing.T, legacy map[string]any) string {
+		t.Helper()
+		home := t.TempDir()
+		bin := filepath.Join(home, "bin")
+		authPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
+		for _, dir := range []string{bin, filepath.Dir(authPath)} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatalf("mkdir %s: %v", dir, err)
+			}
+		}
+		// Stand-in for the OpenClaw CLI: records that the key was pasted.
+		fake := "#!/bin/sh\ncat > \"$HOME/pasted\"\n"
+		if err := os.WriteFile(filepath.Join(bin, "openclaw"), []byte(fake), 0o755); err != nil {
+			t.Fatalf("write fake openclaw: %v", err)
+		}
+		data, _ := json.Marshal(legacy)
+		if err := os.WriteFile(authPath, data, 0o600); err != nil {
+			t.Fatalf("write legacy auth: %v", err)
+		}
+		cmd := exec.Command("bash", "-c", shell)
+		cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+":"+os.Getenv("PATH"), "ANTHROPIC_API_KEY=sk-ant-test")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("run auth sync shell: %v\n%s", err, out)
+		}
+		if pasted, _ := os.ReadFile(filepath.Join(home, "pasted")); strings.TrimSpace(string(pasted)) != "sk-ant-test" {
+			t.Fatalf("key was not pasted into OpenClaw: %q", pasted)
+		}
+		remaining, err := os.ReadFile(authPath)
+		if os.IsNotExist(err) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("read legacy auth: %v", err)
+		}
+		return string(remaining)
+	}
+
+	anthropic := map[string]any{"provider": "anthropic", "type": "api_key", "key": "sk-ant-old"}
+	t.Run("removes file when only Anthropic remains", func(t *testing.T) {
+		got := run(t, map[string]any{
+			"profiles": map[string]any{"anthropic:default": anthropic},
+			"order":    map[string]any{"anthropic": []string{"anthropic:default"}},
+		})
+		if got != "" {
+			t.Fatalf("legacy auth file kept: %s", got)
+		}
+	})
+	t.Run("keeps other providers", func(t *testing.T) {
+		got := run(t, map[string]any{
+			"profiles": map[string]any{
+				"anthropic:default": anthropic,
+				"xai:default":       map[string]any{"provider": "xai", "type": "oauth"},
+			},
+			"order": map[string]any{"anthropic": []string{"anthropic:default"}},
+		})
+		if strings.Contains(got, "anthropic") || !strings.Contains(got, "xai:default") {
+			t.Fatalf("unexpected legacy auth after sync: %s", got)
+		}
+	})
+}
+
 func TestBuildOpenClawAPIKeyAuthSyncShellSkipsNonAnthropicKeys(t *testing.T) {
 	shell := buildOpenClawAPIKeyAuthSyncShell(types.LLMKeysList{
 		{Name: "openai-main", Provider: "openai", APIKey: "sk-openai-test", Default: true},
@@ -1162,9 +1234,7 @@ func TestBuildOpenClawProviderConfig_DoesNotOverrideAnthropicModels(t *testing.T
 	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
 
 	assertContains(t, snippet, "agent_defaults['model'] = model", "still sets default model")
-	assertContains(t, snippet, "anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')", "reads Anthropic key env var")
-	assertContains(t, snippet, "auth_path = os.path.expanduser('~/.openclaw/agents/main/agent/auth-profiles.json')", "writes Anthropic agent auth profile")
-	assertContains(t, snippet, "profiles['anthropic:default']", "adds Anthropic default auth profile")
+	assertNotContains(t, snippet, "auth-profiles.json", "leaves credentials to the API key auth sync")
 	assertContains(t, snippet, "config['gateway']['remote'] = {'password': gw_password}", "sets gateway remote password for local clients")
 	assertNotContains(t, snippet, "'anthropic': {", "does not replace OpenClaw's bundled Anthropic provider config")
 	assertNotContains(t, snippet, "config['models'] =", "does not replace the models section")
@@ -1187,7 +1257,7 @@ func TestBuildOpenClawProviderConfig_ConfiguresAnthropicWithoutProviderCatalog(t
 
 	snippet := buildOpenClawProviderConfig(keys, "anthropic-main")
 
-	assertContains(t, snippet, "profiles['anthropic:default']", "configures Anthropic auth")
+	assertNotContains(t, snippet, "auth-profiles.json", "does not write legacy Anthropic auth")
 	assertNotContains(t, snippet, "providers.update({", "does not write legacy provider config")
 	assertNotContains(t, snippet, "'groq': {", "does not add custom provider")
 	assertNotContains(t, snippet, "'anthropic': {", "does not add Anthropic custom provider")
@@ -1313,7 +1383,7 @@ func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alia
 	}
 }
 
-func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileAndRemovesLegacyProviderCatalog(t *testing.T) {
+func TestBuildOpenClawProviderConfig_SkipsLegacyAuthProfileAndRemovesLegacyProviderCatalog(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not in PATH")
 	}
@@ -1380,25 +1450,11 @@ func TestBuildOpenClawProviderConfig_WritesAnthropicAuthProfileAndRemovesLegacyP
 		t.Fatalf("gateway remote password not set: %#v", remote)
 	}
 
+	// OpenClaw 2026.9.4 refuses every auth read while an Anthropic profile
+	// sits in this legacy file; the key lives in its SQLite store instead.
 	authPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
-	authData, err := os.ReadFile(authPath)
-	if err != nil {
-		t.Fatalf("read auth profiles: %v", err)
-	}
-	var auth map[string]interface{}
-	if err := json.Unmarshal(authData, &auth); err != nil {
-		t.Fatalf("parse auth profiles: %v", err)
-	}
-	profiles, ok := auth["profiles"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("auth profiles missing or wrong type: %#v", auth["profiles"])
-	}
-	profile, ok := profiles["anthropic:default"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("anthropic default profile missing or wrong type: %#v", profiles["anthropic:default"])
-	}
-	if profile["key"] != "sk-ant-test" || profile["provider"] != "anthropic" {
-		t.Fatalf("bad anthropic profile: %#v", profile)
+	if _, err := os.Stat(authPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy auth profiles file was written (stat err: %v)", err)
 	}
 }
 
