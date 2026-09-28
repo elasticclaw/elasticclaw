@@ -26,7 +26,10 @@ type livenessSettings struct {
 	prConditionsMaxWait                                  time.Duration
 	idleResumeEnabled                                    bool
 	idleResumeAfter                                      time.Duration
+	sessionLossMax                                       int
 }
+
+const defaultSessionLossMax = 3
 
 func (s *Server) livenessEnabled() bool {
 	s.mu.RLock()
@@ -52,6 +55,7 @@ func (s *Server) livenessSettings() livenessSettings {
 		prConditionsMaxWait:            2 * time.Hour,
 		idleResumeEnabled:              true,
 		idleResumeAfter:                defaultIdleResumeAfter,
+		sessionLossMax:                 defaultSessionLossMax,
 	}
 	s.mu.RLock()
 	l := livenessConfig(s.hubCfg)
@@ -96,6 +100,13 @@ func (s *Server) livenessSettings() livenessSettings {
 			log.Printf("[reaper] invalid gateway_unhealthy_checks %d; using %d", *l.GatewayUnhealthyChecks, cfg.gatewayUnhealthyMax)
 		} else {
 			cfg.gatewayUnhealthyMax = *l.GatewayUnhealthyChecks
+		}
+	}
+	if l.SessionLossMaxConsecutive != nil {
+		if *l.SessionLossMaxConsecutive < 0 {
+			log.Printf("[reaper] invalid session_loss_max_consecutive %d; using %d", *l.SessionLossMaxConsecutive, defaultSessionLossMax)
+		} else {
+			cfg.sessionLossMax = *l.SessionLossMaxConsecutive
 		}
 	}
 	// Parsed separately from the others: zero is a meaningful value here (it

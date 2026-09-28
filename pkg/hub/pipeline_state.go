@@ -28,7 +28,7 @@ func (s *Server) claimPipelineStageTransition(clawID, stageID string) bool {
 	// idle_resume_at is deliberately left alone — it is the once-per-stretch
 	// dedupe latch, not budget, and a stage whose on_enter runs nothing that
 	// finishes a turn would otherwise have the SAME idle stretch poked twice.
-	res, err := s.db.Exec(`UPDATE claws SET pipeline_stage=?, stage_entered_at=?, idle_resume_count=0 WHERE id=? AND pipeline_stage<>?`, stageID, time.Now().UnixMilli(), clawID, stageID)
+	res, err := s.db.Exec(`UPDATE claws SET pipeline_stage=?, stage_entered_at=?, idle_resume_count=0, session_loss_streak=0, session_loss_progress_mark='' WHERE id=? AND pipeline_stage<>?`, stageID, time.Now().UnixMilli(), clawID, stageID)
 	if err != nil {
 		log.Printf("[pipeline] failed to set stage %q for claw %s: %v", stageID, clawID[:8], err)
 		return false

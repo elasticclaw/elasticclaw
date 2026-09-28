@@ -620,7 +620,7 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 		}
 	}()
 	prompt := workflowV2TaskPrompt(task)
-	response, sendErr := gateway.SendMessage(taskCtx, prompt, func(string) {}, func(agentActivity) {})
+	response, sendErr := gateway.SendMessage(taskCtx, prompt, assignmentMessageID, func(string) {}, func(agentActivity) {})
 	close(heartbeatDone)
 	<-heartbeatStopped
 	if sendErr != nil {

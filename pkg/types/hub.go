@@ -74,6 +74,37 @@ type FileReadResp struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// SessionRecoveryEdge is the optional payload of session_rotated and
+// session_preserved edges. Old bridges may send only a session_key or no payload;
+// old hubs ignore the added fields.
+type SessionRecoveryEdge struct {
+	InterruptedMessageID string         `json:"interrupted_message_id,omitempty"`
+	SessionKey           string         `json:"session_key,omitempty"`
+	PreviousSessionKey   string         `json:"previous_session_key,omitempty"`
+	Reason               string         `json:"reason,omitempty"`
+	TranscriptPath       string         `json:"transcript_path,omitempty"`
+	Digest               *SessionDigest `json:"digest,omitempty"`
+}
+
+type SessionDigest struct {
+	AssistantMessages []string                `json:"assistant_messages,omitempty"`
+	ToolCalls         []SessionDigestToolCall `json:"tool_calls,omitempty"`
+	Truncated         bool                    `json:"truncated,omitempty"`
+}
+
+type SessionDigestToolCall struct {
+	Tool string `json:"tool"`
+	Args string `json:"args,omitempty"`
+}
+
+const (
+	SessionLossReasonTurnTimeout      = "turn_timeout"
+	SessionLossReasonLockConflict     = "lock_conflict"
+	SessionLossReasonGatewayReconnect = "gateway_reconnect"
+	SessionLossReasonProviderError    = "provider_error"
+	SessionLossReasonUnknown          = "unknown"
+)
+
 // RegisterPayload is sent by a claw on connect.
 type RegisterPayload struct {
 	ClawID         string   `json:"claw_id"`
