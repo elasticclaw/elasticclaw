@@ -303,8 +303,8 @@ func TestBootstrapScript_OnboardFlagsShellQuoted(t *testing.T) {
 	p.OnboardFlags = buildOnboardFlags(nil, "", p.DefaultModel)
 	script := GenerateReplicatedBootstrapScript(p)
 
-	assertContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS='--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"'`, "onboard flags shell quoted")
-	assertNotContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS="--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}""`, "onboard flags must not use nested double quotes")
+	assertContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS='--auth-choice apiKey --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"'`, "onboard flags shell quoted")
+	assertNotContains(t, script, `export ELASTICCLAW_ONBOARD_FLAGS="--auth-choice apiKey --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}""`, "onboard flags must not use nested double quotes")
 }
 
 func TestBootstrapScript_GatewayPasswordInBridgeEnv(t *testing.T) {
@@ -486,7 +486,7 @@ func TestBuildOnboardFlagsSkipsBlankExternalKeys(t *testing.T) {
 
 	flags := buildOnboardFlags(keys, "", "")
 
-	assertContains(t, flags, "--auth-choice anthropic-api-key", "uses usable external key")
+	assertContains(t, flags, "--auth-choice apiKey", "uses usable external key")
 	assertNotContains(t, flags, "openai-api-key", "does not select blank OpenAI key")
 }
 

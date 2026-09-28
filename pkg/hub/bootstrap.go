@@ -693,16 +693,17 @@ func shellQuote(s string) string {
 }
 
 // buildOnboardFlags returns the --auth-choice flags for openclaw onboard based
-// on the active LLM key (selected > default > first).
+// on the active LLM key (selected > default > first). OpenClaw 2026.9.4
+// dropped the "anthropic-api-key" choice; Anthropic keys now use "apiKey".
 func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel string) string {
 	active := resolveActiveKey(keys, selectedKeyName)
 	if active == nil {
-		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
+		return `--auth-choice apiKey --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}
 	envVar := active.EnvVarName()
 	switch active.Provider {
 	case "anthropic":
-		return fmt.Sprintf(`--auth-choice anthropic-api-key --anthropic-api-key "${%s:-placeholder}"`, envVar)
+		return fmt.Sprintf(`--auth-choice apiKey --anthropic-api-key "${%s:-placeholder}"`, envVar)
 	case "fireworks":
 		return fmt.Sprintf(`--auth-choice fireworks-api-key --fireworks-api-key "${%s:-}"`, envVar)
 	case "openai":
@@ -734,6 +735,6 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel
 		// The config patch registers this custom provider after onboarding.
 		return `--auth-choice skip`
 	default:
-		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
+		return `--auth-choice apiKey --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}
 }
