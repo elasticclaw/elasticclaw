@@ -58,8 +58,15 @@ func dialPipeGateway(t *testing.T, handler http.Handler) *websocket.Conn {
 
 func TestGatewaySessionClearsTurnMessageIDAfterSuccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Wait for the fake gateway to return before the pipe is torn down, so its
+	// final write can't fail (and call t.Error) after the test has completed.
+	handlerDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-handlerDone
+	}()
 	conn := dialPipeGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			t.Error(err)
