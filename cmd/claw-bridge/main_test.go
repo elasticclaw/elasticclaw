@@ -1535,6 +1535,239 @@ func TestDeliverInFlightDoesNotBlockWhenTerminalResultRacesTeardown(t *testing.T
 	}
 }
 
+func TestLifecycleErrorTextAppendsLastAssistantRawError(t *testing.T) {
+	const generic = "⚠️ Agent run failed (model: anthropic/claude-sonnet-5)"
+	const raw = "Provider completed tool call with malformed JSON arguments"
+	payload := mustJSON(map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "continue"},
+			{"role": "assistant", "stopReason": "error", "errorMessage": raw},
+		},
+	})
+	if got := lastAssistantErrorMessage(payload); got != raw {
+		t.Fatalf("lastAssistantErrorMessage() = %q, want %q", got, raw)
+	}
+	if got := appendLifecycleErrorCause(generic, raw); got != generic+": "+raw {
+		t.Fatalf("appendLifecycleErrorCause() = %q", got)
+	}
+	if got := appendLifecycleErrorCause(generic+": "+raw, raw); got != generic+": "+raw {
+		t.Fatalf("duplicate cause was appended: %q", got)
+	}
+	if got := appendLifecycleErrorCause(generic, ""); got != generic {
+		t.Fatalf("generic error changed without a raw cause: %q", got)
+	}
+
+	// Never reuse a stale earlier failure when the latest assistant message
+	// completed successfully.
+	payload = mustJSON(map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{"role": "assistant", "stopReason": "error", "errorMessage": raw},
+			{"role": "assistant", "stopReason": "stop", "content": "done"},
+		},
+	})
+	if got := lastAssistantErrorMessage(payload); got != "" {
+		t.Fatalf("stale errorMessage = %q, want empty", got)
+	}
+
+	// Nor when the current turn's failed assistant message is not in the
+	// transcript yet: an older turn's malformed-JSON cause must not turn a
+	// later auth failure into an auto-liftable one.
+	payload = mustJSON(map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{"role": "assistant", "stopReason": "error", "errorMessage": raw},
+			{"role": "user", "content": "[hub] continue"},
+		},
+	})
+	if got := lastAssistantErrorMessage(payload); got != "" {
+		t.Fatalf("errorMessage from a previous turn = %q, want empty", got)
+	}
+}
+
+// sessionsGetFailedTurnPayload mirrors OpenClaw 2026.9.4's sessions.get
+// response: raw transcript messages (projectTranscriptEntryMessage) with the
+// __openclaw metadata attached and errorMessage intact.
+func sessionsGetFailedTurnPayload(raw string) json.RawMessage {
+	return mustJSON(map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": []map[string]string{{"type": "text", "text": "continue"}},
+				"__openclaw": map[string]interface{}{"id": "e1", "seq": 1}},
+			{"role": "assistant", "content": []interface{}{}, "api": "anthropic-messages", "provider": "anthropic",
+				"model": "claude-sonnet-5", "stopReason": "error", "errorMessage": raw,
+				"__openclaw": map[string]interface{}{"id": "e2", "seq": 2}},
+		},
+	})
+}
+
+func TestGatewaySessionSurfacesLifecycleRawErrorFromSessionsGet(t *testing.T) {
+	const generic = "⚠️ Agent run failed (model: anthropic/claude-sonnet-5)"
+	const raw = "Provider completed tool call with malformed JSON arguments"
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": generic},
+		})}); err != nil {
+			t.Error(err)
+			return
+		}
+
+		// chat.history is not an option: its display projection deletes
+		// errorMessage. sessions.get returns the raw transcript message.
+		var history gwFrame
+		if err := wsjson.Read(r.Context(), conn, &history); err != nil || history.Method != "sessions.get" {
+			t.Errorf("read sessions.get: method=%q err=%v", history.Method, err)
+			return
+		}
+		var params struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(history.Params, &params); err != nil || params.Key != "session-1" {
+			t.Errorf("sessions.get params = %s (err %v), want key session-1", history.Params, err)
+		}
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: history.ID, OK: true, Payload: sessionsGetFailedTurnPayload(raw)})
+		// Keep the socket open so the read loop cannot report a disconnect first.
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue", "turn-1", nil, nil)
+	if err == nil || err.Error() != generic+": "+raw {
+		t.Fatalf("SendMessage error = %v, want combined lifecycle and raw error", err)
+	}
+}
+
+func TestGatewaySessionLifecycleErrorWinsOverDisconnectDuringCauseLookup(t *testing.T) {
+	const generic = "⚠️ Agent run failed (model: anthropic/claude-sonnet-5)"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": generic},
+		})}); err != nil {
+			t.Error(err)
+			return
+		}
+		// Drop the socket while the cause lookup is pending.
+		var history gwFrame
+		_ = wsjson.Read(r.Context(), conn, &history)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.sendMessageOnce(ctx, "session-1", "continue", nil, nil)
+	if err == nil || err.Error() != generic {
+		t.Fatalf("sendMessageOnce error = %v, want the original lifecycle error, not a gateway disconnect", err)
+	}
+}
+
+func TestLifecycleErrorAfterTurnEndedEmitsNothing(t *testing.T) {
+	var activities int
+	inf := &inFlightState{done: make(chan agentResult, 1), onActivity: func(agentActivity) { activities++ }}
+	gs := &gatewaySession{pending: make(map[string]chan gwFrame)}
+	// gs.inFlight is nil: the turn already returned (deadline or rotation).
+	gs.deliverLifecycleError(inf, "session-1", "LLM request failed: credits exhausted")
+	if activities != 0 {
+		t.Fatalf("emitted %d activities for a finished turn", activities)
+	}
+	select {
+	case result := <-inf.done:
+		t.Fatalf("delivered %v for a finished turn", result)
+	default:
+	}
+}
+
+func TestGatewaySessionCompletesSlashCommandFromFinalChatReply(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		payload := mustJSON(map[string]interface{}{
+			"runId": "command-new", "sessionKey": "session-1", "state": "final",
+			"message": map[string]interface{}{
+				"role":    "assistant",
+				"content": []map[string]string{{"type": "text", "text": "✅ New session started."}},
+			},
+		})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "chat", Payload: payload})
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	reply, err := gs.SendMessage(ctx, "/new", "turn-command", nil, nil)
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if reply != "✅ New session started." {
+		t.Fatalf("reply = %q", reply)
+	}
+}
+
 func TestSessionKeyRotationFailsInFlightTurn(t *testing.T) {
 	inf := &inFlightState{done: make(chan agentResult, 1)}
 	gs := &gatewaySession{sessionKey: "old-session", inFlight: inf}

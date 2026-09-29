@@ -112,10 +112,11 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
 	// bridge_error_pause_kind records WHY a bridge-error pause latched ('gateway' =
-	// gateway connectivity, auto-liftable on recovery; '' = needs a human) and
-	// bridge_error_auto_resumes counts those auto-lifts per unit of work. Both
-	// are referenced by the pause, resume and retry UPDATEs, so a missing column
-	// must abort startup rather than break those paths at runtime.
+	// auto-liftable after sustained health, 'provider_transient' = immediately
+	// auto-liftable malformed tool-call JSON, '' = needs a human) and
+	// bridge_error_auto_resumes counts those auto-lifts per unit of work. Both are
+	// referenced by the pause, resume and retry UPDATEs, so a missing column must
+	// abort startup rather than break those paths at runtime.
 	if err := addColumn(db, "claws", "bridge_error_pause_kind", `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}

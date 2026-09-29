@@ -46,20 +46,36 @@ const bridgeErrorPauseThreshold = 2
 // tagged bridge_error_pause_kind='gateway'. It is lifted automatically once
 // heartbeats report the gateway healthy AND ready continuously for
 // bridgeErrorRecoveryHealthyFor, counted from after the pause, at most
-// bridgeErrorAutoResumeMax times per unit of work. The counter resets only on a
-// stage transition (claimPipelineStageTransition) and a sandbox replacement
-// (resetClawForRetry). It deliberately survives a session loss, unlike
-// idle_resume_count: a gateway hang is exactly what rotates the session, so
-// resetting there would refund the budget on every flap. The cap preserves the
-// NEXT-725 guarantee: a sandbox that keeps failing still stops and then waits
-// for a human. Every other error (ENOSPC, "Agent run failed", credential or
-// handshake rejections) is never auto-lifted, and neither is a gateway pause
-// carried across a sandbox replacement (resetClawForRetry clears the kind).
+// bridgeErrorAutoResumeMax times per unit of work. NEXT-1294's narrower
+// provider_transient kind reuses the same counter and reset rules with a cap of
+// bridgeErrorProviderAutoResumeMax; sharing the counter is conservative when
+// error kinds alternate and never refunds the gateway cap. The counter resets
+// only on a stage transition (claimPipelineStageTransition) and a sandbox
+// replacement (resetClawForRetry). It deliberately survives a session loss,
+// unlike idle_resume_count: a gateway hang is exactly what rotates the session,
+// so resetting there would refund the budget on every flap. The caps preserve
+// the NEXT-725 guarantee: a sandbox that keeps failing still stops and then
+// waits for a human. Every other error (ENOSPC, other "Agent run failed"
+// causes, credential or handshake rejections) is never auto-lifted, and neither
+// is a gateway pause carried across a sandbox replacement
+// (resetClawForRetry clears the kind).
 const (
-	bridgeErrorPauseKindGateway   = "gateway"
-	bridgeErrorRecoveryHealthyFor = 3 * time.Minute
-	bridgeErrorAutoResumeMax      = 2
+	bridgeErrorPauseKindGateway           = "gateway"
+	bridgeErrorPauseKindProviderTransient = "provider_transient"
+	bridgeErrorRecoveryHealthyFor         = 3 * time.Minute
+	bridgeErrorAutoResumeMax              = 2
+	bridgeErrorProviderAutoResumeMax      = 5
 )
+
+// bridgeErrorIsProviderTransient identifies NEXT-1294's intermittent provider
+// failure. The provider completed a tool call with invalid argument JSON, so
+// OpenClaw never ran the tool and the intact session can safely continue. Keep
+// this deliberately narrow: every other "Agent run failed" cause (auth,
+// credits, schema rejection, and unknown provider failures) remains human-only
+// under the NEXT-725 guarantee.
+func bridgeErrorIsProviderTransient(errText string) bool {
+	return strings.Contains(strings.ToLower(errText), "malformed json arguments")
+}
 
 // bridgeErrorIsGatewayConnectivity matches the claw-bridge strings that mean
 // "could not talk to the local gateway" (cmd/claw-bridge/main.go). The
@@ -95,17 +111,36 @@ func (cc *clawConn) observeGatewayHealthLocked(healthyAndReady bool) {
 	}
 }
 
-// bridgeErrorLiftDue reports whether cc's pause is a gateway pause whose
-// gateway has now been healthy and ready for the whole recovery window.
-func (cc *clawConn) bridgeErrorLiftDue() bool {
+// bridgeErrorLiftKindDue reports which auto-liftable pause is ready. Gateway
+// pauses retain NEXT-1293's sustained-health requirement; NEXT-1294 provider
+// pauses are immediately ready because the gateway itself stayed healthy.
+func (cc *clawConn) bridgeErrorLiftKindDue() string {
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
-	return cc.noProgressPaused && cc.bridgeErrorPauseGateway &&
-		!cc.gatewayHealthySince.IsZero() && now().Sub(cc.gatewayHealthySince) >= bridgeErrorRecoveryHealthyFor
+	if !cc.noProgressPaused {
+		return ""
+	}
+	switch cc.bridgeErrorPauseKind {
+	case bridgeErrorPauseKindProviderTransient:
+		return bridgeErrorPauseKindProviderTransient
+	case bridgeErrorPauseKindGateway:
+		if !cc.gatewayHealthySince.IsZero() && now().Sub(cc.gatewayHealthySince) >= bridgeErrorRecoveryHealthyFor {
+			return bridgeErrorPauseKindGateway
+		}
+	}
+	return ""
+}
+
+func bridgeErrorAutoResumeLimit(kind string) int {
+	if kind == bridgeErrorPauseKindProviderTransient {
+		return bridgeErrorProviderAutoResumeMax
+	}
+	return bridgeErrorAutoResumeMax
 }
 
 // maybeLiftBridgeErrorPause runs on every bridge heartbeat (the one place that
-// already sees gateway health per connection, so no extra ticker or DB scan).
+// already sees gateway health per connection, so no extra ticker or DB scan),
+// and directly after a NEXT-1294 pause because that kind needs no health window.
 // The in-memory pre-check keeps the common case free of DB work and of
 // noProgressMu. Everything after it runs under noProgressMu, which the pause,
 // the human resume AND connection registration also hold (handleClawWS reads
@@ -113,47 +148,70 @@ func (cc *clawConn) bridgeErrorLiftDue() bool {
 // connection re-checked and cleared here is the live one: a bridge that
 // reconnects either registers before the lift (and is the connection re-checked
 // here, with its own fresh healthy window) or after it (and reads the cleared
-// row), never in between with a stale paused copy.
-func (s *Server) maybeLiftBridgeErrorPause(clawID string) {
+// row), never in between with a stale paused copy. It reports whether it
+// lifted the pause.
+func (s *Server) maybeLiftBridgeErrorPause(clawID string) bool {
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
-	if cc == nil || !cc.bridgeErrorLiftDue() {
-		return
+	if cc == nil {
+		return false
+	}
+	kind := cc.bridgeErrorLiftKindDue()
+	if kind == "" {
+		return false
 	}
 
 	s.noProgressMu.Lock()
 	s.mu.RLock()
 	cc = s.claws[clawID]
 	s.mu.RUnlock()
-	if cc == nil || !cc.bridgeErrorLiftDue() {
+	if cc == nil || cc.bridgeErrorLiftKindDue() != kind {
 		s.noProgressMu.Unlock()
-		return
+		return false
 	}
+	limit := bridgeErrorAutoResumeLimit(kind)
 	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0, bridge_error_pause_kind='', bridge_error_auto_resumes=bridge_error_auto_resumes+1
 		WHERE id=? AND no_progress_paused!=0 AND bridge_error_pause_kind=? AND bridge_error_auto_resumes<?`,
-		clawID, bridgeErrorPauseKindGateway, bridgeErrorAutoResumeMax)
+		clawID, kind, limit)
 	if err != nil {
 		s.noProgressMu.Unlock()
 		log.Printf("[bridge-error] auto-resume claw %s: %v", shortID(clawID), err)
-		return
+		return false
 	}
 	if changed, _ := res.RowsAffected(); changed == 0 {
+		if kind == bridgeErrorPauseKindProviderTransient {
+			// The NEXT-1294 budget is spent (or the row is no longer this
+			// pause). Unlike the gateway kind, the pre-check has no health window
+			// to gate on, so forget the kind in memory or every heartbeat would
+			// take noProgressMu and run this 0-row UPDATE until a human resumes.
+			// The row keeps it; only a human lifts the pause now.
+			cc.mu.Lock()
+			cc.bridgeErrorPauseKind = ""
+			cc.mu.Unlock()
+		}
 		s.noProgressMu.Unlock()
-		return
+		return false
 	}
 	cc.mu.Lock()
 	cc.noProgressPaused = false
-	cc.bridgeErrorPauseGateway = false
+	cc.bridgeErrorPauseKind = ""
 	cc.bridgeErrorStreak = 0
 	cc.mu.Unlock()
 	var n int
 	_ = s.db.QueryRow(`SELECT bridge_error_auto_resumes FROM claws WHERE id=?`, clawID).Scan(&n)
 	s.noProgressMu.Unlock()
 
+	if kind == bridgeErrorPauseKindProviderTransient {
+		log.Printf("[bridge-error] claw %s: transient malformed tool-call JSON pause, resuming automatically (%d/%d)",
+			shortID(clawID), n, limit)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] The last turn failed on the provider side with malformed tool-call JSON. The tool call did not run and nothing was lost. Continue exactly where it stopped. Keep each tool call small and prefer several small edits or short shell commands over one large write or edit. Recovery attempt %d of %d for this unit of work.", n, limit))
+		return true
+	}
 	log.Printf("[bridge-error] claw %s: gateway healthy for 3m after transport-error pause, resuming automatically (%d/%d)",
-		shortID(clawID), n, bridgeErrorAutoResumeMax)
+		shortID(clawID), n, limit)
 	s.injectHubMessageByID(clawID, "[hub] The sandbox gateway recovered after transport errors interrupted your last turns. Nothing in the workspace was lost. Recover your state from the workspace (git status, git log --oneline -15, the current branch, any uncommitted changes) and continue the current stage without starting over.")
+	return true
 }
 
 // bridgeErrorNoticeLimit caps how much of the error we repeat into the
@@ -206,10 +264,15 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 		return false
 	}
 	kind := ""
-	if bridgeErrorIsGatewayConnectivity(errText) {
+	if bridgeErrorIsProviderTransient(errText) {
+		kind = bridgeErrorPauseKindProviderTransient
+	} else if bridgeErrorIsGatewayConnectivity(errText) {
 		kind = bridgeErrorPauseKindGateway
 	}
 	notice := fmt.Sprintf("[hub] Automatic continuation paused: the last %d turns never reached the agent — claw-bridge returned a transport error instead. Last error: %s. This is the sandbox or the gateway failing, not the agent's output; fix it and send a message to resume.", streak, short)
+	if kind == bridgeErrorPauseKindProviderTransient {
+		notice = fmt.Sprintf("[hub] Automatic continuation paused after %d provider-side malformed tool-call JSON failures. The tool calls did not run and the session is intact. Last error: %s. The hub will resume automatically while the per-work-unit retry budget remains.", streak, short)
+	}
 	if !s.pauseAutomaticContinuation(clawID, notice, kind) {
 		// Someone else (or an earlier tick) already latched this claw. Still
 		// paused — just not by us, so no second notification.
@@ -217,6 +280,14 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 	}
 	log.Printf("[bridge-error] claw %s: paused automatic continuation after %d consecutive bridge transport errors: %s",
 		shortID(clawID), streak, errText)
+	// Unlike a gateway outage, NEXT-1294 needs no health window. Run the lift
+	// through the same noProgressMu-serialized path immediately; its injected
+	// resume message owns continuation for this failed turn. A pause the hub
+	// just healed itself is not worth an operator alarm: page only once the
+	// budget is spent and a human really has to act.
+	if kind == bridgeErrorPauseKindProviderTransient && s.maybeLiftBridgeErrorPause(clawID) {
+		return true
+	}
 	s.notifyBridgeErrorPause(clawID, streak, short)
 	return true
 }
