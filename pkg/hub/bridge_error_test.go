@@ -3,6 +3,7 @@ package hub
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -391,10 +392,10 @@ func TestPauseAutomaticContinuationLatchesOnce(t *testing.T) {
 	const clawID = "claw-pause-latch"
 	cc := bridgeErrorClaw(t, s, clawID)
 
-	if !s.pauseAutomaticContinuation(clawID, "[hub] Automatic continuation paused: first.") {
+	if !s.pauseAutomaticContinuation(clawID, "[hub] Automatic continuation paused: first.", "") {
 		t.Fatal("first pause did not latch")
 	}
-	if s.pauseAutomaticContinuation(clawID, "[hub] Automatic continuation paused: second.") {
+	if s.pauseAutomaticContinuation(clawID, "[hub] Automatic continuation paused: second.", "") {
 		t.Fatal("second pause claimed to latch an already-paused claw")
 	}
 	notices := pauseNotices(t, s, clawID)
@@ -482,5 +483,177 @@ func TestGenericErrorPrefixDoesNotCountTowardThePause(t *testing.T) {
 	}
 	if clawPaused(t, s, clawID) {
 		t.Fatal("generic-prefix turns latched the pause")
+	}
+}
+
+func gatewayPauseClaw(t *testing.T, s *Server, clawID, errText string) *clawConn {
+	t.Helper()
+	cc := bridgeErrorClaw(t, s, clawID)
+	// Busy, so the recovery message queues instead of writing to a nil conn.
+	cc.mu.Lock()
+	cc.awaitingResponse = true
+	cc.mu.Unlock()
+	for i := 0; i < bridgeErrorPauseThreshold; i++ {
+		s.observeBridgeErrorTurn(cc, clawID, errText, true)
+	}
+	if !clawPaused(t, s, clawID) {
+		t.Fatalf("claw %s not paused", clawID)
+	}
+	return cc
+}
+
+func healthyFor(cc *clawConn, d time.Duration) {
+	cc.mu.Lock()
+	cc.gatewayHealthySince = now().Add(-d)
+	cc.mu.Unlock()
+}
+
+func bridgeErrorRow(t *testing.T, s *Server, clawID string) (kind string, resumes int) {
+	t.Helper()
+	if err := s.db.QueryRow(`SELECT bridge_error_pause_kind, bridge_error_auto_resumes FROM claws WHERE id=?`, clawID).Scan(&kind, &resumes); err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+func recoveryMessages(t *testing.T, s *Server, clawID string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE '%gateway recovered after transport errors%'`, clawID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+const gatewayDownErr = "gateway disconnected"
+
+func TestGatewayBridgeErrorPauseAutoLiftsAfterSustainedHealth(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-gw-lift"
+	cc := gatewayPauseClaw(t, s, id, gatewayDownErr)
+	if k, _ := bridgeErrorRow(t, s, id); k != "gateway" {
+		t.Fatalf("kind = %q, want gateway", k)
+	}
+	// Too early: healthy for under 3m.
+	healthyFor(cc, 2*time.Minute)
+	s.maybeLiftBridgeErrorPause(id)
+	if !clawPaused(t, s, id) {
+		t.Fatal("lifted before the healthy window elapsed")
+	}
+	healthyFor(cc, bridgeErrorRecoveryHealthyFor+time.Second)
+	s.maybeLiftBridgeErrorPause(id)
+	if clawPaused(t, s, id) {
+		t.Fatal("pause not lifted after sustained health")
+	}
+	if k, n := bridgeErrorRow(t, s, id); k != "" || n != 1 {
+		t.Fatalf("kind=%q resumes=%d, want '' and 1", k, n)
+	}
+	if recoveryMessages(t, s, id) != 1 {
+		t.Fatal("recovery message not injected")
+	}
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if cc.noProgressPaused || cc.bridgeErrorStreak != 0 {
+		t.Fatal("in-memory state not cleared")
+	}
+}
+
+func TestNonGatewayBridgeErrorPauseStaysPaused(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-enospc-stay"
+	cc := gatewayPauseClaw(t, s, id, "write /tmp/x: no space left on device")
+	if k, _ := bridgeErrorRow(t, s, id); k != "" {
+		t.Fatalf("kind = %q, want empty", k)
+	}
+	healthyFor(cc, time.Hour)
+	s.maybeLiftBridgeErrorPause(id)
+	if !clawPaused(t, s, id) || recoveryMessages(t, s, id) != 0 {
+		t.Fatal("non-gateway pause was auto-lifted")
+	}
+	for _, e := range []string{"Agent run failed", "requires legacy credential migration"} {
+		if bridgeErrorIsGatewayConnectivity(e) {
+			t.Fatalf("%q classified as gateway", e)
+		}
+	}
+	for _, e := range []string{"gateway disconnected", "dial gateway: failed to WebSocket dial", "x; gateway reconnect failed: y"} {
+		if !bridgeErrorIsGatewayConnectivity(e) {
+			t.Fatalf("%q not classified as gateway", e)
+		}
+	}
+}
+
+func TestUnhealthyHeartbeatResetsRecoveryWindow(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-gw-reset"
+	cc := gatewayPauseClaw(t, s, id, gatewayDownErr)
+	healthyFor(cc, 10*time.Minute)
+	cc.mu.Lock()
+	cc.observeGatewayHealthLocked(false)
+	cc.mu.Unlock()
+	s.maybeLiftBridgeErrorPause(id)
+	if !clawPaused(t, s, id) {
+		t.Fatal("lifted despite an unhealthy heartbeat")
+	}
+	cc.mu.Lock()
+	cc.observeGatewayHealthLocked(true)
+	since := cc.gatewayHealthySince
+	cc.mu.Unlock()
+	if since.IsZero() || now().Sub(since) > time.Minute {
+		t.Fatalf("window did not restart at now: %v", since)
+	}
+	s.maybeLiftBridgeErrorPause(id)
+	if !clawPaused(t, s, id) {
+		t.Fatal("lifted with a fresh window")
+	}
+}
+
+func TestBridgeErrorAutoLiftIsCappedPerUnitOfWork(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-gw-cap"
+	cc := gatewayPauseClaw(t, s, id, gatewayDownErr)
+	for i := 1; i <= bridgeErrorAutoResumeMax; i++ {
+		healthyFor(cc, 5*time.Minute)
+		s.maybeLiftBridgeErrorPause(id)
+		if clawPaused(t, s, id) {
+			t.Fatalf("lift %d did not happen", i)
+		}
+		for j := 0; j < bridgeErrorPauseThreshold; j++ {
+			s.observeBridgeErrorTurn(cc, id, gatewayDownErr, true)
+		}
+		if !clawPaused(t, s, id) {
+			t.Fatalf("re-pause %d failed", i)
+		}
+	}
+	healthyFor(cc, time.Hour)
+	s.maybeLiftBridgeErrorPause(id)
+	if !clawPaused(t, s, id) {
+		t.Fatal("third pause in the same unit of work was auto-lifted")
+	}
+	if _, n := bridgeErrorRow(t, s, id); n != bridgeErrorAutoResumeMax {
+		t.Fatalf("resumes = %d", n)
+	}
+
+	// (f) a stage transition starts a new unit of work.
+	if _, err := s.db.Exec(`UPDATE claws SET pipeline_stage='other' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	s.claimPipelineStageTransition(id, "ci_passed")
+	if _, n := bridgeErrorRow(t, s, id); n != 0 {
+		t.Fatalf("stage transition left resumes = %d", n)
+	}
+}
+
+func TestHumanMessageClearsBridgeErrorPauseKind(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-gw-human"
+	cc := gatewayPauseClaw(t, s, id, gatewayDownErr)
+	s.resumeNoProgressAfterUserInput(id)
+	if k, _ := bridgeErrorRow(t, s, id); k != "" {
+		t.Fatalf("kind = %q after human input", k)
+	}
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if cc.bridgeErrorPauseGateway {
+		t.Fatal("in-memory gateway kind not cleared")
 	}
 }

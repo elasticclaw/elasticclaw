@@ -446,7 +446,7 @@ func TestPausedSessionLossRecordsPendingNotice(t *testing.T) {
 			s, db, id := newSessionResumeTestServer(t)
 			cc := &clawConn{id: id, tenantID: "test-tenant-id", lastTurnFinishedAt: now()}
 			s.claws[id] = cc
-			if !s.pauseAutomaticContinuation(id, "[hub] Automatic continuation paused for test") {
+			if !s.pauseAutomaticContinuation(id, "[hub] Automatic continuation paused for test", "") {
 				t.Fatal("pause failed")
 			}
 			switch path {

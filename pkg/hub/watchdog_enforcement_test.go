@@ -784,7 +784,7 @@ func testSessionLossPendingNoticeDelivery(t *testing.T, paused bool) {
 	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
 	cc.mu.Unlock()
 	if paused {
-		if !s.pauseAutomaticContinuation(clawID, "[hub] Automatic continuation paused for test") {
+		if !s.pauseAutomaticContinuation(clawID, "[hub] Automatic continuation paused for test", "") {
 			t.Fatal("could not pause claw")
 		}
 		cc.mu.Lock()

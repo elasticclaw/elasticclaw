@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -36,6 +38,92 @@ import (
 // one wasted cycle and still catches a stuck sandbox on its second try. The
 // streak resets on any real turn, so an occasional error never accumulates.
 const bridgeErrorPauseThreshold = 2
+
+// Recovery from a transient gateway hang (NEXT-1293). The pause above assumed a
+// human must fix the sandbox, but a gateway that hung for a minute under a heavy
+// process recovers by itself, and the latch then sat for ~3h until someone
+// typed. A pause whose triggering error was a gateway connectivity failure is
+// tagged bridge_error_pause_kind='gateway'. It is lifted automatically once
+// heartbeats report the gateway healthy AND ready continuously for
+// bridgeErrorRecoveryHealthyFor, counted from after the pause, at most
+// bridgeErrorAutoResumeMax times per unit of work (the counter resets where
+// idle_resume_count does). The cap preserves the NEXT-725 guarantee: a sandbox
+// that keeps failing still stops and then waits for a human. Every other error
+// (ENOSPC, "Agent run failed", credential errors) is never auto-lifted.
+const (
+	bridgeErrorPauseKindGateway   = "gateway"
+	bridgeErrorRecoveryHealthyFor = 3 * time.Minute
+	bridgeErrorAutoResumeMax      = 2
+)
+
+// bridgeErrorIsGatewayConnectivity matches the claw-bridge strings that mean
+// "could not talk to the local gateway" (cmd/claw-bridge/main.go).
+func bridgeErrorIsGatewayConnectivity(errText string) bool {
+	lower := strings.ToLower(errText)
+	for _, marker := range []string{"gateway disconnected", "dial gateway", "gateway reconnect failed"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// observeGatewayHealthLocked extends or breaks the healthy+ready run. Caller
+// holds cc.mu.
+func (cc *clawConn) observeGatewayHealthLocked(healthyAndReady bool) {
+	if !healthyAndReady {
+		cc.gatewayHealthySince = time.Time{}
+	} else if cc.gatewayHealthySince.IsZero() {
+		cc.gatewayHealthySince = now()
+	}
+}
+
+// maybeLiftBridgeErrorPause runs on every bridge heartbeat (the one place that
+// already sees gateway health per connection, so no extra ticker or DB scan).
+// The in-memory checks keep the common case free of DB work; the UPDATE is the
+// authority and shares noProgressMu with the pause and the human resume, so it
+// cannot race with either.
+func (s *Server) maybeLiftBridgeErrorPause(clawID string) {
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		return
+	}
+	cc.mu.Lock()
+	eligible := cc.noProgressPaused && cc.bridgeErrorPauseGateway &&
+		!cc.gatewayHealthySince.IsZero() && now().Sub(cc.gatewayHealthySince) >= bridgeErrorRecoveryHealthyFor
+	cc.mu.Unlock()
+	if !eligible {
+		return
+	}
+
+	s.noProgressMu.Lock()
+	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0, bridge_error_pause_kind='', bridge_error_auto_resumes=bridge_error_auto_resumes+1
+		WHERE id=? AND no_progress_paused!=0 AND bridge_error_pause_kind=? AND bridge_error_auto_resumes<?`,
+		clawID, bridgeErrorPauseKindGateway, bridgeErrorAutoResumeMax)
+	if err != nil {
+		s.noProgressMu.Unlock()
+		log.Printf("[bridge-error] auto-resume claw %s: %v", shortID(clawID), err)
+		return
+	}
+	if changed, _ := res.RowsAffected(); changed == 0 {
+		s.noProgressMu.Unlock()
+		return
+	}
+	cc.mu.Lock()
+	cc.noProgressPaused = false
+	cc.bridgeErrorPauseGateway = false
+	cc.bridgeErrorStreak = 0
+	cc.mu.Unlock()
+	var n int
+	_ = s.db.QueryRow(`SELECT bridge_error_auto_resumes FROM claws WHERE id=?`, clawID).Scan(&n)
+	s.noProgressMu.Unlock()
+
+	log.Printf("[bridge-error] claw %s: gateway healthy for 3m after transport-error pause, resuming automatically (%d/%d)",
+		shortID(clawID), n, bridgeErrorAutoResumeMax)
+	s.injectHubMessageByID(clawID, "[hub] The sandbox gateway recovered after transport errors interrupted your last turns. Nothing in the workspace was lost. Recover your state from the workspace (git status, git log --oneline -15, the current branch, any uncommitted changes) and continue the current stage without starting over.")
+}
 
 // bridgeErrorNoticeLimit caps how much of the error we repeat into the
 // dashboard notice and the operator notification. The useful part ("no space
@@ -86,8 +174,12 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 	if streak < bridgeErrorPauseThreshold {
 		return false
 	}
+	kind := ""
+	if bridgeErrorIsGatewayConnectivity(errText) {
+		kind = bridgeErrorPauseKindGateway
+	}
 	notice := fmt.Sprintf("[hub] Automatic continuation paused: the last %d turns never reached the agent — claw-bridge returned a transport error instead. Last error: %s. This is the sandbox or the gateway failing, not the agent's output; fix it and send a message to resume.", streak, short)
-	if !s.pauseAutomaticContinuation(clawID, notice) {
+	if !s.pauseAutomaticContinuation(clawID, notice, kind) {
 		// Someone else (or an earlier tick) already latched this claw. Still
 		// paused — just not by us, so no second notification.
 		return true
