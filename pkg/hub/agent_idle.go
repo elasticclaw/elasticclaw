@@ -89,7 +89,7 @@ const (
 
 	// agentIdleStretchSlack absorbs clock drift in the stretch-start value
 	// across hub restarts: a reconnect seeds lastTurnFinishedAt from the last
-	// claw message's created_at, which can differ from the pre-restart
+	// claw or activity message's created_at, which can differ from the pre-restart
 	// finishTurnLocked timestamp by seconds. Two stretch starts within the
 	// slack are treated as the same stretch (no re-notification); a genuinely
 	// new stretch starts at least idle_after later, far outside it.

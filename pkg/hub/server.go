@@ -2920,12 +2920,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0 FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused)
 	// A bridge-process restart tears down the main channel, so the old clawConn
 	// (and its lastTurnFinishedAt) is usually gone by the time the new bridge
-	// registers. Seed the post-restart resume window from the last claw
-	// response — a turn interrupted by the crash was flushed as an
-	// "[interrupted]" claw message at disconnect, so its created_at marks the
-	// turn end closely enough for autoResumeRecentTurnWindow.
-	var lastClawMsgAt time.Time
-	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
+	// registers. Seed the post-restart resume window and idle stretch from the
+	// latest evidence of agent turn output (see lastAgentTurnEvidenceAt).
+	lastClawMsgAt := s.lastAgentTurnEvidenceAt(clawID)
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
@@ -5609,6 +5606,23 @@ func isUnhelpfulActivityContent(activity map[string]interface{}, content string)
 // streaming internal monologue does not flood the messages table. Tool,
 // diagnostic, error, and lifecycle activity messages are inserted as distinct
 // rows because they are useful audit events.
+// lastAgentTurnEvidenceAt is the latest created_at over the claw's messages
+// that agent turn output produces: role 'claw' (a response, or the
+// "[interrupted]" flush at disconnect) and role 'activity' (tool/reasoning
+// activity streamed by the bridge). A turn made only of tool calls, such as a
+// lone sessions_yield, writes no 'claw' row, so seeding from 'claw' alone
+// rewinds the idle stretch to an older turn and the once-per-stretch resume
+// latch then reads "already handled" forever (NEXT-1154). Hub-authored rows
+// use roles 'hub' and 'user' and are deliberately excluded. Activity is only
+// stored from bridge agent_activity events (storeAgentActivity); one arriving
+// outside a turn can only push the seed later, which delays an idle
+// resume instead of suppressing it, so no per-kind filtering is needed.
+func (s *Server) lastAgentTurnEvidenceAt(clawID string) time.Time {
+	var at time.Time
+	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role IN ('claw','activity') ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&at)
+	return at
+}
+
 func (s *Server) storeAgentActivity(clawID, tenantID, content, format string, activity map[string]interface{}, createdAt time.Time) {
 	kind, _ := activity["kind"].(string)
 	if strings.ToLower(strings.TrimSpace(kind)) == "activity" {
@@ -9409,7 +9423,7 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edge ty
 	//
 	// idle_resume_at goes with it here, unlike the stage transition: the latch
 	// keys on the idle stretch's anchor, and lastTurnFinishedAt is seeded on
-	// reconnect from the last claw message, which can land within
+	// reconnect from the last claw/activity message, which can land within
 	// agentIdleStretchSlack of a latch the DEAD session earned. Leaving it
 	// would then read as "this stretch was already handled" on every tick and
 	// veto the resume permanently. Nothing is lost by clearing it: what
