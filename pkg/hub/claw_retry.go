@@ -524,7 +524,7 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// and clearing the latch would let the SAME idle stretch be poked twice —
 	// the successor here is a different session whose stretch anchor is not
 	// comparable to the predecessor's. Worse, it can collide with it:
-	// lastTurnFinishedAt is seeded on reconnect from the last claw message
+	// lastTurnFinishedAt is seeded on reconnect from the last agent turn evidence
 	// (server.go), so a successor whose re-brief delivery aborts before any
 	// turn finishes can anchor within agentIdleStretchSlack of a latch the
 	// dead session earned, and checkAgentIdleResume would then read "this
@@ -534,11 +534,17 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// in-flight turn is invisible, is protected by agentIdleResumeBlindGrace,
 	// which is an upper bound rather than a permanent veto (see
 	// TestAgentIdleResumeFiresAfterTheBlindWindowElapses).
+	//
+	// bridge_error_auto_resumes is re-armed for the new sandbox, but
+	// bridge_error_pause_kind is cleared WITHOUT lifting no_progress_paused: a
+	// transport-error pause that survives into a replacement stays human-only,
+	// as before NEXT-1293. The gateway auto-lift promises "nothing in the
+	// workspace was lost", which is false after a checkpoint restore.
 	res, err := s.db.Exec(`
 		UPDATE claws
 		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
 		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
-		       rebrief_pending=1, idle_resume_count=0, idle_resume_at=0, session_loss_streak=0, session_loss_progress_mark=''
+		       rebrief_pending=1, idle_resume_count=0, bridge_error_auto_resumes=0, bridge_error_pause_kind='', idle_resume_at=0, session_loss_streak=0, session_loss_progress_mark=''
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
 		bootstrapStatus, bootstrapDiagnostic, checkpointID, clawID, tenantID)
 	if err != nil {

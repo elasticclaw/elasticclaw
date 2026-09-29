@@ -344,38 +344,40 @@ func (s *Server) gatewayUnhealthyCount(clawID string) int {
 type clawConn struct {
 	mu sync.RWMutex // protects mutable fields below
 
-	id                     string
-	tenantID               string
-	conn                   *websocket.Conn
-	tags                   []string        // cached from DB at registration time for access-control checks
-	contextUsage           int             // 0-100, updated from heartbeats
-	gatewayReady           bool            // true once bridge reports gateway session established
-	gatewayRestartCount    int             // cumulative bridge restarts reported by heartbeats
-	gatewaySessionKey      string          // last live gateway session key reported by heartbeat
-	gatewaySessionKeySeen  bool            // distinguishes the first live-key heartbeat from a loss
-	turnInputMessageID     string          // hub message that started the current turn
-	sessionLossInterrupted bool            // the bridge identified this turn as interrupted
-	forcedFinishCount      int             // consecutive watchdog-forced streaming turn finishes
-	workflowStartPending   bool            // true while initial volume attach / wake is in flight
-	workflowStartDone      bool            // true once initial volume attach / wake has completed
-	workflowV2Controlled   bool            // typed control owns execution; conversation text is display-only
-	streamingBuf           strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID         string          // pre-assigned message ID for the current stream
-	streamingSplit         bool            // true once activity has split this turn into multiple persisted segments
-	streamingSplitText     string          // last non-empty segment flushed by a split, for progress when the final event is empty
-	streamingStartedAt     time.Time       // when the current streaming turn started (zero if not streaming)
-	streamingTimeoutSent   bool            // true once the 12-min timeout message has been injected this turn
-	contextWarningSent     bool            // true once the context-nearly-full warning has been injected this turn
-	awaitingResponse       bool            // true as soon as a prompt is delivered, before the first chunk/activity
-	noProgressPaused       bool            // automatic delivery is paused after repeated turns with unchanged progress
-	bridgeErrorStreak      int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
-	llmLimitedUntil        time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
-	lastTurnFinishedAt     time.Time       // when the last streaming turn ended (for post-restart resume window)
-	connectedAt            time.Time       // when this connection registered; immutable after registration
-	idleNotifiedAt         time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
-	turnBoundarySeen       bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
-	subagentsActiveAt      time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
-	subagentActiveCount    int             // subagent sessions with a run in flight per that heartbeat
+	id                      string
+	tenantID                string
+	conn                    *websocket.Conn
+	tags                    []string        // cached from DB at registration time for access-control checks
+	contextUsage            int             // 0-100, updated from heartbeats
+	gatewayReady            bool            // true once bridge reports gateway session established
+	gatewayRestartCount     int             // cumulative bridge restarts reported by heartbeats
+	gatewaySessionKey       string          // last live gateway session key reported by heartbeat
+	gatewaySessionKeySeen   bool            // distinguishes the first live-key heartbeat from a loss
+	turnInputMessageID      string          // hub message that started the current turn
+	sessionLossInterrupted  bool            // the bridge identified this turn as interrupted
+	forcedFinishCount       int             // consecutive watchdog-forced streaming turn finishes
+	workflowStartPending    bool            // true while initial volume attach / wake is in flight
+	workflowStartDone       bool            // true once initial volume attach / wake has completed
+	workflowV2Controlled    bool            // typed control owns execution; conversation text is display-only
+	streamingBuf            strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID          string          // pre-assigned message ID for the current stream
+	streamingSplit          bool            // true once activity has split this turn into multiple persisted segments
+	streamingSplitText      string          // last non-empty segment flushed by a split, for progress when the final event is empty
+	streamingStartedAt      time.Time       // when the current streaming turn started (zero if not streaming)
+	streamingTimeoutSent    bool            // true once the 12-min timeout message has been injected this turn
+	contextWarningSent      bool            // true once the context-nearly-full warning has been injected this turn
+	awaitingResponse        bool            // true as soon as a prompt is delivered, before the first chunk/activity
+	noProgressPaused        bool            // automatic delivery is paused after repeated turns with unchanged progress
+	bridgeErrorPauseGateway bool            // the current pause was caused by gateway connectivity errors; eligible for auto-lift
+	gatewayHealthySince     time.Time       // start of the current unbroken gateway healthy+ready heartbeat run; zero = not healthy
+	bridgeErrorStreak       int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
+	llmLimitedUntil         time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
+	lastTurnFinishedAt      time.Time       // when the last streaming turn ended (for post-restart resume window)
+	connectedAt             time.Time       // when this connection registered; immutable after registration
+	idleNotifiedAt          time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
+	turnBoundarySeen        bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
+	subagentsActiveAt       time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
+	subagentActiveCount     int             // subagent sessions with a run in flight per that heartbeat
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -2916,17 +2918,23 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var noProgressPaused bool
-	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0 FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused)
 	// A bridge-process restart tears down the main channel, so the old clawConn
 	// (and its lastTurnFinishedAt) is usually gone by the time the new bridge
-	// registers. Seed the post-restart resume window from the last claw
-	// response — a turn interrupted by the crash was flushed as an
-	// "[interrupted]" claw message at disconnect, so its created_at marks the
-	// turn end closely enough for autoResumeRecentTurnWindow.
-	var lastClawMsgAt time.Time
-	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, workflowV2Controlled: workflowV2Controlled}
+	// registers. Seed the post-restart resume window and idle stretch from the
+	// latest evidence of agent turn output (see lastAgentTurnEvidenceAt).
+	lastClawMsgAt := s.lastAgentTurnEvidenceAt(clawID)
+	// The persisted pause is read and the new connection published under
+	// noProgressMu, the lock every pause/resume writer holds while it updates
+	// the row and then the live clawConn. Without it a writer could land
+	// between this read and the publish below and update only the superseded
+	// connection, leaving this one with a stale copy of the latch (a pause that
+	// no longer exists in the DB can then never be lifted except by a human).
+	// Lock order is noProgressMu then s.mu, as in pauseAutomaticContinuation.
+	s.noProgressMu.Lock()
+	var noProgressPaused bool
+	var pausedForGateway bool
+	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0, COALESCE(bridge_error_pause_kind,'')='gateway' FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused, &pausedForGateway)
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseGateway: noProgressPaused && pausedForGateway, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -2954,6 +2962,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
+	s.noProgressMu.Unlock()
 	// A provider limit outlives the bridge that discovered it: the account is
 	// capped whether or not this sandbox restarted, so a fresh connection must
 	// come back parked rather than spend another turn on the same wall. Settled
@@ -3194,6 +3203,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						activeCC.gatewayReady = true
 						gatewayReadyReported = true
 					}
+					// Unbroken healthy+ready run, consumed by
+					// maybeLiftBridgeErrorPause. Any other heartbeat breaks it.
+					activeCC.observeGatewayHealthLocked(hb.GatewayHealthy && gatewayReadyBool(hb.GatewayReady))
 					// A gateway that is still starting is not a failing one. The
 					// counter never resets on its own -- only a healthy heartbeat
 					// clears it, and none arrives while the bridge is disconnected
@@ -3282,6 +3294,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if !current {
 					continue
 				}
+				s.maybeLiftBridgeErrorPause(clawID)
 				if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider}); err != nil {
 					log.Printf("[usage] heartbeat for %s: %v", clawID, err)
 				}
@@ -5602,6 +5615,34 @@ func isUnhelpfulActivityContent(activity map[string]interface{}, content string)
 		return true
 	}
 	return strings.HasPrefix(content, "No streamed output")
+}
+
+// lastAgentTurnEvidenceAt is the latest created_at over the claw's messages
+// that agent turn output produces: role 'claw' (a response, or the
+// "[interrupted]" flush at disconnect) and role 'activity' (tool/reasoning
+// activity streamed by the bridge). A turn made only of tool calls, such as a
+// lone sessions_yield, writes no 'claw' row, so seeding from 'claw' alone
+// rewinds the idle stretch to an older turn and the once-per-stretch resume
+// latch then reads "already handled" forever (NEXT-1154). Hub-authored rows
+// use roles 'hub' and 'user' and are excluded.
+//
+// Activity rows are only written from bridge agent_activity events
+// (storeAgentActivity), but not all of them are turn output: claw-bridge also
+// emits its own session lifecycle rows (kinds session_rotated,
+// session_preserved, session_error) on a gateway reconnect, which can land
+// while the agent is idle. Counting those would not just delay an idle resume:
+// the same seed feeds autoResumeRecentTurnWindow, so a hub restart shortly
+// after an idle claw's reconnect would read as "a turn just ended" and a
+// session loss would wake the idle claw into autonomous work. They are
+// excluded by kind (format is "activity:" + the compact JSON payload).
+// session_error is emitted inside a turn, but that turn also ends with a
+// 'claw' row, so dropping it loses no evidence.
+func (s *Server) lastAgentTurnEvidenceAt(clawID string) time.Time {
+	var at time.Time
+	_ = s.db.QueryRow(`SELECT created_at FROM messages
+		WHERE claw_id=? AND (role='claw' OR (role='activity' AND format NOT LIKE '%"kind":"session\_%' ESCAPE '\'))
+		ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&at)
+	return at
 }
 
 // storeAgentActivity persists an activity message. Generic reasoning activity
@@ -9409,12 +9450,16 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edge ty
 	//
 	// idle_resume_at goes with it here, unlike the stage transition: the latch
 	// keys on the idle stretch's anchor, and lastTurnFinishedAt is seeded on
-	// reconnect from the last claw message, which can land within
+	// reconnect from the last agent turn evidence, which can land within
 	// agentIdleStretchSlack of a latch the DEAD session earned. Leaving it
 	// would then read as "this stretch was already handled" on every tick and
 	// veto the resume permanently. Nothing is lost by clearing it: what
 	// protects a connection whose turn state is invisible is
 	// agentIdleResumeBlindGrace, not this latch.
+	//
+	// bridge_error_auto_resumes is deliberately NOT re-armed here (see
+	// bridge_error.go): a gateway hang is what rotates the session, so the
+	// same failing sandbox would get a fresh auto-lift budget on every flap.
 	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_count=0, idle_resume_at=0 WHERE id=?`, clawID); err != nil {
 		log.Printf("[watchdog] re-arm idle resume budget for %s: %v", shortID(clawID), err)
 	}

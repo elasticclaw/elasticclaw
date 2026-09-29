@@ -111,6 +111,17 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
+	// bridge_error_pause_kind records WHY a bridge-error pause latched ('gateway' =
+	// gateway connectivity, auto-liftable on recovery; '' = needs a human) and
+	// bridge_error_auto_resumes counts those auto-lifts per unit of work. Both
+	// are referenced by the pause, resume and retry UPDATEs, so a missing column
+	// must abort startup rather than break those paths at runtime.
+	if err := addColumn(db, "claws", "bridge_error_pause_kind", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claws", "bridge_error_auto_resumes", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pending_session_loss_notice TEXT NOT NULL DEFAULT ''`)
 	// rebrief_pending is armed by [claw-retry] when a sandbox is replaced and
 	// consumed on reconnect to re-brief the fresh session. resetClawForRetry's
@@ -570,6 +581,8 @@ func migrate(db *sql.DB) error {
 		stop_comment_pending INTEGER NOT NULL DEFAULT 0,
 		rebrief_pending INTEGER NOT NULL DEFAULT 0,
 		no_progress_paused INTEGER NOT NULL DEFAULT 0,
+		bridge_error_pause_kind TEXT NOT NULL DEFAULT '',
+		bridge_error_auto_resumes INTEGER NOT NULL DEFAULT 0,
 		idle_since INTEGER NOT NULL DEFAULT 0,
 		stage_entered_at INTEGER,
 		stage_stalled_since INTEGER NOT NULL DEFAULT 0,

@@ -234,7 +234,7 @@ func TestResetClawForRetryResetsIdleResumeBudget(t *testing.T) {
 	}
 	// The latch goes too, and this is the half that is easy to get wrong. The
 	// successor is a different session; on reconnect its lastTurnFinishedAt is
-	// seeded from the last claw message, so its first idle stretch can anchor
+	// seeded from the last agent turn evidence, so its first idle stretch can anchor
 	// within agentIdleStretchSlack of a latch the DEAD session earned. Leave
 	// the latch and checkAgentIdleResume reads "already handled" forever — a
 	// budget that was just zeroed and can never be spent.
@@ -619,5 +619,26 @@ func TestWatchdogActionTrustsHeartbeatOverStaleStatusChannel(t *testing.T) {
 	freshStatus := nowAt.Add(-30 * time.Second)
 	if got := watchdogAction(nowAt, "connected", true, true, freshStatus, staleStatus, freshStatus, warnedLongAgo, defaultSilentDeathMax); got != watchdogHealthNone {
 		t.Errorf("got %v, want none: the status channel is answering", got)
+	}
+}
+
+// A gateway transport-error pause that survives into a replacement sandbox is
+// human-only again: the kind is cleared (so the gateway auto-lift cannot tell
+// a checkpoint-restored session "nothing was lost") while the pause stays.
+func TestResetClawForRetryKeepsTransportPauseHumanOnly(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "error")
+	if _, err := db.Exec(`UPDATE claws SET no_progress_paused=1, bridge_error_pause_kind='gateway', bridge_error_auto_resumes=1 WHERE id=?`, "retry-claw"); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", ""); err != nil || !reset {
+		t.Fatalf("reset: reset=%v err=%v", reset, err)
+	}
+	var paused, resumes int
+	var kind string
+	if err := db.QueryRow(`SELECT no_progress_paused, bridge_error_pause_kind, bridge_error_auto_resumes FROM claws WHERE id=?`, "retry-claw").Scan(&paused, &kind, &resumes); err != nil {
+		t.Fatal(err)
+	}
+	if paused == 0 || kind != "" || resumes != 0 {
+		t.Fatalf("after replacement paused=%d kind=%q resumes=%d, want paused, '' and 0", paused, kind, resumes)
 	}
 }
