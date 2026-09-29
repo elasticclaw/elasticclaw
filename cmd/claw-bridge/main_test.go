@@ -1535,6 +1535,145 @@ func TestDeliverInFlightDoesNotBlockWhenTerminalResultRacesTeardown(t *testing.T
 	}
 }
 
+func TestLifecycleErrorTextAppendsLastAssistantRawError(t *testing.T) {
+	const generic = "⚠️ Agent run failed (model: anthropic/claude-sonnet-5)"
+	const raw = "Provider completed tool call with malformed JSON arguments"
+	payload := mustJSON(map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "continue"},
+			{"role": "assistant", "stopReason": "error", "errorMessage": raw},
+		},
+	})
+	if got := lastAssistantErrorMessage(payload); got != raw {
+		t.Fatalf("lastAssistantErrorMessage() = %q, want %q", got, raw)
+	}
+	if got := appendLifecycleErrorCause(generic, raw); got != generic+": "+raw {
+		t.Fatalf("appendLifecycleErrorCause() = %q", got)
+	}
+	if got := appendLifecycleErrorCause(generic+": "+raw, raw); got != generic+": "+raw {
+		t.Fatalf("duplicate cause was appended: %q", got)
+	}
+	if got := appendLifecycleErrorCause(generic, ""); got != generic {
+		t.Fatalf("generic error changed without a raw cause: %q", got)
+	}
+
+	// Never reuse a stale earlier failure when the latest assistant message
+	// completed successfully.
+	payload = mustJSON(map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{"role": "assistant", "stopReason": "error", "errorMessage": raw},
+			{"role": "assistant", "stopReason": "stop", "content": "done"},
+		},
+	})
+	if got := lastAssistantErrorMessage(payload); got != "" {
+		t.Fatalf("stale errorMessage = %q, want empty", got)
+	}
+}
+
+func TestGatewaySessionSurfacesLifecycleRawErrorFromChatHistory(t *testing.T) {
+	const generic = "⚠️ Agent run failed (model: anthropic/claude-sonnet-5)"
+	const raw = "Provider completed tool call with malformed JSON arguments"
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": generic},
+		})}); err != nil {
+			t.Error(err)
+			return
+		}
+
+		var history gwFrame
+		if err := wsjson.Read(r.Context(), conn, &history); err != nil || history.Method != "chat.history" {
+			t.Errorf("read chat.history: method=%q err=%v", history.Method, err)
+			return
+		}
+		payload := mustJSON(map[string]interface{}{
+			"messages": []map[string]interface{}{{"role": "assistant", "stopReason": "error", "errorMessage": raw}},
+		})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: history.ID, OK: true, Payload: payload})
+		// Keep the socket open so the read loop cannot report a disconnect first.
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue", "turn-1", nil, nil)
+	if err == nil || err.Error() != generic+": "+raw {
+		t.Fatalf("SendMessage error = %v, want combined lifecycle and raw error", err)
+	}
+}
+
+func TestGatewaySessionCompletesSlashCommandFromFinalChatReply(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		payload := mustJSON(map[string]interface{}{
+			"runId": "command-new", "sessionKey": "session-1", "state": "final",
+			"message": map[string]interface{}{
+				"role":    "assistant",
+				"content": []map[string]string{{"type": "text", "text": "✅ New session started."}},
+			},
+		})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "chat", Payload: payload})
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	reply, err := gs.SendMessage(ctx, "/new", "turn-command", nil, nil)
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if reply != "✅ New session started." {
+		t.Fatalf("reply = %q", reply)
+	}
+}
+
 func TestSessionKeyRotationFailsInFlightTurn(t *testing.T) {
 	inf := &inFlightState{done: make(chan agentResult, 1)}
 	gs := &gatewaySession{sessionKey: "old-session", inFlight: inf}

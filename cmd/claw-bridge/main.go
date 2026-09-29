@@ -720,6 +720,7 @@ type inFlightToolCall struct {
 type inFlightState struct {
 	onChunk             func(string)
 	onActivity          func(agentActivity)
+	slashCommand        bool
 	fullText            strings.Builder
 	textMu              sync.Mutex
 	transcriptOnce      sync.Once
@@ -732,6 +733,72 @@ type inFlightState struct {
 	lastModelPulseAt    time.Time
 	inFlightCalls       map[string]inFlightToolCall
 	callOccurrences     map[string]int
+}
+
+// appendLifecycleErrorCause preserves OpenClaw's existing user-facing error
+// while adding the provider cause recovered from the transcript. OpenClaw
+// 2026.9.4 deliberately sanitizes lifecycle error events, so the assistant
+// message's errorMessage is the only wire-visible copy of failures such as the
+// NEXT-1294 malformed tool-call JSON response.
+func appendLifecycleErrorCause(message, cause string) string {
+	message = strings.TrimSpace(message)
+	cause = strings.TrimSpace(cause)
+	if cause == "" || strings.Contains(strings.ToLower(message), strings.ToLower(cause)) {
+		return message
+	}
+	if message == "" {
+		return cause
+	}
+	return message + ": " + cause
+}
+
+func lastAssistantErrorMessage(payload json.RawMessage) string {
+	var history struct {
+		Messages []struct {
+			Role         string `json:"role"`
+			StopReason   string `json:"stopReason"`
+			ErrorMessage string `json:"errorMessage"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(payload, &history) != nil {
+		return ""
+	}
+	for i := len(history.Messages) - 1; i >= 0; i-- {
+		message := history.Messages[i]
+		if message.Role != "assistant" {
+			continue
+		}
+		if message.StopReason == "error" {
+			return strings.TrimSpace(message.ErrorMessage)
+		}
+		return ""
+	}
+	return ""
+}
+
+func chatMessageText(content json.RawMessage) string {
+	var text string
+	if json.Unmarshal(content, &text) == nil {
+		return strings.TrimSpace(text)
+	}
+	var blocks []struct {
+		Type    string `json:"type"`
+		Text    string `json:"text"`
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, block := range blocks {
+		if block.Type != "" && block.Type != "text" && block.Type != "message" {
+			continue
+		}
+		if value := strings.TrimSpace(firstNonEmpty(block.Text, block.Content)); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 const (
@@ -1580,6 +1647,66 @@ func (gs *gatewaySession) reconnectGatewayWithTimeout(ctx context.Context, expec
 	return reconnected, replacedSession, previousKey, err
 }
 
+func (gs *gatewaySession) deliverLifecycleError(inf *inFlightState, sessionKey, message string) {
+	// NEXT-1294: OpenClaw 2026.9.4's
+	// embedded-agent-subscribe.handlers.lifecycle.ts handleAgentEnd emits a
+	// sanitized lifecycle data.error and intentionally keeps the raw provider
+	// text only on the failed assistant transcript message. Query chat.history
+	// off the read-loop goroutine (which must remain free to dispatch the RPC
+	// response) and preserve the old error unchanged if the best-effort lookup
+	// fails.
+	if strings.Contains(strings.ToLower(message), "agent run failed") {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		response, err := gs.sendReq(ctx, "chat.history", map[string]interface{}{
+			"sessionKey": sessionKey,
+			"limit":      10,
+		})
+		cancel()
+		if err != nil {
+			log.Printf("[gateway] chat.history after lifecycle error: %v", err)
+		} else {
+			message = appendLifecycleErrorCause(message, lastAssistantErrorMessage(response.Payload))
+		}
+	}
+	log.Printf("[gateway] agent turn error: %s", message)
+	inf.transcriptOnce.Do(func() { gs.transcript.noteAssistant(inf.assistantText()) })
+	inf.emitActivity(cleanAgentActivity(agentActivity{Kind: "session_error", Stream: "lifecycle", Phase: "error", Error: message}))
+	deliverInFlight(inf, agentResult{err: fmt.Errorf("%s", message)})
+}
+
+func (gs *gatewaySession) handleFinalChatEvent(payload json.RawMessage) {
+	var chatPayload struct {
+		SessionKey string `json:"sessionKey"`
+		State      string `json:"state"`
+		Message    struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(payload, &chatPayload) != nil || chatPayload.SessionKey != gs.getSessionKey() || chatPayload.State != "final" || chatPayload.Message.Role != "assistant" {
+		return
+	}
+	reply := chatMessageText(chatPayload.Message.Content)
+	if reply == "" {
+		return
+	}
+	gs.infMu.RLock()
+	inf := gs.inFlight
+	gs.infMu.RUnlock()
+	if inf == nil || !inf.slashCommand {
+		return
+	}
+
+	// NEXT-1294: command replies such as /new and /reset finish through the
+	// chat stream without starting an agent run, so no lifecycle end follows.
+	// OpenClaw chat-send-agent-dispatch.ts startChatDispatch finalizes dispatched
+	// slash-command replies with chat state=final. Treat that signal as terminal
+	// only for an in-flight slash command; ordinary turns continue to use the
+	// agent lifecycle signal.
+	log.Printf("[gateway] slash command complete from final chat reply")
+	deliverInFlight(inf, agentResult{text: reply})
+}
+
 // readLoop reads frames from the gateway forever, dispatching responses to
 // pending channels and agent events to the in-flight handler.
 // When the connection drops it reconnects and re-subscribes.
@@ -1650,6 +1777,10 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			}
 
 		case "event":
+			if frame.Event == "chat" {
+				gs.handleFinalChatEvent(frame.Payload)
+				continue
+			}
 			if frame.Event != "agent" {
 				continue
 			}
@@ -1790,10 +1921,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					if msg == "" {
 						msg = "agent lifecycle error"
 					}
-					log.Printf("[gateway] agent turn error: %s", msg)
-					inf.transcriptOnce.Do(func() { gs.transcript.noteAssistant(inf.assistantText()) })
-					inf.emitActivity(cleanAgentActivity(agentActivity{Kind: "session_error", Stream: "lifecycle", Phase: "error", Error: msg}))
-					deliverInFlight(inf, agentResult{err: fmt.Errorf("%s", msg)})
+					go gs.deliverLifecycleError(inf, agentPayload.SessionKey, msg)
 				}
 			}
 		}
@@ -2965,9 +3093,10 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 
 func (gs *gatewaySession) sendMessageOnce(ctx context.Context, turnKey, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
 	inf := &inFlightState{
-		onChunk:    onChunk,
-		onActivity: onActivity,
-		done:       make(chan agentResult, 1),
+		onChunk:      onChunk,
+		onActivity:   onActivity,
+		slashCommand: strings.HasPrefix(strings.TrimSpace(message), "/"),
+		done:         make(chan agentResult, 1),
 	}
 	gs.infMu.Lock()
 	gs.inFlight = inf
