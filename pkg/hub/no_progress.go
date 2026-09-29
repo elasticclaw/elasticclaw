@@ -332,9 +332,7 @@ func (s *Server) pauseAutomaticContinuation(clawID, notice, kind string) bool {
 		cc.bridgeErrorPauseKind = kind
 		// The recovery window must start AFTER the pause, so a gateway that was
 		// already healthy when the error turn landed does not count.
-		if kind == bridgeErrorPauseKindGateway {
-			cc.gatewayHealthySince = time.Time{}
-		}
+		cc.gatewayHealthySince = time.Time{}
 		cc.mu.Unlock()
 	}
 	return true

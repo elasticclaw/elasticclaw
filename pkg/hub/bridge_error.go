@@ -148,17 +148,18 @@ func bridgeErrorAutoResumeLimit(kind string) int {
 // connection re-checked and cleared here is the live one: a bridge that
 // reconnects either registers before the lift (and is the connection re-checked
 // here, with its own fresh healthy window) or after it (and reads the cleared
-// row), never in between with a stale paused copy.
-func (s *Server) maybeLiftBridgeErrorPause(clawID string) {
+// row), never in between with a stale paused copy. It reports whether it
+// lifted the pause.
+func (s *Server) maybeLiftBridgeErrorPause(clawID string) bool {
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
 	if cc == nil {
-		return
+		return false
 	}
 	kind := cc.bridgeErrorLiftKindDue()
 	if kind == "" {
-		return
+		return false
 	}
 
 	s.noProgressMu.Lock()
@@ -167,7 +168,7 @@ func (s *Server) maybeLiftBridgeErrorPause(clawID string) {
 	s.mu.RUnlock()
 	if cc == nil || cc.bridgeErrorLiftKindDue() != kind {
 		s.noProgressMu.Unlock()
-		return
+		return false
 	}
 	limit := bridgeErrorAutoResumeLimit(kind)
 	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0, bridge_error_pause_kind='', bridge_error_auto_resumes=bridge_error_auto_resumes+1
@@ -176,11 +177,21 @@ func (s *Server) maybeLiftBridgeErrorPause(clawID string) {
 	if err != nil {
 		s.noProgressMu.Unlock()
 		log.Printf("[bridge-error] auto-resume claw %s: %v", shortID(clawID), err)
-		return
+		return false
 	}
 	if changed, _ := res.RowsAffected(); changed == 0 {
+		if kind == bridgeErrorPauseKindProviderTransient {
+			// The NEXT-1294 budget is spent (or the row is no longer this
+			// pause). Unlike the gateway kind, the pre-check has no health window
+			// to gate on, so forget the kind in memory or every heartbeat would
+			// take noProgressMu and run this 0-row UPDATE until a human resumes.
+			// The row keeps it; only a human lifts the pause now.
+			cc.mu.Lock()
+			cc.bridgeErrorPauseKind = ""
+			cc.mu.Unlock()
+		}
 		s.noProgressMu.Unlock()
-		return
+		return false
 	}
 	cc.mu.Lock()
 	cc.noProgressPaused = false
@@ -195,11 +206,12 @@ func (s *Server) maybeLiftBridgeErrorPause(clawID string) {
 		log.Printf("[bridge-error] claw %s: transient malformed tool-call JSON pause, resuming automatically (%d/%d)",
 			shortID(clawID), n, limit)
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] The last turn failed on the provider side with malformed tool-call JSON. The tool call did not run and nothing was lost. Continue exactly where it stopped. Keep each tool call small and prefer several small edits or short shell commands over one large write or edit. Recovery attempt %d of %d for this unit of work.", n, limit))
-		return
+		return true
 	}
 	log.Printf("[bridge-error] claw %s: gateway healthy for 3m after transport-error pause, resuming automatically (%d/%d)",
 		shortID(clawID), n, limit)
 	s.injectHubMessageByID(clawID, "[hub] The sandbox gateway recovered after transport errors interrupted your last turns. Nothing in the workspace was lost. Recover your state from the workspace (git status, git log --oneline -15, the current branch, any uncommitted changes) and continue the current stage without starting over.")
+	return true
 }
 
 // bridgeErrorNoticeLimit caps how much of the error we repeat into the
@@ -268,13 +280,15 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 	}
 	log.Printf("[bridge-error] claw %s: paused automatic continuation after %d consecutive bridge transport errors: %s",
 		shortID(clawID), streak, errText)
-	s.notifyBridgeErrorPause(clawID, streak, short)
-	if kind == bridgeErrorPauseKindProviderTransient {
-		// Unlike a gateway outage, NEXT-1294 needs no health window. Run the
-		// lift through the same noProgressMu-serialized path immediately; its
-		// injected resume message owns continuation for this failed turn.
-		s.maybeLiftBridgeErrorPause(clawID)
+	// Unlike a gateway outage, NEXT-1294 needs no health window. Run the lift
+	// through the same noProgressMu-serialized path immediately; its injected
+	// resume message owns continuation for this failed turn. A pause the hub
+	// just healed itself is not worth an operator alarm: page only once the
+	// budget is spent and a human really has to act.
+	if kind == bridgeErrorPauseKindProviderTransient && s.maybeLiftBridgeErrorPause(clawID) {
+		return true
 	}
+	s.notifyBridgeErrorPause(clawID, streak, short)
 	return true
 }
 

@@ -652,6 +652,132 @@ func TestMalformedJSONBridgeErrorPauseAutoLiftsWithOwnCap(t *testing.T) {
 	}
 }
 
+// A provider_transient pause the hub lifts on the spot must not page the
+// operator; only the pause that outlives the budget does. Once the budget is
+// spent the in-memory kind is dropped, so heartbeats stop re-running the lift.
+func TestMalformedJSONPauseAlarmsOnlyWhenBudgetIsSpent(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-provider-transient-alarm"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, status, pipeline_stage, task_run_id, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		id, "test-tenant-id", id, "connected", "ci_passed", "run-provider-alarm"); err != nil {
+		t.Fatal(err)
+	}
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-provider-alarm", AttemptID: "attempt-provider-alarm", ClawID: id, TenantID: "test-tenant-id",
+		OwnerType: taskRunOwnerFactory, Factory: "bugfix", Phase: taskRunPhaseAgentRunning, StartedAt: int64(1760000000000),
+	})
+	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true}
+	s.mu.Lock()
+	s.claws[id] = cc
+	s.mu.Unlock()
+	pausedAlarms := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id='run-provider-alarm' AND event_type=? AND detail LIKE '%"noProgressPaused":true%'`,
+			taskRunEventAgentIdle).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	for i := 0; i < bridgeErrorPauseThreshold; i++ {
+		s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+	}
+	if clawPaused(t, s, id) {
+		t.Fatal("provider-transient pause was not lifted")
+	}
+	if got := pausedAlarms(); got != 0 {
+		t.Fatalf("self-healed pause paged the operator %d times", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET bridge_error_auto_resumes=? WHERE id=?`, bridgeErrorProviderAutoResumeMax, id); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < bridgeErrorPauseThreshold; i++ {
+		s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+	}
+	if !clawPaused(t, s, id) {
+		t.Fatal("pause beyond the budget was lifted")
+	}
+	if got := pausedAlarms(); got != 1 {
+		t.Fatalf("paused alarms after the budget is spent = %d, want 1", got)
+	}
+	cc.mu.RLock()
+	kind := cc.bridgeErrorPauseKind
+	cc.mu.RUnlock()
+	if kind != "" {
+		t.Fatalf("in-memory kind = %q after the budget is spent; heartbeats would keep retrying the lift", kind)
+	}
+	if k, _ := bridgeErrorRow(t, s, id); k != bridgeErrorPauseKindProviderTransient {
+		t.Fatalf("persisted kind = %q, want %q", k, bridgeErrorPauseKindProviderTransient)
+	}
+	if s.maybeLiftBridgeErrorPause(id) || !clawPaused(t, s, id) {
+		t.Fatal("exhausted provider-transient pause was lifted")
+	}
+}
+
+// Both auto-lift kinds share bridge_error_auto_resumes: provider lifts spend
+// the gateway budget, and gateway lifts count toward the provider cap. The
+// sharing is deliberately conservative; per-kind counters would refund budget.
+func TestBridgeErrorAutoLiftKindsShareOneCounter(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	providerEpisode := func(cc *clawConn, id string) {
+		t.Helper()
+		for i := 0; i < bridgeErrorPauseThreshold; i++ {
+			s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+		}
+	}
+
+	// Provider lifts first: after bridgeErrorAutoResumeMax of them, a gateway
+	// pause is human-only even after a long healthy window.
+	const first = "claw-shared-provider-first"
+	cc := bridgeErrorClaw(t, s, first)
+	cc.mu.Lock()
+	cc.awaitingResponse = true
+	cc.mu.Unlock()
+	for i := 0; i < bridgeErrorAutoResumeMax; i++ {
+		providerEpisode(cc, first)
+	}
+	if k, n := bridgeErrorRow(t, s, first); clawPaused(t, s, first) || k != "" || n != bridgeErrorAutoResumeMax {
+		t.Fatalf("after provider lifts: paused=%v kind=%q resumes=%d", clawPaused(t, s, first), k, n)
+	}
+	for i := 0; i < bridgeErrorPauseThreshold; i++ {
+		s.observeBridgeErrorTurn(cc, first, gatewayDownErr, true)
+	}
+	healthyFor(cc, time.Hour)
+	s.maybeLiftBridgeErrorPause(first)
+	if k, n := bridgeErrorRow(t, s, first); !clawPaused(t, s, first) || k != bridgeErrorPauseKindGateway || n != bridgeErrorAutoResumeMax {
+		t.Fatalf("gateway pause after spent budget: paused=%v kind=%q resumes=%d", clawPaused(t, s, first), k, n)
+	}
+
+	// Gateway lifts first: provider pauses get only the remainder of their cap.
+	const second = "claw-shared-gateway-first"
+	cc = gatewayPauseClaw(t, s, second, gatewayDownErr)
+	for i := 1; i <= bridgeErrorAutoResumeMax; i++ {
+		healthyFor(cc, time.Hour)
+		s.maybeLiftBridgeErrorPause(second)
+		if clawPaused(t, s, second) {
+			t.Fatalf("gateway lift %d did not happen", i)
+		}
+		if i < bridgeErrorAutoResumeMax {
+			for j := 0; j < bridgeErrorPauseThreshold; j++ {
+				s.observeBridgeErrorTurn(cc, second, gatewayDownErr, true)
+			}
+		}
+	}
+	for i := bridgeErrorAutoResumeMax + 1; i <= bridgeErrorProviderAutoResumeMax; i++ {
+		providerEpisode(cc, second)
+		if k, n := bridgeErrorRow(t, s, second); clawPaused(t, s, second) || k != "" || n != i {
+			t.Fatalf("provider lift %d: paused=%v kind=%q resumes=%d", i, clawPaused(t, s, second), k, n)
+		}
+	}
+	providerEpisode(cc, second)
+	if k, n := bridgeErrorRow(t, s, second); !clawPaused(t, s, second) || k != bridgeErrorPauseKindProviderTransient || n != bridgeErrorProviderAutoResumeMax {
+		t.Fatalf("provider pause past the shared cap: paused=%v kind=%q resumes=%d", clawPaused(t, s, second), k, n)
+	}
+}
+
 func TestOtherAgentRunFailuresRemainHumanOnly(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	for _, errText := range []string{

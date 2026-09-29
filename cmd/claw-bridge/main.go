@@ -733,12 +733,16 @@ type inFlightState struct {
 	lastModelPulseAt    time.Time
 	inFlightCalls       map[string]inFlightToolCall
 	callOccurrences     map[string]int
+	// lifecycleErrorPending is set (under mu) when a lifecycle error arrived
+	// and deliverLifecycleError owns this turn's terminal result.
+	lifecycleErrorPending bool
 }
 
 // appendLifecycleErrorCause preserves OpenClaw's existing user-facing error
 // while adding the provider cause recovered from the transcript. OpenClaw
-// 2026.9.4 deliberately sanitizes lifecycle error events, so the assistant
-// message's errorMessage is the only wire-visible copy of failures such as the
+// 2026.9.4 deliberately sanitizes lifecycle error events, so the raw transcript
+// assistant message's errorMessage (read through sessions.get, see
+// deliverLifecycleError) is the only wire-visible copy of failures such as the
 // NEXT-1294 malformed tool-call JSON response.
 func appendLifecycleErrorCause(message, cause string) string {
 	message = strings.TrimSpace(message)
@@ -763,8 +767,14 @@ func lastAssistantErrorMessage(payload json.RawMessage) string {
 	if json.Unmarshal(payload, &history) != nil {
 		return ""
 	}
+	// Only the current turn counts: a user message before any assistant reply
+	// means the failed turn's assistant message is not in the transcript, and
+	// an older turn's errorMessage must never be attached to this failure.
 	for i := len(history.Messages) - 1; i >= 0; i-- {
 		message := history.Messages[i]
+		if message.Role == "user" {
+			return ""
+		}
 		if message.Role != "assistant" {
 			continue
 		}
@@ -1648,25 +1658,41 @@ func (gs *gatewaySession) reconnectGatewayWithTimeout(ctx context.Context, expec
 }
 
 func (gs *gatewaySession) deliverLifecycleError(inf *inFlightState, sessionKey, message string) {
-	// NEXT-1294: OpenClaw 2026.9.4's
-	// embedded-agent-subscribe.handlers.lifecycle.ts handleAgentEnd emits a
-	// sanitized lifecycle data.error and intentionally keeps the raw provider
-	// text only on the failed assistant transcript message. Query chat.history
-	// off the read-loop goroutine (which must remain free to dispatch the RPC
-	// response) and preserve the old error unchanged if the best-effort lookup
-	// fails.
+	// NEXT-1294: OpenClaw 2026.9.4's handleAgentEnd (lifecycle handler in
+	// dist/builtin-openclaw-*.mjs) emits a sanitized lifecycle data.error and
+	// keeps the raw provider text only on the failed assistant transcript
+	// message, which AgentSession persists on message_end before agent_end is
+	// processed. chat.history cannot recover it: its display projection
+	// (projectEmptyAssistantErrorMessages / sanitizeAssistantErrorDisplayMessage
+	// in session-transcript-readers-*.mjs) deletes errorMessage. sessions.get
+	// (sessions-read-*.mjs) returns readRecentSessionMessagesWithStatsAsync
+	// records through projectTranscriptEntryMessage, i.e. the raw transcript
+	// message with stopReason and errorMessage intact, and the bridge already
+	// uses it as its session probe. Query it off the read-loop goroutine (which
+	// must remain free to dispatch the RPC response) and preserve the old error
+	// unchanged if the best-effort lookup fails.
 	if strings.Contains(strings.ToLower(message), "agent run failed") {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		response, err := gs.sendReq(ctx, "chat.history", map[string]interface{}{
-			"sessionKey": sessionKey,
-			"limit":      10,
+		response, err := gs.sendReq(ctx, "sessions.get", map[string]interface{}{
+			"key":   sessionKey,
+			"limit": 10,
 		})
 		cancel()
 		if err != nil {
-			log.Printf("[gateway] chat.history after lifecycle error: %v", err)
+			log.Printf("[gateway] sessions.get after lifecycle error: %v", err)
 		} else {
 			message = appendLifecycleErrorCause(message, lastAssistantErrorMessage(response.Payload))
 		}
+	}
+	// The lookup can outlive the turn (turn deadline, session rotation). Its
+	// terminal result was already reported then, so emitting a session_error
+	// activity now would mark an idle claw busy on the hub.
+	gs.infMu.RLock()
+	current := gs.inFlight == inf
+	gs.infMu.RUnlock()
+	if !current {
+		log.Printf("[gateway] agent turn error after the turn ended, dropped: %s", message)
+		return
 	}
 	log.Printf("[gateway] agent turn error: %s", message)
 	inf.transcriptOnce.Do(func() { gs.transcript.noteAssistant(inf.assistantText()) })
@@ -1733,7 +1759,16 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			gs.infMu.RUnlock()
 			gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
 			if inf != nil {
-				deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway disconnected")})
+				// A lifecycle error that already arrived owns the turn's result
+				// (NEXT-1294): its transcript lookup fails fast on this
+				// disconnect and delivers the original error, so a needs-human
+				// failure is not reported as a recoverable gateway drop.
+				inf.mu.Lock()
+				lifecycleErrorPending := inf.lifecycleErrorPending
+				inf.mu.Unlock()
+				if !lifecycleErrorPending {
+					deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway disconnected")})
+				}
 			}
 			if gs.client == nil {
 				return
@@ -1921,6 +1956,9 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					if msg == "" {
 						msg = "agent lifecycle error"
 					}
+					inf.mu.Lock()
+					inf.lifecycleErrorPending = true
+					inf.mu.Unlock()
 					go gs.deliverLifecycleError(inf, agentPayload.SessionKey, msg)
 				}
 			}
