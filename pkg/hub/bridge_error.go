@@ -83,27 +83,41 @@ func (cc *clawConn) observeGatewayHealthLocked(healthyAndReady bool) {
 	}
 }
 
+// bridgeErrorLiftDue reports whether cc's pause is a gateway pause whose
+// gateway has now been healthy and ready for the whole recovery window.
+func (cc *clawConn) bridgeErrorLiftDue() bool {
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	return cc.noProgressPaused && cc.bridgeErrorPauseGateway &&
+		!cc.gatewayHealthySince.IsZero() && now().Sub(cc.gatewayHealthySince) >= bridgeErrorRecoveryHealthyFor
+}
+
 // maybeLiftBridgeErrorPause runs on every bridge heartbeat (the one place that
 // already sees gateway health per connection, so no extra ticker or DB scan).
-// The in-memory checks keep the common case free of DB work; the UPDATE is the
-// authority and shares noProgressMu with the pause and the human resume, so it
-// cannot race with either.
+// The in-memory pre-check keeps the common case free of DB work and of
+// noProgressMu. Everything after it runs under noProgressMu, which the pause,
+// the human resume AND connection registration also hold (handleClawWS reads
+// the persisted latch and publishes the new clawConn inside it). So the
+// connection re-checked and cleared here is the live one: a bridge that
+// reconnects either registers before the lift (and is the connection re-checked
+// here, with its own fresh healthy window) or after it (and reads the cleared
+// row), never in between with a stale paused copy.
 func (s *Server) maybeLiftBridgeErrorPause(clawID string) {
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
-	if cc == nil {
-		return
-	}
-	cc.mu.Lock()
-	eligible := cc.noProgressPaused && cc.bridgeErrorPauseGateway &&
-		!cc.gatewayHealthySince.IsZero() && now().Sub(cc.gatewayHealthySince) >= bridgeErrorRecoveryHealthyFor
-	cc.mu.Unlock()
-	if !eligible {
+	if cc == nil || !cc.bridgeErrorLiftDue() {
 		return
 	}
 
 	s.noProgressMu.Lock()
+	s.mu.RLock()
+	cc = s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil || !cc.bridgeErrorLiftDue() {
+		s.noProgressMu.Unlock()
+		return
+	}
 	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0, bridge_error_pause_kind='', bridge_error_auto_resumes=bridge_error_auto_resumes+1
 		WHERE id=? AND no_progress_paused!=0 AND bridge_error_pause_kind=? AND bridge_error_auto_resumes<?`,
 		clawID, bridgeErrorPauseKindGateway, bridgeErrorAutoResumeMax)

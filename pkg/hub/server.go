@@ -2918,14 +2918,22 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var noProgressPaused bool
-	var pausedForGateway bool
-	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0, COALESCE(bridge_error_pause_kind,'')='gateway' FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused, &pausedForGateway)
 	// A bridge-process restart tears down the main channel, so the old clawConn
 	// (and its lastTurnFinishedAt) is usually gone by the time the new bridge
 	// registers. Seed the post-restart resume window and idle stretch from the
 	// latest evidence of agent turn output (see lastAgentTurnEvidenceAt).
 	lastClawMsgAt := s.lastAgentTurnEvidenceAt(clawID)
+	// The persisted pause is read and the new connection published under
+	// noProgressMu, the lock every pause/resume writer holds while it updates
+	// the row and then the live clawConn. Without it a writer could land
+	// between this read and the publish below and update only the superseded
+	// connection, leaving this one with a stale copy of the latch (a pause that
+	// no longer exists in the DB can then never be lifted except by a human).
+	// Lock order is noProgressMu then s.mu, as in pauseAutomaticContinuation.
+	s.noProgressMu.Lock()
+	var noProgressPaused bool
+	var pausedForGateway bool
+	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0, COALESCE(bridge_error_pause_kind,'')='gateway' FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused, &pausedForGateway)
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseGateway: noProgressPaused && pausedForGateway, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
@@ -2954,6 +2962,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
+	s.noProgressMu.Unlock()
 	// A provider limit outlives the bridge that discovered it: the account is
 	// capped whether or not this sandbox restarted, so a fresh connection must
 	// come back parked rather than spend another turn on the same wall. Settled
