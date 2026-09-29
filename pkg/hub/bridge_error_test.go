@@ -572,12 +572,25 @@ func TestNonGatewayBridgeErrorPauseStaysPaused(t *testing.T) {
 	if !clawPaused(t, s, id) || recoveryMessages(t, s, id) != 0 {
 		t.Fatal("non-gateway pause was auto-lifted")
 	}
-	for _, e := range []string{"Agent run failed", "requires legacy credential migration"} {
+	for _, e := range []string{
+		"Agent run failed",
+		"requires legacy credential migration",
+		// The reconnect wrapper around causes that need a human.
+		"sessions.send write: use of closed network connection; gateway reconnect failed: connect rejected: unauthorized",
+		"gateway disconnected; gateway reconnect failed: read challenge: open /root/.openclaw/auth-profiles.json: no space left on device",
+		"dial gateway: failed to WebSocket dial: expected handshake response status code 101 but got 401 Unauthorized",
+	} {
 		if bridgeErrorIsGatewayConnectivity(e) {
 			t.Fatalf("%q classified as gateway", e)
 		}
 	}
-	for _, e := range []string{"gateway disconnected", "dial gateway: failed to WebSocket dial", "x; gateway reconnect failed: y"} {
+	for _, e := range []string{
+		"gateway disconnected",
+		"dial gateway: failed to WebSocket dial",
+		"x; gateway reconnect failed: y",
+		// NEXT-1293, verbatim shape.
+		"sessions.send write: use of closed network connection; gateway reconnect failed: dial gateway: failed to WebSocket dial: failed to send handshake request: Get \"http://127.0.0.1:18789\": context deadline exceeded",
+	} {
 		if !bridgeErrorIsGatewayConnectivity(e) {
 			t.Fatalf("%q not classified as gateway", e)
 		}

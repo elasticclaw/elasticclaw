@@ -62,9 +62,21 @@ const (
 )
 
 // bridgeErrorIsGatewayConnectivity matches the claw-bridge strings that mean
-// "could not talk to the local gateway" (cmd/claw-bridge/main.go).
+// "could not talk to the local gateway" (cmd/claw-bridge/main.go). The
+// reconnect wrapper ("...; gateway reconnect failed: <cause>") also carries
+// causes that are not a hang: the gateway answering the handshake with a
+// rejection, or a credential/disk failure. Those need a human, so any
+// non-transient marker anywhere in the text wins over a connectivity marker.
 func bridgeErrorIsGatewayConnectivity(errText string) bool {
 	lower := strings.ToLower(errText)
+	for _, marker := range []string{
+		"connect rejected", "unauthorized", "forbidden", "auth", "credential",
+		"no space left", "enospc", "agent run failed", "usage limit",
+	} {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
 	for _, marker := range []string{"gateway disconnected", "dial gateway", "gateway reconnect failed"} {
 		if strings.Contains(lower, marker) {
 			return true
