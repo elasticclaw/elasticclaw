@@ -5617,11 +5617,6 @@ func isUnhelpfulActivityContent(activity map[string]interface{}, content string)
 	return strings.HasPrefix(content, "No streamed output")
 }
 
-// storeAgentActivity persists an activity message. Generic reasoning activity
-// (kind == "activity") is upserted into a single row per claw so the model's
-// streaming internal monologue does not flood the messages table. Tool,
-// diagnostic, error, and lifecycle activity messages are inserted as distinct
-// rows because they are useful audit events.
 // lastAgentTurnEvidenceAt is the latest created_at over the claw's messages
 // that agent turn output produces: role 'claw' (a response, or the
 // "[interrupted]" flush at disconnect) and role 'activity' (tool/reasoning
@@ -5629,16 +5624,32 @@ func isUnhelpfulActivityContent(activity map[string]interface{}, content string)
 // lone sessions_yield, writes no 'claw' row, so seeding from 'claw' alone
 // rewinds the idle stretch to an older turn and the once-per-stretch resume
 // latch then reads "already handled" forever (NEXT-1154). Hub-authored rows
-// use roles 'hub' and 'user' and are deliberately excluded. Activity is only
-// stored from bridge agent_activity events (storeAgentActivity); one arriving
-// outside a turn can only push the seed later, which delays an idle
-// resume instead of suppressing it, so no per-kind filtering is needed.
+// use roles 'hub' and 'user' and are excluded.
+//
+// Activity rows are only written from bridge agent_activity events
+// (storeAgentActivity), but not all of them are turn output: claw-bridge also
+// emits its own session lifecycle rows (kinds session_rotated,
+// session_preserved, session_error) on a gateway reconnect, which can land
+// while the agent is idle. Counting those would not just delay an idle resume:
+// the same seed feeds autoResumeRecentTurnWindow, so a hub restart shortly
+// after an idle claw's reconnect would read as "a turn just ended" and a
+// session loss would wake the idle claw into autonomous work. They are
+// excluded by kind (format is "activity:" + the compact JSON payload).
+// session_error is emitted inside a turn, but that turn also ends with a
+// 'claw' row, so dropping it loses no evidence.
 func (s *Server) lastAgentTurnEvidenceAt(clawID string) time.Time {
 	var at time.Time
-	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role IN ('claw','activity') ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&at)
+	_ = s.db.QueryRow(`SELECT created_at FROM messages
+		WHERE claw_id=? AND (role='claw' OR (role='activity' AND format NOT LIKE '%"kind":"session\_%' ESCAPE '\'))
+		ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&at)
 	return at
 }
 
+// storeAgentActivity persists an activity message. Generic reasoning activity
+// (kind == "activity") is upserted into a single row per claw so the model's
+// streaming internal monologue does not flood the messages table. Tool,
+// diagnostic, error, and lifecycle activity messages are inserted as distinct
+// rows because they are useful audit events.
 func (s *Server) storeAgentActivity(clawID, tenantID, content, format string, activity map[string]interface{}, createdAt time.Time) {
 	kind, _ := activity["kind"].(string)
 	if strings.ToLower(strings.TrimSpace(kind)) == "activity" {
@@ -9439,7 +9450,7 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edge ty
 	//
 	// idle_resume_at goes with it here, unlike the stage transition: the latch
 	// keys on the idle stretch's anchor, and lastTurnFinishedAt is seeded on
-	// reconnect from the last claw/activity message, which can land within
+	// reconnect from the last agent turn evidence, which can land within
 	// agentIdleStretchSlack of a latch the DEAD session earned. Leaving it
 	// would then read as "this stretch was already handled" on every tick and
 	// veto the resume permanently. Nothing is lost by clearing it: what

@@ -582,43 +582,55 @@ func TestEnqueueSessionLostResumeLeavesBudgetWhenClawIneligible(t *testing.T) {
 // NEXT-1154: a turn made only of tool calls (a lone sessions_yield) writes
 // role='activity' rows and no role='claw' row. Seeding lastTurnFinishedAt from
 // 'claw' alone after a hub restart rewound the stretch to an older turn, which
-// sat inside the latched stretch, so the resume never fired again.
+// sat inside the latched stretch, so the resume never fired again. Driven
+// through the real bridge registration with no prior clawConn, i.e. the
+// hub-restart path, and ticked once the blind grace has elapsed.
 func TestAgentIdleResumeAfterHubRestartSeedsFromActivityOnlyTurn(t *testing.T) {
-	s, db := newIdleResumeTestServer(t, nil)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token"}, "", "", "")
+	backdateAgentIdleResumeBaseline(t, s)
 	const clawID = "resume-activity-seed"
-	insertSlackTestClaw(t, db, clawID, "connected", 0, "", 10*time.Hour)
+	insertSlackTestClaw(t, db, clawID, "offline", 0, "", 10*time.Hour)
 	setClawPipelineStage(t, db, clawID, "implement")
 
 	latchedAt := time.Now().Add(-2 * time.Hour)
 	if _, err := db.Exec(`UPDATE claws SET idle_resume_at=?, idle_resume_count=3 WHERE id=?`, latchedAt.UnixMilli(), clawID); err != nil {
 		t.Fatalf("latch stretch: %v", err)
 	}
-	insertMsg := func(id, role string, at time.Time) {
+	insertMsg := func(id, role, format string, at time.Time) {
 		t.Helper()
 		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
-			id, clawID, "test-tenant-id", role, "x", "", at.UTC(), at.UTC()); err != nil {
+			id, clawID, "test-tenant-id", role, "x", format, at.UTC(), at.UTC()); err != nil {
 			t.Fatalf("insert %s message: %v", role, err)
 		}
 	}
-	insertMsg("m-claw", "claw", latchedAt.Add(-80*time.Minute))
-	insertMsg("m-activity", "activity", latchedAt.Add(6*time.Minute))
-	insertMsg("m-hub", "hub", latchedAt.Add(30*time.Minute)) // hub notices are not turn evidence
+	turnEnd := latchedAt.Add(6 * time.Minute)
+	insertMsg("m-claw", "claw", "", latchedAt.Add(-80*time.Minute))
+	insertMsg("m-activity", "activity", `activity:{"kind":"tool","phase":"completed","tool":"sessions_yield"}`, turnEnd)
+	insertMsg("m-hub", "hub", "pre", latchedAt.Add(30*time.Minute)) // hub notices are not turn evidence
+	// A bridge lifecycle row written while the agent was idle is not turn evidence either.
+	insertMsg("m-rotated", "activity", `activity:{"kind":"session_rotated","message":"gateway reconnected"}`, latchedAt.Add(40*time.Minute))
 
-	seed := s.lastAgentTurnEvidenceAt(clawID)
-	if want := latchedAt.Add(6 * time.Minute); seed.Sub(want).Abs() > time.Second {
-		t.Fatalf("seed = %v, want the latest activity row at %v", seed, want)
+	watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.RLock()
+	seed, boundarySeen, connectedAt := cc.lastTurnFinishedAt, cc.turnBoundarySeen, cc.connectedAt
+	cc.mu.RUnlock()
+	if seed.Sub(turnEnd).Abs() > time.Second {
+		t.Fatalf("registration seeded lastTurnFinishedAt=%v, want the activity-only turn at %v", seed, turnEnd)
+	}
+	if boundarySeen {
+		t.Fatal("a hub-restart registration must start blind (turnBoundarySeen=false)")
 	}
 	// The old claw-only seed sits inside the latched stretch and would veto.
 	if old := latchedAt.Add(-80 * time.Minute); old.UnixMilli() > latchedAt.UnixMilli()+agentIdleStretchSlack.Milliseconds() {
 		t.Fatal("test setup: claw-only seed must fall inside the latched stretch")
 	}
 
-	// Fresh registration after a hub restart: no prior clawConn.
-	restarted := &clawConn{id: clawID, tenantID: "test-tenant-id",
-		connectedAt:        latchedAt.Add(-time.Hour),
-		lastTurnFinishedAt: seed,
-		turnBoundarySeen:   true}
-	s.checkAgentIdleResume(time.Now(), clawID, restarted)
+	tick := connectedAt.Add(agentIdleResumeBlindGrace + time.Minute)
+	s.checkAgentIdleResume(tick, clawID, cc)
 	if got := idleResumeMessages(t, db, clawID); got != 1 {
 		t.Fatalf("resume messages = %d, want 1 after restart with activity-only turn", got)
 	}
@@ -634,10 +646,9 @@ func TestAgentIdleResumeAfterHubRestartSeedsFromActivityOnlyTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := &clawConn{id: clawID, tenantID: "test-tenant-id",
-		connectedAt:        latchedAt.Add(-3 * time.Hour),
-		lastTurnFinishedAt: latchedAt.Add(-80 * time.Minute),
-		turnBoundarySeen:   true}
-	s2.checkAgentIdleResume(time.Now(), clawID, stale)
+		connectedAt:        connectedAt,
+		lastTurnFinishedAt: latchedAt.Add(-80 * time.Minute)}
+	s2.checkAgentIdleResume(tick, clawID, stale)
 	if got := idleResumeMessages(t, db2, clawID); got != 0 {
 		t.Fatalf("claw-only seed resumed %d times; expected the latch veto this test documents", got)
 	}

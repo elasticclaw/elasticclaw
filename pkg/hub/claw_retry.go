@@ -524,7 +524,7 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// and clearing the latch would let the SAME idle stretch be poked twice —
 	// the successor here is a different session whose stretch anchor is not
 	// comparable to the predecessor's. Worse, it can collide with it:
-	// lastTurnFinishedAt is seeded on reconnect from the last claw/activity message
+	// lastTurnFinishedAt is seeded on reconnect from the last agent turn evidence
 	// (server.go), so a successor whose re-brief delivery aborts before any
 	// turn finishes can anchor within agentIdleStretchSlack of a latch the
 	// dead session earned, and checkAgentIdleResume would then read "this

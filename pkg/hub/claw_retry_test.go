@@ -234,7 +234,7 @@ func TestResetClawForRetryResetsIdleResumeBudget(t *testing.T) {
 	}
 	// The latch goes too, and this is the half that is easy to get wrong. The
 	// successor is a different session; on reconnect its lastTurnFinishedAt is
-	// seeded from the last claw message, so its first idle stretch can anchor
+	// seeded from the last agent turn evidence, so its first idle stretch can anchor
 	// within agentIdleStretchSlack of a latch the DEAD session earned. Leave
 	// the latch and checkAgentIdleResume reads "already handled" forever — a
 	// budget that was just zeroed and can never be spent.
