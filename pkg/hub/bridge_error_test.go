@@ -527,7 +527,17 @@ func recoveryMessages(t *testing.T, s *Server, clawID string) int {
 	return n
 }
 
+func providerRecoveryMessages(t *testing.T, s *Server, clawID string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE '%last turn failed on the provider side with malformed tool-call JSON%'`, clawID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 const gatewayDownErr = "gateway disconnected"
+const providerMalformedJSONErr = "⚠️ Agent run failed (model: anthropic/claude-sonnet-5): Provider completed tool call with malformed JSON arguments"
 
 func TestGatewayBridgeErrorPauseAutoLiftsAfterSustainedHealth(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
@@ -574,6 +584,7 @@ func TestNonGatewayBridgeErrorPauseStaysPaused(t *testing.T) {
 	}
 	for _, e := range []string{
 		"Agent run failed",
+		providerMalformedJSONErr,
 		"requires legacy credential migration",
 		// The reconnect wrapper around causes that need a human.
 		"sessions.send write: use of closed network connection; gateway reconnect failed: connect rejected: unauthorized",
@@ -593,6 +604,70 @@ func TestNonGatewayBridgeErrorPauseStaysPaused(t *testing.T) {
 	} {
 		if !bridgeErrorIsGatewayConnectivity(e) {
 			t.Fatalf("%q not classified as gateway", e)
+		}
+	}
+}
+
+func TestMalformedJSONBridgeErrorPauseAutoLiftsWithOwnCap(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-provider-transient-cap"
+	cc := bridgeErrorClaw(t, s, id)
+	cc.mu.Lock()
+	cc.awaitingResponse = true
+	cc.mu.Unlock()
+
+	if !bridgeErrorIsProviderTransient(strings.ToUpper(providerMalformedJSONErr)) {
+		t.Fatal("case-insensitive malformed JSON error was not classified as provider transient")
+	}
+	if bridgeErrorIsProviderTransient("⚠️ Agent run failed: authentication rejected") {
+		t.Fatal("unrelated agent-run failure was classified as provider transient")
+	}
+	if bridgeErrorIsGatewayConnectivity(providerMalformedJSONErr) {
+		t.Fatal("malformed JSON provider failure was classified as gateway connectivity")
+	}
+
+	for episode := 1; episode <= bridgeErrorProviderAutoResumeMax; episode++ {
+		for i := 0; i < bridgeErrorPauseThreshold; i++ {
+			s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+		}
+		if clawPaused(t, s, id) {
+			t.Fatalf("provider-transient episode %d stayed paused", episode)
+		}
+		if kind, resumes := bridgeErrorRow(t, s, id); kind != "" || resumes != episode {
+			t.Fatalf("episode %d: kind=%q resumes=%d", episode, kind, resumes)
+		}
+	}
+	if got := providerRecoveryMessages(t, s, id); got != bridgeErrorProviderAutoResumeMax {
+		t.Fatalf("provider recovery messages = %d, want %d", got, bridgeErrorProviderAutoResumeMax)
+	}
+
+	for i := 0; i < bridgeErrorPauseThreshold; i++ {
+		s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+	}
+	if !clawPaused(t, s, id) {
+		t.Fatal("provider-transient pause beyond its per-work-unit cap was auto-lifted")
+	}
+	if kind, resumes := bridgeErrorRow(t, s, id); kind != bridgeErrorPauseKindProviderTransient || resumes != bridgeErrorProviderAutoResumeMax {
+		t.Fatalf("capped pause: kind=%q resumes=%d", kind, resumes)
+	}
+}
+
+func TestOtherAgentRunFailuresRemainHumanOnly(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	for _, errText := range []string{
+		"⚠️ Agent run failed (model: anthropic/claude-sonnet-5): authentication rejected",
+		"⚠️ Agent run failed (model: anthropic/claude-sonnet-5): insufficient credits",
+		"⚠️ Agent run failed (model: anthropic/claude-sonnet-5): provider rejected the request schema",
+	} {
+		id := "claw-human-" + strings.ReplaceAll(strings.Fields(errText)[len(strings.Fields(errText))-1], ".", "")
+		cc := gatewayPauseClaw(t, s, id, errText)
+		healthyFor(cc, time.Hour)
+		s.maybeLiftBridgeErrorPause(id)
+		if !clawPaused(t, s, id) {
+			t.Fatalf("%q was auto-lifted", errText)
+		}
+		if kind, resumes := bridgeErrorRow(t, s, id); kind != "" || resumes != 0 {
+			t.Fatalf("%q: kind=%q resumes=%d, want human-only", errText, kind, resumes)
 		}
 	}
 }
@@ -668,8 +743,8 @@ func TestHumanMessageClearsBridgeErrorPauseKind(t *testing.T) {
 	}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	if cc.bridgeErrorPauseGateway {
-		t.Fatal("in-memory gateway kind not cleared")
+	if cc.bridgeErrorPauseKind != "" {
+		t.Fatalf("in-memory pause kind = %q, want cleared", cc.bridgeErrorPauseKind)
 	}
 }
 
@@ -760,7 +835,7 @@ func TestRegistrationSeedsGatewayPauseKind(t *testing.T) {
 	cc := watchdogClawConn(t, s, id)
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
-	if !cc.noProgressPaused || !cc.bridgeErrorPauseGateway {
-		t.Fatalf("registration seeded paused=%v gateway=%v, want both", cc.noProgressPaused, cc.bridgeErrorPauseGateway)
+	if !cc.noProgressPaused || cc.bridgeErrorPauseKind != bridgeErrorPauseKindGateway {
+		t.Fatalf("registration seeded paused=%v kind=%q, want paused gateway", cc.noProgressPaused, cc.bridgeErrorPauseKind)
 	}
 }

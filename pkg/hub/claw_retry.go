@@ -538,8 +538,8 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// bridge_error_auto_resumes is re-armed for the new sandbox, but
 	// bridge_error_pause_kind is cleared WITHOUT lifting no_progress_paused: a
 	// transport-error pause that survives into a replacement stays human-only,
-	// as before NEXT-1293. The gateway auto-lift promises "nothing in the
-	// workspace was lost", which is false after a checkpoint restore.
+	// as before NEXT-1293. Both auto-lift messages assume continuity that a
+	// checkpoint restore cannot guarantee.
 	res, err := s.db.Exec(`
 		UPDATE claws
 		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,

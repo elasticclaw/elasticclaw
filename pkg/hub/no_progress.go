@@ -134,7 +134,7 @@ func (s *Server) resumeNoProgressAfterUserInput(clawID string) {
 	if cc != nil {
 		cc.mu.Lock()
 		cc.noProgressPaused = false
-		cc.bridgeErrorPauseGateway = false
+		cc.bridgeErrorPauseKind = ""
 		// A human intervened, so the bridge-error streak starts over too: the
 		// next pause should again cost bridgeErrorPauseThreshold turns, not one.
 		cc.bridgeErrorStreak = 0
@@ -307,8 +307,9 @@ func responseProgressMarkers(content string) []string {
 // It reports whether THIS call performed the pause: an already-paused claw
 // returns false so the caller does not notify a human twice about a claw that
 // is already stopped. kind records why (see bridge_error.go): only a
-// bridgeErrorPauseKindGateway pause is ever lifted without a human. Both writers take noProgressMu, so an observation tick
-// and a bridge error cannot both think they were the one to latch.
+// recognised auto-lift kind is ever lifted without a human. Both writers take
+// noProgressMu, so an observation tick and a bridge error cannot both think
+// they were the one to latch.
 func (s *Server) pauseAutomaticContinuation(clawID, notice, kind string) bool {
 	s.noProgressMu.Lock()
 	defer s.noProgressMu.Unlock()
@@ -328,10 +329,12 @@ func (s *Server) pauseAutomaticContinuation(clawID, notice, kind string) bool {
 	s.mu.RUnlock()
 	if cc != nil {
 		cc.mu.Lock()
-		cc.bridgeErrorPauseGateway = kind == bridgeErrorPauseKindGateway
+		cc.bridgeErrorPauseKind = kind
 		// The recovery window must start AFTER the pause, so a gateway that was
 		// already healthy when the error turn landed does not count.
-		cc.gatewayHealthySince = time.Time{}
+		if kind == bridgeErrorPauseKindGateway {
+			cc.gatewayHealthySince = time.Time{}
+		}
 		cc.mu.Unlock()
 	}
 	return true
