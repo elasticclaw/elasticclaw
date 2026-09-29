@@ -9436,7 +9436,11 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edge ty
 	// veto the resume permanently. Nothing is lost by clearing it: what
 	// protects a connection whose turn state is invisible is
 	// agentIdleResumeBlindGrace, not this latch.
-	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_count=0, bridge_error_auto_resumes=0, idle_resume_at=0 WHERE id=?`, clawID); err != nil {
+	//
+	// bridge_error_auto_resumes is deliberately NOT re-armed here (see
+	// bridge_error.go): a gateway hang is what rotates the session, so the
+	// same failing sandbox would get a fresh auto-lift budget on every flap.
+	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_count=0, idle_resume_at=0 WHERE id=?`, clawID); err != nil {
 		log.Printf("[watchdog] re-arm idle resume budget for %s: %v", shortID(clawID), err)
 	}
 	if prefix == sessionRotatedResumePrefix && s.sessionLossLoopGuard(clawID, edge.Reason, b.String()) {
@@ -9898,7 +9902,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		// statement would refund the attempt checkAgentIdleResume just latched
 		// AND drop its latch, letting the next tick poke the identical stretch
 		// a second time.
-		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='', idle_resume_count=0, bridge_error_auto_resumes=0 WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
+		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='', idle_resume_count=0 WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
 			log.Printf("[hub] clear pending session-loss notice for %s: %v", shortID(clawID), err)
 			return
 		}

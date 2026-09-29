@@ -1,11 +1,13 @@
 package hub
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"nhooyr.io/websocket/wsjson"
 )
 
 // The two turn bodies claw 1572c4e4 produced during NEXT-725, verbatim. Both
@@ -655,5 +657,97 @@ func TestHumanMessageClearsBridgeErrorPauseKind(t *testing.T) {
 	defer cc.mu.Unlock()
 	if cc.bridgeErrorPauseGateway {
 		t.Fatal("in-memory gateway kind not cleared")
+	}
+}
+
+// End to end through the bridge WebSocket (NEXT-1293): heartbeats drive the
+// healthy window, a not-ready heartbeat breaks it, and the lift fires from the
+// heartbeat handler. The session rotation the hang caused is recorded as a
+// pending notice while paused and rides the recovery message; delivering it
+// must not refund the auto-lift budget, or a flapping gateway is auto-lifted
+// forever and the NEXT-725 "keeps failing still stops" guarantee is gone.
+func TestGatewayPauseLiftsFromHeartbeatsAndSessionLossKeepsTheCap(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const id = "claw-gw-heartbeats"
+	conn := watchdogClaw(t, s, id)
+	cc := watchdogClawConn(t, s, id)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, pipeline_stage='working' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.awaitingResponse = false
+	cc.mu.Unlock()
+	const incidentErr = "sessions.send write: use of closed network connection; gateway reconnect failed: dial gateway: failed to WebSocket dial: context deadline exceeded"
+	for i := 0; i < bridgeErrorPauseThreshold; i++ {
+		s.observeBridgeErrorTurn(cc, id, incidentErr, true)
+	}
+	if k, _ := bridgeErrorRow(t, s, id); !clawPaused(t, s, id) || k != bridgeErrorPauseKindGateway {
+		t.Fatalf("not paused as gateway (kind=%q)", k)
+	}
+
+	// The hang rotated the session while paused: only a notice is parked.
+	cc.mu.Lock()
+	cc.lastTurnFinishedAt = now()
+	cc.mu.Unlock()
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated", Payload: types.SessionRecoveryEdge{SessionKey: "after-hang"}}); err != nil {
+		t.Fatal(err)
+	}
+	pendingNotice := func() string {
+		var notice string
+		_ = db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, id).Scan(&notice)
+		return notice
+	}
+	eventuallyWatchdog(t, func() bool { return pendingNotice() != "" }, "paused session-loss notice")
+
+	heartbeat := func(healthy, ready bool) {
+		t.Helper()
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": healthy, "gateway_ready": ready}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	since := func() time.Time {
+		cc.mu.RLock()
+		defer cc.mu.RUnlock()
+		return cc.gatewayHealthySince
+	}
+	heartbeat(true, true)
+	eventuallyWatchdog(t, func() bool { return !since().IsZero() }, "healthy window start")
+	heartbeat(true, false)
+	eventuallyWatchdog(t, func() bool { return since().IsZero() }, "not-ready heartbeat to break the window")
+	heartbeat(true, true)
+	eventuallyWatchdog(t, func() bool { return !since().IsZero() }, "healthy window restart")
+	if !clawPaused(t, s, id) {
+		t.Fatal("lifted before the healthy window elapsed")
+	}
+	cc.mu.Lock()
+	cc.gatewayHealthySince = now().Add(-bridgeErrorRecoveryHealthyFor - time.Second)
+	cc.mu.Unlock()
+	heartbeat(true, true)
+	eventuallyWatchdog(t, func() bool { return !clawPaused(t, s, id) }, "heartbeat-driven lift")
+	eventuallyWatchdog(t, func() bool { return pendingNotice() == "" }, "notice delivered with the recovery message")
+	if k, n := bridgeErrorRow(t, s, id); k != "" || n != 1 {
+		t.Fatalf("kind=%q resumes=%d after lift and notice delivery, want '' and 1", k, n)
+	}
+	if recoveryMessages(t, s, id) != 1 {
+		t.Fatal("recovery message not injected")
+	}
+}
+
+// A hub restart rebuilds the clawConn from the row: a persisted gateway pause
+// must come back eligible for the heartbeat-driven lift.
+func TestRegistrationSeedsGatewayPauseKind(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const id = "claw-gw-restart"
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,pipeline_stage,no_progress_paused,bridge_error_pause_kind,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		id, "test-tenant-id", "watchdog claw", "elasticclaw", "offline", "working", 1, bridgeErrorPauseKindGateway, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	watchdogClaw(t, s, id)
+	cc := watchdogClawConn(t, s, id)
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	if !cc.noProgressPaused || !cc.bridgeErrorPauseGateway {
+		t.Fatalf("registration seeded paused=%v gateway=%v, want both", cc.noProgressPaused, cc.bridgeErrorPauseGateway)
 	}
 }

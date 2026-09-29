@@ -46,10 +46,15 @@ const bridgeErrorPauseThreshold = 2
 // tagged bridge_error_pause_kind='gateway'. It is lifted automatically once
 // heartbeats report the gateway healthy AND ready continuously for
 // bridgeErrorRecoveryHealthyFor, counted from after the pause, at most
-// bridgeErrorAutoResumeMax times per unit of work (the counter resets where
-// idle_resume_count does). The cap preserves the NEXT-725 guarantee: a sandbox
-// that keeps failing still stops and then waits for a human. Every other error
-// (ENOSPC, "Agent run failed", credential errors) is never auto-lifted.
+// bridgeErrorAutoResumeMax times per unit of work. The counter resets only on a
+// stage transition (claimPipelineStageTransition) and a sandbox replacement
+// (resetClawForRetry). It deliberately survives a session loss, unlike
+// idle_resume_count: a gateway hang is exactly what rotates the session, so
+// resetting there would refund the budget on every flap. The cap preserves the
+// NEXT-725 guarantee: a sandbox that keeps failing still stops and then waits
+// for a human. Every other error (ENOSPC, "Agent run failed", credential or
+// handshake rejections) is never auto-lifted, and neither is a gateway pause
+// carried across a sandbox replacement (resetClawForRetry clears the kind).
 const (
 	bridgeErrorPauseKindGateway   = "gateway"
 	bridgeErrorRecoveryHealthyFor = 3 * time.Minute
