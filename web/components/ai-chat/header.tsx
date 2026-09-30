@@ -14,10 +14,11 @@ export function ChatHeader({ mode, title, data, onNewChat, onRefreshSources }: {
   onRefreshSources: () => void
 }) {
   const sources = data?.sources ?? []
+  const modeName = chatModes.find((item) => item.id === mode)?.name
   return (
     <header className="flex min-h-14 shrink-0 items-center gap-3 border-b px-5 py-2.5">
-      <h1 className="text-sm font-semibold">AI Chat</h1>
-      <span className="rounded-full border px-2 py-0.5 text-xs text-muted-foreground">{chatModes.find((item) => item.id === mode)?.name ?? "Choose a mode"}</span>
+      <h1 className="shrink-0 whitespace-nowrap text-sm font-semibold">AI Chat</h1>
+      {modeName && <span className="shrink-0 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs text-muted-foreground">{modeName}</span>}
       {title && <p className="min-w-0 truncate text-sm text-muted-foreground">{title}</p>}
       <div className="ml-auto flex items-center gap-2">
         <Popover>

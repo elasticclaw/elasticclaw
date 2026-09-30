@@ -292,8 +292,8 @@ function Conversation() {
                     "How is quiz completion doing this month?",
                     "Prototype a simpler check-in screen",
                   ].map((suggestion) => (
-                    <Button key={suggestion} variant="outline" size="sm" onClick={() => setDraft(suggestion)} className="rounded-full text-xs">
-                      <Sparkles className="size-3" />{suggestion}
+                    <Button key={suggestion} variant="outline" onClick={() => setDraft(suggestion)} className="rounded-full px-3.5">
+                      <Sparkles className="size-3.5" />{suggestion}
                     </Button>
                   ))}
                 </div>
