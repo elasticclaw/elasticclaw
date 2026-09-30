@@ -226,7 +226,7 @@ func (r *Runner) runTool(ctx context.Context, messageID string, seq int, call ll
 	run.Summary, run.RowCount = result.Summary, result.RowCount
 	// Store JSON even when a connector returns plain text. No provider error body
 	// or credentials enter persistence or the prompt.
-	data, _ := json.Marshal(result.Data)
+	data, _ := json.Marshal(tools.CapStored(result.Data))
 	run.Result = string(data)
 	if toolErr != nil {
 		run.Error = "Read tool failed"

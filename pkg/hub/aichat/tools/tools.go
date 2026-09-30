@@ -14,6 +14,10 @@ import (
 
 const Timeout = 30 * time.Second
 const MaxResultBytes = 32 * 1024
+
+// MaxStoredResultBytes bounds result_json in ai_chat_tool_runs; the prompt copy
+// is capped separately at MaxResultBytes.
+const MaxStoredResultBytes = 256 * 1024
 const (
 	EmitBlock    = "emit_block"
 	AskInterview = "ask_interview"
@@ -88,12 +92,17 @@ func Execute(ctx context.Context, tool Tool, args json.RawMessage) (Result, erro
 	return result, err
 }
 
-func CapResult(text string) string {
-	if len(text) <= MaxResultBytes {
+func CapResult(text string) string { return truncate(text, MaxResultBytes) }
+
+// CapStored limits the tool result kept for auditing, marking any truncation.
+func CapStored(text string) string { return truncate(text, MaxStoredResultBytes) }
+
+func truncate(text string, max int) string {
+	if len(text) <= max {
 		return text
 	}
 	const suffix = "\n[truncated]"
-	end := MaxResultBytes - len(suffix)
+	end := max - len(suffix)
 	for end > 0 && !utf8.RuneStart(text[end]) {
 		end--
 	}

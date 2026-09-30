@@ -25,4 +25,7 @@ func TestReservedAndResultCap(t *testing.T) {
 			t.Fatal("short value changed")
 		}
 	}
+	if got := CapStored(strings.Repeat("a", MaxStoredResultBytes+1)); len(got) > MaxStoredResultBytes || !strings.HasSuffix(got, "[truncated]") {
+		t.Fatalf("stored result not capped: %d", len(got))
+	}
 }
