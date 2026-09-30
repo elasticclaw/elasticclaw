@@ -52,6 +52,7 @@ function createHooks() {
         if (!(index in states)) states[index] = { current }
         return states[index]
       },
+      useEffectEvent: (callback) => callback,
       Suspense: "Suspense",
       useCallback: (callback) => callback,
       useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
@@ -85,15 +86,20 @@ function chatFixture(options = {}) {
   let query = options.thread ? `thread=${options.thread}` : ""
   const hooks = createHooks()
   const requests = []
+  const api = {
+    fetchAIChatSources: (workspace) => new Promise((resolve) => requests.push({ workspace, resolve })),
+    ...options.api,
+  }
+  // The screen's own hooks and helpers run for real, sharing the mocks.
+  const local = (file) => loadComponent(`components/ai-chat/${file}`, { react: hooks.react, "@/lib/api": api })
   const { ChatScreen } = loadComponent("components/ai-chat/chat-screen.tsx", {
     react: hooks.react,
     "next/navigation": { useRouter: () => ({ replace(url) { query = url.split("?")[1] ?? "" } }), useSearchParams: () => new URLSearchParams(query) },
     "lucide-react": { Sparkles: "Sparkles" },
     "@/hooks/use-feature-flag": { useFeatureFlag: () => true, useFeatureFlagsLoaded: () => true },
-    "@/lib/api": {
-      fetchAIChatSources: (workspace) => new Promise((resolve) => requests.push({ workspace, resolve })),
-      ...options.api,
-    },
+    "@/lib/api": api,
+    "./use-chat-sources": local("use-chat-sources.ts"),
+    "./stream-turn": local("stream-turn.ts"),
     "./header": { ChatHeader: "ChatHeader" },
     "./composer": { ChatComposer: "ChatComposer" },
     "./message-list": { MessageList: "MessageList" },

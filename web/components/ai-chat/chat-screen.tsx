@@ -1,15 +1,17 @@
 "use client"
 
-import { Suspense, useEffect, useRef, useState } from "react"
+import { Suspense, useEffect, useEffectEvent, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { Sparkles } from "lucide-react"
 import { useFeatureFlag, useFeatureFlagsLoaded } from "@/hooks/use-feature-flag"
-import { cancelAIChatTurn, createAIChatThread, fetchAIChatSources, fetchAIChatThread, streamAIChatTurn, type AIChatSources, type AIChatThread, type AIChatMessage } from "@/lib/api"
+import { cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { ChatHeader } from "./header"
 import { ModeCards, type ChatMode } from "./mode-cards"
 import { ChatComposer } from "./composer"
 import { MessageList } from "./message-list"
+import { applyStreamEvent, type StreamTurn } from "./stream-turn"
+import { useChatSources } from "./use-chat-sources"
 
 type TurnError = { message: string; text: string; retry: boolean; afterMessageId?: string }
 
@@ -39,6 +41,9 @@ function Conversation() {
   const requestedThread = params.get("thread") ?? ""
   const threadRef = useRef("")
   const loadedThread = useRef("")
+  // Guards against stale responses: `generation` changes whenever the visible
+  // conversation is replaced; `syncRevision` whenever a newer thread sync or
+  // turn starts.
   const active = useRef<AbortController | null>(null)
   const generation = useRef(0)
   const syncRevision = useRef(0)
@@ -51,104 +56,91 @@ function Conversation() {
   const [loadingThread, setLoadingThread] = useState(!!requestedThread)
   const [loadError, setLoadError] = useState("")
   const [turnError, setTurnError] = useState<TurnError | null>(null)
-
-  const [workspace, setWorkspace] = useState("")
   const [mode, setMode] = useState<ChatMode | null>(null)
-  const [revision, setRevision] = useState(0)
-  const [result, setResult] = useState<{ workspace: string; revision: number; data?: AIChatSources; error?: string }>()
-  const current = result?.workspace === workspace && result?.revision === revision ? result : undefined
-  const data = current?.data
-  const refresh = () => setRevision((value) => value + 1)
+  const { current, data, setWorkspace, refresh } = useChatSources(threadRef, () => setMode(null))
 
-  useEffect(() => {
-    let cancelled = false
-    fetchAIChatSources(workspace).then(
-      (data) => {
-        if (cancelled) return
-        if (workspace && !threadRef.current && !data.workspaces.includes(workspace)) {
-          setWorkspace(data.workspaces[0] ?? "")
-          setMode(null)
-          return
-        }
-        setResult({ workspace, revision, data })
-      },
-      () => { if (!cancelled) setResult({ workspace, revision, error: "Unable to load workspace sources." }) },
-    )
-    return () => { cancelled = true }
-  }, [workspace, revision])
-
-  useEffect(() => {
-    if (requestedThread === loadedThread.current && (requestedThread || !threadRef.current)) return
-    const controller = new AbortController()
+  // Drops the visible conversation and invalidates every in-flight request.
+  const resetConversation = (threadId = "") => {
     active.current?.abort()
     const version = ++generation.current
     syncRevision.current++
     sending.current = false
-    setStreaming(false)
-    setReading("")
-    setTurnError(null)
-    setLoadError("")
-    setLoadingThread(!!requestedThread)
-    threadRef.current = requestedThread
+    threadRef.current = threadId
     loadedThread.current = ""
     setThread(null)
     setMessages([])
     setDraft("")
     setMode(null)
-    if (requestedThread) {
-      fetchAIChatThread(requestedThread, controller.signal).then(({ thread, messages }) => {
-        if (controller.signal.aborted || version !== generation.current) return
-        loadedThread.current = thread.id
-        setThread(thread)
-        setMessages(messages)
-        setWorkspace(thread.workspace)
-        setMode(thread.mode as ChatMode)
-        setLoadingThread(false)
-      }, (error: unknown) => {
-        if (controller.signal.aborted || version !== generation.current) return
-        setLoadError(error instanceof Error ? error.message : "Unable to load conversation.")
-        setLoadingThread(false)
-      })
-    }
+    setStreaming(false)
+    setReading("")
+    setTurnError(null)
+    setLoadError("")
+    setLoadingThread(!!threadId)
+    return version
+  }
+
+  const showSavedThread = (saved: AIChatConversation) => {
+    setThread(saved.thread)
+    setMessages(saved.messages)
+    setTurnError((error) => reconcileError(error, saved.messages))
+  }
+
+  const syncThread = async (id: string) => {
+    const version = generation.current
+    const revision = ++syncRevision.current
+    const saved = await fetchAIChatThread(id)
+    if (version === generation.current && revision === syncRevision.current && !sending.current) showSavedThread(saved)
+  }
+
+  const openThread = useEffectEvent((id: string) => {
+    if (id === loadedThread.current && (id || !threadRef.current)) return
+    const version = resetConversation(id)
+    if (!id) return
+    const controller = new AbortController()
+    const isCurrent = () => !controller.signal.aborted && version === generation.current
+    fetchAIChatThread(id, controller.signal).then(({ thread, messages }) => {
+      if (!isCurrent()) return
+      loadedThread.current = thread.id
+      setThread(thread)
+      setMessages(messages)
+      setWorkspace(thread.workspace)
+      setMode(thread.mode as ChatMode)
+      setLoadingThread(false)
+    }, (error: unknown) => {
+      if (!isCurrent()) return
+      setLoadError(error instanceof Error ? error.message : "Unable to load conversation.")
+      setLoadingThread(false)
+    })
     return () => controller.abort()
-  }, [requestedThread])
+  })
+
+  // Another tab (or the sidebar) changed this thread.
+  const onThreadUpdated = useEffectEvent((id: string) => {
+    if (id === threadRef.current && !sending.current) syncThread(id).catch(() => {})
+  })
+
+  useEffect(() => openThread(requestedThread), [requestedThread])
 
   useEffect(() => () => { generation.current++; active.current?.abort() }, [])
 
   useEffect(() => {
-    const refreshThread = (event: Event) => {
-      const id = (event as CustomEvent<{ threadId: string }>).detail.threadId
-      if (id !== threadRef.current || sending.current) return
-      const version = generation.current
-      const revision = ++syncRevision.current
-      fetchAIChatThread(id).then((saved) => {
-        if (version !== generation.current || revision !== syncRevision.current || sending.current) return
-        setThread(saved.thread)
-        setMessages(saved.messages)
-        setTurnError((error) => reconcileError(error, saved.messages))
-      }).catch(() => {})
-    }
-    window.addEventListener("ai-chat-thread-updated", refreshThread)
-    return () => window.removeEventListener("ai-chat-thread-updated", refreshThread)
+    const listener = (event: Event) => onThreadUpdated((event as CustomEvent<{ threadId: string }>).detail.threadId)
+    window.addEventListener("ai-chat-thread-updated", listener)
+    return () => window.removeEventListener("ai-chat-thread-updated", listener)
   }, [])
 
   const newChat = () => {
-    generation.current++
-    active.current?.abort()
-    sending.current = false
-    threadRef.current = ""
-    loadedThread.current = ""
-    setThread(null)
-    setMessages([])
-    setMode(null)
-    setDraft("")
-    setStreaming(false)
-    setReading("")
-    setTurnError(null)
-    setLoadError("")
-    setLoadingThread(false)
+    resetConversation()
     router.replace("/chat")
     refresh()
+  }
+
+  const openCreatedThread = (created: AIChatThread) => {
+    threadRef.current = created.id
+    loadedThread.current = created.id
+    setThread(created)
+    setMode(created.mode as ChatMode)
+    router.replace(`/chat?thread=${encodeURIComponent(created.id)}`)
   }
 
   const send = async (text: string, retry = false) => {
@@ -156,72 +148,31 @@ function Conversation() {
     sending.current = true
     syncRevision.current++
     const version = generation.current
+    const isCurrent = () => version === generation.current
     const controller = new AbortController()
     active.current = controller
     setStreaming(true)
     setTurnError(null)
-    let id = threadRef.current
-    let started = false
-    let assistantId = ""
-    let streamError = ""
-    const previousLastId = messages[messages.length - 1]?.id
+    const turn: StreamTurn = { threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
+    const afterMessageId = messages[messages.length - 1]?.id
     try {
-      if (!id) {
+      if (!turn.threadId) {
         const created = await createAIChatThread(data.workspace, mode ?? "explore_idea", controller.signal)
-        if (version !== generation.current) return
-        id = created.id
-        threadRef.current = id
-        loadedThread.current = id
-        setThread(created)
-        setMode(created.mode as ChatMode)
-        router.replace(`/chat?thread=${encodeURIComponent(id)}`)
+        if (!isCurrent()) return
+        openCreatedThread(created)
+        turn.threadId = created.id
       }
-      await streamAIChatTurn(id, text, retry, controller.signal, (event, payload) => {
-        if (version !== generation.current) return
-        switch (event) {
-          case "message_started": {
-            if (typeof payload.messageId !== "string") return
-            started = true
-            assistantId = payload.messageId
-            setDraft("")
-            const now = Date.now()
-            const base = { threadId: id, seq: 0, model: "", inputTokens: 0, outputTokens: 0, createdAt: now }
-            setMessages((previous) => [...previous,
-              ...(!retry ? [{ ...base, id: `user-${assistantId}`, role: "user" as const, content: text, status: "completed" }] : []),
-              { ...base, id: assistantId, role: "assistant", content: "", status: "streaming", model: String(payload.model ?? "") },
-            ])
-            break
-          }
-          case "token":
-            if (typeof payload.text === "string") setMessages((previous) => previous.map((message) => message.id === assistantId ? { ...message, content: message.content + payload.text } : message))
-            break
-          case "tool_started": setReading(String(payload.provider || payload.tool || "sources")); break
-          case "tool_finished": setReading(""); break
-          case "error": streamError = typeof payload.message === "string" ? payload.message : "Unable to complete this turn."; break
-          case "done":
-            setMessages((previous) => previous.map((message) => message.id === assistantId ? { ...message, status: String(payload.status) } : message))
-            break
-          // Reserved events and unknown block types are intentionally ignored.
-          default: break
-        }
+      await streamAIChatTurn(turn.threadId, text, retry, controller.signal, (event, payload) => {
+        if (isCurrent()) applyStreamEvent(turn, event, payload, { setMessages, setDraft, setReading })
       })
-      if (streamError) setTurnError({ message: streamError, text, retry: true, afterMessageId: previousLastId })
+      if (turn.error) setTurnError({ message: turn.error, text, retry: true, afterMessageId })
     } catch (error) {
-      if (version === generation.current && !controller.signal.aborted) setTurnError({ message: error instanceof Error ? error.message : "Unable to send message.", text, retry: started || retry, afterMessageId: previousLastId })
+      if (isCurrent() && !controller.signal.aborted) setTurnError({ message: error instanceof Error ? error.message : "Unable to send message.", text, retry: turn.started || retry, afterMessageId })
     } finally {
-      if (version === generation.current) sending.current = false
-      if (id && version === generation.current) {
-        try {
-          const revision = ++syncRevision.current
-          const saved = await fetchAIChatThread(id)
-          if (version === generation.current && revision === syncRevision.current) {
-            setThread(saved.thread)
-            setMessages(saved.messages)
-            setTurnError((error) => reconcileError(error, saved.messages))
-          }
-        } catch { /* Keep streamed content if the connection is unavailable. */ }
-      }
-      if (version === generation.current) {
+      if (isCurrent()) sending.current = false
+      // Keep streamed content if the connection is unavailable.
+      if (turn.threadId && isCurrent()) await syncThread(turn.threadId).catch(() => {})
+      if (isCurrent()) {
         sending.current = false
         setStreaming(false)
         setReading("")
