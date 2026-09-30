@@ -12,7 +12,7 @@ export type StreamTurn = {
 
 export type StreamView = {
   setMessages: (update: (messages: AIChatMessage[]) => AIChatMessage[]) => void
-  setDraft: (draft: string) => void
+  setDraft: (update: (draft: string) => string) => void
   setReading: (reading: string) => void
 }
 
@@ -22,7 +22,9 @@ export function applyStreamEvent(turn: StreamTurn, event: string, payload: Recor
       if (typeof payload.messageId !== "string") return
       turn.started = true
       turn.assistantId = payload.messageId
-      view.setDraft("")
+      // Clear the composer only if it still holds what was just sent; a retry
+      // sends no text, and the user may have started typing something else.
+      if (!turn.retry) view.setDraft((draft) => (draft.trim() === turn.text.trim() ? "" : draft))
       const base = { threadId: turn.threadId, seq: 0, model: "", inputTokens: 0, outputTokens: 0, createdAt: Date.now() }
       view.setMessages((previous) => [...previous,
         ...(!turn.retry ? [{ ...base, id: `user-${turn.assistantId}`, role: "user" as const, content: turn.text, status: "completed" }] : []),

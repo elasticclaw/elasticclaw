@@ -456,3 +456,22 @@ test("a new thread pins the workspace the server picked for its sources", async 
   fixture.render()
   assert.equal(fixture.requests.at(-1).workspace, "A")
 })
+
+test("retrying a failed reply keeps a new question typed in the composer", async () => {
+  const fixture = chatFixture({ thread: "existing", api: {
+    fetchAIChatThread: async () => ({ thread: thread("existing"), messages: [{ id: "a1", role: "assistant", content: "", status: "error" }] }),
+    streamAIChatTurn: async (_id, _text, retry, _signal, onEvent) => {
+      assert.equal(retry, true)
+      onEvent("message_started", { messageId: "a2", model: "m" })
+      onEvent("done", { messageId: "a2", status: "completed" })
+    },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  findElement(fixture.render(), "ChatComposer").props.onChange("Next question")
+  const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  alert.props.children[1].props.onClick()
+  await flush()
+  assert.equal(findElement(fixture.render(), "ChatComposer").props.value, "Next question")
+})
