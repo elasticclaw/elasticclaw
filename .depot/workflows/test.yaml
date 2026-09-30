@@ -128,6 +128,10 @@ jobs:
           exit $ec
         working-directory: web
 
+      - name: Unit tests
+        run: npm test
+        working-directory: web
+
       - name: Build (static export)
         run: npm run build
         working-directory: web
