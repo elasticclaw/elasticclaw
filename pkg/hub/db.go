@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -24,7 +25,7 @@ func openDB(path string) (*sql.DB, error) {
 	if err := migrate(db); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	if err := aichat.Migrate(db); err != nil {
+	if err := aichat.Migrate(context.Background(), db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate ai chat: %w", err)
 	}

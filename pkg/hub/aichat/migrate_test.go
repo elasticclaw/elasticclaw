@@ -1,6 +1,7 @@
 package aichat
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"reflect"
@@ -17,7 +18,7 @@ func TestMigrate(t *testing.T) {
 	}
 	defer db.Close()
 	for i := 0; i < 2; i++ {
-		if err := Migrate(db); err != nil {
+		if err := Migrate(context.Background(), db); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -88,7 +89,7 @@ func TestMigrate(t *testing.T) {
 	if err := db.QueryRow(`SELECT visibility, topic, panel_json FROM ai_chat_threads`).Scan(&visibility, &topic, &panel); err != nil || visibility != "private" || topic.Valid || panel.Valid {
 		t.Fatalf("thread defaults = %q, %v, %v, %v", visibility, topic, panel, err)
 	}
-	if err := Migrate(db); err != nil {
+	if err := Migrate(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -110,7 +111,7 @@ func TestMigrateConcurrentOpeners(t *testing.T) {
 			}
 			defer db.Close()
 			<-start
-			results <- Migrate(db)
+			results <- Migrate(context.Background(), db)
 		}()
 	}
 	close(start)

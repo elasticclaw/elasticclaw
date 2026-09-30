@@ -2,20 +2,21 @@
 package aichat
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 )
 
 // Migrate creates the AI Chat schema. Every statement is idempotent; the
 // transaction and the hub's SQLite busy timeout serialize concurrent openers.
-func Migrate(db *sql.DB) error {
-	tx, err := db.Begin()
+func Migrate(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	for _, statement := range schema {
-		if _, err := tx.Exec(statement); err != nil {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("ai chat schema: %w", err)
 		}
 	}
