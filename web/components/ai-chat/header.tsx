@@ -6,8 +6,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import type { AIChatSources } from "@/lib/api"
 import { chatModes, type ChatMode } from "./mode-cards"
 
-export function ChatHeader({ mode, data, onNewChat, onRefreshSources }: {
+export function ChatHeader({ mode, title, data, onNewChat, onRefreshSources }: {
   mode: ChatMode | null
+  title?: string
   data?: AIChatSources
   onNewChat: () => void
   onRefreshSources: () => void
@@ -17,6 +18,7 @@ export function ChatHeader({ mode, data, onNewChat, onRefreshSources }: {
     <header className="flex min-h-14 shrink-0 items-center gap-3 border-b px-5 py-2.5">
       <h1 className="text-sm font-semibold">AI Chat</h1>
       <span className="rounded-full border px-2 py-0.5 text-xs text-muted-foreground">{chatModes.find((item) => item.id === mode)?.name ?? "Choose a mode"}</span>
+      {title && <p className="min-w-0 truncate text-sm text-muted-foreground">{title}</p>}
       <div className="ml-auto flex items-center gap-2">
         <Popover>
           <PopoverTrigger asChild>

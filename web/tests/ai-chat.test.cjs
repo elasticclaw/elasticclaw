@@ -4,6 +4,8 @@ const path = require("node:path")
 const test = require("node:test")
 const ts = require("typescript")
 
+global.window = { addEventListener() {}, removeEventListener() {} }
+
 // Exercise the components' state/effect transitions without a browser or server.
 function loadComponent(file, mocks) {
   const source = readFileSync(path.join(__dirname, "..", file), "utf8")
@@ -41,13 +43,22 @@ function createHooks() {
         if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) {
           pending.push(() => {
             previous?.cleanup?.()
-            effects[index] = { deps, cleanup: callback() }
+            effects[index] = { deps, callback, cleanup: callback() }
           })
         }
       },
-      useRef: (current) => ({ current }),
+      useRef(current) {
+        const index = cursor++
+        if (!(index in states)) states[index] = { current }
+        return states[index]
+      },
+      Suspense: "Suspense",
       useCallback: (callback) => callback,
       useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
+    },
+    restartEffects() {
+      for (const effect of effects) effect?.cleanup?.()
+      for (const effect of effects) if (effect) effect.cleanup = effect.callback()
     },
     render(component) {
       cursor = 0
@@ -70,21 +81,25 @@ function findElement(tree, type) {
   }
 }
 
-function chatFixture() {
+function chatFixture(options = {}) {
+  let query = options.thread ? `thread=${options.thread}` : ""
   const hooks = createHooks()
   const requests = []
   const { ChatScreen } = loadComponent("components/ai-chat/chat-screen.tsx", {
     react: hooks.react,
-    "next/navigation": { useRouter: () => ({ replace() {} }) },
+    "next/navigation": { useRouter: () => ({ replace(url) { query = url.split("?")[1] ?? "" } }), useSearchParams: () => new URLSearchParams(query) },
     "lucide-react": { Sparkles: "Sparkles" },
     "@/hooks/use-feature-flag": { useFeatureFlag: () => true, useFeatureFlagsLoaded: () => true },
     "@/lib/api": {
       fetchAIChatSources: (workspace) => new Promise((resolve) => requests.push({ workspace, resolve })),
+      ...options.api,
     },
     "./header": { ChatHeader: "ChatHeader" },
+    "./composer": { ChatComposer: "ChatComposer" },
+    "./message-list": { MessageList: "MessageList" },
   })
-  const component = hooks.render(ChatScreen).type
-  return { requests, render: () => hooks.render(component) }
+  const component = hooks.render(ChatScreen).props.children.type
+  return { requests, render: () => hooks.render(component), restartEffects: () => hooks.restartEffects(), navigate: (thread) => { query = thread ? `thread=${thread}` : "" } }
 }
 
 const sources = (workspace, workspaces, extra = {}) => ({
@@ -179,4 +194,150 @@ test("only a visible agent conversation is passed to useHub, preserving navigati
     assert.throws(() => hooks.render(HomeShell), (error) => error === stopAtHub)
   }
   assert.deepEqual(selections, ["agent-B", null, null, "agent-B"])
+})
+
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+const thread = (id) => ({ id, workspace: "A", title: "Question", mode: "explore_idea", archivedAt: null })
+
+test("existing thread reloads after StrictMode effect restart", async () => {
+  const loads = []
+  const fixture = chatFixture({ thread: "existing", api: {
+    fetchAIChatThread: (id, signal) => new Promise((resolve) => loads.push({ id, signal, resolve })),
+  } })
+  fixture.render()
+  fixture.restartEffects()
+  assert.equal(loads.length, 2)
+  assert.equal(loads[0].signal.aborted, true)
+  loads[1].resolve({ thread: thread("existing"), messages: [] })
+  await flush()
+  assert.ok(findElement(fixture.render(), "MessageList"))
+})
+
+test("Back to new chat while an existing thread loads discards the stale load", async () => {
+  const loads = []
+  const fixture = chatFixture({ thread: "existing", api: {
+    fetchAIChatThread: (_id, signal) => new Promise((resolve) => loads.push({ signal, resolve })),
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  fixture.navigate("")
+  fixture.render()
+  assert.equal(loads[0].signal.aborted, true)
+  loads[0].resolve({ thread: thread("existing"), messages: [] })
+  await flush()
+  const tree = fixture.render()
+  assert.equal(findElement(tree, "h2").props.children, "What are we working on?")
+  assert.equal(findElement(tree, "MessageList"), undefined)
+})
+
+test("first send creates a thread, streams tokens, and ignores future event types", async () => {
+  let emit
+  let finish
+  let created = 0
+  const fixture = chatFixture({ api: {
+    createAIChatThread: async (workspace, mode) => { created++; assert.equal(workspace, "A"); assert.equal(mode, "explore_idea"); return thread("new") },
+    streamAIChatTurn: (id, text, retry, _signal, onEvent) => {
+      assert.equal(id, "new"); assert.equal(text, "Question"); assert.equal(retry, false)
+      emit = onEvent
+      return new Promise((resolve) => { finish = resolve })
+    },
+    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "assistant", role: "assistant", content: "Hello", status: "completed" }] }),
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  findElement(fixture.render(), "ChatComposer").props.onChange("Question")
+  findElement(fixture.render(), "ChatComposer").props.onSend()
+  await flush()
+  emit("message_started", { messageId: "assistant", model: "model" })
+  emit("token", { text: "Hel" })
+  emit("block", { type: "future_block", data: {} })
+  emit("future_event", { text: "not a token" })
+  emit("token", { text: "lo" })
+  const tree = fixture.render()
+  assert.equal(findElement(tree, "MessageList").props.messages[1].content, "Hello")
+  assert.equal(findElement(tree, "ChatComposer").props.streaming, true)
+  emit("done", { messageId: "assistant", status: "completed" })
+  finish()
+  await flush()
+  assert.equal(created, 1)
+  assert.equal(findElement(fixture.render(), "ChatComposer").props.streaming, false)
+})
+
+test("composer Enter sends, Shift+Enter and IME composition do not", () => {
+  const { ChatComposer } = loadComponent("components/ai-chat/composer.tsx", { "lucide-react": {} })
+  let sent = 0
+  const tree = ChatComposer({ value: "Question", onChange() {}, onSend() { sent++ }, onCancel() {}, streaming: false })
+  const key = findElement(tree, "textarea").props.onKeyDown
+  for (const [shiftKey, isComposing] of [[true, false], [false, true], [false, false]]) key({ key: "Enter", shiftKey, nativeEvent: { isComposing }, preventDefault() {} })
+  assert.equal(sent, 1)
+})
+
+const { readAIChatEvents } = loadComponent("lib/ai-chat-stream.ts", {})
+function byteStream(text, size = 1) {
+  const bytes = new TextEncoder().encode(text)
+  return new ReadableStream({ start(controller) {
+    for (let i = 0; i < bytes.length; i += size) controller.enqueue(bytes.slice(i, i + size))
+    controller.close()
+  } })
+}
+
+test("SSE handles split UTF-8, CRLF and multiline frames", async () => {
+  const events = []
+  await readAIChatEvents(byteStream('event: token\r\ndata: {"text":\r\ndata: "Olá 界"}\r\n\r\nevent: done\ndata: {"status":"completed"}\n\n'), (event, data) => events.push([event, data]))
+  assert.deepEqual(events, [["token", { text: "Olá 界" }], ["done", { status: "completed" }]])
+})
+
+test("SSE rejects a disconnected stream without done", async () => {
+  await assert.rejects(readAIChatEvents(byteStream('event: token\ndata: {"text":"partial"}\n\n'), () => {}), /connection ended/)
+})
+
+test("cancel aborts the active request without a delayed cancel that could affect a new turn", async () => {
+  let signal
+  let emit
+  let cancelCalls = 0
+  const fixture = chatFixture({ api: {
+    createAIChatThread: async () => thread("new"),
+    streamAIChatTurn: (_id, _text, _retry, requestSignal, onEvent) => {
+      signal = requestSignal
+      emit = onEvent
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted"))))
+    },
+    cancelAIChatTurn: async () => { cancelCalls++ },
+    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "assistant", role: "assistant", content: "Partial", status: "cancelled" }] }),
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  findElement(fixture.render(), "ChatComposer").props.onChange("Question")
+  findElement(fixture.render(), "ChatComposer").props.onSend()
+  await flush()
+  emit("message_started", { messageId: "assistant" })
+  findElement(fixture.render(), "ChatComposer").props.onCancel()
+  await flush()
+  assert.equal(signal.aborted, true)
+  assert.equal(cancelCalls, 0)
+  const tree = fixture.render()
+  assert.equal(findElement(tree, "ChatComposer").props.streaming, false)
+  assert.equal(findElement(tree, "MessageList").props.messages[0].status, "cancelled")
+})
+
+test("lost message_started reconciles the persisted turn before retrying", async () => {
+  const attempts = []
+  const fixture = chatFixture({ api: {
+    createAIChatThread: async () => thread("new"),
+    streamAIChatTurn: async (_id, text, retry) => { attempts.push({ text, retry }); throw new Error("connection lost") },
+    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "persisted", role: "assistant", content: "", status: "cancelled" }] }),
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  findElement(fixture.render(), "ChatComposer").props.onChange("Question")
+  findElement(fixture.render(), "ChatComposer").props.onSend()
+  await flush()
+  const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  alert.props.children[1].props.onClick()
+  await flush()
+  assert.deepEqual(attempts, [{ text: "Question", retry: false }, { text: "Question", retry: true }])
 })

@@ -528,7 +528,9 @@ export function useHub(selectedClawId: string | null): HubState {
         const data = JSON.parse(event.data)
         const { type, payload } = data
 
-        if (type === "chunk") {
+        if (type === "ai_chat_thread_updated") {
+          if (typeof payload?.threadId === "string") window.dispatchEvent(new CustomEvent("ai-chat-thread-updated", { detail: { threadId: payload.threadId } }))
+        } else if (type === "chunk") {
           // Streaming chunk — feed into typewriter
           const { claw_id, content } = payload
           noteOutput(claw_id)
