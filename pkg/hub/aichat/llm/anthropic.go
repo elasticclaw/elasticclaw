@@ -113,6 +113,8 @@ func (p *Anthropic) Stream(ctx context.Context, req Request, token func(string) 
 			switch event.Delta.StopReason {
 			case "end_turn", "tool_use", "stop_sequence":
 				finished = true
+			case "max_tokens":
+				finished, result.Truncated = true, true
 			case "":
 			default:
 				return fmt.Errorf("LLM response did not complete")
@@ -123,6 +125,10 @@ func (p *Anthropic) Stream(ctx context.Context, req Request, token func(string) 
 		}
 		return nil
 	})
+	// A token limit may interrupt tool arguments; keep the text, not the calls.
+	if result.Truncated {
+		calls = nil
+	}
 	indices := make([]int, 0, len(calls))
 	for i := range calls {
 		indices = append(indices, i)

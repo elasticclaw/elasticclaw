@@ -105,6 +105,8 @@ func (p *OpenAI) Stream(ctx context.Context, req Request, token func(string) err
 				switch *choice.FinishReason {
 				case "stop", "tool_calls":
 					finished = true
+				case "length":
+					finished, result.Truncated = true, true
 				default:
 					return fmt.Errorf("LLM response did not complete")
 				}
@@ -112,6 +114,10 @@ func (p *OpenAI) Stream(ctx context.Context, req Request, token func(string) err
 		}
 		return nil
 	})
+	// A token limit may interrupt tool arguments; keep the text, not the calls.
+	if result.Truncated {
+		calls = nil
+	}
 	indices := make([]int, 0, len(calls))
 	for i := range calls {
 		indices = append(indices, i)
