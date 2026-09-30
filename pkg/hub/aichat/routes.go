@@ -2,6 +2,7 @@ package aichat
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -41,6 +42,7 @@ type SourcesResponse struct {
 	Workspaces []string        `json:"workspaces"`
 	Workspace  string          `json:"workspace"`
 	Sources    []config.Source `json:"sources"`
+	Error      string          `json:"error,omitempty"`
 }
 
 func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
@@ -70,6 +72,12 @@ func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
 		if cfg, err := config.Load(deps.ManagedDir(response.Workspace)); err == nil {
 			response.Configured = true
 			response.Sources = cfg.Sources
+		} else if !os.IsNotExist(err) {
+			response.Error = err.Error()
+			var pathError *os.PathError
+			if errors.As(err, &pathError) {
+				response.Error = "Unable to read ai_chat.yaml"
+			}
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -131,19 +131,30 @@ func Load(managedDir string) (*Config, error) {
 		return true
 	}, "Expected provider github, repo owner/repo and a relative entry file")
 	if n, ok := nodes["repositories"]; ok {
+		source := Source{Kind: "repositories", Name: "Repositories", Status: "unchecked"}
 		if n.Kind != yaml.SequenceNode {
-			cfg.Sources = append(cfg.Sources, Source{"repositories", "Repositories", "invalid", "Expected a list of GitHub owner/repo names"})
+			source.Status = "invalid"
+			source.Error = "Expected a list of GitHub owner/repo names"
 		} else {
-			for _, item := range n.Content {
+			var rejected []string
+			for i, item := range n.Content {
 				var repo string
 				if item.Decode(&repo) != nil || !validRepo(repo) {
-					cfg.Sources = append(cfg.Sources, Source{"repositories", "Repository", "invalid", "Expected a GitHub owner/repo name"})
+					if item.Kind == yaml.ScalarNode && item.Value != "" {
+						rejected = append(rejected, item.Value)
+					} else {
+						rejected = append(rejected, fmt.Sprintf("entry %d", i+1))
+					}
 				} else {
 					cfg.Repositories = append(cfg.Repositories, repo)
-					cfg.Sources = append(cfg.Sources, Source{"repositories", repo, "unchecked", ""})
 				}
 			}
+			if len(rejected) > 0 {
+				source.Status = "invalid"
+				source.Error = "Rejected: " + strings.Join(rejected, ", ") + " - expected GitHub owner/repo names"
+			}
 		}
+		cfg.Sources = append(cfg.Sources, source)
 	}
 	cfg.decodeSource(nodes, "posthog", "PostHog", func(n yaml.Node) bool {
 		var v PostHog

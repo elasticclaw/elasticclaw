@@ -23,7 +23,13 @@ func TestSources(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("configured", "repositories: [org/repo]\nposthog: {host: invalid}")
+	write("configured", `
+knowledge_base: {provider: github, repo: org/docs, entry: README.md}
+repositories: [org/one, org/two, org/three]
+posthog: {host: invalid}
+datadog: {site: datadoghq.com, env: prod, api_key: API_KEY, app_key: APP_KEY}
+issue_tracker: {provider: linear, default_fields: {team: PRODUCT}}
+`)
 	write("broken", "about: [")
 	deps := Deps{
 		WebAuth:     func(next http.HandlerFunc) http.HandlerFunc { return next },
@@ -41,13 +47,14 @@ func TestSources(t *testing.T) {
 		query, workspace string
 		configured       bool
 		sourceCount      int
+		message          string
 	}{
-		{"", "broken", false, 0},
-		{"?workspace=configured", "configured", true, 2},
-		{"?workspace=broken", "broken", false, 0},
-		{"?workspace=missing", "missing", false, 0},
-		{"?workspace=unknown", "unknown", false, 0},
-		{"?workspace=..%2Fprivate", "../private", false, 0},
+		{"", "broken", false, 0, "invalid ai_chat.yaml"},
+		{"?workspace=configured", "configured", true, 5, ""},
+		{"?workspace=broken", "broken", false, 0, "invalid ai_chat.yaml"},
+		{"?workspace=missing", "missing", false, 0, ""},
+		{"?workspace=unknown", "unknown", false, 0, ""},
+		{"?workspace=..%2Fprivate", "../private", false, 0, ""},
 	} {
 		t.Run(tc.query, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -62,7 +69,10 @@ func TestSources(t *testing.T) {
 			if response.Configured != tc.configured || response.Workspace != tc.workspace || len(response.Sources) != tc.sourceCount || response.Sources == nil || !reflect.DeepEqual(response.Workspaces, []string{"broken", "configured"}) {
 				t.Fatalf("response = %#v", response)
 			}
-			if tc.configured && (response.Sources[0].Status != "unchecked" || response.Sources[1].Status != "invalid" || response.Sources[1].Error == "") {
+			if response.Error != tc.message {
+				t.Fatalf("error = %q, want %q", response.Error, tc.message)
+			}
+			if tc.configured && (response.Sources[1].Name != "Repositories" || response.Sources[1].Status != "unchecked" || response.Sources[2].Status != "invalid" || response.Sources[2].Error == "") {
 				t.Fatalf("sources = %#v", response.Sources)
 			}
 		})
@@ -108,5 +118,38 @@ func TestOwnerLogin(t *testing.T) {
 		if got := OwnerLogin(input); got != want {
 			t.Errorf("OwnerLogin(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestSourcesConfigErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, message string
+	}{
+		{"unknown mode", "modes: {explore_ideas: {prompt: secret}}", "unsupported mode"},
+		{"zero retention", "retention: {chats_days: 0}", "retention days must be positive"},
+		{"unreadable path", "", "Unable to read ai_chat.yaml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "ai_chat.yaml")
+			if err := os.WriteFile(file, []byte(tc.body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "unreadable path" {
+				dir = file // A regular file cannot be used as the managed directory.
+			}
+			rec := httptest.NewRecorder()
+			sources(rec, httptest.NewRequest("GET", "/api/ai-chat/sources?workspace=broken", nil), Deps{
+				Workspaces: func() ([]string, error) { return []string{"broken"}, nil },
+				ManagedDir: func(string) string { return dir },
+			})
+			var response SourcesResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != http.StatusOK || response.Configured || response.Error != tc.message {
+				t.Fatalf("status = %d, response = %#v", rec.Code, response)
+			}
+		})
 	}
 }

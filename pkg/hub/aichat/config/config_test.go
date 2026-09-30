@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -36,7 +37,7 @@ func TestLoad(t *testing.T) {
 		{name: "KB absolute", yaml: "knowledge_base: {provider: github, repo: org/docs, entry: /README.md}", invalid: 1},
 		{name: "KB missing entry", yaml: "knowledge_base: {provider: github, repo: org/docs}", invalid: 1},
 		{name: "malformed source", yaml: "knowledge_base: []", invalid: 1},
-		{name: "repositories", yaml: "repositories: [org/repo, invalid, ../private, {repo: org/repo2}]", valid: 1, invalid: 3},
+		{name: "repositories", yaml: "repositories: [org/repo, org/repo2, org/repo3]", valid: 1},
 		{name: "invalid repositories list", yaml: "repositories: org/repo", invalid: 1},
 		{name: "PostHog", yaml: "posthog: {host: https://us.posthog.com, project_id: 123, api_key: product/posthog}", valid: 1},
 		{name: "PostHog credentials in URL", yaml: "posthog: {host: 'https://user:password@example.com', project_id: 123, api_key: KEY}", invalid: 1},
@@ -81,7 +82,10 @@ func TestLoad(t *testing.T) {
 			if valid != tc.valid || invalid != tc.invalid {
 				t.Fatalf("sources = %#v", cfg.Sources)
 			}
-			retained := len(cfg.Repositories)
+			retained := 0
+			if len(cfg.Repositories) > 0 {
+				retained++
+			}
 			if cfg.KnowledgeBase != nil {
 				retained++
 			}
@@ -99,6 +103,34 @@ func TestLoad(t *testing.T) {
 			}
 			if cfg.Retention != (Retention{90, 30, 30}) {
 				t.Fatalf("defaults = %#v", cfg.Retention)
+			}
+		})
+	}
+}
+
+func TestLoadRepositories(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, status, message string
+		repositories                []string
+	}{
+		{"valid", "[org/one, org/two, org/three]", "unchecked", "", []string{"org/one", "org/two", "org/three"}},
+		{"empty", "[]", "unchecked", "", nil},
+		{"mixed", "[org/one, bad, org/two, worse]", "invalid", "Rejected: bad, worse - expected GitHub owner/repo names", []string{"org/one", "org/two"}},
+		{"malformed entries", "[../private, {repo: org/repo}, '', [org/repo]]", "invalid", "Rejected: ../private, entry 2, entry 3, entry 4 - expected GitHub owner/repo names", nil},
+		{"not a list", "org/repo", "invalid", "Expected a list of GitHub owner/repo names", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "ai_chat.yaml"), []byte("repositories: "+tc.yaml), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := Source{Kind: "repositories", Name: "Repositories", Status: tc.status, Error: tc.message}
+			if len(cfg.Sources) != 1 || cfg.Sources[0] != want || !slices.Equal(cfg.Repositories, tc.repositories) {
+				t.Fatalf("sources = %#v, repositories = %v", cfg.Sources, cfg.Repositories)
 			}
 		})
 	}
