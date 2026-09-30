@@ -110,6 +110,10 @@ func (a *api) getThread(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if err := a.runner.RecoverInterrupted(r.Context(), t); err != nil {
+		http.Error(w, "unable to recover interrupted turn", 500)
+		return
+	}
 	messages, err := a.store.Messages(r.Context(), t.ID, 0)
 	if err != nil {
 		http.Error(w, "unable to load messages", 500)

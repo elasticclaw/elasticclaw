@@ -28,12 +28,24 @@ type flight struct {
 	owner  string
 	cancel context.CancelFunc
 }
+
+// Runner assumes one serving hub process per database. CLI migrations do not
+// serve turns; limits, cancellation and interrupted-turn recovery are local.
 type Runner struct {
 	Store   *Store
 	Reads   *tools.ReadRegistry
 	mu      sync.Mutex
 	flights map[string]flight
 	users   map[string]int
+}
+
+func (r *Runner) RecoverInterrupted(ctx context.Context, t Thread) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, busy := r.flights[t.ID]; busy {
+		return nil
+	}
+	return r.Store.RecoverInterrupted(ctx, t.ID)
 }
 
 func (r *Runner) Acquire(ctx context.Context, t Thread) (context.Context, func(), error) {
@@ -168,7 +180,7 @@ func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Con
 		if err != nil {
 			return err
 		}
-		if len(response.ToolCalls) == 0 {
+		if response.Truncated || len(response.ToolCalls) == 0 {
 			return nil
 		}
 		req.Messages = append(req.Messages, llm.Message{Role: "assistant", Content: response.Text, ToolCalls: response.ToolCalls})

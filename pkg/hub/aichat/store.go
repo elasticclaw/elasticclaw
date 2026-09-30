@@ -83,17 +83,23 @@ func (s *Store) Threads(ctx context.Context, tenant, owner string) ([]Thread, er
 	return threads, rows.Err()
 }
 func (s *Store) UpdateThread(ctx context.Context, t Thread, title *string, archived *bool) error {
+	fields := []string{"updated_at=?"}
+	args := []any{time.Now().UnixMilli()}
 	if title != nil {
-		t.Title = strings.TrimSpace(*title)
+		fields = append(fields, "title=?")
+		args = append(args, strings.TrimSpace(*title))
 	}
 	if archived != nil {
-		t.ArchivedAt = nil
+		var archivedAt *int64
 		if *archived {
 			now := time.Now().UnixMilli()
-			t.ArchivedAt = &now
+			archivedAt = &now
 		}
+		fields = append(fields, "archived_at=?")
+		args = append(args, archivedAt)
 	}
-	_, err := s.DB.ExecContext(ctx, `UPDATE ai_chat_threads SET title=?,archived_at=?,updated_at=? WHERE id=? AND tenant_id=? AND owner_login=?`, t.Title, t.ArchivedAt, time.Now().UnixMilli(), t.ID, t.TenantID, t.OwnerLogin)
+	args = append(args, t.ID, t.TenantID, t.OwnerLogin)
+	_, err := s.DB.ExecContext(ctx, `UPDATE ai_chat_threads SET `+strings.Join(fields, ",")+` WHERE id=? AND tenant_id=? AND owner_login=?`, args...)
 	return err
 }
 func (s *Store) Messages(ctx context.Context, threadID string, limit int) ([]Message, error) {
@@ -134,6 +140,14 @@ func (s *Store) messages(ctx context.Context, threadID string, limit int, comple
 
 var ErrRetry = errors.New("no failed turn to retry")
 
+const interruptMessagesSQL = `UPDATE ai_chat_messages SET status='error' WHERE thread_id=? AND role='assistant' AND status='streaming'`
+
+// RecoverInterrupted requires the runner to exclude an active turn for this thread.
+func (s *Store) RecoverInterrupted(ctx context.Context, threadID string) error {
+	_, err := s.DB.ExecContext(ctx, interruptMessagesSQL, threadID)
+	return err
+}
+
 // BeginTurn saves the user and pending assistant atomically. The runner owns the
 // thread's in-flight slot before calling it, so sequence numbers cannot race.
 func (s *Store) BeginTurn(ctx context.Context, t Thread, text, model string, retry bool) (Message, error) {
@@ -142,6 +156,9 @@ func (s *Store) BeginTurn(ctx context.Context, t Thread, text, model string, ret
 		return Message{}, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, interruptMessagesSQL, t.ID); err != nil {
+		return Message{}, err
+	}
 	var seq int
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM ai_chat_messages WHERE thread_id=?`, t.ID).Scan(&seq); err != nil {
 		return Message{}, err

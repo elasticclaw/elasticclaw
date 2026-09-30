@@ -19,10 +19,16 @@ func (s *Server) aiChatDeps() aichat.Deps {
 		WebAuth:     s.withWebAuth,
 		WithFeature: s.withFeature,
 		CallerLogin: func(r *http.Request) string { return aichat.OwnerLogin(githubLoginFromContext(r.Context())) },
-		TenantID:    tenantFromCtx,
-		Workspaces:  listExternalWorkspaceNames,
-		ManagedDir:  workspaceManagedDir,
-		LLM:         s.aiChatProvider,
+		TenantID: func(r *http.Request) string {
+			if tenant := tenantFromCtx(r); tenant != "" {
+				return tenant
+			}
+			tenant, _ := s.githubTenantIDContext(r.Context())
+			return tenant
+		},
+		Workspaces: listExternalWorkspaceNames,
+		ManagedDir: workspaceManagedDir,
+		LLM:        s.aiChatProvider,
 		Publish: func(t aichat.Thread) {
 			// Reuse the hub's tenant recipient selection, then restrict to the owner.
 			event := types.WSMessage{Type: "ai_chat_thread_updated", Payload: map[string]string{"threadId": t.ID}}
@@ -59,7 +65,14 @@ func (s *Server) aiChatProvider(name string) (llm.Provider, error) {
 		}
 		keys = selected
 	}
-	choice, err := selectAIConfigProvider(keys, s.hubCfg.DefaultModel)
+	// Chat's HTTP clients cannot resolve auth profiles into credentials.
+	var usable types.LLMKeysList
+	for _, key := range keys {
+		if key != nil && (key.APIKey != "" || key.Provider == "ollama") {
+			usable = append(usable, key)
+		}
+	}
+	choice, err := selectAIConfigProvider(usable, s.hubCfg.DefaultModel)
 	if err != nil {
 		return nil, err
 	}

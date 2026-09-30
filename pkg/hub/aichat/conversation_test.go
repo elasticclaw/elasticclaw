@@ -556,3 +556,145 @@ func TestToolFailureIsRecordedWithoutProviderError(t *testing.T) {
 		t.Fatal(stored)
 	}
 }
+
+func TestThreadPatchPreservesUnspecifiedFields(t *testing.T) {
+	for _, archiveFirst := range []bool{false, true} {
+		t.Run(fmt.Sprint(archiveFirst), func(t *testing.T) {
+			s := testStore(t)
+			thread := testThread(t, s)
+			ctx := context.Background()
+			title, archived := "Renamed", true
+			rename := func() error { return s.UpdateThread(ctx, thread, &title, nil) }
+			archive := func() error { return s.UpdateThread(ctx, thread, nil, &archived) }
+			first, second := rename, archive
+			if archiveFirst {
+				first, second = archive, rename
+			}
+			// Both requests loaded the same snapshot before either update.
+			if err := first(); err != nil {
+				t.Fatal(err)
+			}
+			if err := second(); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := s.Thread(ctx, thread.TenantID, thread.OwnerLogin, thread.ID)
+			if err != nil || saved.Title != title || saved.ArchivedAt == nil {
+				t.Fatalf("thread=%+v err=%v", saved, err)
+			}
+			archived = false
+			if err := s.UpdateThread(ctx, thread, nil, &archived); err != nil {
+				t.Fatal(err)
+			}
+			saved, err = s.Thread(ctx, thread.TenantID, thread.OwnerLogin, thread.ID)
+			if err != nil || saved.Title != title || saved.ArchivedAt != nil {
+				t.Fatalf("unarchived=%+v err=%v", saved, err)
+			}
+		})
+	}
+}
+
+func TestInterruptedTurnRecovery(t *testing.T) {
+	for _, reload := range []bool{false, true} {
+		t.Run(fmt.Sprint(reload), func(t *testing.T) {
+			p := fakeProvider{stream: func(_ context.Context, req llm.Request, emit func(string) error) (llm.Response, error) {
+				if len(req.Messages) != 1 || req.Messages[0].Content != "original" {
+					t.Errorf("retry history=%+v", req.Messages)
+				}
+				return llm.Response{Text: "recovered"}, emit("recovered")
+			}}
+			handler, s, _ := apiFixture(t, p)
+			thread := testThread(t, s)
+			ctx := context.Background()
+			m, err := s.BeginTurn(ctx, thread, "original", "model", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Content, m.InputTokens = "partial", 12
+			if err := s.FinishMessage(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+			// Migration-only DB openers must not interrupt a serving process.
+			if err := Migrate(s.DB); err != nil {
+				t.Fatal(err)
+			}
+			messages, err := s.Messages(ctx, thread.ID, 0)
+			if err != nil || messages[1].Status != "streaming" {
+				t.Fatalf("%+v %v", messages, err)
+			}
+			path := "/api/ai-chat/threads/" + thread.ID
+			if reload {
+				rec := request(handler, "GET", path, "", "octocat", "on")
+				var body struct {
+					Messages []Message `json:"messages"`
+				}
+				if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &body) != nil || len(body.Messages) != 2 || body.Messages[1].Status != "error" {
+					t.Fatalf("reload=%d %s", rec.Code, rec.Body.String())
+				}
+			}
+			rec := request(handler, "POST", path+"/messages", `{"retry":true}`, "octocat", "on")
+			if rec.Code != 200 {
+				t.Fatalf("retry=%d %s", rec.Code, rec.Body.String())
+			}
+			messages, err = s.Messages(ctx, thread.ID, 0)
+			if err != nil || len(messages) != 3 || messages[1].Status != "error" || messages[1].Content != "partial" || messages[1].InputTokens != 12 || messages[2].Status != "completed" {
+				t.Fatalf("messages=%+v err=%v", messages, err)
+			}
+		})
+	}
+}
+
+func TestRecoveryPreservesActiveTurn(t *testing.T) {
+	s := testStore(t)
+	thread := testThread(t, s)
+	r := &Runner{Store: s}
+	ctx, release, err := r.Acquire(context.Background(), thread)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := s.BeginTurn(ctx, thread, "original", "model", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RecoverInterrupted(ctx, thread); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.Messages(ctx, thread.ID, 0)
+	if err != nil || messages[1].Status != "streaming" {
+		t.Fatalf("%+v %v", messages, err)
+	}
+	release()
+	if err := r.RecoverInterrupted(context.Background(), thread); err != nil {
+		t.Fatal(err)
+	}
+	messages, err = s.Messages(context.Background(), thread.ID, 0)
+	if err != nil || messages[1].Status != "error" {
+		t.Fatalf("%+v %v", messages, err)
+	}
+}
+
+func TestRunnerCompletesTruncatedResponse(t *testing.T) {
+	s := testStore(t)
+	thread := testThread(t, s)
+	m, err := s.BeginTurn(context.Background(), thread, "question", "model", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := fakeProvider{stream: func(_ context.Context, _ llm.Request, emit func(string) error) (llm.Response, error) {
+		return llm.Response{Text: "partial answer", Truncated: true, InputTokens: 10, OutputTokens: 20,
+			ToolCalls: []llm.ToolCall{{ID: "partial", Name: "read_test", Arguments: "{"}}}, emit("partial answer")
+	}}
+	r := &Runner{Store: s}
+	err = r.Run(context.Background(), thread, m, &config.Config{}, p, func(event string, _ any) error {
+		if event == EventError || event == EventToolStarted {
+			t.Errorf("unexpected event: %s", event)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.Messages(context.Background(), thread.ID, 0)
+	if err != nil || messages[1].Status != "completed" || messages[1].Content != "partial answer" || messages[1].InputTokens != 10 || messages[1].OutputTokens != 20 {
+		t.Fatalf("messages=%+v err=%v", messages, err)
+	}
+}
