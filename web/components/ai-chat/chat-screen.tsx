@@ -47,6 +47,8 @@ function Conversation() {
   const active = useRef<AbortController | null>(null)
   const generation = useRef(0)
   const syncRevision = useRef(0)
+  // The syncRevision of the last thread sync shown on screen.
+  const shownSync = useRef(0)
   const sending = useRef(false)
   const [thread, setThread] = useState<AIChatThread | null>(null)
   const [messages, setMessages] = useState<AIChatMessage[]>([])
@@ -89,7 +91,10 @@ function Conversation() {
     const version = generation.current
     const revision = ++syncRevision.current
     const saved = await fetchAIChatThread(id)
-    if (version === generation.current && revision === syncRevision.current && !sending.current) showSavedThread(saved)
+    if (version === generation.current && revision === syncRevision.current && !sending.current) {
+      shownSync.current = revision
+      showSavedThread(saved)
+    }
   }
 
   const openThread = useEffectEvent((id: string) => {
@@ -98,11 +103,15 @@ function Conversation() {
     if (!id) return
     const controller = new AbortController()
     const isCurrent = () => !controller.signal.aborted && version === generation.current
+    const revision = syncRevision.current
     fetchAIChatThread(id, controller.signal).then(({ thread, messages }) => {
       if (!isCurrent()) return
       loadedThread.current = thread.id
-      setThread(thread)
-      setMessages(messages)
+      // A thread sync started after this load may already show a newer snapshot.
+      if (shownSync.current <= revision) {
+        setThread(thread)
+        setMessages(messages)
+      }
       setWorkspace(thread.workspace)
       setMode(thread.mode as ChatMode)
       setLoadingThread(false)

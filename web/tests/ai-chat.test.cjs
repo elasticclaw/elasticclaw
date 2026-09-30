@@ -237,6 +237,37 @@ test("Back to new chat while an existing thread loads discards the stale load", 
   assert.equal(findElement(tree, "MessageList"), undefined)
 })
 
+function captureWindowListeners() {
+  const listeners = {}
+  const previous = global.window
+  global.window = { addEventListener(type, listener) { listeners[type] = listener }, removeEventListener() {} }
+  return { emit: (type, detail) => listeners[type]({ detail }), restore: () => { global.window = previous } }
+}
+
+for (const syncFails of [false, true]) {
+  test(`a slow initial thread load ${syncFails ? "still shows when the newer sync fails" : "cannot overwrite a newer cross-tab sync"}`, async () => {
+    const windowEvents = captureWindowListeners()
+    try {
+      const loads = []
+      const fixture = chatFixture({ thread: "existing", api: {
+        fetchAIChatThread: (_id, signal) => new Promise((resolve, reject) => loads.push({ signal, resolve, reject })),
+      } })
+      fixture.render()
+      windowEvents.emit("ai-chat-thread-updated", { threadId: "existing" })
+      assert.equal(loads.length, 2)
+      if (syncFails) loads[1].reject(new Error("offline"))
+      else loads[1].resolve({ thread: thread("existing"), messages: [{ id: "a", role: "assistant", content: "Done", status: "completed" }] })
+      await flush()
+      loads[0].resolve({ thread: thread("existing"), messages: [{ id: "a", role: "assistant", content: "", status: "streaming" }] })
+      await flush()
+      const shown = findElement(fixture.render(), "MessageList").props.messages[0]
+      assert.equal(shown.status, syncFails ? "streaming" : "completed")
+    } finally {
+      windowEvents.restore()
+    }
+  })
+}
+
 test("first send creates a thread, streams tokens, and ignores future event types", async () => {
   let emit
   let finish
