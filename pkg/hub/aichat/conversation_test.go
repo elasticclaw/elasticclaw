@@ -29,7 +29,7 @@ func testStore(t *testing.T) *Store {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
-	if err := Migrate(db); err != nil {
+	if err := Migrate(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
 	return &Store{DB: db}
@@ -614,7 +614,7 @@ func TestInterruptedTurnRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Migration-only DB openers must not interrupt a serving process.
-			if err := Migrate(s.DB); err != nil {
+			if err := Migrate(context.Background(), s.DB); err != nil {
 				t.Fatal(err)
 			}
 			messages, err := s.Messages(ctx, thread.ID, 0)
