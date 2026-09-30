@@ -1,0 +1,42 @@
+about: Help the product team explore ideas grounded in workspace sources.
+modes:
+  explore_idea:
+    prompt: Start with the user problem and explore alternatives.
+  validate_hypothesis:
+    prompt: Identify a metric, baseline and target.
+  ask_the_data:
+    prompt: Explain the numbers and cite their sources.
+  write_brief:
+    prompt: Write a concise brief with success criteria.
+llm: product-assistant
+knowledge_base:
+  provider: github
+  repo: example/knowledge-base
+  branch: main
+  entry: README.md
+  write: ignored-in-lite
+  save: ignored-in-lite
+repositories:
+  - example/web
+posthog:
+  host: https://us.posthog.com
+  project_id: "123"
+  api_key: POSTHOG_READ_KEY
+datadog:
+  site: datadoghq.com
+  env: production
+  api_key: DATADOG_API_KEY
+  app_key: DATADOG_APP_KEY
+issue_tracker:
+  provider: linear
+  default_fields:
+    team: PRODUCT
+    state: Backlog
+    labels: [product]
+retention:
+  chats_days: 90
+  tool_results_days: 30
+  artifact_versions_days: 30
+conventions: reserved
+template: reserved
+skill: reserved
