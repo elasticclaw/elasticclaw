@@ -90,8 +90,8 @@ function NewChat() {
                     "How is quiz completion doing this month?",
                     "Prototype a simpler check-in screen",
                   ].map((suggestion) => (
-                    <Button key={suggestion} variant="outline" size="sm" disabled className="rounded-full text-xs">
-                      <Sparkles className="size-3" />{suggestion}
+                    <Button key={suggestion} variant="outline" disabled className="rounded-full px-3.5">
+                      <Sparkles className="size-3.5" />{suggestion}
                     </Button>
                   ))}
                 </div>

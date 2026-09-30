@@ -16,7 +16,7 @@ export function ModeCards({ mode, onSelect }: { mode: ChatMode | null; onSelect:
   return (
     <div className="grid grid-cols-4 gap-2.5">
       {chatModes.map(({ id, name, icon: Icon, description, example }) => (
-        <button key={id} type="button" aria-pressed={mode === id} onClick={() => onSelect(id)} className={cn("rounded-xl border bg-card p-4 text-left transition-colors hover:border-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", mode === id && "border-primary bg-accent")}>
+        <button key={id} type="button" aria-pressed={mode === id} onClick={() => onSelect(id)} className={cn("flex flex-col items-start rounded-xl border bg-card p-4 text-left transition-colors hover:border-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", mode === id && "border-primary bg-accent")}>
           <span className="mb-2 inline-flex size-7 items-center justify-center rounded-lg bg-muted"><Icon className="size-4" /></span>
           <h2 className="text-sm font-semibold">{name}</h2>
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{description}</p>
