@@ -124,6 +124,9 @@ func (c Client) stream(ctx context.Context, body any, anthropic bool, consume fu
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("LLM stream interrupted")
 	}
 	err = dispatch()
