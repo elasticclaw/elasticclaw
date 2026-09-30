@@ -127,7 +127,7 @@ func (r *Runner) Run(ctx context.Context, t Thread, m Message, cfg *config.Confi
 		m.Status, code, message = "error", "turn_failed", "Unable to complete this turn. Try again."
 	}
 	// Request cancellation must not cancel the final database write.
-	saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := r.Store.FinishMessage(saveCtx, m); err != nil {
 		_ = emit(EventError, map[string]string{"code": "storage_error", "message": "Unable to save this response."})
@@ -240,7 +240,7 @@ func (r *Runner) runTool(ctx context.Context, messageID string, seq int, call ll
 			run.Error = "Read tool cancelled"
 		}
 	}
-	saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := r.Store.RecordToolRun(saveCtx, run); err != nil {
 		return llm.Message{}, err
