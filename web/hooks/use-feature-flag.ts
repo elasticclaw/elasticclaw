@@ -99,3 +99,8 @@ export function useFeatureFlag(key: string): boolean {
   const enabled = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
   return enabled?.includes(key) ?? false
 }
+
+/** Whether /api/auth/me has supplied feature flags for this session. */
+export function useFeatureFlagsLoaded(): boolean {
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot) !== null
+}

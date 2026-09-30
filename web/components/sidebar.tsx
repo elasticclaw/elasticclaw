@@ -1,6 +1,7 @@
 "use client"
 
-import { Search, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3, LayoutGrid } from "lucide-react"
+import { Search, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3, LayoutGrid, MessageCircle } from "lucide-react"
+import { useFeatureFlag } from "@/hooks/use-feature-flag"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -70,8 +71,9 @@ interface SidebarProps {
   subagentLines?: Record<string, string>
   isAdmin?: boolean
   onSelectWorkflow?: (workflow: Workflow | null) => void
-  view?: "agents" | "analytics"
+  view?: "agents" | "analytics" | "chat"
   onToggleView?: () => void
+  onOpenChat: () => void
   /**
    * "inline" is the desktop column; "drawer" renders inside the mobile Sheet:
    * full-size, no collapse toggle, and no footer (the bottom tab bar and the
@@ -156,9 +158,11 @@ export const Sidebar = memo(function Sidebar({
   onSelectWorkflow,
   view = "agents",
   onToggleView,
+  onOpenChat,
   variant = "inline",
 }: SidebarProps) {
   const inDrawer = variant === "drawer"
+  const aiChatEnabled = useFeatureFlag("ai-chat")
   const tagKeys = allTags
   const { appName } = useBranding()
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
@@ -385,6 +389,18 @@ export const Sidebar = memo(function Sidebar({
 
         {/* Footer: view toggle (everyone) + settings (admin) and sign out */}
         <div className="p-2 border-t border-border flex flex-col items-center gap-1">
+          {aiChatEnabled && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn("size-8 text-muted-foreground hover:text-foreground", view === "chat" && "bg-muted text-foreground")}
+              title="AI Chat"
+              aria-label="AI Chat"
+              onClick={onOpenChat}
+            >
+              <MessageCircle className="size-4" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -583,6 +599,18 @@ export const Sidebar = memo(function Sidebar({
           these destinations there. */}
       {!inDrawer && (
       <div className="p-2 border-t border-border">
+        {aiChatEnabled && (
+          <button
+            onClick={onOpenChat}
+            className={cn(
+              "flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+              view === "chat" && "bg-muted text-foreground"
+            )}
+          >
+            <MessageCircle className="size-4 flex-shrink-0" />
+            AI Chat
+          </button>
+        )}
         <button
           onClick={onToggleView}
           className={cn(

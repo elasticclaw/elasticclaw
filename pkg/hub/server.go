@@ -34,6 +34,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/elasticclaw/elasticclaw/internal/webui"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
@@ -814,6 +815,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/login", s.handleWebLogin)
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
+	mux.Handle("/api/ai-chat/", aichat.Routes(s.aiChatDeps()))
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
 	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
