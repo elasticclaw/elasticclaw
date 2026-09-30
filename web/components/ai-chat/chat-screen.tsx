@@ -253,7 +253,7 @@ function Conversation() {
     <section className="flex min-h-0 flex-1 flex-col">
       <ChatHeader mode={mode} title={thread?.title} data={data} onNewChat={newChat} onRefreshSources={refresh} />
       <div className={`min-h-0 flex-1 overflow-y-auto px-8 ${thread ? "py-6" : "py-16"}`}>
-        <div className="mx-auto max-w-[860px] space-y-5">
+        <div className={`mx-auto space-y-5 ${thread ? "max-w-[760px]" : "max-w-[860px]"}`}>
           {!thread && !requestedThread && data && data.workspaces.length > 1 && (
             <div className="flex justify-end gap-2 text-sm">
               <label htmlFor="chat-workspace" className="self-center text-muted-foreground">Workspace</label>
@@ -303,12 +303,12 @@ function Conversation() {
         </div>
       </div>
       {(turnError || (!streaming && canRetry)) && (
-        <div role="alert" className="mx-auto flex w-full max-w-[924px] items-center gap-3 px-8 pb-3 text-sm">
+        <div role="alert" className="mx-auto flex w-full max-w-[824px] items-center gap-3 px-8 pb-3 text-sm">
           <p className="text-destructive">{turnError?.message ?? "The last response did not finish."}</p>
           <Button variant="outline" size="sm" disabled={streaming} onClick={() => void send(turnError?.text ?? "", turnError?.retry ?? true)}>Retry</Button>
         </div>
       )}
-      {thread && <div className="mx-auto w-full max-w-[924px] px-8 pb-5">
+      {thread && <div className="mx-auto w-full max-w-[824px] px-8 pb-5">
         {thread.archivedAt && <p className="mb-2 text-xs text-muted-foreground">This conversation is archived.</p>}
         {!data?.configured && <p className="mb-2 text-xs text-muted-foreground">{!current ? "Loading workspace sources…" : "Not configured for this workspace"}</p>}
         {composer}

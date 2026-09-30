@@ -12,11 +12,11 @@ export function MessageList({ messages, reading }: { messages: AIChatMessage[]; 
   return (
     <div className="space-y-6" role="log" aria-label="Conversation">
       {messages.map((message) => (
-        <article key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-xl border border-primary/25 bg-primary/10 p-3" : "text-sm"}>
-          <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
-            {message.role === "assistant" && <Sparkles className="size-3.5" />}
+        <article key={message.id} className={message.role === "user" ? "ml-auto w-fit max-w-[85%] rounded-lg border border-(--step-running)/50 bg-(--step-running)/20 px-3.5 py-2.5" : "pl-7 text-sm"}>
+          <div className={`flex items-center gap-2 text-xs text-muted-foreground ${message.role === "user" ? "mb-1" : "-ml-7 mb-2"}`}>
+            {message.role === "assistant" && <span className="inline-flex size-5 items-center justify-center rounded-md bg-muted"><Sparkles className="size-3" /></span>}
             <span className="font-medium text-foreground">{message.role === "user" ? "You" : "Assistant"}</span>
-            <time dateTime={new Date(message.createdAt).toISOString()}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+            <time dateTime={new Date(message.createdAt).toISOString()}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}</time>
           </div>
           {message.role === "user" ? <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p> : (
             <div className="space-y-3 break-words leading-relaxed [&_p]:my-3 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted [&_pre]:p-3 [&_a]:text-primary [&_a]:underline">
