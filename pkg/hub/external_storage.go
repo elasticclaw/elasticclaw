@@ -287,7 +287,7 @@ func deleteExternalFactory(name string) error {
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
-func loadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
+func listExternalWorkspaceNames() ([]string, error) {
 	entries, err := os.ReadDir(workspacesDir())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -296,14 +296,26 @@ func loadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
 		return nil, fmt.Errorf("read workspaces dir: %w", err)
 	}
 
-	var workspaces []*types.WorkspaceConfig
+	var names []string
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		workspace, err := loadExternalWorkspace(e.Name())
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+func loadExternalWorkspaces() ([]*types.WorkspaceConfig, error) {
+	names, err := listExternalWorkspaceNames()
+	if err != nil {
+		return nil, err
+	}
+	var workspaces []*types.WorkspaceConfig
+	for _, name := range names {
+		workspace, err := loadExternalWorkspace(name)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[hub] skip workspace %q: %v\n", e.Name(), err)
+			fmt.Fprintf(os.Stderr, "[hub] skip workspace %q: %v\n", name, err)
 			continue
 		}
 		workspaces = append(workspaces, workspace)

@@ -105,3 +105,42 @@ func TestAIChatSourcesUsesWorkspaceManagedDirectory(t *testing.T) {
 		t.Fatalf("openDB tables = %d, %v", count, err)
 	}
 }
+
+func TestAIChatSourcesIgnoresInvalidWorkflow(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", filepath.Join(t.TempDir(), "hub.yaml"))
+	s, db := newFeatureFlagTestServer(t)
+	if _, err := db.Exec(`INSERT INTO hub_feature_flags(key, stage, updated_at) VALUES('ai-chat', 'on', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"product/elasticclaw-config.yaml":           "name: product\nrepositories: [example/product]\n",
+		"product/workflows/broken.yaml":             "steps: [",
+		"product/.elasticclaw-managed/ai_chat.yaml": "about: Product assistant\n",
+		".hidden/.elasticclaw-managed/ai_chat.yaml": "about: Hidden\n",
+		"not-a-directory":                           "ignored",
+	} {
+		path := filepath.Join(workspacesDir(), name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := loadExternalWorkspace("product"); err == nil {
+		t.Fatal("expected invalid workflow to fail the full workspace loader")
+	}
+	workspaces, err := loadExternalWorkspaces()
+	if err != nil || len(workspaces) != 0 {
+		t.Fatalf("full workspace listing = %#v, %v", workspaces, err)
+	}
+	rec := featureFlagRequest(t, s, "GET", "/api/ai-chat/sources", "", "hub-token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var response aichat.SourcesResponse
+	decodeFeatureFlagResponse(t, rec, &response)
+	if !response.Configured || response.Workspace != "product" || !slices.Equal(response.Workspaces, []string{"product"}) {
+		t.Fatalf("sources = %#v", response)
+	}
+}
