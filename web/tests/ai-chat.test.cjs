@@ -87,6 +87,7 @@ function chatFixture(options = {}) {
   const hooks = createHooks()
   const requests = []
   const api = {
+    ApiError,
     fetchAIChatSources: (workspace) => new Promise((resolve) => requests.push({ workspace, resolve })),
     ...options.api,
   }
@@ -208,6 +209,7 @@ test("only a visible agent conversation is passed to useHub, preserving navigati
 })
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
+class ApiError extends Error { constructor(message, status) { super(message); this.status = status } }
 const thread = (id) => ({ id, workspace: "A", title: "Question", mode: "explore_idea", archivedAt: null })
 
 test("existing thread reloads after StrictMode effect restart", async () => {
@@ -403,4 +405,54 @@ test("lost message_started reconciles the persisted turn before retrying", async
   alert.props.children[1].props.onClick()
   await flush()
   assert.deepEqual(attempts, [{ text: "Question", retry: false }, { text: "Question", retry: true }])
+})
+
+test("a message the hub rejected is resent, never retried as another tab's failed turn", async () => {
+  const windowEvents = captureWindowListeners()
+  try {
+    const attempts = []
+    let saved = { thread: thread("existing"), messages: [{ id: "a1", role: "assistant", content: "Earlier", status: "completed" }] }
+    const fixture = chatFixture({ thread: "existing", api: {
+      fetchAIChatThread: async () => saved,
+      streamAIChatTurn: async (_id, text, retry) => { attempts.push({ text, retry }); throw new ApiError("Too many turns in progress.", 429) },
+    } })
+    fixture.render()
+    fixture.requests[0].resolve(sources("A", ["A"]))
+    await flush()
+    findElement(fixture.render(), "ChatComposer").props.onChange("New question")
+    findElement(fixture.render(), "ChatComposer").props.onSend()
+    await flush()
+    // Another tab's turn on this thread fails afterwards.
+    saved = { thread: thread("existing"), messages: [...saved.messages, { id: "a2", role: "assistant", content: "", status: "cancelled" }] }
+    windowEvents.emit("ai-chat-thread-updated", { threadId: "existing" })
+    await flush()
+    const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+    alert.props.children[1].props.onClick()
+    await flush()
+    assert.deepEqual(attempts, [{ text: "New question", retry: false }, { text: "New question", retry: false }])
+  } finally {
+    windowEvents.restore()
+  }
+})
+
+test("a new thread pins the workspace the server picked for its sources", async () => {
+  const fixture = chatFixture({ api: {
+    createAIChatThread: async () => thread("new"),
+    streamAIChatTurn: async () => {},
+    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [] }),
+  } })
+  fixture.render()
+  assert.equal(fixture.requests[0].workspace, "")
+  fixture.requests[0].resolve(sources("A", ["A", "B"]))
+  await flush()
+  findElement(fixture.render(), "ChatComposer").props.onChange("Question")
+  findElement(fixture.render(), "ChatComposer").props.onSend()
+  await flush()
+  const tree = fixture.render()
+  assert.equal(fixture.requests.at(-1).workspace, "A")
+  // The default load already answers for A, so sources stay visible meanwhile.
+  assert.equal(findElement(tree, "ChatHeader").props.data.workspace, "A")
+  findElement(tree, "ChatHeader").props.onRefreshSources()
+  fixture.render()
+  assert.equal(fixture.requests.at(-1).workspace, "A")
 })

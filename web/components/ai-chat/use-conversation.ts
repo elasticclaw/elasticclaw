@@ -2,12 +2,14 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
+import { ApiError, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
 import type { ChatMode } from "./mode-cards"
 import { applyStreamEvent, type StreamTurn } from "./stream-turn"
 import { useChatSources } from "./use-chat-sources"
 
-type TurnError = { message: string; text: string; retry: boolean; afterMessageId?: string }
+// `rejected` marks a message the hub refused before starting a turn (an HTTP
+// error such as 429): it was never sent, so it must be resent, not retried.
+type TurnError = { message: string; text: string; retry: boolean; rejected?: boolean; afterMessageId?: string }
 
 const unfinishedStatuses = ["error", "cancelled", "limit"]
 
@@ -17,7 +19,7 @@ function isUnfinishedReply(message: AIChatMessage | undefined) {
 
 function reconcileError(error: TurnError | null, messages: AIChatMessage[]): TurnError | null {
   const last = messages[messages.length - 1]
-  if (!error || last?.role !== "assistant" || last.id === error.afterMessageId) return error
+  if (!error || error.rejected || last?.role !== "assistant" || last.id === error.afterMessageId) return error
   if (last.status === "completed") return null
   return isUnfinishedReply(last) ? { ...error, retry: true } : error
 }
@@ -155,6 +157,7 @@ export function useConversation() {
     threadRef.current = created.id
     loadedThread.current = created.id
     setThread(created)
+    setWorkspace(created.workspace)
     setMode(created.mode as ChatMode)
     router.replace(`/chat?thread=${encodeURIComponent(created.id)}`)
   }
@@ -206,7 +209,10 @@ export function useConversation() {
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
       if (turn.error) setTurnError({ message: turn.error, text, retry: true, afterMessageId })
     } catch (error) {
-      if (isCurrent() && !controller.signal.aborted) setTurnError({ message: errorMessage(error, "Unable to send message."), text, retry: turn.started || retry, afterMessageId })
+      if (isCurrent() && !controller.signal.aborted) {
+        const rejected = error instanceof ApiError && !turn.started
+        setTurnError({ message: errorMessage(error, "Unable to send message."), text, retry: turn.started || retry, rejected, afterMessageId })
+      }
     } finally {
       await finishTurn(turn, isCurrent)
     }

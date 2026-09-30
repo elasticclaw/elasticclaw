@@ -14,7 +14,8 @@ export function useChatSources(threadRef: RefObject<string>, onWorkspaceRemoved:
   const [workspace, setWorkspace] = useState("")
   const [revision, setRevision] = useState(0)
   const [result, setResult] = useState<SourcesResult>()
-  const current = result?.workspace === workspace && result?.revision === revision ? result : undefined
+  // A default ("") load already answers for the workspace the server picked.
+  const current = result?.revision === revision && (result.workspace === workspace || result.data?.workspace === workspace) ? result : undefined
   const workspaceRemoved = useEffectEvent(onWorkspaceRemoved)
 
   useEffect(() => {
