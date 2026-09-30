@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
-	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/llm"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
@@ -610,24 +610,179 @@ func aiConfigModelForKey(key *types.LLMKeyConfig, defaultModel string) string {
 	}
 }
 
-// The configuration assistant and AI Chat share the streaming HTTP adapters.
+// streamAnthropic calls Anthropic Messages API with stream:true, forwarding text_delta events.
 func streamAnthropic(ctx context.Context, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string)) error {
-	provider := &llm.Anthropic{Client: llm.Client{APIKey: apiKey, Endpoint: "https://api.anthropic.com/v1/messages", ModelName: "claude-sonnet-4-6"}}
-	return streamConfigProvider(ctx, provider, systemPrompt, msgs, onToken)
-}
-
-func streamOpenAI(ctx context.Context, provider openAICompatibleProvider, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string), model string) error {
-	client := &llm.OpenAI{Client: llm.Client{APIKey: apiKey, Endpoint: strings.TrimRight(provider.BaseURL, "/") + "/chat/completions", ModelName: model}}
-	return streamConfigProvider(ctx, client, systemPrompt, msgs, onToken)
-}
-
-func streamConfigProvider(ctx context.Context, provider llm.Provider, system string, msgs []aiChatMessage, onToken func(string)) error {
-	req := llm.Request{System: system}
-	for _, m := range msgs {
-		req.Messages = append(req.Messages, llm.Message{Role: m.Role, Content: m.Content})
+	type anthropicMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
 	}
-	_, err := provider.Stream(ctx, req, func(text string) error { onToken(text); return nil })
-	return err
+	type anthropicReq struct {
+		Model     string         `json:"model"`
+		MaxTokens int            `json:"max_tokens"`
+		System    string         `json:"system"`
+		Messages  []anthropicMsg `json:"messages"`
+		Stream    bool           `json:"stream"`
+	}
+
+	anthropicMsgs := make([]anthropicMsg, len(msgs))
+	for i, m := range msgs {
+		anthropicMsgs[i] = anthropicMsg{Role: m.Role, Content: m.Content}
+	}
+	body, _ := json.Marshal(anthropicReq{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 4096,
+		System:    systemPrompt,
+		Messages:  anthropicMsgs,
+		Stream:    true,
+	})
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(data, &errResp) == nil && errResp.Error.Message != "" {
+			return fmt.Errorf("Anthropic error: %s", errResp.Error.Message)
+		}
+		return fmt.Errorf("Anthropic error %d: %s", resp.StatusCode, string(data))
+	}
+
+	type deltaEvent struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1*1024*1024)
+	var currentEvent string
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			if currentEvent != "content_block_delta" {
+				continue
+			}
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if raw == "" || raw == "[DONE]" {
+				continue
+			}
+			var ev deltaEvent
+			if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+				continue
+			}
+			if ev.Delta.Type == "text_delta" && ev.Delta.Text != "" {
+				onToken(ev.Delta.Text)
+			}
+		}
+	}
+	return scanner.Err()
+}
+
+// streamOpenAI calls an OpenAI-compatible Chat Completions API with stream:true,
+// forwarding delta.content.
+func streamOpenAI(ctx context.Context, provider openAICompatibleProvider, apiKey, systemPrompt string, msgs []aiChatMessage, onToken func(string), model string) error {
+	type openAIMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type openAIReq struct {
+		Model    string      `json:"model"`
+		Messages []openAIMsg `json:"messages"`
+		Stream   bool        `json:"stream"`
+	}
+
+	openAIMsgs := []openAIMsg{{Role: "system", Content: systemPrompt}}
+	for _, m := range msgs {
+		openAIMsgs = append(openAIMsgs, openAIMsg{Role: m.Role, Content: m.Content})
+	}
+	body, _ := json.Marshal(openAIReq{
+		Model:    model,
+		Messages: openAIMsgs,
+		Stream:   true,
+	})
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(provider.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(data, &errResp) == nil && errResp.Error.Message != "" {
+			return fmt.Errorf("%s error: %s", provider.Name, errResp.Error.Message)
+		}
+		return fmt.Errorf("%s error %d: %s", provider.Name, resp.StatusCode, string(data))
+	}
+
+	type streamChoice struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	}
+	type streamChunk struct {
+		Choices []streamChoice `json:"choices"`
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1*1024*1024)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if raw == "" || raw == "[DONE]" {
+			continue
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			onToken(chunk.Choices[0].Delta.Content)
+		}
+	}
+	return scanner.Err()
 }
 
 func callAnthropic(apiKey, systemPrompt string, msgs []aiChatMessage) (string, error) {

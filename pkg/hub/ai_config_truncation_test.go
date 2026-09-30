@@ -19,7 +19,7 @@ func TestAIConfigStreamAcceptsTokenLimit(t *testing.T) {
 		t.Run(provider, func(t *testing.T) {
 			body := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":" + string(encoded) + "},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n"
 			if provider == "anthropic" {
-				body = "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":" + string(encoded) + "}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"
+				body = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":" + string(encoded) + "}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 			}
 			previous := http.DefaultClient
 			http.DefaultClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
