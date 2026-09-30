@@ -14,8 +14,9 @@ export function ChatHeader({ mode, data, onNewChat, onRefreshSources }: {
 }) {
   const sources = data?.sources ?? []
   const modeName = chatModes.find((item) => item.id === mode)?.name
+  // py-2.5 around h-8 controls matches the sidebar and board headers so the hairlines line up.
   return (
-    <header className="flex min-h-14 shrink-0 items-center gap-3 border-b px-5 py-2.5">
+    <header className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2.5">
       <h1 className="shrink-0 whitespace-nowrap text-sm font-semibold">AI Chat</h1>
       {modeName && <span className="shrink-0 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs text-muted-foreground">{modeName}</span>}
       <div className="ml-auto flex items-center gap-2">
