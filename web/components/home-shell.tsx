@@ -161,7 +161,8 @@ export function HomeShell() {
     window.history.pushState(null, "", "/chat")
   }, [view])
 
-  const hub = useHub(selectedClawId)
+  const visibleClawId = view === "agents" ? selectedClawId : null
+  const hub = useHub(visibleClawId)
 
   const {
     claws: rawClaws,

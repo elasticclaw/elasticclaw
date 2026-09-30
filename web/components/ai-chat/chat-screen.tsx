@@ -35,7 +35,15 @@ function NewChat() {
   useEffect(() => {
     let cancelled = false
     fetchAIChatSources(workspace).then(
-      (data) => { if (!cancelled) setResult({ workspace, revision, data }) },
+      (data) => {
+        if (cancelled) return
+        if (workspace && !data.workspaces.includes(workspace)) {
+          setWorkspace(data.workspaces[0] ?? "")
+          setMode(null)
+          return
+        }
+        setResult({ workspace, revision, data })
+      },
       () => { if (!cancelled) setResult({ workspace, revision, error: "Unable to load workspace sources." }) },
     )
     return () => { cancelled = true }
@@ -59,6 +67,7 @@ function NewChat() {
           ) : !data?.configured ? (
             <div className="rounded-xl border bg-card p-10 text-center">
               <h2 className="text-lg font-semibold">Not configured for this workspace</h2>
+              {data?.error && <p role="alert" className="mt-2 text-sm text-destructive">{data.error}</p>}
               <p className="mt-2 text-sm text-muted-foreground">Ask your workspace administrator to configure AI Chat.</p>
             </div>
           ) : (

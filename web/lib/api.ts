@@ -604,6 +604,7 @@ export interface AIChatSource {
 
 export interface AIChatSources {
   configured: boolean
+  error?: string
   workspaces: string[]
   workspace: string
   sources: AIChatSource[]
