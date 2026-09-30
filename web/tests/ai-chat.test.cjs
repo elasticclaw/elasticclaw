@@ -273,6 +273,27 @@ for (const syncFails of [false, true]) {
   })
 }
 
+test("a late initial load failure cannot hide a newer cross-tab sync", async () => {
+  const windowEvents = captureWindowListeners()
+  try {
+    const loads = []
+    const fixture = chatFixture({ thread: "existing", api: {
+      fetchAIChatThread: (_id, signal) => new Promise((resolve, reject) => loads.push({ signal, resolve, reject })),
+    } })
+    fixture.render()
+    windowEvents.emit("ai-chat-thread-updated", { threadId: "existing" })
+    loads[1].resolve({ thread: thread("existing"), messages: [{ id: "a", role: "assistant", content: "Done", status: "completed" }] })
+    await flush()
+    loads[0].reject(new Error("offline"))
+    await flush()
+    const tree = fixture.render()
+    assert.equal(findElement(tree, "MessageList").props.messages[0].status, "completed")
+    assert.equal(findElement(tree, "Loading conversation…"), undefined)
+  } finally {
+    windowEvents.restore()
+  }
+})
+
 test("first send creates a thread, streams tokens, and ignores future event types", async () => {
   let emit
   let finish

@@ -85,20 +85,22 @@ export function useConversation() {
     const saved = await fetchAIChatThread(id)
     if (!isSameConversation(version) || !isLatestSync(revision) || sending.current) return
     shownSync.current = revision
-    setThread(saved.thread)
-    setMessages(saved.messages)
+    showThread(saved)
     setTurnError((error) => reconcileError(error, saved.messages))
   }
 
-  const showLoadedThread = ({ thread, messages }: AIChatConversation, revision: number) => {
-    loadedThread.current = thread.id
-    if (!hasNewerSyncShown(revision)) {
-      setThread(thread)
-      setMessages(messages)
+  // Whichever of the initial load or a cross-tab sync lands first completes
+  // opening the thread; later syncs only refresh its messages.
+  const showThread = ({ thread, messages }: AIChatConversation) => {
+    if (loadedThread.current !== thread.id) {
+      loadedThread.current = thread.id
+      setWorkspace(thread.workspace)
+      setMode(thread.mode as ChatMode)
+      setLoadError("")
+      setLoadingThread(false)
     }
-    setWorkspace(thread.workspace)
-    setMode(thread.mode as ChatMode)
-    setLoadingThread(false)
+    setThread(thread)
+    setMessages(messages)
   }
 
   const showLoadError = (error: unknown) => {
@@ -114,8 +116,9 @@ export function useConversation() {
     const isCurrent = () => !controller.signal.aborted && isSameConversation(version)
     const revision = syncRevision.current
     fetchAIChatThread(id, controller.signal).then(
-      (loaded) => { if (isCurrent()) showLoadedThread(loaded, revision) },
-      (error: unknown) => { if (isCurrent()) showLoadError(error) },
+      // A newer cross-tab sync already on screen wins over this late answer.
+      (loaded) => { if (isCurrent() && !hasNewerSyncShown(revision)) showThread(loaded) },
+      (error: unknown) => { if (isCurrent() && !hasNewerSyncShown(revision)) showLoadError(error) },
     )
     return () => controller.abort()
   })
