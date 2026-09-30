@@ -594,3 +594,22 @@ export async function addBetaTester(login: string): Promise<BetaTester> {
 export async function removeBetaTester(login: string): Promise<void> {
   return apiFetch<void>(`/api/settings/beta-testers/${encodeURIComponent(login)}`, { method: "DELETE" })
 }
+
+export interface AIChatSource {
+  kind: string
+  name: string
+  status: "unchecked" | "invalid"
+  error?: string
+}
+
+export interface AIChatSources {
+  configured: boolean
+  workspaces: string[]
+  workspace: string
+  sources: AIChatSource[]
+}
+
+export function fetchAIChatSources(workspace = ""): Promise<AIChatSources> {
+  const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""
+  return apiFetch<AIChatSources>(`/api/ai-chat/sources${query}`)
+}

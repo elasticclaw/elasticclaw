@@ -30,23 +30,25 @@ import { isWaitingOnYou } from "@/lib/waiting-on-you"
 import { agentSection, type AgentSectionName } from "@/components/ds/agent-section"
 import { Spinner } from "@/components/ui/spinner"
 
+const ChatScreen = dynamic(() => import("@/components/ai-chat/chat-screen").then((module) => module.ChatScreen))
+
 const AnalyticsCommandCenter = dynamic(() => import("@/components/analytics-command-center").then((module) => module.AnalyticsCommandCenter), {
   loading: () => <div className="flex min-h-64 items-center justify-center text-muted-foreground"><Spinner className="size-5" /></div>,
 })
 
-export type HomeView = "agents" | "analytics"
+export type HomeView = "agents" | "analytics" | "chat"
 
 /**
- * Shell shared by "/" and "/analytics": one sidebar, one hub connection, and a
- * right-hand pane that swaps between the agents board and analytics. The view
+ * Shell shared by "/", "/analytics" and "/chat": one sidebar, one hub connection, and a
+ * right-hand pane that swaps between the agents board, analytics and AI Chat. The view
  * is derived from the pathname; toggling uses history.pushState so the app
  * never remounts (Next syncs usePathname/useSearchParams with the history API)
- * and the hub WebSocket stays alive. Both static-export routes render this
- * same component so deep links to either path hydrate into the same shell.
+ * and the hub WebSocket stays alive. The static-export routes render this
+ * same component so deep links hydrate into the same shell.
  */
 export function HomeShell() {
   const pathname = usePathname()
-  const view: HomeView = pathname.startsWith("/analytics") ? "analytics" : "agents"
+  const view: HomeView = pathname.startsWith("/chat") ? "chat" : pathname.startsWith("/analytics") ? "analytics" : "agents"
   // Last analytics query string, so toggling away and back restores filters.
   const analyticsSearchRef = useRef("")
 
@@ -152,6 +154,11 @@ export function HomeShell() {
     } else {
       window.history.pushState(null, "", `/analytics/${analyticsSearchRef.current}`)
     }
+  }, [view])
+
+  const handleOpenChat = useCallback(() => {
+    if (view === "analytics") analyticsSearchRef.current = window.location.search
+    window.history.pushState(null, "", "/chat")
   }, [view])
 
   const hub = useHub(selectedClawId)
@@ -314,11 +321,11 @@ export function HomeShell() {
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
     (id: string) => {
-      // Selecting an agent while on analytics jumps back to the agents view.
+      // Selecting an agent returns to the agents view, preserving analytics filters.
       if (window.location.pathname.startsWith("/analytics")) {
         analyticsSearchRef.current = window.location.search
-        window.history.pushState(null, "", "/")
       }
+      if (window.location.pathname !== "/") window.history.pushState(null, "", "/")
       writeSelectedClawId(id)
       setUnreadCount(id, 0)
       loadMessages(id)
@@ -426,13 +433,14 @@ export function HomeShell() {
       onSelectWorkflow={setSelectedWorkflow}
       view={view}
       onToggleView={handleToggleView}
+      onOpenChat={handleOpenChat}
       variant={isMobile ? "drawer" : "inline"}
     />
   )
 
   // The tab bar shows on the board and analytics; the agent detail view is
   // full-screen (back chevron returns to the board).
-  const showTabBar = isMobile && (view === "analytics" || !selectedClaw)
+  const showTabBar = isMobile && view !== "chat" && (view === "analytics" || !selectedClaw)
 
   return (
     <div className="flex h-screen-safe bg-background">
@@ -447,7 +455,7 @@ export function HomeShell() {
         sidebar
       )}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {view === "analytics" ? (
+        {view === "chat" ? <ChatScreen /> : view === "analytics" ? (
           // Everyone reads analytics; only admins see the cost widgets, so the
           // view waits for the admin check instead of rendering a page whose
           // cost sections would pop in (or wrongly stay hidden) afterwards.
