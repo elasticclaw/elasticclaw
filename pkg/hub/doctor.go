@@ -182,7 +182,6 @@ func (s *Server) checkLLMKeys(cfg *types.HubConfig) []DoctorCheck {
 		"anthropic": true, "openai": true, "fireworks": true,
 		"moonshot": true, "google": true, "mistral": true,
 		"groq": true, "grok": true, "deepseek": true, "codex": true, "ollama": true,
-		"camel-stream": true,
 	}
 
 	allKeysValid := true

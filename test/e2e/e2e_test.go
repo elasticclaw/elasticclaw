@@ -49,12 +49,6 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	runGitHubIssuesWorkflowE2E(t, "daytona")
 }
 
-func TestDaytonaCamelStreamGitHubIssuesWorkflowE2E(t *testing.T) {
-	t.Setenv("ELASTICCLAW_E2E_LLM_PROVIDER", "camel-stream")
-	t.Setenv("ELASTICCLAW_E2E_MODEL", "camel-stream/auto")
-	runGitHubIssuesWorkflowE2E(t, "daytona")
-}
-
 func TestReplicatedGitHubIssuesWorkflowE2E(t *testing.T) {
 	runGitHubIssuesWorkflowE2E(t, "replicated")
 }
@@ -64,16 +58,10 @@ func TestExedevGitHubIssuesWorkflowE2E(t *testing.T) {
 }
 
 func TestDockerWorkflowE2E(t *testing.T) {
-	runDockerWorkflowE2E(t, false)
+	runDockerWorkflowE2E(t)
 }
 
-func TestDockerCamelStreamWorkflowE2E(t *testing.T) {
-	t.Setenv("ELASTICCLAW_E2E_LLM_PROVIDER", "camel-stream")
-	t.Setenv("ELASTICCLAW_E2E_MODEL", "camel-stream/auto")
-	runDockerWorkflowE2E(t, true)
-}
-
-func runDockerWorkflowE2E(t *testing.T, waitForInference bool) {
+func runDockerWorkflowE2E(t *testing.T) {
 	runID := e2eRunID()
 	env := newE2EEnv(t, runID, "docker")
 
@@ -151,9 +139,6 @@ func runDockerWorkflowE2E(t *testing.T, waitForInference bool) {
 	if !foundRun {
 		t.Logf("messages seen for docker claw %s: %+v", agentID, lastMsgs)
 		t.Fatalf("docker run action + output capture + gate did not produce expected evidence (see #530)")
-	}
-	if waitForInference {
-		waitForAgentReply(ctx, t, hub, agentID)
 	}
 }
 
@@ -316,9 +301,6 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	switch llmProvider {
 	case "fireworks":
 		llmAPIKey = requiredEnv(t, "FIREWORKS_API_KEY")
-	case "camel-stream":
-		llmAPIKey = requiredEnv(t, "CAMEL_API_KEY")
-		defaultLLMModel = "camel-stream/auto"
 	default:
 		t.Fatalf("unsupported E2E inference provider %q", llmProvider)
 	}
@@ -527,7 +509,6 @@ llm_keys:
 		"ELASTICCLAW_HUB_CONFIG="+configPath,
 		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
 		"FIREWORKS_API_KEY="+providerAPIKey(env, "fireworks"),
-		"CAMEL_API_KEY="+providerAPIKey(env, "camel-stream"),
 		"ELASTICCLAW_E2E_BRIDGE_BINARY="+env.BridgeBinary,
 		"ELASTICCLAW_E2E_BRIDGE_TOKEN="+env.BridgeToken,
 		"ELASTICCLAW_PROVIDER_NAME_PREFIX="+env.ProviderPrefix,
