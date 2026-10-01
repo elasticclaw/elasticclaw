@@ -221,20 +221,6 @@ if model.startswith('grok/'):
             'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
         }],
     }
-if model.startswith('camel-stream/'):
-    model_id = model.split('/', 1)[1]
-    config.setdefault('models', {})['mode'] = 'merge'
-    providers = config['models'].setdefault('providers', {})
-    providers['camel-stream'] = {
-        'baseUrl': 'https://stream.camelai.com/v1',
-        'api': 'openai-completions',
-        'apiKey': '${CAMEL_API_KEY}',
-        'models': [{
-            'id': model_id,
-            'name': 'Auto',
-            'contextWindow': 262144,
-        }],
-    }
 if model.startswith('fireworks/'):
     # OpenClaw 2026.9.x dropped the built-in Fireworks catalog (full-path
     # accounts/fireworks/models/* ids); register it as a custom provider so
@@ -713,9 +699,6 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel
 			model = "ollama/qwen2.5-coder:1.5b"
 		}
 		return fmt.Sprintf(`--auth-choice ollama --custom-base-url "http://ollama:11434" --custom-model-id %s`, shellQuote(stripProviderPrefix(model)))
-	case "camel-stream":
-		// The config patch registers this custom provider after onboarding.
-		return `--auth-choice skip`
 	default:
 		return `--auth-choice apiKey --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}
