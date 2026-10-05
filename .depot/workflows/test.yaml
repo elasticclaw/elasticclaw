@@ -37,13 +37,18 @@ jobs:
 
       - name: Run public adversaries
         uses: doomerlabs/actions/run@v1
-        env:
-          CAMEL_API_KEY: ${{ secrets.CAMEL_API_KEY }}
         with:
           adversaries: auto
           path: .
           data-dir: /mnt/adversary
+          # Resolve the latest stable CLI at install time. The action's pinned
+          # default prerelease (2026.9.30-beta.3) was deleted when the CLI went
+          # stable (2026.10.x), which 404'd the install download on every run.
+          cli-version: ""
           model: auto
+          # camelStream shut down; Fireworks is the review model provider.
+          model-provider: fireworks
+          model-api-key: ${{ secrets.FIREWORKS_API_KEY }}
           auth-mode: oidc
           registry-host: registry.doomer.ai
           registry-namespace: elasticclaw
