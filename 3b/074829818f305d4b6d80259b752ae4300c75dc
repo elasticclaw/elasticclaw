@@ -1,0 +1,14 @@
+.depot/workflows/test.yaml
+  h_38cb974bb08fad 44-47,49-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3b074829818f305d4b6d80259b752ae4300c75dc",
+  "prompts": {},
+  "humans": {
+    "h_38cb974bb08fad": {
+      "author": "Xav Paice <xav@replicated.com>"
+    }
+  }
+}
