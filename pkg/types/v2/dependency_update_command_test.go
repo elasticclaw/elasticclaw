@@ -68,6 +68,34 @@ func TestNormalizeDependencyUpdateConfigDefaults(t *testing.T) {
 	if out.SeparateRuntime == nil || !*out.SeparateRuntime {
 		t.Fatal("expected separate_runtime to default to true")
 	}
+	if out.IncludeIndirect {
+		t.Fatal("expected include_indirect to default to false")
+	}
+}
+
+func TestBuildDependencyUpdateCommandIncludesIncludeIndirect(t *testing.T) {
+	cfg := DependencyUpdateConfig{
+		Ecosystems:      []string{"go"},
+		IncludeIndirect: true,
+	}
+	cmd, err := BuildDependencyUpdateCommand(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(extractConfigBase64(cmd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed DependencyUpdateConfig
+	if err := json.Unmarshal(decoded, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.IncludeIndirect {
+		t.Fatal("expected include_indirect to survive config encoding")
+	}
+	if !strings.Contains(cmd, "include_indirect") {
+		t.Fatal("expected embedded script to gate on include_indirect")
+	}
 }
 
 func extractConfigBase64(command string) string {

@@ -24,6 +24,12 @@ type DependencyUpdateConfig struct {
 	ExcludePaths     []string `json:"exclude_paths,omitempty" yaml:"exclude_paths,omitempty"`
 	Grouping         string   `json:"grouping,omitempty" yaml:"grouping,omitempty"`
 	IncludeMajor     bool     `json:"include_major,omitempty" yaml:"include_major,omitempty"`
+	// IncludeIndirect (Go only) allows patch-level updates to indirect
+	// modules. When false (default), indirect modules are skipped entirely.
+	// Indirect minor/major updates are never applied: bumping a module
+	// nothing directly requires across a minor/major boundary risks pulling
+	// unvetted versions into the build list.
+	IncludeIndirect  bool     `json:"include_indirect,omitempty" yaml:"include_indirect,omitempty"`
 	SeparateMajor    *bool    `json:"separate_major,omitempty" yaml:"separate_major,omitempty"`
 	SeparateSecurity *bool    `json:"separate_security,omitempty" yaml:"separate_security,omitempty"`
 	SeparateRuntime  *bool    `json:"separate_runtime,omitempty" yaml:"separate_runtime,omitempty"`
