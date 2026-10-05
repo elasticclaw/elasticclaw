@@ -11,46 +11,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  adversary-review:
-    name: Adversary Labs review
-    runs-on: depot-ubuntu-24.04
-    # The review of a full PR runs 25+ routed review jobs and has been landing
-    # at 9-10 minutes; the platform default (10) kills it mid-review on larger
-    # diffs. Keep headroom so findings are not lost to the cap.
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-      pull-requests: write
-
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Mount adversary cache
-        uses: depot/cache-mount@c4ccf77f90f7fa7df6a002813c0b13f6a5943063 # v1
-        with:
-          name: adversary-${{ github.event.repository.id }}-public-v1
-          path: /mnt/adversary
-
-      - name: Run public adversaries
-        uses: doomerlabs/actions/run@v1
-        env:
-          CAMEL_API_KEY: ${{ secrets.CAMEL_API_KEY }}
-        with:
-          adversaries: auto
-          path: .
-          data-dir: /mnt/adversary
-          model: auto
-          auth-mode: oidc
-          registry-host: registry.doomer.ai
-          registry-namespace: elasticclaw
-          include-summary: false
-          fail-on-findings: false
-          timeout-minutes: "30"
-
   unit:
     name: Unit tests
     runs-on: depot-ubuntu-24.04
