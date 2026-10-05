@@ -26,7 +26,7 @@ func TestCollectWorkspacesForPush_DefaultPath(t *testing.T) {
 	}
 	defer os.Chdir(origDir)
 
-	workspaces, err := collectWorkspacesForPush("", "")
+	workspaces, err := collectAndValidateWorkspaces("", "")
 	if err != nil {
 		t.Fatalf("collect workspaces: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestCollectWorkspacesForPush_LegacyPath(t *testing.T) {
 	}
 	defer os.Chdir(origDir)
 
-	workspaces, err := collectWorkspacesForPush("", "")
+	workspaces, err := collectAndValidateWorkspaces("", "")
 	if err != nil {
 		t.Fatalf("collect workspaces: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestCollectWorkspacesForPush_PrefersFactoryWorkspaces(t *testing.T) {
 	}
 	defer os.Chdir(origDir)
 
-	workspaces, err := collectWorkspacesForPush("", "")
+	workspaces, err := collectAndValidateWorkspaces("", "")
 	if err != nil {
 		t.Fatalf("collect workspaces: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestCollectWorkspacesForPush_DefaultPathWithFilter(t *testing.T) {
 	}
 	defer os.Chdir(origDir)
 
-	workspaces, err := collectWorkspacesForPush("other-ws", "")
+	workspaces, err := collectAndValidateWorkspaces("other-ws", "")
 	if err != nil {
 		t.Fatalf("collect workspaces: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestCollectWorkspacesForPush_CustomPath(t *testing.T) {
 	customPath := filepath.Join(root, "custom", "my-workspace")
 	writeMinimalWorkspace(t, customPath, "my-workspace")
 
-	workspaces, err := collectWorkspacesForPush("", customPath)
+	workspaces, err := collectAndValidateWorkspaces("", customPath)
 	if err != nil {
 		t.Fatalf("collect workspaces: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestCollectWorkspacesForPush_CustomPathFilterMismatch(t *testing.T) {
 	// A filter mismatch on a custom path should behave like the default scan:
 	// return no matches (not a hard error), so callers get a consistent
 	// "no workspaces matched" message from runWorkspacePush.
-	workspaces, err := collectWorkspacesForPush("wrong-name", customPath)
+	workspaces, err := collectAndValidateWorkspaces("wrong-name", customPath)
 	if err != nil {
 		t.Fatalf("expected no error for filter mismatch, got %v", err)
 	}
@@ -150,7 +150,7 @@ func TestCollectWorkspacesForPush_CustomPathNotDirectory(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	_, err := collectWorkspacesForPush("", filePath)
+	_, err := collectAndValidateWorkspaces("", filePath)
 	if err == nil {
 		t.Fatalf("expected error for non-directory path, got nil")
 	}
@@ -218,10 +218,10 @@ source_control:
 		t.Fatalf("shell Validate: %v", err)
 	}
 
-	// collectWorkspacesForPush must accept --path to a v2 workspace dir.
-	got, err := collectWorkspacesForPush("", dir)
+	// collectAndValidateWorkspaces must accept --path to a v2 workspace dir.
+	got, err := collectAndValidateWorkspaces("", dir)
 	if err != nil {
-		t.Fatalf("collectWorkspacesForPush: %v", err)
+		t.Fatalf("collectAndValidateWorkspaces: %v", err)
 	}
 	if len(got) != 1 || got[0].Name != "amazecrm-dev" {
 		t.Fatalf("got %#v", got)
@@ -248,5 +248,129 @@ ci:
 	}
 	if !strings.Contains(err.Error(), "unknown credential") && !strings.Contains(err.Error(), "validate workspace v2") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunWorkspaceValidate_DefaultPath(t *testing.T) {
+	root := t.TempDir()
+	workspacesDir := filepath.Join(root, "factory-workspaces")
+	if err := os.MkdirAll(workspacesDir, 0755); err != nil {
+		t.Fatalf("mkdir workspaces: %v", err)
+	}
+	writeMinimalWorkspace(t, filepath.Join(workspacesDir, "default-ws"), "default-ws")
+	writeMinimalWorkspace(t, filepath.Join(workspacesDir, "other-ws"), "other-ws")
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	out, err := captureStdout(func() error {
+		return runWorkspaceValidate("", "")
+	})
+	if err != nil {
+		t.Fatalf("validate workspaces: %v", err)
+	}
+	if !strings.Contains(out, "Validated 2 workspace(s)") {
+		t.Fatalf("output missing validation count:\n%s", out)
+	}
+	if !strings.Contains(out, "default-ws") || !strings.Contains(out, "other-ws") {
+		t.Fatalf("output missing workspace names:\n%s", out)
+	}
+}
+
+func TestRunWorkspaceValidate_FilterName(t *testing.T) {
+	root := t.TempDir()
+	workspacesDir := filepath.Join(root, "factory-workspaces")
+	if err := os.MkdirAll(workspacesDir, 0755); err != nil {
+		t.Fatalf("mkdir workspaces: %v", err)
+	}
+	writeMinimalWorkspace(t, filepath.Join(workspacesDir, "default-ws"), "default-ws")
+	writeMinimalWorkspace(t, filepath.Join(workspacesDir, "other-ws"), "other-ws")
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	out, err := captureStdout(func() error {
+		return runWorkspaceValidate("other-ws", "")
+	})
+	if err != nil {
+		t.Fatalf("validate filtered workspace: %v", err)
+	}
+	if !strings.Contains(out, "Validated 1 workspace(s)") || !strings.Contains(out, "other-ws") {
+		t.Fatalf("output missing filtered workspace:\n%s", out)
+	}
+	if strings.Contains(out, "default-ws") {
+		t.Fatalf("output should not include default-ws:\n%s", out)
+	}
+}
+
+func TestRunWorkspaceValidate_InvalidWorkspace(t *testing.T) {
+	root := t.TempDir()
+	workspacesDir := filepath.Join(root, "factory-workspaces")
+	if err := os.MkdirAll(workspacesDir, 0755); err != nil {
+		t.Fatalf("mkdir workspaces: %v", err)
+	}
+	invalidDir := filepath.Join(workspacesDir, "invalid-ws")
+	if err := os.MkdirAll(invalidDir, 0755); err != nil {
+		t.Fatalf("mkdir invalid workspace: %v", err)
+	}
+	// Invalid repository permissions make this workspace invalid.
+	config := "schema_version: v1\nname: invalid-ws\nprovider: replicated\nrepositories:\n  - repo: owner/repo\n    permissions: admin\n"
+	if err := os.WriteFile(filepath.Join(invalidDir, "elasticclaw-config.yaml"), []byte(config), 0644); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(origDir)
+
+	_, err = captureStdout(func() error {
+		return runWorkspaceValidate("", "")
+	})
+	if err == nil {
+		t.Fatalf("expected validation error for invalid workspace, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid permissions") {
+		t.Fatalf("expected invalid permissions error, got %v", err)
+	}
+}
+
+func TestWorkspaceValidateCmdRejectsTooManyArgs(t *testing.T) {
+	cmd := workspaceValidateCmd()
+	err := cmd.Args(cmd, []string{"first", "second"})
+	if err == nil {
+		t.Fatalf("expected error for too many args, got nil")
+	}
+}
+
+func TestRunWorkspaceValidate_CustomPath(t *testing.T) {
+	root := t.TempDir()
+	customPath := filepath.Join(root, "custom", "my-workspace")
+	writeMinimalWorkspace(t, customPath, "my-workspace")
+
+	out, err := captureStdout(func() error {
+		return runWorkspaceValidate("", customPath)
+	})
+	if err != nil {
+		t.Fatalf("validate custom path workspace: %v", err)
+	}
+	if !strings.Contains(out, "Validated 1 workspace(s)") || !strings.Contains(out, "my-workspace") {
+		t.Fatalf("output missing custom path workspace:\n%s", out)
 	}
 }
