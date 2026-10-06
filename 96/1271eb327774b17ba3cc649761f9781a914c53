@@ -1,0 +1,18 @@
+pkg/types/v2/dependency_update_command.go
+  h_38cb974bb08fad 324
+pkg/types/v2/dependency_update_command_test.go
+  h_38cb974bb08fad 6-8,104-241
+pkg/types/v2/exec_effects.go
+  h_38cb974bb08fad 20-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "961271eb327774b17ba3cc649761f9781a914c53",
+  "prompts": {},
+  "humans": {
+    "h_38cb974bb08fad": {
+      "author": "Xav Paice <xav@replicated.com>"
+    }
+  }
+}
