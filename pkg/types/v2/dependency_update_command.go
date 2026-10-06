@@ -321,6 +321,7 @@ for manifest in manifests:
                     # minor/major jumps for a module nothing directly requires
                     # risk pulling unvetted versions into the build list.
                     if not CONFIG.get("include_indirect"):
+                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="indirect updates disabled")
                         continue
                     if kind != "patch":
                         update_record("go", name, from_version, to_version, kind, False, skipped_reason="indirect updates are limited to patch releases")

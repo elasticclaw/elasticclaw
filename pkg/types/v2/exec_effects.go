@@ -17,7 +17,8 @@ type ExecRunReceipt struct {
 
 // DependencyUpdateConfig is the v2 effect payload for dependency.update.
 // It mirrors v1's DependencyUpdatesAction fields (excluding output and
-// continue_on_error, which are deliberately not carried forward).
+// continue_on_error, which are deliberately not carried forward) and adds
+// v2-only options such as include_indirect.
 type DependencyUpdateConfig struct {
 	Ecosystems       []string `json:"ecosystems" yaml:"ecosystems"`
 	Paths            []string `json:"paths,omitempty" yaml:"paths,omitempty"`
