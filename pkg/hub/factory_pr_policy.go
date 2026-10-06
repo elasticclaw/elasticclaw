@@ -9,6 +9,7 @@ const defaultFactoryPRPolicy = "## PR Completion Policy\n\n" +
 	"2. Push the branch.\n" +
 	"3. Open a pull request for the branch.\n" +
 	"4. Send exactly: `[DONE] https://github.com/org/repo/pull/N` with the actual PR URL.\n\n" +
+	browserEvidencePRPolicy + "\n" +
 	"If you cannot create a PR because credentials, repository access, or remotes are missing, do not send `[DONE]`. Report the blocker and the verification already completed.\n"
 
 func appendDefaultFactoryPRPolicy(b *strings.Builder) {
