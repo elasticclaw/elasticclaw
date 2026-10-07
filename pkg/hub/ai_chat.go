@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/llm"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"nhooyr.io/websocket/wsjson"
@@ -16,6 +17,27 @@ import (
 func (s *Server) aiChatDeps() aichat.Deps {
 	return aichat.Deps{
 		DB:          s.db,
+		GitHubToken: s.tokenForRepo,
+		GitHubAPI:   s.githubBaseURL,
+		HTTPClient:  http.DefaultClient,
+		Secret: func(workspace, name string) (string, bool) {
+			secrets, _ := loadWorkspaceSecrets(workspace)
+			if value, ok := secrets[name]; ok {
+				return value, value != ""
+			}
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+			value, ok := s.hubCfg.Secrets[name]
+			return value, ok && value != ""
+		},
+		LinearToken: func(workspace string) (string, bool) {
+			cfg, err := config.Load(workspaceManagedDir(workspace))
+			if err != nil || cfg.IssueTracker == nil {
+				return "", false
+			}
+			tracker, ok := findWorkspaceIssueTracker(workspace, "linear", cfg.IssueTracker.Name)
+			return tracker.Token, ok && tracker.Token != ""
+		},
 		WebAuth:     s.withWebAuth,
 		WithFeature: s.withFeature,
 		CallerLogin: func(r *http.Request) string { return aichat.OwnerLogin(githubLoginFromContext(r.Context())) },
