@@ -614,3 +614,48 @@ export function fetchAIChatSources(workspace = ""): Promise<AIChatSources> {
   const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""
   return apiFetch<AIChatSources>(`/api/ai-chat/sources${query}`)
 }
+
+export interface AIChatThread {
+  id: string
+  workspace: string
+  title: string
+  mode: string
+  createdAt: number
+  updatedAt: number
+  archivedAt: number | null
+}
+export interface AIChatMessage {
+  id: string
+  threadId: string
+  seq: number
+  role: "user" | "assistant"
+  content: string
+  model: string
+  inputTokens: number
+  outputTokens: number
+  status: string
+  createdAt: number
+}
+export interface AIChatConversation { thread: AIChatThread; messages: AIChatMessage[] }
+export function createAIChatThread(workspace: string, mode: string, signal?: AbortSignal): Promise<AIChatThread> {
+  return apiFetch("/api/ai-chat/threads", { method: "POST", body: JSON.stringify({ workspace, mode }), signal })
+}
+export function fetchAIChatThread(id: string, signal?: AbortSignal): Promise<AIChatConversation> {
+  return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}`, { signal })
+}
+export function cancelAIChatTurn(id: string): Promise<void> {
+  return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel`, { method: "POST" })
+}
+export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void): Promise<void> {
+  const token = await resolveToken()
+  const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/messages`, {
+    method: "POST", signal,
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify({ text, retry }),
+  })
+  if (response.status === 401) return handleSessionExpired<void>()
+  if (!response.ok) throw new ApiError((await response.text()).trim() || "Unable to send message.", response.status)
+  if (!response.body) throw new Error("Streaming is unavailable.")
+  const { readAIChatEvents } = await import("./ai-chat-stream")
+  await readAIChatEvents(response.body, onEvent)
+}

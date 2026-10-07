@@ -1,6 +1,7 @@
 package aichat
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,11 +11,16 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/llm"
 )
 
 // Deps is the hub boundary. Connectors and runner dependencies are added when
 // they are needed; this package never imports its parent hub package.
 type Deps struct {
+	DB          *sql.DB
+	TenantID    func(*http.Request) string
+	LLM         func(string) (llm.Provider, error)
+	Publish     func(Thread)
 	WebAuth     func(http.HandlerFunc) http.HandlerFunc
 	WithFeature func(string, http.HandlerFunc) http.HandlerFunc
 	CallerLogin func(*http.Request) string
@@ -33,6 +39,14 @@ func OwnerLogin(login string) string {
 // Routes gates the entire namespace, including endpoints added in later PRs.
 func Routes(deps Deps) http.Handler {
 	mux := http.NewServeMux()
+	api := &api{deps: deps, store: &Store{DB: deps.DB}}
+	api.runner = &Runner{Store: api.store}
+	mux.HandleFunc("GET /api/ai-chat/threads", api.listThreads)
+	mux.HandleFunc("POST /api/ai-chat/threads", api.createThread)
+	mux.HandleFunc("GET /api/ai-chat/threads/{id}", api.getThread)
+	mux.HandleFunc("PATCH /api/ai-chat/threads/{id}", api.patchThread)
+	mux.HandleFunc("POST /api/ai-chat/threads/{id}/messages", api.sendMessage)
+	mux.HandleFunc("POST /api/ai-chat/threads/{id}/cancel", api.cancelTurn)
 	mux.HandleFunc("GET /api/ai-chat/sources", func(w http.ResponseWriter, r *http.Request) { sources(w, r, deps) })
 	return deps.WebAuth(deps.WithFeature("ai-chat", mux.ServeHTTP))
 }
