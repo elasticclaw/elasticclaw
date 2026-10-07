@@ -80,15 +80,25 @@ func (h *sourceHealth) check(ctx context.Context, key string, refresh bool, chec
 	}
 	entry := &healthEntry{started: now, done: make(chan struct{})}
 	h.entries[key] = entry
+	done := entry.done
 	h.mu.Unlock()
-	result := check(ctx)
-	result.checked = now
-	h.mu.Lock()
-	entry.result = result
-	close(entry.done)
-	entry.done = nil
-	h.mu.Unlock()
-	return result
+	go func() {
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthTimeout)
+		defer cancel()
+		result := check(checkCtx)
+		result.checked = now
+		h.mu.Lock()
+		entry.result = result
+		close(done)
+		entry.done = nil
+		h.mu.Unlock()
+	}()
+	select {
+	case <-done:
+		return entry.result
+	case <-ctx.Done():
+		return healthResult{err: ctx.Err(), checked: now}
+	}
 }
 
 type sourceCandidate struct {

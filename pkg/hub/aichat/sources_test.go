@@ -199,15 +199,124 @@ func TestHealthyPostHogCachesEventsAndRefreshes(t *testing.T) {
 			t.Fatalf("prepared %+v", prepared)
 		}
 	}
-	if requests.Load() != 2 {
+	if requests.Load() != 3 {
 		t.Fatalf("health not cached: %d", requests.Load())
 	}
 	now = now.Add(11 * time.Second)
 	_, _, _ = deps.checkSources(context.Background(), "ws", cfg, true)
-	if requests.Load() != 4 {
+	if requests.Load() != 6 {
 		t.Fatal("refresh did not run live checks")
 	}
 	if cfg.Sources[0].Status != "" || len(cfg.Sources[0].Events) != 0 {
 		t.Fatal("configuration mutated")
+	}
+}
+
+func TestHealthLeaderCancellationDoesNotPoisonCache(t *testing.T) {
+	cache := newSourceHealth()
+	started, release := make(chan struct{}), make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan healthResult, 1)
+	go func() {
+		finished <- cache.check(ctx, "source", false, func(checkCtx context.Context) healthResult {
+			close(started)
+			select {
+			case <-release:
+				return healthResult{detail: "connected", err: checkCtx.Err()}
+			case <-checkCtx.Done():
+				return healthResult{err: checkCtx.Err()}
+			}
+		})
+	}()
+	<-started
+	cancel()
+	select {
+	case result := <-finished:
+		if result.err != context.Canceled {
+			t.Errorf("leader cancellation: %v", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Error("leader did not honor cancellation")
+	}
+	close(release)
+	for range 2 {
+		result := cache.check(context.Background(), "source", false, func(context.Context) healthResult {
+			t.Error("shared check was discarded")
+			return healthResult{}
+		})
+		if result.err != nil || result.detail != "connected" {
+			t.Fatalf("poisoned cache: %+v", result)
+		}
+	}
+}
+
+func TestPostHogConnectedWithoutMetadataPermission(t *testing.T) {
+	deps := Deps{health: newSourceHealth(), Secret: func(string, string) (string, bool) { return "secret", true }, HTTPClient: sourceClient(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects/42/query/":
+			if r.Method != http.MethodPost {
+				t.Error("expected query POST")
+			}
+			fmt.Fprint(w, `{"results":[[1]]}`)
+		case "/api/projects/42/insights/":
+			fmt.Fprint(w, `{"results":[]}`)
+		case "/api/projects/42/", "/api/projects/42/event_definitions/":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			t.Errorf("unexpected request %s", r.URL)
+		}
+	})}
+	cfg := &config.Config{PostHog: &config.PostHog{Host: "https://posthog.test", ProjectID: "42", APIKey: "PH"}, Sources: []config.Source{{Kind: "posthog", Name: "PostHog"}}}
+	sources, reads, _ := deps.checkSources(context.Background(), "ws", cfg, false)
+	if sources[0].Status != "connected" || len(reads) != 2 || sources[0].Detail != "Project 42 · events and saved insights" {
+		t.Fatalf("health: %+v, tools: %d", sources, len(reads))
+	}
+	for _, tool := range reads {
+		args := `{}`
+		if tool.Definition().Name == "posthog_query" {
+			args = `{"query":"SELECT 1"}`
+		}
+		if _, err := tool.Run(context.Background(), json.RawMessage(args)); err != nil {
+			t.Fatalf("%s: %v", tool.Definition().Name, err)
+		}
+	}
+}
+
+func TestLargeKnowledgeTreeKeepsHealthAndReadAvailable(t *testing.T) {
+	var trees atomic.Int32
+	deps := Deps{health: newSourceHealth(), GitHubAPI: "https://github.test", GitHubToken: func(string) string { return "secret" }, HTTPClient: sourceClient(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/commits/"):
+			fmt.Fprint(w, `{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+		case strings.Contains(r.URL.Path, "/contents/README.md"):
+			fmt.Fprint(w, `{"type":"file","encoding":"base64","content":"IyBoZWxsbw=="}`)
+		case strings.Contains(r.URL.Path, "/git/trees/"):
+			trees.Add(1)
+			entries := make([]map[string]any, 5001)
+			for i := range entries {
+				entries[i] = map[string]any{"path": fmt.Sprintf("%d.txt", i), "type": "blob"}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"tree": entries})
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	})}
+	cfg := &config.Config{KnowledgeBase: &config.KnowledgeBase{Repo: "acme/large", Branch: "main", Entry: "README.md"}, Sources: []config.Source{{Kind: "knowledge_base", Name: "Knowledge base"}}}
+	sources, reads, _ := deps.checkSources(context.Background(), "ws", cfg, false)
+	if sources[0].Status != "connected" || len(reads) != 3 || trees.Load() != 0 {
+		t.Fatalf("health: %+v tools=%d trees=%d", sources, len(reads), trees.Load())
+	}
+	for _, tool := range reads {
+		name := tool.Definition().Name
+		args := map[string]string{"kb_read": `{"path":"README.md"}`, "kb_list": `{}`, "kb_search": `{"query":"hello"}`}[name]
+		result, err := tool.Run(context.Background(), json.RawMessage(args))
+		if name == "kb_read" {
+			if err != nil || result.Data != "# hello" {
+				t.Fatalf("read: %+v %v", result, err)
+			}
+		} else if err == nil {
+			t.Errorf("%s ignored enumeration limit", name)
+		}
 	}
 }
