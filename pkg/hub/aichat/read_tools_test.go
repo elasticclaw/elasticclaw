@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -200,5 +201,72 @@ func TestRunnerRedactsSplitTokensAndRejectsOriginalMalformedArgs(t *testing.T) {
 	messages, err := store.Messages(context.Background(), thread.ID, 0)
 	if err != nil || strings.Contains(fmt.Sprint(messages), secret) {
 		t.Fatalf("persisted secret: %v", err)
+	}
+}
+
+func TestConnectorValidationErrorsAreActionable(t *testing.T) {
+	cfg := &config.Config{
+		KnowledgeBase: &config.KnowledgeBase{Repo: "acme/docs", Entry: "README.md"},
+		Repositories:  []string{"acme/app"},
+		PostHog:       &config.PostHog{Host: "https://posthog.test", ProjectID: "42", APIKey: "PH"},
+		Datadog:       &config.Datadog{Site: "datadoghq.com", Env: "prod", APIKey: "DD", AppKey: "APP"},
+		IssueTracker:  &config.IssueTracker{},
+	}
+	cfg.IssueTracker.DefaultFields.Team = "Product"
+	deps := Deps{GitHubToken: func(string) string { return "secret" }, Secret: func(string, string) (string, bool) { return "secret", true }, LinearToken: func(string) (string, bool) { return "secret", true }, HTTPClient: sourceClient(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("invalid arguments reached provider: %s", r.URL)
+		w.WriteHeader(500)
+	})}
+	args := map[string]string{
+		"kb_list": `{"dir":"../"}`, "kb_read": `{"path":"../README.md"}`, "kb_search": `{"query":""}`,
+		"repo_tree": `{"repo":"other/private"}`, "repo_read": `{"repo":"acme/app","path":"../file"}`, "repo_search": `{"repo":"acme/app","query":"repo:other/private"}`,
+		"posthog_query": `{"query":"DELETE FROM events"}`, "posthog_insights": `{"id":"../"}`,
+		"datadog_metrics": `{"from":"invalid"}`, "datadog_logs": `{"from":"invalid"}`,
+		"linear_search": `{"query":""}`, "linear_get": `{"id":"../"}`,
+	}
+	for _, kind := range []string{"knowledge_base", "repositories", "posthog", "datadog", "issue_tracker"} {
+		for _, tool := range deps.candidate("ws", cfg, config.Source{Kind: kind}).tools {
+			name := tool.Definition().Name
+			for _, raw := range []string{args[name], `{"unknown":true}`} {
+				_, err := tool.Run(context.Background(), json.RawMessage(raw))
+				var argErr tools.ArgError
+				if !errors.As(err, &argErr) || argErr.Error() == "" {
+					t.Errorf("%s validation error: %v", name, err)
+				}
+			}
+		}
+	}
+}
+
+func TestRunnerExposesOnlyRedactedArgumentErrors(t *testing.T) {
+	store := testStore(t)
+	thread := testThread(t, store)
+	message, err := store.BeginTurn(context.Background(), thread, "question", "model", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{Store: store}
+	for i, test := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("wrapped: %w", tools.ArgError("Invalid reference sentinel-secret")), "Invalid reference [redacted]"},
+		{errors.New("provider sentinel-secret private details"), "Read tool failed"},
+	} {
+		tool := tools.ReadTool{Name: tools.Define("safe_read", "Read", map[string]any{}), Execute: func(context.Context, json.RawMessage) (tools.Result, error) { return tools.Result{}, test.err }}
+		registry, _ := tools.NewReadRegistry(tool)
+		reply, err := runner.runToolReads(context.Background(), message.ID, i+1, llm.ToolCall{ID: "call", Name: "safe_read", Arguments: `{}`}, func(event string, payload any) error {
+			if event == EventToolFinished && payload.(map[string]any)["error"] != test.want {
+				t.Errorf("SSE error: %v", payload)
+			}
+			return nil
+		}, registry, []string{"sentinel-secret"})
+		if err != nil || !reply.IsError || reply.Content != test.want {
+			t.Fatalf("tool reply: %+v %v", reply, err)
+		}
+		var stored string
+		if err := store.DB.QueryRow(`SELECT error FROM ai_chat_tool_runs WHERE message_id=? AND seq=?`, message.ID, i+1).Scan(&stored); err != nil || stored != test.want {
+			t.Fatalf("stored error: %q %v", stored, err)
+		}
 	}
 }

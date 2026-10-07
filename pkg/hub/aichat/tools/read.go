@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/llm"
 	"io"
 	"strings"
@@ -31,10 +30,15 @@ func Define(name, description string, properties map[string]any, required ...str
 	return llm.Tool{Name: name, Description: description, InputSchema: schema}
 }
 
+// ArgError describes a caller-correctable validation failure, never a provider error.
+type ArgError string
+
+func (e ArgError) Error() string { return string(e) }
+
 func DecodeArgs(raw json.RawMessage, out any) error {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || len(raw) > MaxResultBytes || raw[0] != '{' {
-		return errors.New("invalid tool arguments")
+		return ArgError("invalid tool arguments")
 	}
 	fields := json.NewDecoder(bytes.NewReader(raw))
 	_, _ = fields.Token()
@@ -42,27 +46,27 @@ func DecodeArgs(raw json.RawMessage, out any) error {
 	for fields.More() {
 		key, err := fields.Token()
 		if err != nil {
-			return errors.New("invalid tool arguments")
+			return ArgError("invalid tool arguments")
 		}
 		name, ok := key.(string)
 		name = strings.ToLower(name)
 		if !ok || seen[name] {
-			return errors.New("invalid tool arguments")
+			return ArgError("invalid tool arguments")
 		}
 		seen[name] = true
 		var value json.RawMessage
 		if fields.Decode(&value) != nil || string(value) == "null" {
-			return errors.New("invalid tool arguments")
+			return ArgError("invalid tool arguments")
 		}
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if err := d.Decode(out); err != nil {
-		return errors.New("invalid tool arguments")
+		return ArgError("invalid tool arguments")
 	}
 	var extra any
 	if d.Decode(&extra) != io.EOF {
-		return errors.New("invalid tool arguments")
+		return ArgError("invalid tool arguments")
 	}
 	return nil
 }

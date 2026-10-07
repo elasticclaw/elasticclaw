@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -10,8 +11,9 @@ func TestStrictReadArguments(t *testing.T) {
 		var args struct {
 			Query string `json:"query"`
 		}
-		if DecodeArgs(json.RawMessage(raw), &args) == nil {
-			t.Errorf("accepted %s", raw)
+		var argErr ArgError
+		if err := DecodeArgs(json.RawMessage(raw), &args); !errors.As(err, &argErr) {
+			t.Errorf("argument error for %s: %v", raw, err)
 		}
 	}
 	var args struct {

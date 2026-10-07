@@ -260,6 +260,10 @@ func (r *Runner) runToolReads(ctx context.Context, messageID string, seq int, ca
 	run.Result = string(data)
 	if toolErr != nil {
 		run.Error = "Read tool failed"
+		var argErr tools.ArgError
+		if errors.As(toolErr, &argErr) {
+			run.Error = readhttp.Redact(argErr.Error(), secrets)
+		}
 		if !ok {
 			run.Error = "Read tool unavailable"
 		}

@@ -108,7 +108,7 @@ func (l *Linear) Search(ctx context.Context, raw json.RawMessage) (tools.Result,
 		return tools.Result{}, err
 	}
 	if strings.TrimSpace(args.Query) == "" || len(args.Query) > 500 || len(args.Team) > 200 || args.Limit < 0 || args.Limit > 100 {
-		return tools.Result{}, fmt.Errorf("Invalid issue search or limit.")
+		return tools.Result{}, tools.ArgError("Invalid issue search or limit.")
 	}
 	if args.Limit == 0 {
 		args.Limit = 25
@@ -117,7 +117,7 @@ func (l *Linear) Search(ctx context.Context, raw json.RawMessage) (tools.Result,
 		args.Team = l.team
 	}
 	if strings.TrimSpace(args.Team) == "" {
-		return tools.Result{}, fmt.Errorf("A team is required for issue search.")
+		return tools.Result{}, tools.ArgError("A team is required for issue search.")
 	}
 	var response struct {
 		SearchIssues struct {
@@ -140,7 +140,7 @@ func (l *Linear) Get(ctx context.Context, raw json.RawMessage) (tools.Result, er
 		return tools.Result{}, err
 	}
 	if !identifier.MatchString(args.ID) {
-		return tools.Result{}, fmt.Errorf("Use an issue identifier such as ABC-123.")
+		return tools.Result{}, tools.ArgError("Use an issue identifier such as ABC-123.")
 	}
 	var response struct {
 		Issue *issue `json:"issue"`

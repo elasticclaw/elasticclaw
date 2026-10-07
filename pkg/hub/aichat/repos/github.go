@@ -42,10 +42,10 @@ func (g *GitHub) allowed(repo string) bool {
 }
 func (g *GitHub) resolve(ctx context.Context, a reference) (string, error) {
 	if !g.allowed(a.Repo) {
-		return "", errors.New("Repository is not configured for this workspace.")
+		return "", tools.ArgError("Repository is not configured for this workspace.")
 	}
 	if (a.PR != nil && (*a.PR <= 0 || *a.PR > 100000000)) || (a.Ref != "" && a.PR != nil) || !gh.ValidRef(a.Ref) {
-		return "", errors.New("Specify either a valid branch reference or a positive pull request number.")
+		return "", tools.ArgError("Specify either a valid branch reference or a positive pull request number.")
 	}
 	if a.PR != nil {
 		return g.client.PullHead(ctx, a.Repo, *a.PR)
@@ -89,7 +89,7 @@ func (g *GitHub) Tools() []tools.Tool {
 				return tools.Result{}, err
 			}
 			if !gh.ValidPath(a.Dir, true) {
-				return tools.Result{}, errors.New("Invalid relative directory path.")
+				return tools.Result{}, tools.ArgError("Invalid relative directory path.")
 			}
 			sha, err := g.resolve(ctx, a.reference)
 			if err != nil {
@@ -117,7 +117,7 @@ func (g *GitHub) Tools() []tools.Tool {
 				return tools.Result{}, err
 			}
 			if !gh.ValidPath(a.Path, false) {
-				return tools.Result{}, errors.New("Invalid relative file path.")
+				return tools.Result{}, tools.ArgError("Invalid relative file path.")
 			}
 			sha, err := g.resolve(ctx, a.reference)
 			if err != nil {
@@ -142,15 +142,15 @@ func (g *GitHub) search(ctx context.Context, raw json.RawMessage) (tools.Result,
 		return tools.Result{}, err
 	}
 	if !g.allowed(a.Repo) {
-		return tools.Result{}, errors.New("Repository is not configured for this workspace.")
+		return tools.Result{}, tools.ArgError("Repository is not configured for this workspace.")
 	}
 	a.Query = strings.TrimSpace(a.Query)
 	if a.Query == "" || len(a.Query) > 256 || strings.ContainsAny(a.Query, ":\x00\r\n()\"") {
-		return tools.Result{}, errors.New("Use plain search text without qualifiers or Boolean operators.")
+		return tools.Result{}, tools.ArgError("Use plain search text without qualifiers or Boolean operators.")
 	}
 	for _, word := range strings.Fields(strings.ToUpper(a.Query)) {
 		if word == "OR" || word == "NOT" || word == "AND" {
-			return tools.Result{}, errors.New("Use plain search text without Boolean operators.")
+			return tools.Result{}, tools.ArgError("Use plain search text without Boolean operators.")
 		}
 	}
 	limit := 30
@@ -158,7 +158,7 @@ func (g *GitHub) search(ctx context.Context, raw json.RawMessage) (tools.Result,
 		limit = *a.Limit
 	}
 	if limit < 1 || limit > 100 {
-		return tools.Result{}, errors.New("Search limit must be between 1 and 100.")
+		return tools.Result{}, tools.ArgError("Search limit must be between 1 and 100.")
 	}
 	var response struct {
 		Items []struct {
