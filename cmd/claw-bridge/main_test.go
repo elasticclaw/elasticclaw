@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1087,6 +1088,60 @@ func TestResolveSubagentFields(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDenyOpenClawToolsMergesIntoExistingDenyList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "openclaw.json")
+	initial := `{"agents":{"defaults":{"model":"anthropic/claude-sonnet-5"}},"tools":{"profile":"coding","deny":["exec"]}}`
+	if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Twice: bootstrap reruns configureOpenClaw on restored sandboxes.
+	for i := 0; i < 2; i++ {
+		if err := denyOpenClawTools(path, "sessions_yield"); err != nil {
+			t.Fatalf("denyOpenClawTools: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var config struct {
+		Agents struct {
+			Defaults struct {
+				Model string `json:"model"`
+			} `json:"defaults"`
+		} `json:"agents"`
+		Tools struct {
+			Profile string   `json:"profile"`
+			Deny    []string `json:"deny"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if got, want := config.Tools.Deny, []string{"exec", "sessions_yield"}; !slices.Equal(got, want) {
+		t.Fatalf("tools.deny = %v, want %v", got, want)
+	}
+	if config.Tools.Profile != "coding" || config.Agents.Defaults.Model != "anthropic/claude-sonnet-5" {
+		t.Fatalf("unrelated config lost: %s", data)
+	}
+}
+
+func TestDenyOpenClawToolsCreatesToolsSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "openclaw.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := denyOpenClawTools(path, deniedOpenClawTools...); err != nil {
+		t.Fatalf("denyOpenClawTools: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"sessions_yield"`) {
+		t.Fatalf("sessions_yield not denied: %s", data)
 	}
 }
 
