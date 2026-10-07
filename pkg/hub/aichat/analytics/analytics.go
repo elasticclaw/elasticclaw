@@ -29,7 +29,7 @@ func intArg(description string) map[string]any {
 }
 func rowLimit(n int) (int, error) {
 	if n < 0 {
-		return 0, fmt.Errorf("Limit must be positive.")
+		return 0, tools.ArgError("Limit must be positive.")
 	}
 	if n == 0 {
 		return 100, nil
@@ -43,16 +43,20 @@ func rowLimit(n int) (int, error) {
 var readStatement = regexp.MustCompile(`(?i)^\s*(SELECT|WITH)\b`)
 
 // Reject additional statements and SQL write clauses even inside a WITH query.
-// String literals and quoted identifiers do not contribute keywords.
+// String literals, quoted identifiers and property names do not contribute keywords.
 func readQuery(query string) bool {
 	if len(query) == 0 || len(query) > 32000 || !readStatement.MatchString(query) {
 		return false
 	}
 	var tokens []string
 	var word strings.Builder
+	property := false
 	flush := func() {
 		if word.Len() > 0 {
-			tokens = append(tokens, strings.ToUpper(word.String()))
+			if !property {
+				tokens = append(tokens, strings.ToUpper(word.String()))
+			}
+			property = false
 			word.Reset()
 		}
 	}
@@ -60,6 +64,7 @@ func readQuery(query string) bool {
 		c := query[i]
 		if c == '\'' || c == '"' || c == '`' {
 			flush()
+			property = false
 			quote := c
 			closed := false
 			for i++; i < len(query); i++ {
@@ -84,10 +89,15 @@ func readQuery(query string) bool {
 		if c == ';' || (c == '-' && i+1 < len(query) && query[i+1] == '-') || (c == '/' && i+1 < len(query) && query[i+1] == '*') || c == 0 {
 			return false
 		}
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= '0' && c <= '9' && word.Len() > 0) {
 			word.WriteByte(c)
 		} else {
 			flush()
+			if c == '.' {
+				property = true
+			} else if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+				property = false
+			}
 		}
 	}
 	flush()

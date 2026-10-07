@@ -51,7 +51,7 @@ func window(from, to string) (time.Time, time.Time, error) {
 	start, e1 := time.Parse(time.RFC3339, from)
 	end, e2 := time.Parse(time.RFC3339, to)
 	if e1 != nil || e2 != nil || !end.After(start) || end.Sub(start) > 7*24*time.Hour {
-		return time.Time{}, time.Time{}, fmt.Errorf("Use an RFC3339 time window of at most 7 days.")
+		return time.Time{}, time.Time{}, tools.ArgError("Use an RFC3339 time window of at most 7 days.")
 	}
 	return start, end, nil
 }
@@ -72,17 +72,17 @@ func (d *Datadog) Metrics(ctx context.Context, raw json.RawMessage) (tools.Resul
 		return tools.Result{}, err
 	}
 	if !tagValue.MatchString(d.env) || !metricName.MatchString(args.Metric) || len(args.Tags) > 20 || len(args.GroupBy) > 10 {
-		return tools.Result{}, fmt.Errorf("Invalid metric or tag filter.")
+		return tools.Result{}, tools.ArgError("Invalid metric or tag filter.")
 	}
 	switch args.Aggregation {
 	case "avg", "sum", "min", "max":
 	default:
-		return tools.Result{}, fmt.Errorf("Invalid metric aggregation.")
+		return tools.Result{}, tools.ArgError("Invalid metric aggregation.")
 	}
 	tags := []string{"env:" + d.env}
 	for key, value := range args.Tags {
 		if !tagName.MatchString(key) || !tagValue.MatchString(value) || (strings.EqualFold(key, "env") && (key != "env" || value != d.env)) {
-			return tools.Result{}, fmt.Errorf("Invalid tag filter; the configured environment cannot be changed.")
+			return tools.Result{}, tools.ArgError("Invalid tag filter; the configured environment cannot be changed.")
 		}
 		if key != "env" {
 			tags = append(tags, key+":"+value)
@@ -92,7 +92,7 @@ func (d *Datadog) Metrics(ctx context.Context, raw json.RawMessage) (tools.Resul
 	query := args.Aggregation + ":" + args.Metric + "{" + strings.Join(tags, ",") + "}"
 	for _, group := range args.GroupBy {
 		if !tagName.MatchString(group) {
-			return tools.Result{}, fmt.Errorf("Invalid group-by tag.")
+			return tools.Result{}, tools.ArgError("Invalid group-by tag.")
 		}
 	}
 	if len(args.GroupBy) > 0 {
@@ -155,7 +155,7 @@ func (d *Datadog) Logs(ctx context.Context, raw json.RawMessage) (tools.Result, 
 		return tools.Result{}, err
 	}
 	if !tagValue.MatchString(d.env) || !validLogQuery(args.Query) {
-		return tools.Result{}, fmt.Errorf("Invalid log query; the configured environment cannot be changed.")
+		return tools.Result{}, tools.ArgError("Invalid log query; the configured environment cannot be changed.")
 	}
 	limit, err := rowLimit(args.Limit)
 	if err != nil {

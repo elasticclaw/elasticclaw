@@ -92,7 +92,7 @@ func TestPostHogRejectsWritesAndMalformedArguments(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("sent %d invalid requests", calls)
 	}
-	for _, query := range []string{"SELECT event FROM events", "WITH x AS (SELECT 1) SELECT * FROM x", "SELECT 'delete; -- update'"} {
+	for _, query := range []string{"SELECT event FROM events", "WITH x AS (SELECT 1) SELECT * FROM x", "SELECT 'delete; -- update'", "SELECT properties.format, count() FROM events GROUP BY 1", "SELECT * FROM events WHERE properties.system = 'ios'", "SELECT properties . system FROM events", "SELECT properties.v2system FROM events", "SELECT `format`, \"system\" FROM events"} {
 		if !readQuery(query) {
 			t.Errorf("rejected read %q", query)
 		}
@@ -100,6 +100,10 @@ func TestPostHogRejectsWritesAndMalformedArguments(t *testing.T) {
 }
 func TestPostHogHealth(t *testing.T) {
 	p := NewPostHog(config.PostHog{Host: "https://posthog.example", ProjectID: "42"}, secret, fake(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/projects/42/query/" {
+			fmt.Fprint(w, `{"results":[[1]]}`)
+			return
+		}
 		if r.URL.Path == "/api/projects/42/" {
 			fmt.Fprintf(w, `{"name":%q}`, "Demo "+secret)
 			return

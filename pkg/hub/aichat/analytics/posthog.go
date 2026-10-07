@@ -40,7 +40,7 @@ func (p *PostHog) Query(ctx context.Context, raw json.RawMessage) (tools.Result,
 		return tools.Result{}, err
 	}
 	if !readQuery(args.Query) {
-		return tools.Result{}, fmt.Errorf("Only one read-only SELECT or WITH query is allowed.")
+		return tools.Result{}, tools.ArgError("Only one read-only SELECT or WITH query is allowed.")
 	}
 	limit, err := rowLimit(args.Limit)
 	if err != nil {
@@ -76,7 +76,7 @@ func (p *PostHog) Insights(ctx context.Context, raw json.RawMessage) (tools.Resu
 		return tools.Result{}, err
 	}
 	if len(args.Search) > 500 || (args.ID != "" && (!insightID.MatchString(args.ID) || args.Search != "")) {
-		return tools.Result{}, fmt.Errorf("Invalid insight ID or search.")
+		return tools.Result{}, tools.ArgError("Invalid insight ID or search.")
 	}
 	limit, err := rowLimit(args.Limit)
 	if err != nil {
@@ -105,12 +105,14 @@ func (p *PostHog) Insights(ctx context.Context, raw json.RawMessage) (tools.Resu
 	return result("PostHog", response.Results, len(response.Results))
 }
 func (p *PostHog) Health(ctx context.Context) (string, []string, error) {
+	if _, err := p.Query(ctx, json.RawMessage(`{"query":"SELECT 1"}`)); err != nil {
+		return "", nil, err
+	}
 	var project struct {
 		Name string `json:"name"`
 	}
-	if err := p.Client.Do(ctx, http.MethodGet, p.path(""), nil, &project); err != nil {
-		return "", nil, err
-	}
+	// Project metadata needs permissions that the read tools do not require.
+	_ = p.Client.Do(ctx, http.MethodGet, p.path(""), nil, &project)
 	var definitions struct {
 		Results []struct {
 			Name string `json:"name"`
