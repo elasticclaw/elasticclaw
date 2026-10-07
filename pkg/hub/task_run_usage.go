@@ -67,7 +67,10 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	}
 	var cost sql.NullFloat64
 	source := oldSource
-	if snapshot.EstimatedCostUSD != nil {
+	// OpenClaw reports $0 for models missing from its own price catalog, so a
+	// zero cost on a run that used tokens means "unknown", not "free".
+	gatewayCostUnknown := snapshot.EstimatedCostUSD != nil && *snapshot.EstimatedCostUSD == 0 && in+out > 0
+	if snapshot.EstimatedCostUSD != nil && !gatewayCostUnknown {
 		cost = sql.NullFloat64{Float64: *snapshot.EstimatedCostUSD, Valid: true}
 		source = "gateway"
 	} else if estimated, ok := taskRunPrice(tx, effectiveModel, in, out); ok {

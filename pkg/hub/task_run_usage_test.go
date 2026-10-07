@@ -298,6 +298,37 @@ func TestTaskRunUsageCostCorrectionTargetsOriginalModelBucket(t *testing.T) {
 	}
 }
 
+func TestTaskRunUsageZeroGatewayCostFallsBackToHubPricing(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	// OpenClaw reports $0 for models it cannot price.
+	snap := usageSnapshot("a", 1_000_000, 100_000, 1_100_000, "anthropic/claude-sonnet-5-5")
+	snap.EstimatedCostUSD = ptr(0.0)
+	if err := s.recordTaskRunUsage(claw, snap); err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	var source string
+	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
+		t.Fatal(err)
+	}
+	const want = 3.0 // 1M input at $2 + 100k output at $10.
+	if math.Abs(cost-want) > 1e-9 || source != "hub_pricing" {
+		t.Fatalf("cost=%v source=%q, want %v hub_pricing", cost, source, want)
+	}
+	// A repeated $0 heartbeat must not wipe the estimate.
+	if err := s.recordTaskRunUsage(claw, snap); err != nil {
+		t.Fatal(err)
+	}
+	var summaryCost float64
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&summaryCost); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, dailyCost := queryUsageDaily(t, db); math.Abs(summaryCost-want) > 1e-9 || math.Abs(dailyCost-want) > 1e-9 {
+		t.Fatalf("summary=%v daily=%v, want %v", summaryCost, dailyCost, want)
+	}
+}
+
 func TestTaskRunUsageUnknownModelGetsNoEstimatedCost(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
