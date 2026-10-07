@@ -39,6 +39,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -4408,9 +4409,62 @@ PYEOF`, defaultModelJSON, gatewayPasswordJSON)
 		return fmt.Errorf("configure openclaw.json: %w", err)
 	}
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	if err := denyOpenClawTools(filepath.Join(home, ".openclaw", "openclaw.json"), deniedOpenClawTools...); err != nil {
+		return fmt.Errorf("deny openclaw tools: %w", err)
+	}
+
 	// Disable bonjour plugin — not supported on Replicated VMs.
 	_ = runShell("openclaw plugins disable bonjour 2>/dev/null || true")
 
+	return nil
+}
+
+// deniedOpenClawTools are removed from every claw's tool surface.
+//
+// sessions_yield ends the turn and waits for spawned children to announce
+// completion, but the hub has no wake edge for that announcement: every claw
+// that yielded stayed silent until a human, a checkpoint restore, or a closed
+// PR intervened. Prose bans in workspace docs don't hold, because OpenClaw's
+// own system prompt tells the agent to "wait via sessions_yield" whenever the
+// tool is available; denying it removes both the tool and that guidance.
+var deniedOpenClawTools = []string{"sessions_yield"}
+
+// denyOpenClawTools merges names into openclaw.json's tools.deny, keeping any
+// entries already there.
+func denyOpenClawTools(path string, names ...string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	tools, ok := config["tools"].(map[string]interface{})
+	if !ok {
+		tools = map[string]interface{}{}
+		config["tools"] = tools
+	}
+	deny, _ := tools["deny"].([]interface{})
+	for _, name := range names {
+		if !slices.Contains(deny, interface{}(name)) {
+			deny = append(deny, name)
+		}
+	}
+	tools["deny"] = deny
+
+	patched, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, patched, 0600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
 	return nil
 }
 
