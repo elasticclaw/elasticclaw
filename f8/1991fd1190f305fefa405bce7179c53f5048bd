@@ -1,0 +1,16 @@
+pkg/hub/integration_poller.go
+  h_38cb974bb08fad 302-305,319
+test/e2e/linear_test.go
+  h_38cb974bb08fad 14,506,508,512-515,524-528,530,539-580
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f81991fd1190f305fefa405bce7179c53f5048bd",
+  "prompts": {},
+  "humans": {
+    "h_38cb974bb08fad": {
+      "author": "Xav Paice <xav@replicated.com>"
+    }
+  }
+}
