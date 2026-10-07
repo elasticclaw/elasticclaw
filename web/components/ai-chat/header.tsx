@@ -1,0 +1,47 @@
+"use client"
+
+import { ChevronDown, Plus } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import type { AIChatSources } from "@/lib/api"
+import { chatModes, type ChatMode } from "./mode-cards"
+
+export function ChatHeader({ mode, data, onNewChat, onRefreshSources }: {
+  mode: ChatMode | null
+  data?: AIChatSources
+  onNewChat: () => void
+  onRefreshSources: () => void
+}) {
+  const sources = data?.sources ?? []
+  const modeName = chatModes.find((item) => item.id === mode)?.name
+  // py-2.5 around h-8 controls matches the sidebar and board headers so the hairlines line up.
+  return (
+    <header className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2.5">
+      <h1 className="shrink-0 whitespace-nowrap text-sm font-semibold">AI Chat</h1>
+      {modeName && <span className="shrink-0 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs text-muted-foreground">{modeName}</span>}
+      <div className="ml-auto flex items-center gap-2">
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="gap-2" disabled={!data}>
+              <span className="size-1.5 rounded-full bg-muted-foreground" />
+              {sources.length} sources <span className="text-muted-foreground">· read-only</span><ChevronDown className="size-3" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-80 space-y-3">
+            <p className="text-sm font-medium">Workspace sources</p>
+            {sources.length === 0 && <p className="text-xs text-muted-foreground">No sources configured.</p>}
+            {sources.map((source, index) => (
+              <div key={`${source.kind}-${index}`} className="text-xs">
+                <div className="flex justify-between gap-3"><span className="break-all">{source.name}</span><span className={source.status === "invalid" ? "text-destructive" : "text-muted-foreground"}>{source.status === "invalid" ? "Invalid" : "Unchecked"}</span></div>
+                {source.error && <p className="mt-1 text-destructive">{source.error}</p>}
+              </div>
+            ))}
+            <p className="text-xs text-muted-foreground">Connections have not been checked yet.</p>
+            <Button variant="outline" size="sm" onClick={onRefreshSources}>Refresh sources</Button>
+          </PopoverContent>
+        </Popover>
+        <Button variant="outline" size="sm" onClick={onNewChat}><Plus className="size-3.5" />New chat</Button>
+      </div>
+    </header>
+  )
+}

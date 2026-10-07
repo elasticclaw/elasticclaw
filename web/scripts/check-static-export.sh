@@ -26,9 +26,10 @@ if [ -z "$SECTIONS" ]; then
 fi
 
 # Expected paths that must exist for the settings route, plus the
-# standalone analytics route the agents shell toggles into.
+# standalone analytics and chat routes in the shared shell.
 EXPECTED_PATHS=(
   "analytics/index.html"
+  "chat/index.html"
   "settings/index.html"
   "settings/_workspace/index.html"
 )

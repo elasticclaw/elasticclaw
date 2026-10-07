@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat"
 	workflowv2 "github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite, no CGO required
@@ -22,6 +24,10 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	if err := migrate(db); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := aichat.Migrate(context.Background(), db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate ai chat: %w", err)
 	}
 	return db, nil
 }

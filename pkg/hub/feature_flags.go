@@ -29,7 +29,9 @@ type FeatureFlag struct {
 
 // featureFlagRegistry declares every supported feature flag. Add a FeatureFlag
 // here when introducing a gated feature, then remove it after the feature ships.
-var featureFlagRegistry = []FeatureFlag{}
+var featureFlagRegistry = []FeatureFlag{
+	{Key: "ai-chat", Name: "AI Chat", Description: "Product assistant for ideas, hypotheses, data questions and briefs.", DefaultStage: FeatureStageOff},
+}
 
 type featureFlagView struct {
 	Key          string       `json:"key"`
@@ -136,6 +138,18 @@ func (s *Server) featureEnabled(r *http.Request, key string) bool {
 		return s.isBetaTester(r.Context(), githubLoginFromContext(r.Context()))
 	default:
 		return false
+	}
+}
+
+// withFeature hides disabled features. Apply withWebAuth outside this gate so
+// beta checks receive the authenticated GitHub identity.
+func (s *Server) withFeature(key string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.featureEnabled(r, key) {
+			http.NotFound(w, r)
+			return
+		}
+		next(w, r)
 	}
 }
 
