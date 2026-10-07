@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
@@ -83,11 +84,24 @@ func (p *PostHog) Insights(ctx context.Context, raw json.RawMessage) (tools.Resu
 		return tools.Result{}, err
 	}
 	if args.ID != "" {
-		var response map[string]any
-		if err := p.Client.Do(ctx, http.MethodGet, p.path("insights/"+url.PathEscape(args.ID)+"/"), nil, &response); err != nil {
+		if _, err := strconv.Atoi(args.ID); err == nil {
+			var response map[string]any
+			if err := p.Client.Do(ctx, http.MethodGet, p.path("insights/"+url.PathEscape(args.ID)+"/"), nil, &response); err != nil {
+				return tools.Result{}, err
+			}
+			return result("PostHog", response, 1)
+		}
+		// Short IDs (the ones in insight URLs) are a list filter, not a path.
+		var response struct {
+			Results []json.RawMessage `json:"results"`
+		}
+		if err := p.Client.Do(ctx, http.MethodGet, p.path("insights/?")+url.Values{"short_id": []string{args.ID}}.Encode(), nil, &response); err != nil {
 			return tools.Result{}, err
 		}
-		return result("PostHog", response, 1)
+		if len(response.Results) == 0 {
+			return tools.Result{}, tools.ArgError("No insight with this ID.")
+		}
+		return result("PostHog", response.Results[0], 1)
 	}
 	query := url.Values{"limit": []string{fmt.Sprint(limit)}, "saved": []string{"true"}}
 	if args.Search != "" {

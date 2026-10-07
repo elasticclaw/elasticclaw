@@ -46,6 +46,10 @@ func TestPostHogQueryAndInsights(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"columns": []string{"event"}, "results": rows})
 		case "/api/projects/42/insights/":
+			if r.URL.Query().Get("short_id") == "AbC12xYz" {
+				fmt.Fprintf(w, `{"results":[{"short_id":"AbC12xYz","result":[%q]}]}`, secret)
+				return
+			}
 			if r.Method != http.MethodGet || r.URL.Query().Get("search") != "signup" || r.URL.Query().Get("saved") != "true" {
 				t.Error("insight search")
 			}
@@ -62,7 +66,7 @@ func TestPostHogQueryAndInsights(t *testing.T) {
 		index int
 		args  string
 		rows  int
-	}{{0, `{"query":"SELECT event FROM events","limit":999}`, 500}, {1, `{"search":"signup"}`, 1}, {1, `{"id":"123"}`, 1}} {
+	}{{0, `{"query":"SELECT event FROM events","limit":999}`, 500}, {1, `{"search":"signup"}`, 1}, {1, `{"id":"123"}`, 1}, {1, `{"id":"AbC12xYz"}`, 1}} {
 		value, err := p.Tools()[test.index].Run(context.Background(), json.RawMessage(test.args))
 		if err != nil || value.RowCount != test.rows || strings.Contains(fmt.Sprint(value, err), secret) {
 			t.Fatalf("result %+v error %v", value, err)
