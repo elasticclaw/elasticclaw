@@ -3,7 +3,6 @@ package kb
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,7 +57,7 @@ func (g *GitHub) files(ctx context.Context) (string, []gh.Entry, error) {
 func markdown(file string) bool { return strings.HasSuffix(strings.ToLower(file), ".md") }
 func (g *GitHub) List(ctx context.Context, dir string) ([]string, error) {
 	if !gh.ValidPath(dir, true) {
-		return nil, errors.New("Invalid relative directory path.")
+		return nil, tools.ArgError("Invalid relative directory path.")
 	}
 	_, files, err := g.files(ctx)
 	if err != nil {
@@ -74,7 +73,7 @@ func (g *GitHub) List(ctx context.Context, dir string) ([]string, error) {
 }
 func (g *GitHub) Read(ctx context.Context, file string) (string, error) {
 	if !gh.ValidRepo(g.config.Repo) || !gh.ValidPath(file, false) || !markdown(file) {
-		return "", errors.New("Expected a relative Markdown file path.")
+		return "", tools.ArgError("Expected a relative Markdown file path.")
 	}
 	sha, err := g.client.Commit(ctx, g.config.Repo, g.config.Branch)
 	if err != nil {
@@ -83,6 +82,7 @@ func (g *GitHub) Read(ctx context.Context, file string) (string, error) {
 	return g.client.Read(ctx, g.config.Repo, file, sha)
 }
 
+const indexWorkers = 8
 const maxIndexedFiles = 250
 const maxHeadings = 5000
 const maxIndexBytes = 8 * 1024 * 1024
@@ -91,6 +91,9 @@ const cacheTTL = 5 * time.Minute
 type indexEntry struct {
 	created  time.Time
 	headings []Match
+	next     int
+	bytes    int
+	complete bool
 }
 
 var indexes = struct {
@@ -101,59 +104,74 @@ var indexes = struct {
 func (g *GitHub) Search(ctx context.Context, query string) ([]Match, error) {
 	query = strings.TrimSpace(query)
 	if query == "" || len(query) > 256 {
-		return nil, errors.New("Search query must contain 1 to 256 characters.")
+		return nil, tools.ArgError("Search query must contain 1 to 256 characters.")
 	}
 	sha, files, err := g.files(ctx)
 	if err != nil {
 		return nil, err
 	}
-	key := fmt.Sprintf("%s\x00%s\x00%s\x00%x", g.client.BaseURL, g.config.Repo, sha, sha256.Sum256([]byte(g.client.Credential(g.config.Repo))))
+	key := fmt.Sprintf("%s\x00%s\x00%s", g.client.BaseURL, g.config.Repo, sha)
 	indexes.Lock()
 	cached, ok := indexes.entries[key]
 	indexes.Unlock()
 	if !ok || time.Since(cached.created) >= cacheTTL {
-		headings := []Match{}
-		count, total := 0, 0
+		cached = indexEntry{created: time.Now()}
+	}
+	if !cached.complete {
+		selected := make([]gh.Entry, 0, maxIndexedFiles)
 		for _, file := range files {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			if count >= maxIndexedFiles || len(headings) >= maxHeadings || total >= maxIndexBytes {
-				break
-			}
-			if file.Size > gh.MaxFileBytes {
-				continue
-			}
-			content, err := g.client.Read(ctx, g.config.Repo, file.Path, sha)
-			if err != nil {
-				return nil, err
-			}
-			count++
-			total += len(content)
-			headings = append(headings, parseHeadings(g.client.Redact(g.config.Repo, file.Path), content)...)
-		}
-		if len(headings) > maxHeadings {
-			headings = headings[:maxHeadings]
-		}
-		cached = indexEntry{created: time.Now(), headings: headings}
-		indexes.Lock()
-		if len(indexes.entries) >= 32 {
-			oldestKey := ""
-			var oldest time.Time
-			for k, v := range indexes.entries {
-				if oldestKey == "" || v.created.Before(oldest) {
-					oldestKey = k
-					oldest = v.created
+			if file.Size <= gh.MaxFileBytes {
+				selected = append(selected, file)
+				if len(selected) == maxIndexedFiles {
+					break
 				}
 			}
-			delete(indexes.entries, oldestKey)
 		}
-		indexes.entries[key] = cached
-		indexes.Unlock()
+		// Work on a private slice so concurrent searches cannot mutate cached data.
+		cached.headings = append([]Match(nil), cached.headings...)
+		for cached.next < len(selected) && len(cached.headings) < maxHeadings && cached.bytes < maxIndexBytes {
+			batch := selected[cached.next:min(cached.next+indexWorkers, len(selected))]
+			contents := make([]string, len(batch))
+			errs := make([]error, len(batch))
+			var wg sync.WaitGroup
+			for i, file := range batch {
+				wg.Add(1)
+				go func(i int, file gh.Entry) {
+					defer wg.Done()
+					contents[i], errs[i] = g.client.Read(ctx, g.config.Repo, file.Path, sha)
+				}(i, file)
+			}
+			wg.Wait()
+			for i, file := range batch {
+				if errs[i] != nil {
+					// Keep completed files so the next request can resume at this commit.
+					storeIndex(key, cached)
+					return nil, errs[i]
+				}
+				if cached.bytes+len(contents[i]) > maxIndexBytes {
+					cached.complete = true
+					break
+				}
+				cached.bytes += len(contents[i])
+				cached.next++
+				cached.headings = append(cached.headings, parseHeadings(file.Path, contents[i])...)
+				if len(cached.headings) >= maxHeadings {
+					cached.headings = cached.headings[:maxHeadings]
+					break
+				}
+			}
+			if cached.complete {
+				break
+			}
+		}
+		cached.complete = true
+		storeIndex(key, cached)
 	}
 	matches := []Match{}
 	needle := strings.ToLower(query)
 	for _, heading := range cached.headings {
+		heading.Path = g.client.Redact(g.config.Repo, heading.Path)
+		heading.Heading = g.client.Redact(g.config.Repo, heading.Heading)
 		if strings.Contains(strings.ToLower(heading.Heading), needle) {
 			matches = append(matches, heading)
 			if len(matches) >= 100 {
@@ -163,6 +181,25 @@ func (g *GitHub) Search(ctx context.Context, query string) ([]Match, error) {
 	}
 	return matches, nil
 }
+func storeIndex(key string, entry indexEntry) {
+	indexes.Lock()
+	defer indexes.Unlock()
+	if previous, ok := indexes.entries[key]; ok && time.Since(previous.created) < cacheTTL && (previous.complete || previous.next > entry.next) {
+		return
+	}
+	if _, ok := indexes.entries[key]; !ok && len(indexes.entries) >= 32 {
+		oldestKey := ""
+		var oldest time.Time
+		for k, v := range indexes.entries {
+			if oldestKey == "" || v.created.Before(oldest) {
+				oldestKey, oldest = k, v.created
+			}
+		}
+		delete(indexes.entries, oldestKey)
+	}
+	indexes.entries[key] = entry
+}
+
 func parseHeadings(file, content string) []Match {
 	matches := []Match{}
 	fenced := false
@@ -191,11 +228,10 @@ func parseHeadings(file, content string) []Match {
 	return matches
 }
 func (g *GitHub) Health(ctx context.Context) (string, error) {
-	paths, err := g.List(ctx, "")
-	if err != nil {
+	if _, err := g.Read(ctx, g.config.Entry); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s · %d pages", g.client.Redact(g.config.Repo, g.config.Repo), len(paths)), nil
+	return g.client.Redact(g.config.Repo, g.config.Repo+" · "+g.config.Entry), nil
 }
 func (g *GitHub) Tools() []tools.Tool {
 	return []tools.Tool{

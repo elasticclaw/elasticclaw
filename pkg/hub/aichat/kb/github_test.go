@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
 )
@@ -58,10 +60,10 @@ func TestGitHubKnowledgeReadsAndCachedHeadingIndex(t *testing.T) {
 			w.WriteHeader(404)
 		}
 	})
-	provider := New(config.KnowledgeBase{Repo: "acme/docs"}, t.Name(), func(string) string { return "sentinel-secret" }, client)
+	provider := New(config.KnowledgeBase{Repo: "acme/docs", Entry: "README.md"}, t.Name(), func(string) string { return "sentinel-secret" }, client)
 	provider.client.BaseURL = "https://" + strings.ToLower(t.Name()) + ".test"
 	detail, err := provider.Health(context.Background())
-	if err != nil || detail != "acme/docs · 2 pages" {
+	if err != nil || detail != "acme/docs · README.md" {
 		t.Fatalf("health = %q %v", detail, err)
 	}
 	for _, tool := range provider.Tools() {
@@ -104,7 +106,7 @@ func TestKnowledgeArgumentValidationAndAuth(t *testing.T) {
 		w.WriteHeader(401)
 		fmt.Fprint(w, "sentinel-secret denied")
 	})
-	provider := New(config.KnowledgeBase{Repo: "acme/docs", Branch: "main"}, "https://github.test", func(string) string { return "sentinel-secret" }, client)
+	provider := New(config.KnowledgeBase{Repo: "acme/docs", Branch: "main", Entry: "README.md"}, "https://github.test", func(string) string { return "sentinel-secret" }, client)
 	for _, path := range []string{"../README.md", "a/../README.md", "/README.md", "a\\README.md", "a\x00.md", "./README.md", "config.yaml"} {
 		if _, err := provider.Read(context.Background(), path); err == nil {
 			t.Errorf("accepted %q", path)
@@ -133,7 +135,7 @@ func TestKnowledgeArgumentValidationAndAuth(t *testing.T) {
 	}
 }
 func TestKnowledgeIndexBoundsAndCancellation(t *testing.T) {
-	reads := 0
+	var reads atomic.Int32
 	client := fake(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(r.URL.Path, "/commits/"):
@@ -145,7 +147,7 @@ func TestKnowledgeIndexBoundsAndCancellation(t *testing.T) {
 			}
 			json.NewEncoder(w).Encode(map[string]any{"tree": entries})
 		case strings.Contains(r.URL.Path, "/contents/"):
-			reads++
+			reads.Add(1)
 			fmt.Fprint(w, `{"type":"file","encoding":"base64","content":"IyBoZWxsbw=="}`)
 		default:
 			t.Fatalf("unexpected %s", r.URL)
@@ -156,12 +158,118 @@ func TestKnowledgeIndexBoundsAndCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reads != 250 || len(matches) != 100 {
-		t.Fatalf("bounds reads=%d matches=%d", reads, len(matches))
+	if reads.Load() != 250 || len(matches) != 100 {
+		t.Fatalf("bounds reads=%d matches=%d", reads.Load(), len(matches))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := provider.Read(ctx, "README.md"); err == nil {
 		t.Fatal("canceled read succeeded")
+	}
+}
+
+func TestKnowledgeIndexConcurrentFetchAndResume(t *testing.T) {
+	var reads atomic.Int32
+	var active atomic.Int32
+	var peak atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{}, indexWorkers)
+	release := make(chan struct{})
+	client := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/commits/"):
+			fmt.Fprintf(w, `{"sha":%q}`, shaA)
+		case strings.Contains(r.URL.Path, "/git/trees/"):
+			entries := make([]map[string]any, 2*indexWorkers)
+			for i := range entries {
+				entries[i] = map[string]any{"path": fmt.Sprintf("%d.md", i), "type": "blob"}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"tree": entries})
+		case strings.Contains(r.URL.Path, "/contents/"):
+			n := reads.Add(1)
+			current := active.Add(1)
+			defer active.Add(-1)
+			for old := peak.Load(); current > old; old = peak.Load() {
+				if peak.CompareAndSwap(old, current) {
+					break
+				}
+			}
+			if n <= indexWorkers {
+				started <- struct{}{}
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+			} else if n <= 2*indexWorkers && ctx.Err() == nil {
+				cancel()
+			}
+			fmt.Fprint(w, `{"type":"file","encoding":"base64","content":"IyBoZWxsbw=="}`)
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	})
+	provider := New(config.KnowledgeBase{Repo: "acme/resume", Branch: "main"}, "https://github.test", func(string) string { return "sentinel-secret" }, client)
+	finished := make(chan error, 1)
+	go func() { _, err := provider.Search(ctx, "hello"); finished <- err }()
+	for range indexWorkers {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			cancel()
+			<-finished
+			t.Fatal("file reads were not concurrent")
+		}
+	}
+	close(release)
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation: %v", err)
+	}
+	before := reads.Load()
+	matches, err := provider.Search(context.Background(), "hello")
+	if err != nil || len(matches) != 2*indexWorkers || reads.Load()-before != indexWorkers {
+		t.Fatalf("resume: matches=%d reads=%d err=%v", len(matches), reads.Load()-before, err)
+	}
+	if peak.Load() != indexWorkers {
+		t.Fatalf("concurrency = %d", peak.Load())
+	}
+}
+
+func TestKnowledgeIndexReusesCommitAcrossCredentials(t *testing.T) {
+	var reads atomic.Int32
+	client := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/commits/"):
+			fmt.Fprintf(w, `{"sha":%q}`, shaA)
+		case strings.Contains(r.URL.Path, "/git/trees/"):
+			fmt.Fprint(w, `{"tree":[{"path":"next-secret.md","type":"blob"}]}`)
+		case strings.Contains(r.URL.Path, "/contents/"):
+			reads.Add(1)
+			content := base64.StdEncoding.EncodeToString([]byte("# hello sentinel-secret next-secret"))
+			fmt.Fprintf(w, `{"type":"file","encoding":"base64","content":%q}`, content)
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	})
+	provider := New(config.KnowledgeBase{Repo: "acme/rotation", Branch: "main"}, "https://github.test", func(string) string { return "sentinel-secret" }, client)
+	if _, err := provider.Search(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	provider.client.Token = func(string) string { return "next-secret" }
+	original := client.Transport
+	client.Transport = transport(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("Authorization") != "Bearer next-secret" {
+			t.Error("credential not rotated")
+		}
+		r.Header.Set("Authorization", "Bearer sentinel-secret")
+		return original.RoundTrip(r)
+	})
+	matches, err := provider.Search(context.Background(), "hello")
+	if err != nil || len(matches) != 1 || reads.Load() != 1 {
+		t.Fatalf("cache reused: matches=%v reads=%d err=%v", matches, reads.Load(), err)
+	}
+	if strings.Contains(fmt.Sprint(matches), "sentinel-secret") || strings.Contains(fmt.Sprint(matches), "next-secret") {
+		t.Fatal("credential leaked from cached index")
 	}
 }
