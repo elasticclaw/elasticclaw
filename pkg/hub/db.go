@@ -1209,7 +1209,7 @@ func migrate(db *sql.DB) error {
 		in, out, cacheRead, cacheWrite float64
 	}{
 		{"claude-fable-5", 10, 50, 1, 12.5}, {"claude-opus-4-8", 5, 25, .5, 6.25}, {"claude-opus-4-7", 5, 25, .5, 6.25}, {"claude-opus-4-6", 5, 25, .5, 6.25},
-		{"claude-sonnet-5-5", 2, 10, .2, 2.5}, {"claude-sonnet-5", 3, 15, .3, 3.75},{"claude-sonnet-4-6", 3, 15, .3, 3.75}, {"claude-haiku-4-5", 1, 5, .1, 1.25},
+		{"claude-sonnet-5-5", 2, 10, .2, 2.5}, {"claude-sonnet-5", 3, 15, .3, 3.75}, {"claude-sonnet-4-6", 3, 15, .3, 3.75}, {"claude-haiku-4-5", 1, 5, .1, 1.25},
 		{"gpt-5", 1.25, 10, .125, 0}, {"gpt-5-mini", .25, 2, .025, 0}, {"gpt-5-nano", .05, .40, .005, 0},
 		{"gpt-5.1", 1.25, 10, .125, 0}, {"gpt-5.6", 1.25, 10, .125, 0},
 		{"kimi-k2p7-code", 0.95, 4, .19, 0},
