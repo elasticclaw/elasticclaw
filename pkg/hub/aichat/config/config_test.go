@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -128,8 +129,8 @@ func TestLoadRepositories(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := Source{Kind: "repositories", Name: "Repositories", Status: tc.status, Error: tc.message}
-			if len(cfg.Sources) != 1 || cfg.Sources[0] != want || !slices.Equal(cfg.Repositories, tc.repositories) {
+			want := Source{Kind: "repositories", Name: "Repositories", Status: tc.status, Error: tc.message, Access: "read"}
+			if len(cfg.Sources) != 1 || !reflect.DeepEqual(cfg.Sources[0], want) || !slices.Equal(cfg.Repositories, tc.repositories) {
 				t.Fatalf("sources = %#v, repositories = %v", cfg.Sources, cfg.Repositories)
 			}
 		})
@@ -175,5 +176,19 @@ func TestSourceErrorsDoNotExposeValues(t *testing.T) {
 	}
 	if cfg.PostHog != nil || len(cfg.Sources) != 1 || strings.Contains(cfg.Sources[0].Error, "super-secret") {
 		t.Fatalf("unsafe source: %#v", cfg)
+	}
+}
+
+func TestNamedIssueTracker(t *testing.T) {
+	for _, name := range []string{"", "product"} {
+		dir := t.TempDir()
+		raw := "issue_tracker:\n  provider: linear\n  name: " + name + "\n  default_fields: {team: PRODUCT}\n"
+		if err := os.WriteFile(filepath.Join(dir, "ai_chat.yaml"), []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(dir)
+		if err != nil || cfg.IssueTracker == nil || cfg.IssueTracker.Name != name {
+			t.Fatalf("tracker = %+v, %v", cfg, err)
+		}
 	}
 }
