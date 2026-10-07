@@ -88,7 +88,7 @@ function chatFixture(options = {}) {
   const requests = []
   const api = {
     ApiError,
-    fetchAIChatSources: (workspace) => new Promise((resolve) => requests.push({ workspace, resolve })),
+    fetchAIChatSources: (workspace, refresh) => new Promise((resolve) => requests.push({ workspace, refresh, resolve })),
     ...options.api,
   }
   const shared = {
@@ -107,6 +107,7 @@ function chatFixture(options = {}) {
       "./stream-turn": local("stream-turn.ts"),
     }),
     "./header": { ChatHeader: "ChatHeader" },
+    "./sources": local("sources.ts"),
     "./composer": { ChatComposer: "ChatComposer" },
     "./message-list": { MessageList: "MessageList" },
   })
@@ -474,4 +475,138 @@ test("retrying a failed reply keeps a new question typed in the composer", async
   alert.props.children[1].props.onClick()
   await flush()
   assert.equal(findElement(fixture.render(), "ChatComposer").props.value, "Next question")
+})
+
+const sourceHelpers = loadComponent("components/ai-chat/sources.ts", {})
+const source = (kind, status = "connected", extra = {}) => ({ kind, name: kind, status, access: "read", ...extra })
+
+test("source statuses distinguish healthy, unreachable, invalid, and future values", () => {
+  const { sourceStatus, sourceSummary } = sourceHelpers
+  assert.equal(sourceStatus("connected").label, "Connected")
+  assert.equal(sourceStatus("unreachable").label, "Can't reach")
+  assert.equal(sourceStatus("unreachable").warning, true)
+  assert.match(sourceStatus("unreachable").textClass, /amber/)
+  assert.equal(sourceStatus("invalid").label, "Invalid")
+  assert.equal(sourceStatus("invalid").textClass, "text-destructive")
+  assert.equal(sourceStatus("future-status").label, "Unknown")
+  const healthy = [source("posthog"), source("datadog")]
+  assert.deepEqual(sourceSummary(healthy), { label: "2 sources", dotClass: "bg-green-500" })
+  for (const status of ["unreachable", "invalid"]) {
+    assert.deepEqual(sourceSummary([healthy[0], source("datadog", status)]), { label: "1 of 2 sources", dotClass: "bg-amber-500" })
+  }
+  assert.equal(sourceSummary(healthy, true).dotClass, "bg-muted-foreground")
+  assert.equal(sourceSummary([]).dotClass, "bg-muted-foreground")
+})
+
+test("source groups follow the design order and preserve unknown providers", () => {
+  const groups = sourceHelpers.groupSources([source("issue_tracker"), source("future"), source("datadog"), source("repositories"), source("posthog"), source("knowledge_base")])
+  assert.deepEqual(groups.map((group) => group.name), ["Knowledge", "Data", "Tracker", "Other"])
+  assert.deepEqual(groups[0].sources.map((item) => item.kind), ["knowledge_base", "repositories"])
+  assert.deepEqual(groups[1].sources.map((item) => item.kind), ["posthog", "datadog"])
+  assert.equal(groups[3].sources[0].kind, "future")
+  assert.deepEqual(sourceHelpers.groupSources([]), [])
+})
+
+function elementText(tree) {
+  if (Array.isArray(tree)) return tree.map(elementText).join("")
+  if (tree == null || typeof tree === "boolean") return ""
+  if (typeof tree !== "object") return String(tree)
+  return elementText(tree.props?.children)
+}
+function findElements(tree, type) {
+  if (!tree || typeof tree !== "object") return []
+  if (Array.isArray(tree)) return tree.flatMap((item) => findElements(item, type))
+  return [...(tree.type === type ? [tree] : []), ...findElements(tree.props?.children, type)]
+}
+
+test("sources popover renders grouped details, read badges, errors, workspace, and refresh", () => {
+  const { ChatHeader } = loadComponent("components/ai-chat/header.tsx", {
+    "lucide-react": Object.fromEntries(["Activity", "BarChart3", "BookOpen", "ChevronDown", "Database", "GitBranch", "Plus", "RefreshCw", "Ticket", "TriangleAlert"].map((name) => [name, name])),
+    "@/components/ui/button": { Button: "Button" },
+    "@/components/ui/popover": { Popover: "Popover", PopoverContent: "PopoverContent", PopoverTrigger: "PopoverTrigger" },
+    "./mode-cards": { chatModes: [] },
+    "./sources": sourceHelpers,
+  })
+  let refreshed = 0
+  const props = { mode: null, onNewChat() {}, onRefreshSources() { refreshed++ }, data: sources("fasterway", ["fasterway"], { sources: [
+    source("knowledge_base", "connected", { name: "Knowledge base", detail: "owner/repo · 61 pages" }),
+    source("repositories", "connected", { name: "Repositories", detail: "acme/web, acme/api, other/tools · default branch" }),
+    source("posthog", "connected", { name: "PostHog", detail: "Project Web app · events and saved insights" }),
+    source("datadog", "unreachable", { name: "Datadog", error: "The API key was rejected." }),
+    source("issue_tracker", "invalid", { name: "Linear", error: "Choose a team." }),
+    source("__proto__", "future-status", { name: "Future provider" }),
+  ] }) }
+  const tree = ChatHeader(props)
+  const text = elementText(tree)
+  for (const expected of ["What this chat can read", "Workspace fasterway", "The assistant reads these and never changes them.", "owner/repo · 61 pages", "3 of 6 sources", "Connected", "Can't reach", "The API key was rejected. Answers skip Datadog until this is fixed.", "Invalid", "Choose a team.", "Future provider", "Unknown", "Set in the workspace configuration, the same for everyone in this workspace."]) assert.ok(text.includes(expected), expected)
+  assert.doesNotMatch(text, /create artifacts|create ticket|unchecked/i)
+  assert.equal(findElements(tree, "span").filter((item) => elementText(item) === "Read").length, 6)
+  assert.equal(findElements(tree, "h3").map(elementText).join(","), "Knowledge,Data,Tracker,Other")
+  assert.ok(findElements(tree, "span").some((item) => elementText(item) === "web, api, tools"))
+  assert.ok(findElements(tree, "span").some((item) => elementText(item) === "owner/repo" && item.props.className.includes("font-mono")))
+  assert.ok(findElement(tree, "Database"))
+  const refresh = findElements(tree, "Button").find((item) => elementText(item) === "Refresh")
+  refresh.props.onClick()
+  assert.equal(refreshed, 1)
+  const loading = ChatHeader({ ...props, loading: true })
+  assert.equal(findElements(loading, "Button").find((item) => elementText(item) === "Refresh").props.disabled, true)
+  assert.equal(findElement(loading, "Button").props["aria-busy"], true)
+})
+
+test("refresh requests live health and keeps source details visible while loading", async () => {
+  const fixture = chatFixture()
+  fixture.render()
+  assert.equal(fixture.requests[0].refresh, false)
+  fixture.requests[0].resolve(sources("A", ["A", "B"], { sources: [source("posthog")] }))
+  await flush()
+  findElement(fixture.render(), "ChatHeader").props.onRefreshSources()
+  const refreshing = findElement(fixture.render(), "ChatHeader")
+  assert.equal(fixture.requests[1].refresh, true)
+  assert.equal(refreshing.props.loading, true)
+  assert.equal(refreshing.props.data.sources[0].kind, "posthog")
+  fixture.requests[1].resolve(sources("A", ["A", "B"]))
+  await flush()
+  findElement(fixture.render(), "select").props.onChange({ target: { value: "B" } })
+  const switched = findElement(fixture.render(), "ChatHeader")
+  assert.equal(fixture.requests[2].refresh, false)
+  assert.equal(switched.props.data, undefined)
+})
+
+test("sources fetch encodes workspace and sends refresh=1 only when requested", async () => {
+  const { fetchAIChatSources } = loadComponent("lib/api.ts", {
+    "./hub-url": { getHubUrl: () => "" },
+    "./auth-storage": { getAuthToken: () => "test-token" },
+  })
+  const previous = global.fetch
+  const urls = []
+  global.fetch = async (url) => { urls.push(url); return { ok: true, status: 200, json: async () => sources("A", ["A"]) } }
+  try {
+    await fetchAIChatSources()
+    await fetchAIChatSources("A & B", true)
+    await fetchAIChatSources("A")
+    assert.deepEqual(urls, ["/api/ai-chat/sources", "/api/ai-chat/sources?workspace=A+%26+B&refresh=1", "/api/ai-chat/sources?workspace=A"])
+  } finally { global.fetch = previous }
+})
+
+test("tool progress uses the provider display name and clears on completion", () => {
+  const { applyStreamEvent } = loadComponent("components/ai-chat/stream-turn.ts", {})
+  const updates = []
+  const view = { setReading: (value) => updates.push(value) }
+  for (const provider of ["Knowledge base", "Repositories", "PostHog", "Datadog", "Linear"]) {
+    applyStreamEvent({}, "tool_started", { tool: "internal_tool", provider }, view)
+    applyStreamEvent({}, "tool_finished", { provider }, view)
+  }
+  assert.deepEqual(updates, ["Knowledge base", "", "Repositories", "", "PostHog", "", "Datadog", "", "Linear", ""])
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+  })
+  const tree = hooks.render(() => MessageList({ messages: [], reading: "Knowledge base" }))
+  assert.equal(elementText(findElement(tree, "p")), "Reading Knowledge base…")
+})
+
+test("SSE heartbeat comments do not appear as events", async () => {
+  const events = []
+  await readAIChatEvents(byteStream(': ping\n\nevent: token\ndata: {"text":"Hi"}\n\n: ping\n\nevent: done\ndata: {"status":"completed"}\n\n'), (event, data) => events.push([event, data]))
+  assert.deepEqual(events, [["token", { text: "Hi" }], ["done", { status: "completed" }]])
 })

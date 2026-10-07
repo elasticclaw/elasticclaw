@@ -6,6 +6,7 @@ import { Sparkles } from "lucide-react"
 import { useFeatureFlag, useFeatureFlagsLoaded } from "@/hooks/use-feature-flag"
 import { Button } from "@/components/ui/button"
 import { ChatHeader } from "./header"
+import { sourceStatus } from "./sources"
 import { ModeCards, type ChatMode } from "./mode-cards"
 import { ChatComposer } from "./composer"
 import { MessageList } from "./message-list"
@@ -34,7 +35,7 @@ function Conversation() {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      <ChatHeader mode={mode} title={thread?.title} data={data} onNewChat={newChat} onRefreshSources={refresh} />
+      <ChatHeader mode={mode} title={thread?.title} data={data} loading={!current} onNewChat={newChat} onRefreshSources={refresh} />
       <div className={`min-h-0 flex-1 overflow-y-auto px-8 ${thread ? "py-6" : "py-16"}`}>
         <div className={`mx-auto space-y-5 ${thread ? "max-w-[760px]" : "max-w-[860px]"}`}>
           {!thread && !requestedThread && data && data.workspaces.length > 1 && renderWorkspaceSelect(data, selectWorkspace)}
@@ -121,7 +122,7 @@ function renderNewChat({ data, mode, setMode, setDraft, composer }: Pick<BodySta
         <h2 className="text-2xl font-semibold tracking-tight">What are we working on?</h2>
         <p className="mt-2 text-sm text-muted-foreground">Pick a mode or just start typing. I read your sources and never change them.</p>
         <div className="mt-3 flex flex-wrap justify-center gap-2">
-          {data.sources.map((source, index) => <span key={`${source.kind}-${index}`} className="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs text-muted-foreground"><span className={`size-1.5 rounded-full ${source.status === "invalid" ? "bg-destructive" : "bg-muted-foreground"}`} />{source.name}</span>)}
+          {data.sources.map((source, index) => <span key={`${source.kind}-${index}`} className="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs text-muted-foreground"><span className={`size-1.5 rounded-full ${sourceStatus(source.status).dotClass}`} />{source.name}</span>)}
         </div>
       </div>
       <ModeCards mode={mode} onSelect={setMode} />

@@ -72,7 +72,7 @@ issue_tracker: {provider: linear, default_fields: {team: PRODUCT}}
 			if response.Error != tc.message {
 				t.Fatalf("error = %q, want %q", response.Error, tc.message)
 			}
-			if tc.configured && (response.Sources[1].Name != "Repositories" || response.Sources[1].Status != "unchecked" || response.Sources[2].Status != "invalid" || response.Sources[2].Error == "") {
+			if tc.configured && (response.Sources[1].Name != "Repositories" || response.Sources[1].Status != "unreachable" || response.Sources[2].Status != "invalid" || response.Sources[2].Error == "") {
 				t.Fatalf("sources = %#v", response.Sources)
 			}
 		})

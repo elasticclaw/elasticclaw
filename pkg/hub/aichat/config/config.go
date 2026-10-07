@@ -59,6 +59,7 @@ type Datadog struct {
 	AppKey string `yaml:"app_key"`
 }
 type IssueTracker struct {
+	Name          string `yaml:"name"`
 	Provider      string `yaml:"provider"`
 	DefaultFields struct {
 		Team   string   `yaml:"team"`
@@ -72,10 +73,14 @@ type Retention struct {
 	ArtifactVersionsDays int `yaml:"artifact_versions_days"`
 }
 type Source struct {
-	Kind   string `json:"kind"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Detail    string   `json:"detail"`
+	CheckedAt string   `json:"checkedAt,omitempty"`
+	Access    string   `json:"access"`
+	Events    []string `json:"-"`
+	Kind      string   `json:"kind"`
+	Name      string   `json:"name"`
+	Status    string   `json:"status"`
+	Error     string   `json:"error,omitempty"`
 }
 
 var repoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
@@ -131,7 +136,7 @@ func Load(managedDir string) (*Config, error) {
 		return true
 	}, "Expected provider github, repo owner/repo and a relative entry file")
 	if n, ok := nodes["repositories"]; ok {
-		source := Source{Kind: "repositories", Name: "Repositories", Status: "unchecked"}
+		source := Source{Kind: "repositories", Name: "Repositories", Status: "unchecked", Access: "read"}
 		if n.Kind != yaml.SequenceNode {
 			source.Status = "invalid"
 			source.Error = "Expected a list of GitHub owner/repo names"
@@ -188,7 +193,7 @@ func (c *Config) decodeSource(nodes map[string]yaml.Node, kind, name string, dec
 	if !ok {
 		return
 	}
-	source := Source{Kind: kind, Name: name, Status: "unchecked"}
+	source := Source{Kind: kind, Name: name, Status: "unchecked", Access: "read"}
 	if n.Kind != yaml.MappingNode || !decode(n) {
 		source.Status = "invalid"
 		source.Error = message
