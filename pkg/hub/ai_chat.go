@@ -22,8 +22,8 @@ func (s *Server) aiChatDeps() aichat.Deps {
 		HTTPClient:  http.DefaultClient,
 		Secret: func(workspace, name string) (string, bool) {
 			secrets, _ := loadWorkspaceSecrets(workspace)
-			if value, ok := secrets[name]; ok {
-				return value, value != ""
+			if value := secrets[name]; value != "" {
+				return value, true
 			}
 			s.mu.RLock()
 			defer s.mu.RUnlock()
