@@ -4426,11 +4426,13 @@ PYEOF`, defaultModelJSON, gatewayPasswordJSON)
 // deniedOpenClawTools are removed from every claw's tool surface.
 //
 // sessions_yield ends the turn and waits for spawned children to announce
-// completion, but the hub has no wake edge for that announcement: every claw
-// that yielded stayed silent until a human, a checkpoint restore, or a closed
-// PR intervened. Prose bans in workspace docs don't hold, because OpenClaw's
-// own system prompt tells the agent to "wait via sessions_yield" whenever the
-// tool is available; denying it removes both the tool and that guidance.
+// completion. Usually the announcement arrives, but when it is lost the hub
+// has no wake edge for it, and the claw stays silent until a human, a
+// checkpoint restore, or a closed PR intervenes (10 of 55 yielding review
+// loops stalled over an hour; 0 of 8 that polled with a deadline did). Prose
+// bans in workspace docs don't hold, because OpenClaw's own system prompt
+// tells the agent to "wait via sessions_yield" whenever the tool is
+// available; denying it removes both the tool and that guidance.
 var deniedOpenClawTools = []string{"sessions_yield"}
 
 // denyOpenClawTools merges names into openclaw.json's tools.deny, keeping any
