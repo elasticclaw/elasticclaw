@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import type { AIChatSource, AIChatSources } from "@/lib/api"
 import { chatModes, type ChatMode } from "./mode-cards"
-import { groupSources, sourceStatus, sourceSummary } from "./sources"
+import { groupSources, repositoryNames, skipNotice, sourceStatus, sourceSummary } from "./sources"
 
 export function ChatHeader({ mode, title, data, loading = !data, onNewChat, onRefreshSources }: {
   mode: ChatMode | null
@@ -78,9 +78,9 @@ function renderSource(source: AIChatSource, index: number) {
           </span>
         </div>
         {source.detail && <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
-          {repository ? <><span className="font-mono text-[11px]">{names}</span>{detail.length > 0 && ` · ${detail.join(" · ")}`}</> : source.detail}
+          {repository ? <><span className="font-mono text-[11px]">{repositoryNames(source.kind, names)}</span>{detail.length > 0 && ` · ${detail.join(" · ")}`}</> : source.detail}
         </p>}
-        {source.error && <p className={`mt-1 break-words text-xs leading-relaxed ${status.textClass}`}>{source.error}</p>}
+        {source.error && <p className={`mt-1 break-words text-xs leading-relaxed ${status.textClass}`}>{source.error} {skipNotice(source)}</p>}
       </div>
     </div>
   )

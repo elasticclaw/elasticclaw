@@ -500,9 +500,10 @@ test("source statuses distinguish healthy, unreachable, invalid, and future valu
 
 test("source groups follow the design order and preserve unknown providers", () => {
   const groups = sourceHelpers.groupSources([source("issue_tracker"), source("future"), source("datadog"), source("repositories"), source("posthog"), source("knowledge_base")])
-  assert.deepEqual(groups.map((group) => group.name), ["Knowledge", "Repositories", "Data", "Tracker", "Other"])
-  assert.deepEqual(groups[2].sources.map((item) => item.kind), ["datadog", "posthog"])
-  assert.equal(groups[4].sources[0].kind, "future")
+  assert.deepEqual(groups.map((group) => group.name), ["Knowledge", "Data", "Tracker", "Other"])
+  assert.deepEqual(groups[0].sources.map((item) => item.kind), ["knowledge_base", "repositories"])
+  assert.deepEqual(groups[1].sources.map((item) => item.kind), ["posthog", "datadog"])
+  assert.equal(groups[3].sources[0].kind, "future")
   assert.deepEqual(sourceHelpers.groupSources([]), [])
 })
 
@@ -529,7 +530,7 @@ test("sources popover renders grouped details, read badges, errors, workspace, a
   let refreshed = 0
   const props = { mode: null, onNewChat() {}, onRefreshSources() { refreshed++ }, data: sources("fasterway", ["fasterway"], { sources: [
     source("knowledge_base", "connected", { name: "Knowledge base", detail: "owner/repo · 61 pages" }),
-    source("repositories", "connected", { name: "Repositories", detail: "a, b, c · default branch" }),
+    source("repositories", "connected", { name: "Repositories", detail: "acme/web, acme/api, other/tools · default branch" }),
     source("posthog", "connected", { name: "PostHog", detail: "Project Web app · events and saved insights" }),
     source("datadog", "unreachable", { name: "Datadog", error: "The API key was rejected." }),
     source("issue_tracker", "invalid", { name: "Linear", error: "Choose a team." }),
@@ -537,10 +538,11 @@ test("sources popover renders grouped details, read badges, errors, workspace, a
   ] }) }
   const tree = ChatHeader(props)
   const text = elementText(tree)
-  for (const expected of ["What this chat can read", "Workspace fasterway", "The assistant reads these and never changes them.", "owner/repo · 61 pages", "3 of 6 sources", "Connected", "Can't reach", "The API key was rejected.", "Invalid", "Choose a team.", "Future provider", "Unknown", "Set in the workspace configuration, the same for everyone in this workspace."]) assert.ok(text.includes(expected), expected)
+  for (const expected of ["What this chat can read", "Workspace fasterway", "The assistant reads these and never changes them.", "owner/repo · 61 pages", "3 of 6 sources", "Connected", "Can't reach", "The API key was rejected. Answers skip Datadog until this is fixed.", "Invalid", "Choose a team.", "Future provider", "Unknown", "Set in the workspace configuration, the same for everyone in this workspace."]) assert.ok(text.includes(expected), expected)
   assert.doesNotMatch(text, /create artifacts|create ticket|unchecked/i)
   assert.equal(findElements(tree, "span").filter((item) => elementText(item) === "Read").length, 6)
-  assert.equal(findElements(tree, "h3").map(elementText).join(","), "Knowledge,Repositories,Data,Tracker,Other")
+  assert.equal(findElements(tree, "h3").map(elementText).join(","), "Knowledge,Data,Tracker,Other")
+  assert.ok(findElements(tree, "span").some((item) => elementText(item) === "web, api, tools"))
   assert.ok(findElements(tree, "span").some((item) => elementText(item) === "owner/repo" && item.props.className.includes("font-mono")))
   assert.ok(findElement(tree, "Database"))
   const refresh = findElements(tree, "Button").find((item) => elementText(item) === "Refresh")

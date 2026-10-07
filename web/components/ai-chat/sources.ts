@@ -20,14 +20,27 @@ export function sourceSummary(sources: AIChatSource[], loading = false) {
 
 export function groupSources(sources: AIChatSource[]) {
   const groups = [
-    { name: "Knowledge", kinds: ["knowledge_base"] },
-    { name: "Repositories", kinds: ["repositories"] },
+    { name: "Knowledge", kinds: ["knowledge_base", "repositories"] },
     { name: "Data", kinds: ["posthog", "datadog"] },
     { name: "Tracker", kinds: ["issue_tracker"] },
   ]
   const knownKinds = groups.flatMap((group) => group.kinds)
   return [
-    ...groups.map((group) => ({ name: group.name, sources: sources.filter((source) => group.kinds.includes(source.kind)) })),
+    ...groups.map((group) => ({ name: group.name, sources: group.kinds.flatMap((kind) => sources.filter((source) => source.kind === kind)) })),
     { name: "Other", sources: sources.filter((source) => !knownKinds.includes(source.kind)) },
   ].filter((group) => group.sources.length > 0)
+}
+
+// Repository lists drop the shared owner prefix, as in the design, unless that
+// would make two names ambiguous.
+export function repositoryNames(kind: string, names: string) {
+  if (kind !== "repositories") return names
+  const repos = names.split(", ")
+  const short = repos.map((repo) => repo.slice(repo.indexOf("/") + 1))
+  return new Set(short).size === short.length ? short.join(", ") : names
+}
+
+// Sources left out of a turn say so, since the runner drops their tools.
+export function skipNotice(source: AIChatSource) {
+  return source.status === "unreachable" || source.status === "invalid" ? `Answers skip ${source.name || "this source"} until this is fixed.` : ""
 }
