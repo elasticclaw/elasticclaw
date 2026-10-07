@@ -495,7 +495,7 @@ func (s *Store) RejectAgentControl(ctx context.Context, envelope typesv2.Control
 		return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: typesv2.DispositionDuplicate,
 			StateVersion: run.StateVersion, Reason: duplicateReason}, nil
 	}
-	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.AttemptID, input.ExpectedStateVersion,
 		run.StateVersion, typesv2.DispositionRejected, reason, ProducerAgent, input.Provenance, nil, nil, now); err != nil {
 		return typesv2.ControlReceipt{}, err
 	}

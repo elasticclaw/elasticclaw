@@ -107,7 +107,7 @@ func (s *Store) preflightDeliveryControl(ctx context.Context,
 		return typesv2.ControlReceipt{}, false, nil
 	}
 	reason := fmt.Sprintf("expected state version %d, current version is %d", *envelope.ExpectedStateVersion, run.StateVersion)
-	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.AttemptID, input.ExpectedStateVersion,
 		run.StateVersion, typesv2.DispositionStaleState, reason, ProducerSourceControl, input.Provenance, nil, nil, now); err != nil {
 		return typesv2.ControlReceipt{}, false, err
 	}

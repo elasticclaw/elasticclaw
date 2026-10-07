@@ -46,6 +46,9 @@ type EffectClaim struct {
 // ClaimEffect leases one ready effect. Expired running effects are first moved
 // to unknown and are deliberately not retried: a reconciler must determine
 // whether the external side effect happened before it is safe to continue.
+// The new attempt row is stamped with the run's current attempt at claim time
+// so attempt-scoped histories attribute it even when it fails before task
+// materialization.
 func (s *Store) ClaimEffect(ctx context.Context, worker string, lease time.Duration) (*EffectClaim, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("workflow v2 store is not configured")
@@ -67,7 +70,7 @@ func (s *Store) ClaimEffect(ctx context.Context, worker string, lease time.Durat
 	if err := expireEffectLeases(ctx, tx, now); err != nil {
 		return nil, err
 	}
-	row := tx.QueryRowContext(ctx, `SELECT e.id,e.run_id,e.effect_key,e.kind,e.payload_json,e.status,e.attempt_count,e.next_attempt_at,e.last_error
+	row := tx.QueryRowContext(ctx, `SELECT e.id,e.run_id,e.effect_key,e.kind,e.payload_json,e.status,e.attempt_count,e.next_attempt_at,e.last_error,r.current_attempt_id
 		FROM workflow_v2_effects e JOIN workflow_v2_runs r ON r.id=e.run_id
 		WHERE e.status IN ('planned','retryable_failed') AND e.next_attempt_at<=? AND r.status='active'
 		ORDER BY e.next_attempt_at,e.created_at,e.id LIMIT 1`, now.UnixMilli())
@@ -75,8 +78,9 @@ func (s *Store) ClaimEffect(ctx context.Context, worker string, lease time.Durat
 	var payloadJSON string
 	var status string
 	var nextAttempt int64
+	var runAttemptID string
 	if err := row.Scan(&effect.ID, &effect.RunID, &effect.EffectKey, &effect.Kind, &payloadJSON,
-		&status, &effect.AttemptCount, &nextAttempt, &effect.LastError); errors.Is(err, sql.ErrNoRows) {
+		&status, &effect.AttemptCount, &nextAttempt, &effect.LastError, &runAttemptID); errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
@@ -111,9 +115,12 @@ func (s *Store) ClaimEffect(ctx context.Context, worker string, lease time.Durat
 		effect.NextAttemptAt = time.UnixMilli(nextAttempt).UTC()
 	}
 	attemptID := uuid.NewString()
+	// Stamp the claiming run attempt immediately so attempt-scoped histories
+	// can attribute this effect attempt even if it fails before (or without)
+	// task materialization.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_effect_attempts(
-		id,effect_id,number,status,request_json,started_at) VALUES(?,?,?,?,?,?)`,
-		attemptID, effect.ID, effect.AttemptCount, string(EffectRunning), payloadJSON, now.UnixMilli()); err != nil {
+		id,effect_id,number,status,request_json,started_at,attempt_id) VALUES(?,?,?,?,?,?,?)`,
+		attemptID, effect.ID, effect.AttemptCount, string(EffectRunning), payloadJSON, now.UnixMilli(), runAttemptID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
