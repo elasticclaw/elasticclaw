@@ -1224,7 +1224,8 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	// Runs after the price seed so the backfill can price newly seeded models.
+	return backfillZeroGatewayUsageCostV1(db)
 }
 
 func migrateTicketMetadataKey(db *sql.DB) error {
