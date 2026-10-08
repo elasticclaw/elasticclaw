@@ -4632,3 +4632,30 @@ func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
 		t.Fatal("no sessions.abort observed")
 	}
 }
+
+func TestParseSessionCacheTokens(t *testing.T) {
+	read, write, err := parseSessionCacheTokens([]byte(`{"sessions":[{"key":"k","usage":{"input":10,"output":5,"cacheRead":1200,"cacheWrite":300,"totalCost":0}}]}`))
+	if err != nil || read == nil || write == nil || *read != 1200 || *write != 300 {
+		t.Fatalf("got %v %v %v, want 1200 300", read, write, err)
+	}
+	if _, _, err := parseSessionCacheTokens([]byte(`{"sessions":[{"key":"k","usage":null}]}`)); err == nil {
+		t.Fatal("missing usage must be an error, not zero cache tokens")
+	}
+}
+
+func TestGatewayCostUnknown(t *testing.T) {
+	n, zero, cost := 10, 0.0, 0.5
+	for _, tc := range []struct {
+		usage gatewayUsage
+		want  bool
+	}{
+		{gatewayUsage{inputTokens: &n, estimatedCostUSD: &zero}, true},
+		{gatewayUsage{outputTokens: &n}, true},
+		{gatewayUsage{inputTokens: &n, estimatedCostUSD: &cost}, false},
+		{gatewayUsage{estimatedCostUSD: &zero}, false},
+	} {
+		if got := tc.usage.gatewayCostUnknown(); got != tc.want {
+			t.Errorf("%+v: got %v, want %v", tc.usage, got, tc.want)
+		}
+	}
+}
