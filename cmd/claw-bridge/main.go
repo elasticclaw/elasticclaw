@@ -2351,6 +2351,12 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 		usage.cacheReadTokens, usage.cacheWriteTokens = gs.sessionCacheTokens(ctx, sessionKey)
 	}
 	gs.ctxMu.Lock()
+	if gs.usage.sessionKey == usage.sessionKey {
+		// Concurrent refreshes can finish out of order; cache counters are
+		// cumulative, so never publish a lower value for the same session.
+		usage.cacheReadTokens = maxIntPtr(gs.usage.cacheReadTokens, usage.cacheReadTokens)
+		usage.cacheWriteTokens = maxIntPtr(gs.usage.cacheWriteTokens, usage.cacheWriteTokens)
+	}
 	gs.usage = usage
 	if payload.Session.ContextTokens > 0 && payload.Session.TotalTokens != nil {
 		usage := *payload.Session.TotalTokens * 100 / payload.Session.ContextTokens
@@ -2403,6 +2409,17 @@ func (gs *gatewaySession) sessionCacheTokens(ctx context.Context, sessionKey str
 		return last.cacheReadTokens, last.cacheWriteTokens
 	}
 	return read, write
+}
+
+// maxIntPtr returns the larger of two optional counters, or whichever is set.
+func maxIntPtr(a, b *int) *int {
+	if a == nil {
+		return b
+	}
+	if b == nil || *a > *b {
+		return a
+	}
+	return b
 }
 
 // parseSessionCacheTokens extracts cacheRead/cacheWrite from the single

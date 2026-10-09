@@ -4659,3 +4659,19 @@ func TestGatewayCostUnknown(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxIntPtr(t *testing.T) {
+	one, two := 1, 2
+	if got := maxIntPtr(&two, &one); *got != 2 {
+		t.Fatalf("max(2,1) = %d", *got)
+	}
+	if got := maxIntPtr(nil, &one); *got != 1 {
+		t.Fatalf("max(nil,1) = %d", *got)
+	}
+	if got := maxIntPtr(&one, nil); *got != 1 {
+		t.Fatalf("max(1,nil) = %d", *got)
+	}
+	if maxIntPtr(nil, nil) != nil {
+		t.Fatal("max(nil,nil) must stay nil")
+	}
+}
