@@ -1266,6 +1266,8 @@ type gatewaySession struct {
 	ctxMu        sync.RWMutex
 	contextUsage int
 	usage        gatewayUsage
+	// cacheUsagePolledAt throttles the sessions.usage transcript scan.
+	cacheUsagePolledAt time.Time
 
 	// ready is true once the gateway session is established and ready for messages
 	readyMu sync.RWMutex
@@ -1278,6 +1280,9 @@ type gatewayUsage struct {
 	estimatedCostUSD                       *float64
 	model                                  string
 	modelProvider                          string
+	// Session-cumulative cache tokens, only polled when the gateway cannot
+	// price the model; see sessionCacheTokens.
+	cacheReadTokens, cacheWriteTokens *int
 }
 
 // newGatewaySession creates a gatewaySession, establishes the gateway
@@ -2341,8 +2346,18 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 		log.Printf("[session] unmarshal sessions.describe response: %v", err)
 		return
 	}
+	usage := gatewayUsage{sessionKey: sessionKey, inputTokens: payload.Session.InputTokens, outputTokens: payload.Session.OutputTokens, totalTokens: payload.Session.TotalTokens, estimatedCostUSD: payload.Session.EstimatedCostUSD, model: payload.Session.Model, modelProvider: payload.Session.ModelProvider}
+	if usage.gatewayCostUnknown() {
+		usage.cacheReadTokens, usage.cacheWriteTokens = gs.sessionCacheTokens(ctx, sessionKey)
+	}
 	gs.ctxMu.Lock()
-	gs.usage = gatewayUsage{sessionKey: sessionKey, inputTokens: payload.Session.InputTokens, outputTokens: payload.Session.OutputTokens, totalTokens: payload.Session.TotalTokens, estimatedCostUSD: payload.Session.EstimatedCostUSD, model: payload.Session.Model, modelProvider: payload.Session.ModelProvider}
+	if gs.usage.sessionKey == usage.sessionKey {
+		// Concurrent refreshes can finish out of order; cache counters are
+		// cumulative, so never publish a lower value for the same session.
+		usage.cacheReadTokens = maxIntPtr(gs.usage.cacheReadTokens, usage.cacheReadTokens)
+		usage.cacheWriteTokens = maxIntPtr(gs.usage.cacheWriteTokens, usage.cacheWriteTokens)
+	}
+	gs.usage = usage
 	if payload.Session.ContextTokens > 0 && payload.Session.TotalTokens != nil {
 		usage := *payload.Session.TotalTokens * 100 / payload.Session.ContextTokens
 		if usage > 100 {
@@ -2351,6 +2366,88 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 		gs.contextUsage = usage
 	}
 	gs.ctxMu.Unlock()
+}
+
+// gatewayCostUnknown reports a session that used tokens but has no gateway
+// cost: OpenClaw reports $0 (or nothing) for models outside its price catalog.
+func (u gatewayUsage) gatewayCostUnknown() bool {
+	used := (u.inputTokens != nil && *u.inputTokens > 0) || (u.outputTokens != nil && *u.outputTokens > 0)
+	return used && (u.estimatedCostUSD == nil || *u.estimatedCostUSD == 0)
+}
+
+const sessionCacheUsagePollInterval = time.Minute
+
+// sessionCacheTokens returns the session's cumulative cache read/write tokens
+// from sessions.usage, which sessions.describe omits. The hub needs them to
+// price models the gateway cannot. sessions.usage scans transcripts, so it is
+// polled at most once per sessionCacheUsagePollInterval; between polls, and
+// when a poll fails, the last values for the same session are reused.
+func (gs *gatewaySession) sessionCacheTokens(ctx context.Context, sessionKey string) (read, write *int) {
+	gs.ctxMu.Lock()
+	last := gs.usage
+	sameSession := last.sessionKey == sessionKey
+	if !sameSession {
+		last = gatewayUsage{}
+	}
+	if sameSession && time.Since(gs.cacheUsagePolledAt) < sessionCacheUsagePollInterval {
+		gs.ctxMu.Unlock()
+		return last.cacheReadTokens, last.cacheWriteTokens
+	}
+	gs.cacheUsagePolledAt = time.Now()
+	gs.ctxMu.Unlock()
+
+	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := gs.sendReq(pollCtx, "sessions.usage", map[string]any{"key": sessionKey, "range": "all", "groupBy": "family", "limit": 1})
+	if err != nil {
+		log.Printf("[session] sessions.usage for cache tokens: %v", err)
+		return last.cacheReadTokens, last.cacheWriteTokens
+	}
+	read, write, err = parseSessionCacheTokens(resp.Payload)
+	if err != nil {
+		log.Printf("[session] parse sessions.usage response: %v", err)
+		return last.cacheReadTokens, last.cacheWriteTokens
+	}
+	return read, write
+}
+
+// maxIntPtr returns the larger of two optional counters, or whichever is set.
+func maxIntPtr(a, b *int) *int {
+	if a == nil {
+		return b
+	}
+	if b == nil || *a > *b {
+		return a
+	}
+	return b
+}
+
+// parseSessionCacheTokens extracts cacheRead/cacheWrite from the single
+// session in a sessions.usage response.
+func parseSessionCacheTokens(payload []byte) (read, write *int, err error) {
+	var parsed struct {
+		Sessions []struct {
+			Usage *struct {
+				CacheRead  *float64 `json:"cacheRead"`
+				CacheWrite *float64 `json:"cacheWrite"`
+			} `json:"usage"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return nil, nil, err
+	}
+	if len(parsed.Sessions) == 0 || parsed.Sessions[0].Usage == nil {
+		return nil, nil, fmt.Errorf("no usage for session")
+	}
+	toInt := func(v *float64) *int {
+		if v == nil {
+			return nil
+		}
+		n := int(*v)
+		return &n
+	}
+	u := parsed.Sessions[0].Usage
+	return toInt(u.CacheRead), toInt(u.CacheWrite), nil
 }
 
 // countActiveSubagents extracts, from a sessions.list response, how many
@@ -5488,6 +5585,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		}
 		if usage.modelProvider != "" {
 			heartbeatPayload["model_provider"] = usage.modelProvider
+		}
+		if usage.cacheReadTokens != nil {
+			heartbeatPayload["cache_read_tokens"] = usage.cacheReadTokens
+		}
+		if usage.cacheWriteTokens != nil {
+			heartbeatPayload["cache_write_tokens"] = usage.cacheWriteTokens
 		}
 		_ = writeHub(hubMsg{Type: "heartbeat", Payload: mustJSON(heartbeatPayload)})
 	})

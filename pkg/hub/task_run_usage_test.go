@@ -298,6 +298,37 @@ func TestTaskRunUsageCostCorrectionTargetsOriginalModelBucket(t *testing.T) {
 	}
 }
 
+func TestTaskRunUsageZeroGatewayCostFallsBackToHubPricing(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	// OpenClaw reports $0 for models it cannot price.
+	snap := usageSnapshot("a", 1_000_000, 100_000, 1_100_000, "anthropic/claude-sonnet-5-5")
+	snap.EstimatedCostUSD = ptr(0.0)
+	if err := s.recordTaskRunUsage(claw, snap); err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	var source string
+	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
+		t.Fatal(err)
+	}
+	const want = 3.0 // 1M input at $2 + 100k output at $10.
+	if math.Abs(cost-want) > 1e-9 || source != "hub_pricing" {
+		t.Fatalf("cost=%v source=%q, want %v hub_pricing", cost, source, want)
+	}
+	// A repeated $0 heartbeat must not wipe the estimate.
+	if err := s.recordTaskRunUsage(claw, snap); err != nil {
+		t.Fatal(err)
+	}
+	var summaryCost float64
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&summaryCost); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, dailyCost := queryUsageDaily(t, db); math.Abs(summaryCost-want) > 1e-9 || math.Abs(dailyCost-want) > 1e-9 {
+		t.Fatalf("summary=%v daily=%v, want %v", summaryCost, dailyCost, want)
+	}
+}
+
 func TestTaskRunUsageUnknownModelGetsNoEstimatedCost(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
@@ -370,5 +401,249 @@ func TestMigrateBackfillsUsageDayFromUpdatedAt(t *testing.T) {
 	}
 	if day != "2026-07-10" {
 		t.Fatalf("usage_day = %q, want 2026-07-10", day)
+	}
+}
+
+func TestMigrateBackfillsZeroGatewayUsageCost(t *testing.T) {
+	_, db, _ := newUsageTestServer(t)
+	defer db.Close()
+	// Session with two $0 gateway runs (1M/100k committed, last run 500k/50k),
+	// plus an unpriced model and a genuinely priced row that must stay as-is.
+	insert := func(session, model string, in, out, comIn, comOut int, cost float64, source string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			uuid.NewString(), "tenant", "run-usage", session, model, "anthropic", in, out, in+out, comIn, comOut, comIn+comOut, cost, cost, source, "2026-10-07", 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("zero", "claude-sonnet-5-5", 500_000, 50_000, 1_000_000, 100_000, 0, "gateway")
+	insert("unpriced", "gpt-9-mega", 10, 5, 10, 5, 0, "gateway")
+	insert("real", "claude-sonnet-5", 10, 5, 10, 5, 0.5, "gateway")
+	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='zero_gateway_usage_cost_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // second migrate must be a no-op
+		if err := migrate(db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var last, committed float64
+	var source string
+	if err := db.QueryRow(`SELECT estimated_cost_usd,committed_cost_usd,cost_source FROM task_run_usage WHERE session_key='zero'`).Scan(&last, &committed, &source); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(last-1.5) > 1e-9 || math.Abs(committed-3.0) > 1e-9 || source != "hub_pricing" {
+		t.Fatalf("zero row = %v/%v/%q, want 1.5/3/hub_pricing", last, committed, source)
+	}
+	var unpricedSource string
+	if err := db.QueryRow(`SELECT cost_source FROM task_run_usage WHERE session_key='unpriced'`).Scan(&unpricedSource); err != nil {
+		t.Fatal(err)
+	}
+	if unpricedSource != "gateway" {
+		t.Fatalf("unpriced row source = %q, want gateway", unpricedSource)
+	}
+	var summary, daily float64
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT cost_usd FROM usage_daily WHERE day='2026-10-07' AND model='claude-sonnet-5-5'`).Scan(&daily); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(summary-3.5) > 1e-9 || math.Abs(daily-3.0) > 1e-9 {
+		t.Fatalf("summary=%v daily=%v, want 3.5 and 3", summary, daily)
+	}
+}
+
+func TestTaskRunUsageZeroGatewayCostNeverOverridesKnownCost(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	cost := func(session string) (float64, string) {
+		t.Helper()
+		var c float64
+		var src string
+		if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key=?`, session).Scan(&c, &src); err != nil {
+			t.Fatal(err)
+		}
+		return c, src
+	}
+	// Real gateway cost followed by a $0 heartbeat keeps the real cost.
+	real := usageSnapshot("real", 1_000_000, 100_000, 1, "claude-sonnet-5-5")
+	real.EstimatedCostUSD = ptr(2.5)
+	zero := real
+	zero.EstimatedCostUSD = ptr(0.0)
+	for _, snap := range []taskRunUsageSnapshot{real, zero} {
+		if err := s.recordTaskRunUsage(claw, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c, src := cost("real"); c != 2.5 || src != "gateway" {
+		t.Fatalf("real then zero = %v/%q, want 2.5/gateway", c, src)
+	}
+	// A $0 run estimated by the hub is replaced by a later real gateway cost.
+	est := usageSnapshot("est", 1_000_000, 100_000, 1, "claude-sonnet-5-5")
+	est.EstimatedCostUSD = ptr(0.0)
+	corrected := est
+	corrected.EstimatedCostUSD = ptr(2.0)
+	for _, snap := range []taskRunUsageSnapshot{est, corrected} {
+		if err := s.recordTaskRunUsage(claw, snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c, src := cost("est"); c != 2.0 || src != "gateway" {
+		t.Fatalf("zero then real = %v/%q, want 2/gateway", c, src)
+	}
+	var summary float64
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, daily := queryUsageDaily(t, db); math.Abs(summary-4.5) > 1e-9 || math.Abs(daily-4.5) > 1e-9 {
+		t.Fatalf("summary=%v daily=%v, want 4.5", summary, daily)
+	}
+}
+
+func TestTaskRunUsagePricesCacheTokensWhenGatewayCannot(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	snap := func(session string, in, out, cacheRead, cacheWrite int, cost float64) taskRunUsageSnapshot {
+		u := usageSnapshot(session, in, out, 1, "anthropic/claude-sonnet-5-5")
+		u.EstimatedCostUSD = ptr(cost)
+		u.CacheReadTokens, u.CacheWriteTokens = ptr(cacheRead), ptr(cacheWrite)
+		return u
+	}
+	for _, u := range []taskRunUsageSnapshot{
+		snap("a", 100_000, 10_000, 1_000_000, 100_000, 0),   // run 1: $0.20 + $0.10 + $0.20 + $0.25
+		snap("a", 100_000, 10_000, 2_000_000, 100_000, 0),   // cache-only update: +$0.20
+		snap("a", 200_000, 20_000, 2_000_000, 300_000, 0),   // run 2: $0.40 + $0.20 + $0.50
+		snap("b", 100_000, 10_000, 9_000_000, 900_000, 1.5), // gateway priced: cache ignored
+	} {
+		if err := s.recordTaskRunUsage(claw, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var committed float64
+	var cacheRead, cacheWrite int
+	if err := db.QueryRow(`SELECT committed_cost_usd,cache_read_tokens,cache_write_tokens FROM task_run_usage WHERE session_key='a'`).Scan(&committed, &cacheRead, &cacheWrite); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(committed-2.05) > 1e-9 || cacheRead != 2_000_000 || cacheWrite != 300_000 {
+		t.Fatalf("session a = $%v cache %d/%d, want $2.05 cache 2000000/300000", committed, cacheRead, cacheWrite)
+	}
+	var summary float64
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, daily := queryUsageDaily(t, db); math.Abs(summary-3.55) > 1e-9 || math.Abs(daily-3.55) > 1e-9 {
+		t.Fatalf("summary=%v daily=%v, want 3.55", summary, daily)
+	}
+}
+
+func TestTaskRunUsageCacheCostEdgeCases(t *testing.T) {
+	committed := func(t *testing.T, db *sql.DB, session string) float64 {
+		t.Helper()
+		var c float64
+		if err := db.QueryRow(`SELECT committed_cost_usd FROM task_run_usage WHERE session_key=?`, session).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	snap := func(in, out int, cost float64, cache *[2]int) taskRunUsageSnapshot {
+		u := usageSnapshot("a", in, out, 1, "anthropic/claude-sonnet-5-5")
+		u.EstimatedCostUSD = ptr(cost)
+		if cache != nil {
+			u.CacheReadTokens, u.CacheWriteTokens = ptr(cache[0]), ptr(cache[1])
+		}
+		return u
+	}
+	record := func(t *testing.T, s *Server, claw string, snaps ...taskRunUsageSnapshot) {
+		t.Helper()
+		for _, u := range snaps {
+			if err := s.recordTaskRunUsage(claw, u); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Run("gateway correction replaces hub cache cost", func(t *testing.T) {
+		s, db, claw := newUsageTestServer(t)
+		defer db.Close()
+		// Hub: $0.30 in/out + $0.45 cache; then the gateway prices the same run.
+		record(t, s, claw, snap(100_000, 10_000, 0, &[2]int{1_000_000, 100_000}), snap(100_000, 10_000, 0.80, nil))
+		if got := committed(t, db, "a"); math.Abs(got-0.80) > 1e-9 {
+			t.Fatalf("committed = %v, want 0.80", got)
+		}
+	})
+	t.Run("first cache counters on a gateway-priced session are a baseline", func(t *testing.T) {
+		s, db, claw := newUsageTestServer(t)
+		defer db.Close()
+		// Run A priced by the gateway ($1, cache included), then run B unpriced
+		// with 2M cumulative cache reads, of which only 1M is new — but the hub
+		// cannot tell, so none of the pre-existing tally is charged.
+		record(t, s, claw, snap(100_000, 10_000, 1.0, nil), snap(200_000, 20_000, 0, &[2]int{2_000_000, 0}), snap(200_000, 20_000, 0, &[2]int{3_000_000, 0}))
+		// $1 + $0.60 run B in/out + 1M new cache reads ($0.20).
+		if got := committed(t, db, "a"); math.Abs(got-1.80) > 1e-9 {
+			t.Fatalf("committed = %v, want 1.80", got)
+		}
+	})
+	t.Run("stale snapshot does not re-bill cache", func(t *testing.T) {
+		s, db, claw := newUsageTestServer(t)
+		defer db.Close()
+		record(t, s, claw,
+			snap(100_000, 10_000, 0, &[2]int{1_000_000, 0}),
+			snap(100_000, 10_000, 0, &[2]int{2_000_000, 0}),
+			snap(100_000, 10_000, 0, &[2]int{1_000_000, 0}), // out of order
+			snap(100_000, 10_000, 0, &[2]int{2_000_000, 0}),
+		)
+		// $0.30 in/out + 2M cache reads ($0.40).
+		if got := committed(t, db, "a"); math.Abs(got-0.70) > 1e-9 {
+			t.Fatalf("committed = %v, want 0.70", got)
+		}
+	})
+}
+
+func TestMigrateScalesSonnet55CostWithoutCache(t *testing.T) {
+	_, db, _ := newUsageTestServer(t)
+	defer db.Close()
+	insert := func(session, model string, cache any) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,1,1,2,1,1,2,1.0,0.5,'hub_pricing','2026-10-08',?,?,0,0)`,
+			uuid.NewString(), "tenant", "run-usage", session, model, "anthropic", cache, cache); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("no-cache", "claude-sonnet-5-5", nil)
+	insert("with-cache", "claude-sonnet-5-5", 100)
+	insert("other-model", "gpt-5", nil)
+	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='sonnet55_cache_estimate_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // second migrate must be a no-op
+		if err := migrate(db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var committed, estimated float64
+	var note string
+	if err := db.QueryRow(`SELECT committed_cost_usd,estimated_cost_usd,cost_note FROM task_run_usage WHERE session_key='no-cache'`).Scan(&committed, &estimated, &note); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(committed-sonnet55CacheMultiplier) > 1e-9 || math.Abs(estimated-sonnet55CacheMultiplier/2) > 1e-9 || note != "cache_estimate_x20.2" {
+		t.Fatalf("no-cache row = %v/%v/%q", committed, estimated, note)
+	}
+	for _, session := range []string{"with-cache", "other-model"} {
+		if err := db.QueryRow(`SELECT committed_cost_usd,cost_note FROM task_run_usage WHERE session_key=?`, session).Scan(&committed, &note); err != nil {
+			t.Fatal(err)
+		}
+		if committed != 1.0 || note != "" {
+			t.Fatalf("%s row = %v/%q, want untouched", session, committed, note)
+		}
+	}
+	var summary, daily float64
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT cost_usd FROM usage_daily WHERE day='2026-10-08' AND model='claude-sonnet-5-5'`).Scan(&daily); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(summary-(sonnet55CacheMultiplier+2)) > 1e-9 || math.Abs(daily-(sonnet55CacheMultiplier-1)) > 1e-9 {
+		t.Fatalf("summary=%v daily=%v", summary, daily)
 	}
 }
