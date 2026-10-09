@@ -40,12 +40,13 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		}
 		return err
 	}
-	var oldIn, oldOut, oldTotal, comIn, comOut, comTotal, oldCacheRead, oldCacheWrite int
+	var oldIn, oldOut, oldTotal, comIn, comOut, comTotal int
+	var oldCacheRead, oldCacheWrite sql.NullInt64
 	var oldModel, oldUsageDay string
 	var oldCost sql.NullFloat64
 	var comCost float64
 	oldSource := "gateway"
-	err = tx.QueryRow(`SELECT model,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,COALESCE(cache_read_tokens,0),COALESCE(cache_write_tokens,0) FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(&oldModel, &oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource, &oldUsageDay, &oldCacheRead, &oldCacheWrite)
+	err = tx.QueryRow(`SELECT model,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(&oldModel, &oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource, &oldUsageDay, &oldCacheRead, &oldCacheWrite)
 	found := err == nil
 	if err != nil && err != sql.ErrNoRows {
 		return err
@@ -87,6 +88,7 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 			log.Printf("[usage] no static price for model %s", effectiveModel)
 		}
 	}
+	comCostBefore := comCost
 	din, dout, dtotal, dcost := 0, 0, 0, 0.0
 	if newRun {
 		din, dout, dtotal = in, out, in+out
@@ -97,38 +99,44 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 			dcost = cost.Float64
 			comCost += dcost
 		}
-	} else if cost.Valid && (!oldCost.Valid || cost.Float64 != oldCost.Float64) && !(oldSource == "gateway" && source == "hub_pricing") {
-		// A real gateway cost can replace a hub estimate for the same run.
+	} else if source == "gateway" && cost.Valid && (oldSource != "gateway" || !oldCost.Valid || cost.Float64 != oldCost.Float64) {
+		// A real gateway cost replaces the hub estimate for the same run,
+		// including any cache cost the hub added to it.
 		dcost = cost.Float64
 		if oldCost.Valid {
 			dcost -= oldCost.Float64
 		}
 		comCost += dcost
-	} else if !cost.Valid || (oldSource == "gateway" && source == "hub_pricing") {
+	} else {
 		cost = oldCost
 		source = oldSource
 	}
-	cacheRead, cacheWrite := oldCacheRead, oldCacheWrite
+	// Cache counters are session-cumulative; keeping the highest value seen
+	// means a stale or out-of-order snapshot never reads as new usage.
+	cacheRead, cacheWrite := oldCacheRead.Int64, oldCacheWrite.Int64
 	if snapshot.CacheReadTokens != nil {
-		cacheRead = *snapshot.CacheReadTokens
+		cacheRead = max(cacheRead, int64(*snapshot.CacheReadTokens))
 	}
 	if snapshot.CacheWriteTokens != nil {
-		cacheWrite = *snapshot.CacheWriteTokens
+		cacheWrite = max(cacheWrite, int64(*snapshot.CacheWriteTokens))
 	}
-	// A shrinking counter means the gateway restarted its tally, so the whole
-	// value is new.
-	dRead, dWrite := cacheRead-oldCacheRead, cacheWrite-oldCacheWrite
-	if dRead < 0 {
-		dRead = cacheRead
+	dRead, dWrite := cacheRead-oldCacheRead.Int64, cacheWrite-oldCacheWrite.Int64
+	// The first counters on a session the gateway already priced only set a
+	// baseline: those gateway costs covered the cache used so far.
+	if !oldCacheRead.Valid && !oldCacheWrite.Valid && found && oldSource == "gateway" && comCostBefore > 0 {
+		dRead, dWrite = 0, 0
 	}
-	if dWrite < 0 {
-		dWrite = cacheWrite
-	}
-	if source == "hub_pricing" {
+	// NULL until the bridge reports cache counters, so the baseline above can
+	// tell "never reported" from zero.
+	cacheKnown := oldCacheRead.Valid || oldCacheWrite.Valid || snapshot.CacheReadTokens != nil || snapshot.CacheWriteTokens != nil
+	storedRead := sql.NullInt64{Int64: cacheRead, Valid: cacheKnown}
+	storedWrite := sql.NullInt64{Int64: cacheWrite, Valid: cacheKnown}
+	if source == "hub_pricing" && cost.Valid {
 		// Per-run token snapshots exclude cache, so hub-priced sessions add the
-		// cost of the cache used since the last snapshot.
+		// cost of the cache used since the last snapshot to the current run.
 		if p, ok := modelPrice(tx, effectiveModel); ok {
 			cacheCost := float64(dRead)*p.cacheRead + float64(dWrite)*p.cacheWrite
+			cost.Float64 += cacheCost
 			dcost += cacheCost
 			comCost += cacheCost
 		}
@@ -140,7 +148,7 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	if newRun || usageDay == "" {
 		usageDay = day
 	}
-	_, err = tx.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id,session_key) DO UPDATE SET model=excluded.model,model_provider=excluded.model_provider,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,total_tokens=excluded.total_tokens,committed_input_tokens=excluded.committed_input_tokens,committed_output_tokens=excluded.committed_output_tokens,committed_total_tokens=excluded.committed_total_tokens,committed_cost_usd=excluded.committed_cost_usd,estimated_cost_usd=excluded.estimated_cost_usd,cost_source=excluded.cost_source,usage_day=excluded.usage_day,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,updated_at=excluded.updated_at`, uuid.NewString(), tenant, runID, snapshot.SessionKey, effectiveModel, snapshot.ModelProvider, in, out, total, comIn, comOut, comTotal, comCost, nullFloat(cost), source, usageDay, cacheRead, cacheWrite, ts, ts)
+	_, err = tx.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id,session_key) DO UPDATE SET model=excluded.model,model_provider=excluded.model_provider,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,total_tokens=excluded.total_tokens,committed_input_tokens=excluded.committed_input_tokens,committed_output_tokens=excluded.committed_output_tokens,committed_total_tokens=excluded.committed_total_tokens,committed_cost_usd=excluded.committed_cost_usd,estimated_cost_usd=excluded.estimated_cost_usd,cost_source=excluded.cost_source,usage_day=excluded.usage_day,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,updated_at=excluded.updated_at`, uuid.NewString(), tenant, runID, snapshot.SessionKey, effectiveModel, snapshot.ModelProvider, in, out, total, comIn, comOut, comTotal, comCost, nullFloat(cost), source, usageDay, storedRead, storedWrite, ts, ts)
 	if err != nil {
 		return err
 	}
@@ -263,7 +271,7 @@ func backfillZeroGatewayUsageCostV1(db *sql.DB) error {
 	if len(runs) > 0 {
 		log.Printf("[usage] zero gateway cost backfill: priced %d run(s)", len(runs))
 	}
-	if _, err := tx.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?)`, migration, now().UnixMilli()); err != nil {
+	if _, err := tx.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli()); err != nil {
 		return err
 	}
 	return tx.Commit()

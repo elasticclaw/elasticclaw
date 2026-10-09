@@ -536,3 +536,65 @@ func TestTaskRunUsagePricesCacheTokensWhenGatewayCannot(t *testing.T) {
 		t.Fatalf("summary=%v daily=%v, want 3.55", summary, daily)
 	}
 }
+
+func TestTaskRunUsageCacheCostEdgeCases(t *testing.T) {
+	committed := func(t *testing.T, db *sql.DB, session string) float64 {
+		t.Helper()
+		var c float64
+		if err := db.QueryRow(`SELECT committed_cost_usd FROM task_run_usage WHERE session_key=?`, session).Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	snap := func(in, out int, cost float64, cache *[2]int) taskRunUsageSnapshot {
+		u := usageSnapshot("a", in, out, 1, "anthropic/claude-sonnet-5-5")
+		u.EstimatedCostUSD = ptr(cost)
+		if cache != nil {
+			u.CacheReadTokens, u.CacheWriteTokens = ptr(cache[0]), ptr(cache[1])
+		}
+		return u
+	}
+	record := func(t *testing.T, s *Server, claw string, snaps ...taskRunUsageSnapshot) {
+		t.Helper()
+		for _, u := range snaps {
+			if err := s.recordTaskRunUsage(claw, u); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Run("gateway correction replaces hub cache cost", func(t *testing.T) {
+		s, db, claw := newUsageTestServer(t)
+		defer db.Close()
+		// Hub: $0.30 in/out + $0.45 cache; then the gateway prices the same run.
+		record(t, s, claw, snap(100_000, 10_000, 0, &[2]int{1_000_000, 100_000}), snap(100_000, 10_000, 0.80, nil))
+		if got := committed(t, db, "a"); math.Abs(got-0.80) > 1e-9 {
+			t.Fatalf("committed = %v, want 0.80", got)
+		}
+	})
+	t.Run("first cache counters on a gateway-priced session are a baseline", func(t *testing.T) {
+		s, db, claw := newUsageTestServer(t)
+		defer db.Close()
+		// Run A priced by the gateway ($1, cache included), then run B unpriced
+		// with 2M cumulative cache reads, of which only 1M is new — but the hub
+		// cannot tell, so none of the pre-existing tally is charged.
+		record(t, s, claw, snap(100_000, 10_000, 1.0, nil), snap(200_000, 20_000, 0, &[2]int{2_000_000, 0}), snap(200_000, 20_000, 0, &[2]int{3_000_000, 0}))
+		// $1 + $0.60 run B in/out + 1M new cache reads ($0.20).
+		if got := committed(t, db, "a"); math.Abs(got-1.80) > 1e-9 {
+			t.Fatalf("committed = %v, want 1.80", got)
+		}
+	})
+	t.Run("stale snapshot does not re-bill cache", func(t *testing.T) {
+		s, db, claw := newUsageTestServer(t)
+		defer db.Close()
+		record(t, s, claw,
+			snap(100_000, 10_000, 0, &[2]int{1_000_000, 0}),
+			snap(100_000, 10_000, 0, &[2]int{2_000_000, 0}),
+			snap(100_000, 10_000, 0, &[2]int{1_000_000, 0}), // out of order
+			snap(100_000, 10_000, 0, &[2]int{2_000_000, 0}),
+		)
+		// $0.30 in/out + 2M cache reads ($0.40).
+		if got := committed(t, db, "a"); math.Abs(got-0.70) > 1e-9 {
+			t.Fatalf("committed = %v, want 0.70", got)
+		}
+	})
+}
