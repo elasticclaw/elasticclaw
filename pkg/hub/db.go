@@ -380,6 +380,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_total_tokens INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN usage_day TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cost_note TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN last_agent_head_sha TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
@@ -754,7 +755,7 @@ func migrate(db *sql.DB) error {
 		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
 		committed_input_tokens INTEGER NOT NULL DEFAULT 0, committed_output_tokens INTEGER NOT NULL DEFAULT 0, committed_total_tokens INTEGER NOT NULL DEFAULT 0, committed_cost_usd REAL NOT NULL DEFAULT 0,
 		cache_read_tokens INTEGER, cache_write_tokens INTEGER, estimated_cost_usd REAL, cost_source TEXT NOT NULL DEFAULT 'gateway' CHECK(cost_source IN ('gateway','hub_pricing')),
-		usage_day TEXT NOT NULL DEFAULT '',
+		usage_day TEXT NOT NULL DEFAULT '', cost_note TEXT NOT NULL DEFAULT '',
 		first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tenant_id, run_id, session_key)
 	);
 	CREATE TABLE IF NOT EXISTS usage_daily (
@@ -1225,7 +1226,10 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	// Runs after the price seed so the backfill can price newly seeded models.
-	return backfillZeroGatewayUsageCostV1(db)
+	if err := backfillZeroGatewayUsageCostV1(db); err != nil {
+		return err
+	}
+	return backfillSonnet55CacheEstimateV1(db)
 }
 
 func migrateTicketMetadataKey(db *sql.DB) error {

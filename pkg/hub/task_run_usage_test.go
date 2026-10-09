@@ -598,3 +598,52 @@ func TestTaskRunUsageCacheCostEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+func TestMigrateScalesSonnet55CostWithoutCache(t *testing.T) {
+	_, db, _ := newUsageTestServer(t)
+	defer db.Close()
+	insert := func(session, model string, cache any) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,1,1,2,1,1,2,1.0,0.5,'hub_pricing','2026-10-08',?,?,0,0)`,
+			uuid.NewString(), "tenant", "run-usage", session, model, "anthropic", cache, cache); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("no-cache", "claude-sonnet-5-5", nil)
+	insert("with-cache", "claude-sonnet-5-5", 100)
+	insert("other-model", "gpt-5", nil)
+	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='sonnet55_cache_estimate_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // second migrate must be a no-op
+		if err := migrate(db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var committed, estimated float64
+	var note string
+	if err := db.QueryRow(`SELECT committed_cost_usd,estimated_cost_usd,cost_note FROM task_run_usage WHERE session_key='no-cache'`).Scan(&committed, &estimated, &note); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(committed-sonnet55CacheMultiplier) > 1e-9 || math.Abs(estimated-sonnet55CacheMultiplier/2) > 1e-9 || note != "cache_estimate_x20.2" {
+		t.Fatalf("no-cache row = %v/%v/%q", committed, estimated, note)
+	}
+	for _, session := range []string{"with-cache", "other-model"} {
+		if err := db.QueryRow(`SELECT committed_cost_usd,cost_note FROM task_run_usage WHERE session_key=?`, session).Scan(&committed, &note); err != nil {
+			t.Fatal(err)
+		}
+		if committed != 1.0 || note != "" {
+			t.Fatalf("%s row = %v/%q, want untouched", session, committed, note)
+		}
+	}
+	var summary, daily float64
+	if err := db.QueryRow(`SELECT estimated_cost_usd FROM task_run_summaries WHERE run_id='run-usage'`).Scan(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT cost_usd FROM usage_daily WHERE day='2026-10-08' AND model='claude-sonnet-5-5'`).Scan(&daily); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(summary-(sonnet55CacheMultiplier+2)) > 1e-9 || math.Abs(daily-(sonnet55CacheMultiplier-1)) > 1e-9 {
+		t.Fatalf("summary=%v daily=%v", summary, daily)
+	}
+}
