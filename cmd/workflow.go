@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -95,9 +96,127 @@ func printWorkflowInspection(inspection workflowv2.Inspection) {
 			fmt.Printf("  - %s --[%s]--> %s\n", run.State, transition.EventKind, transition.ToState)
 		}
 	}
+	printWorkflowInspectionEffects(inspection.Effects)
+	printWorkflowInspectionAgentTasks(inspection.AgentTasks)
+	printWorkflowInspectionFacts(inspection.Facts)
+	printWorkflowInspectionEvents(inspection.RecentEvents)
 	fmt.Printf("Delivery: %d active PR(s), %d open, %d merged, %d closed\n",
 		inspection.Delivery.ActivePullRequests, inspection.Delivery.OpenPullRequests,
 		inspection.Delivery.MergedPullRequests, inspection.Delivery.ClosedPullRequests)
+}
+
+func printWorkflowInspectionEffects(effects []workflowv2.EffectSummary) {
+	if len(effects) == 0 {
+		return
+	}
+	fmt.Println("Effects:")
+	for _, effect := range effects {
+		fmt.Printf("  - %s %s", effect.Kind, effect.Status)
+		if effect.DefinitionPath != "" {
+			fmt.Printf(" (%s)", effect.DefinitionPath)
+		}
+		if effect.AttemptCount > 0 {
+			fmt.Printf(", attempt %d", effect.AttemptCount)
+		}
+		fmt.Println()
+		if command, ok := effect.Payload["command"].(string); ok && command != "" {
+			fmt.Printf("      command: %s\n", command)
+		}
+		if value, ok := effect.Receipt["exit_code"].(float64); ok {
+			fmt.Printf("      exit code: %d\n", int(value))
+		}
+		if value, ok := effect.Receipt["error"].(string); ok && value != "" {
+			fmt.Printf("      error: %s\n", value)
+		}
+		if effect.LastError != "" {
+			fmt.Printf("      last error: %s\n", effect.LastError)
+		}
+		if value, ok := effect.Receipt["stdout"].(string); ok && value != "" {
+			printIndentedBlock("      ", "stdout", value)
+		}
+		if value, ok := effect.Receipt["stderr"].(string); ok && value != "" {
+			printIndentedBlock("      ", "stderr", value)
+		}
+	}
+}
+
+func printWorkflowInspectionAgentTasks(tasks []workflowv2.AgentTaskSummary) {
+	if len(tasks) == 0 {
+		return
+	}
+	fmt.Println("Agent tasks:")
+	for _, task := range tasks {
+		fmt.Printf("  - %s %s", shortID(task.ID), task.Status)
+		if task.State != "" {
+			fmt.Printf(" (state %s)", task.State)
+		}
+		fmt.Println()
+		if task.Instructions != "" {
+			fmt.Printf("      instructions: %s\n", previewText(task.Instructions, 200))
+		}
+		if task.TerminalReason != "" {
+			fmt.Printf("      reason: %s\n", task.TerminalReason)
+		}
+	}
+}
+
+func printWorkflowInspectionFacts(facts map[string]interface{}) {
+	if len(facts) == 0 {
+		return
+	}
+	fmt.Println("Facts:")
+	for _, line := range flattenFactLines("", facts) {
+		fmt.Printf("  - %s\n", line)
+	}
+}
+
+func printWorkflowInspectionEvents(events []workflowv2.EventRecord) {
+	if len(events) == 0 {
+		return
+	}
+	fmt.Println("Recent events:")
+	for _, event := range events {
+		fmt.Printf("  - %s (%s) %s", event.Kind, event.Disposition, event.ReceivedAt.Format("2006-01-02 15:04:05"))
+		if event.Reason != "" {
+			fmt.Printf(": %s", event.Reason)
+		}
+		fmt.Println()
+	}
+}
+
+// previewText trims a long text field to a single-line preview for summary
+// output; full values remain available via --json.
+func previewText(value string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "... (truncated, use --json for the full text)"
+}
+
+// flattenFactLines renders the nested fact tree as sorted "key = value" lines.
+// Values are printed in full: exec.last_run.stdout and friends are exactly the
+// diagnostic output operators need when a run misbehaves.
+func flattenFactLines(prefix string, facts map[string]interface{}) []string {
+	keys := make([]string, 0, len(facts))
+	for key := range facts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var lines []string
+	for _, key := range keys {
+		dotted := key
+		if prefix != "" {
+			dotted = prefix + "." + key
+		}
+		if nested, ok := facts[key].(map[string]interface{}); ok {
+			lines = append(lines, flattenFactLines(dotted, nested)...)
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s = %v", dotted, facts[key]))
+	}
+	return lines
 }
 
 type workflowCLIView struct {
@@ -928,6 +1047,10 @@ type agentActivity struct {
 
 func printActivityMessage(msg types.HubMessage, collapsedSimilar int) {
 	ts := msg.CreatedAt.Format("2006-01-02 15:04:05")
+	if event, ok := types.ParseWorkflowEffectFormat(msg.Format); ok {
+		printWorkflowEffectEvent(ts, event)
+		return
+	}
 	if !strings.HasPrefix(msg.Format, "activity:") {
 		fmt.Printf("%s  %s\n", ts, msg.Content)
 		return
@@ -974,6 +1097,55 @@ func printActivityMessage(msg types.HubMessage, collapsedSimilar int) {
 		fmt.Println(" " + msg.Content)
 	} else {
 		fmt.Println(" " + strings.Join(parts, " | "))
+	}
+}
+
+// printWorkflowEffectEvent renders a workflow v2 effect/task lifecycle log
+// line, including full exec.run stdout/stderr and agent task instructions.
+func printWorkflowEffectEvent(ts string, event types.WorkflowEffectEvent) {
+	label := event.Kind
+	if label == "" {
+		label = "effect"
+	}
+	status := event.Status
+	if status == "" {
+		status = event.Phase
+	}
+	fmt.Printf("%s  [%s] %s", ts, label, status)
+	if event.Attempt > 0 {
+		fmt.Printf(" (attempt %d)", event.Attempt)
+	}
+	fmt.Println()
+	if event.Command != "" {
+		fmt.Printf("    cmd: %s\n", event.Command)
+	}
+	if event.TaskID != "" {
+		fmt.Printf("    task: %s\n", event.TaskID)
+	}
+	if event.ExitCode != nil {
+		fmt.Printf("    exit code: %d\n", *event.ExitCode)
+	}
+	if event.Error != "" {
+		fmt.Printf("    error: %s\n", event.Error)
+	}
+	if event.TerminalReason != "" {
+		fmt.Printf("    reason: %s\n", event.TerminalReason)
+	}
+	if event.Instructions != "" {
+		printIndentedBlock("    ", "instructions", event.Instructions)
+	}
+	if event.Stdout != "" {
+		printIndentedBlock("    ", "stdout", event.Stdout)
+	}
+	if event.Stderr != "" {
+		printIndentedBlock("    ", "stderr", event.Stderr)
+	}
+}
+
+func printIndentedBlock(indent, name, value string) {
+	fmt.Printf("%s%s:\n", indent, name)
+	for _, line := range strings.Split(strings.TrimRight(value, "\n"), "\n") {
+		fmt.Printf("%s  %s\n", indent, line)
 	}
 }
 

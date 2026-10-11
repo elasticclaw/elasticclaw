@@ -62,16 +62,17 @@ func Migrate(db *sql.DB) error {
 	CREATE TABLE IF NOT EXISTS workflow_v2_events (
 		id                     TEXT PRIMARY KEY,
 		run_id                 TEXT NOT NULL REFERENCES workflow_v2_runs(id) ON DELETE CASCADE,
-		message_id             TEXT NOT NULL DEFAULT '',
+		message_id             TEXT NOT NULL,
 		kind                   TEXT NOT NULL,
+		attempt_id             TEXT NOT NULL DEFAULT '',
 		expected_state_version INTEGER,
 		observed_state_version INTEGER NOT NULL,
 		disposition            TEXT NOT NULL CHECK(disposition IN ('accepted','duplicate','stale_state','rejected','unauthorized')),
 		reason                 TEXT NOT NULL DEFAULT '',
 		producer               TEXT NOT NULL,
-		provenance_json        TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(provenance_json) AND json_type(provenance_json)='object'),
-		payload_json           TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload_json) AND json_type(payload_json)='object'),
-		facts_json             TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(facts_json) AND json_type(facts_json)='object'),
+		provenance_json        TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(provenance_json)),
+		payload_json           TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload_json)),
+		facts_json             TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(facts_json)),
 		received_at            INTEGER NOT NULL
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_v2_events_message ON workflow_v2_events(run_id, message_id) WHERE message_id != '';
@@ -145,6 +146,7 @@ func Migrate(db *sql.DB) error {
 		id            TEXT PRIMARY KEY,
 		effect_id     TEXT NOT NULL REFERENCES workflow_v2_effects(id) ON DELETE CASCADE,
 		number        INTEGER NOT NULL CHECK(number > 0),
+		attempt_id    TEXT NOT NULL DEFAULT '',
 		status        TEXT NOT NULL CHECK(status IN ('running','succeeded','retryable_failed','permanent_failed','unknown','cancelled')),
 		request_json  TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(request_json)),
 		receipt_json  TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(receipt_json)),
@@ -309,6 +311,14 @@ func Migrate(db *sql.DB) error {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	if err := addColumnIfMissing(db, "workflow_v2_runs", "cron_slot_released", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	// attempt attribution columns let attempt-scoped logs show exactly the
+	// records an attempt produced instead of timestamp-window approximations.
+	if err := addColumnIfMissing(db, "workflow_v2_events", "attempt_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_effect_attempts", "attempt_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	return nil
