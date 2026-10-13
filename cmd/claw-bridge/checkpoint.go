@@ -348,6 +348,10 @@ func putCheckpointBlob(ctx context.Context, req types.CheckpointCreatePayload, s
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(data), "sha mismatch") {
+		// The file changed while it was being streamed, after the re-hash.
+		return fmt.Errorf("%w: upload blob %s: hub reported sha mismatch", errCheckpointFileChanged, sha)
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("upload blob %s: HTTP %d: %s", sha, resp.StatusCode, string(data))
 	}
