@@ -42,11 +42,21 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	}
 	var oldIn, oldOut, oldTotal, comIn, comOut, comTotal int
 	var oldCacheRead, oldCacheWrite sql.NullInt64
-	var oldModel, oldUsageDay string
+	var oldModel, oldUsageDay, note string
 	var oldCost sql.NullFloat64
 	var comCost float64
+	var committed, run, estimated usageCostComponents
+	var runEstimated bool
 	oldSource := "gateway"
-	err = tx.QueryRow(`SELECT model,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(&oldModel, &oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource, &oldUsageDay, &oldCacheRead, &oldCacheWrite)
+	err = tx.QueryRow(`SELECT model,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens,cost_note,
+		committed_input_cost_usd,committed_output_cost_usd,committed_cache_read_tokens,committed_cache_write_tokens,committed_cache_read_cost_usd,committed_cache_write_cost_usd,
+		run_input_cost_usd,run_output_cost_usd,run_cache_read_tokens,run_cache_write_tokens,run_cache_read_cost_usd,run_cache_write_cost_usd,run_cache_estimated,
+		est_cache_read_tokens,est_cache_write_tokens,est_cache_read_cost_usd,est_cache_write_cost_usd
+		FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(
+		&oldModel, &oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource, &oldUsageDay, &oldCacheRead, &oldCacheWrite, &note,
+		&committed.input, &committed.output, &committed.readTokens, &committed.writeTokens, &committed.readCost, &committed.writeCost,
+		&run.input, &run.output, &run.readTokens, &run.writeTokens, &run.readCost, &run.writeCost, &runEstimated,
+		&estimated.readTokens, &estimated.writeTokens, &estimated.readCost, &estimated.writeCost)
 	found := err == nil
 	if err != nil && err != sql.ErrNoRows {
 		return err
@@ -64,55 +74,21 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	// OpenClaw overwrites a session entry after each reply with that run's
 	// totals. total_tokens is context occupancy, not billed token usage.
 	newRun := !found || in != oldIn || out != oldOut
-	// On cost-only heartbeats keep the stored model so corrections target the
-	// usage_daily bucket that received the run's tokens; a model change takes
-	// effect with the next run's snapshot.
+	// Cost-only corrections belong to the model and day originally charged.
 	effectiveModel := snapshot.Model
 	if found && (!newRun || effectiveModel == "") {
 		effectiveModel = oldModel
 	}
-	var cost sql.NullFloat64
-	source := oldSource
-	// OpenClaw reports $0 for models missing from its own price catalog, so a
-	// zero cost on a run that used tokens means "unknown", not "free".
-	gatewayCostUnknown := snapshot.EstimatedCostUSD != nil && *snapshot.EstimatedCostUSD == 0 && in+out > 0
-	if snapshot.EstimatedCostUSD != nil && !gatewayCostUnknown {
-		cost = sql.NullFloat64{Float64: *snapshot.EstimatedCostUSD, Valid: true}
-		source = "gateway"
-	} else if estimated, ok := taskRunPrice(tx, effectiveModel, in, out); ok {
-		// The gateway did not report a cost; estimate this run from its tokens.
-		cost = sql.NullFloat64{Float64: estimated, Valid: true}
-		source = "hub_pricing"
-	} else if effectiveModel != "" {
-		if _, loaded := unmatchedUsagePriceModels.LoadOrStore(effectiveModel, struct{}{}); !loaded {
-			log.Printf("[usage] no static price for model %s", effectiveModel)
-		}
+	usageNow := s.reaperNow()
+	ts := usageNow.UnixMilli()
+	usageDay := oldUsageDay
+	if newRun || usageDay == "" {
+		usageDay = usageNow.UTC().Format("2006-01-02")
 	}
-	comCostBefore := comCost
-	din, dout, dtotal, dcost := 0, 0, 0, 0.0
-	if newRun {
-		din, dout, dtotal = in, out, in+out
-		comIn += in
-		comOut += out
-		comTotal += in + out
-		if cost.Valid {
-			dcost = cost.Float64
-			comCost += dcost
-		}
-	} else if source == "gateway" && cost.Valid && (oldSource != "gateway" || !oldCost.Valid || cost.Float64 != oldCost.Float64) {
-		// A real gateway cost replaces the hub estimate for the same run,
-		// including any cache cost the hub added to it.
-		dcost = cost.Float64
-		if oldCost.Valid {
-			dcost -= oldCost.Float64
-		}
-		comCost += dcost
-	} else {
-		cost = oldCost
-		source = oldSource
-	}
-	// Cache counters are session-cumulative; keeping the highest value seen
-	// means a stale or out-of-order snapshot never reads as new usage.
+	ledger := usageDailyBucket{tenant, workspace, factory, workflow}
+
+	// Session counters only advance. NULL distinguishes an unknown cache from
+	// a reported zero and lets gateway-priced sessions establish a baseline.
 	cacheRead, cacheWrite := oldCacheRead.Int64, oldCacheWrite.Int64
 	if snapshot.CacheReadTokens != nil {
 		cacheRead = max(cacheRead, int64(*snapshot.CacheReadTokens))
@@ -121,42 +97,136 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		cacheWrite = max(cacheWrite, int64(*snapshot.CacheWriteTokens))
 	}
 	dRead, dWrite := cacheRead-oldCacheRead.Int64, cacheWrite-oldCacheWrite.Int64
-	// The first counters on a session the gateway already priced only set a
-	// baseline: those gateway costs covered the cache used so far.
-	if !oldCacheRead.Valid && !oldCacheWrite.Valid && found && oldSource == "gateway" && comCostBefore > 0 {
+	firstCounters := !oldCacheRead.Valid && !oldCacheWrite.Valid && (snapshot.CacheReadTokens != nil || snapshot.CacheWriteTokens != nil)
+	if firstCounters && found && oldSource == "gateway" && comCost > 0 {
 		dRead, dWrite = 0, 0
 	}
-	// NULL until the bridge reports cache counters, so the baseline above can
-	// tell "never reported" from zero.
-	cacheKnown := oldCacheRead.Valid || oldCacheWrite.Valid || snapshot.CacheReadTokens != nil || snapshot.CacheWriteTokens != nil
-	storedRead := sql.NullInt64{Int64: cacheRead, Valid: cacheKnown}
-	storedWrite := sql.NullInt64{Int64: cacheWrite, Valid: cacheKnown}
-	if source == "hub_pricing" && cost.Valid {
-		// Per-run token snapshots exclude cache, so hub-priced sessions add the
-		// cost of the cache used since the last snapshot to the current run.
-		if p, ok := modelPrice(tx, effectiveModel); ok {
-			cacheCost := float64(dRead)*p.cacheRead + float64(dWrite)*p.cacheWrite
-			cost.Float64 += cacheCost
-			dcost += cacheCost
-			comCost += cacheCost
+	cacheKnown := oldCacheRead.Valid || oldCacheWrite.Valid || firstCounters
+	if firstCounters && estimated.cacheCost() > 0 {
+		// Reverse estimates in their original ledger buckets, including the
+		// approximate classification of their otherwise exact input/output.
+		if err := reverseUsageCacheEstimates(tx, ledger, runID, snapshot.SessionKey, ts); err != nil {
+			return err
+		}
+		committed.subtract(estimated)
+		comCost -= estimated.cacheCost()
+		if runEstimated {
+			oldCost.Float64 -= run.cacheCost()
+			run.readTokens, run.writeTokens, run.readCost, run.writeCost = 0, 0, 0, 0
+		}
+		estimated = usageCostComponents{}
+		runEstimated = false
+		if strings.HasPrefix(note, "cache_estimate_x") {
+			note = ""
 		}
 	}
-	usageNow := s.reaperNow()
-	ts := usageNow.UnixMilli()
-	day := usageNow.UTC().Format("2006-01-02")
-	usageDay := oldUsageDay
-	if newRun || usageDay == "" {
-		usageDay = day
+
+	p, priced := modelPrice(tx, effectiveModel)
+	var cost sql.NullFloat64
+	source := oldSource
+	gatewayCostUnknown := snapshot.EstimatedCostUSD != nil && *snapshot.EstimatedCostUSD == 0 && in+out > 0
+	if snapshot.EstimatedCostUSD != nil && !gatewayCostUnknown {
+		cost = sql.NullFloat64{Float64: *snapshot.EstimatedCostUSD, Valid: true}
+		source = "gateway"
+	} else if priced {
+		cost = sql.NullFloat64{Float64: float64(in)*p.input + float64(out)*p.output, Valid: true}
+		source = "hub_pricing"
+	} else if effectiveModel != "" {
+		if _, loaded := unmatchedUsagePriceModels.LoadOrStore(effectiveModel, struct{}{}); !loaded {
+			log.Printf("[usage] no static price for model %s", effectiveModel)
+		}
 	}
+	din, dout, dtotal, dcost, dapprox := 0, 0, 0, 0.0, 0.0
+	if newRun {
+		run, runEstimated = usageCostComponents{}, false
+		din, dout, dtotal = in, out, in+out
+		comIn += in
+		comOut += out
+		comTotal += in + out
+		if cost.Valid {
+			dcost = cost.Float64
+			comCost += dcost
+		}
+		if source == "hub_pricing" && cost.Valid {
+			run.input, run.output = float64(in)*p.input, float64(out)*p.output
+			committed.add(run)
+		}
+	} else if source == "gateway" && cost.Valid && (oldSource != "gateway" || !oldCost.Valid || cost.Float64 != oldCost.Float64) {
+		// A gateway correction replaces only this run's hub contribution.
+		dcost = cost.Float64
+		if oldCost.Valid {
+			dcost -= oldCost.Float64
+		}
+		comCost += dcost
+		committed.subtract(run)
+		if runEstimated {
+			estimated.subtract(usageCostComponents{readTokens: run.readTokens, writeTokens: run.writeTokens, readCost: run.readCost, writeCost: run.writeCost})
+			dapprox -= run.totalCost()
+			dRead -= run.readTokens
+			dWrite -= run.writeTokens
+			if err := adjustUsageCacheEstimate(tx, tenant, runID, snapshot.SessionKey, usageDay, effectiveModel, run, -1); err != nil {
+				return err
+			}
+		}
+		run, runEstimated = usageCostComponents{}, false
+		if estimated.cacheCost() <= 0 && strings.HasPrefix(note, "cache_estimate_x") {
+			note = ""
+		}
+	} else {
+		cost, source = oldCost, oldSource
+	}
+	var newEstimate usageCostComponents
+	if source == "hub_pricing" && cost.Valid && priced {
+		cache := usageCostComponents{}
+		if cacheKnown {
+			cache = usageCostComponents{readTokens: dRead, writeTokens: dWrite, readCost: float64(dRead) * p.cacheRead, writeCost: float64(dWrite) * p.cacheWrite}
+		} else if newRun {
+			ratio, w, err := s.fallbackCacheRatios(tx, effectiveModel, usageNow)
+			if err != nil {
+				return err
+			}
+			cache = estimateUsageCache((run.input+run.output)*(ratio-1), w, p)
+			estimated.add(cache)
+			runEstimated = cache.cacheCost() > 0
+			dRead, dWrite = cache.readTokens, cache.writeTokens
+			if runEstimated {
+				newEstimate = cache
+				newEstimate.input, newEstimate.output = run.input, run.output
+				dapprox += newEstimate.totalCost()
+			}
+		}
+		run.add(cache)
+		committed.add(cache)
+		cost.Float64 += cache.cacheCost()
+		dcost += cache.cacheCost()
+		comCost += cache.cacheCost()
+	}
+	approximate := estimated.cacheCost() > 0 || note != ""
+	storedRead := sql.NullInt64{Int64: cacheRead, Valid: cacheKnown}
+	storedWrite := sql.NullInt64{Int64: cacheWrite, Valid: cacheKnown}
 	_, err = tx.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,model_provider,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id,session_key) DO UPDATE SET model=excluded.model,model_provider=excluded.model_provider,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,total_tokens=excluded.total_tokens,committed_input_tokens=excluded.committed_input_tokens,committed_output_tokens=excluded.committed_output_tokens,committed_total_tokens=excluded.committed_total_tokens,committed_cost_usd=excluded.committed_cost_usd,estimated_cost_usd=excluded.estimated_cost_usd,cost_source=excluded.cost_source,usage_day=excluded.usage_day,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,updated_at=excluded.updated_at`, uuid.NewString(), tenant, runID, snapshot.SessionKey, effectiveModel, snapshot.ModelProvider, in, out, total, comIn, comOut, comTotal, comCost, nullFloat(cost), source, usageDay, storedRead, storedWrite, ts, ts)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO usage_daily(tenant_id,day,workspace_name,factory_name,workflow_name,model,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_write_tokens,cost_usd,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,day,workspace_name,factory_name,workflow_name,model) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,total_tokens=total_tokens+excluded.total_tokens,cache_read_tokens=cache_read_tokens+excluded.cache_read_tokens,cache_write_tokens=cache_write_tokens+excluded.cache_write_tokens,cost_usd=cost_usd+excluded.cost_usd,updated_at=excluded.updated_at`, tenant, usageDay, workspace, factory, workflow, effectiveModel, din, dout, dtotal, dRead, dWrite, dcost, ts)
+	_, err = tx.Exec(`UPDATE task_run_usage SET committed_input_cost_usd=?,committed_output_cost_usd=?,committed_cache_read_tokens=?,committed_cache_write_tokens=?,committed_cache_read_cost_usd=?,committed_cache_write_cost_usd=?,
+		run_input_cost_usd=?,run_output_cost_usd=?,run_cache_read_tokens=?,run_cache_write_tokens=?,run_cache_read_cost_usd=?,run_cache_write_cost_usd=?,run_cache_estimated=?,
+		est_cache_read_tokens=?,est_cache_write_tokens=?,est_cache_cost_usd=?,est_cache_read_cost_usd=?,est_cache_write_cost_usd=?,cost_approximate=?,cost_note=?
+		WHERE tenant_id=? AND run_id=? AND session_key=?`,
+		committed.input, committed.output, committed.readTokens, committed.writeTokens, committed.readCost, committed.writeCost,
+		run.input, run.output, run.readTokens, run.writeTokens, run.readCost, run.writeCost, boolInt(runEstimated),
+		estimated.readTokens, estimated.writeTokens, estimated.cacheCost(), estimated.readCost, estimated.writeCost, boolInt(approximate), note, tenant, runID, snapshot.SessionKey)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`UPDATE task_run_summaries SET input_tokens=(SELECT COALESCE(SUM(committed_input_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),output_tokens=(SELECT COALESCE(SUM(committed_output_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),total_tokens=(SELECT COALESCE(SUM(committed_total_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),usage_updated_at=? WHERE tenant_id=? AND run_id=?`, tenant, runID, tenant, runID, tenant, runID, tenant, runID, ts, tenant, runID)
+	if newEstimate.cacheCost() > 0 {
+		if err := adjustUsageCacheEstimate(tx, tenant, runID, snapshot.SessionKey, usageDay, effectiveModel, newEstimate, 1); err != nil {
+			return err
+		}
+	}
+	if err := ledger.add(tx, usageDay, effectiveModel, din, dout, dtotal, dRead, dWrite, dcost, dapprox, ts); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE task_run_summaries SET input_tokens=(SELECT COALESCE(SUM(committed_input_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),output_tokens=(SELECT COALESCE(SUM(committed_output_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),total_tokens=(SELECT COALESCE(SUM(committed_total_tokens),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),cost_approximate=EXISTS(SELECT 1 FROM task_run_usage u WHERE u.tenant_id=task_run_summaries.tenant_id AND u.run_id=task_run_summaries.run_id AND u.cost_approximate=1),usage_updated_at=? WHERE tenant_id=? AND run_id=?`, tenant, runID, tenant, runID, tenant, runID, tenant, runID, ts, tenant, runID)
 	if err != nil {
 		return err
 	}
@@ -176,10 +246,7 @@ type tokenPrices struct{ input, output, cacheRead, cacheWrite float64 }
 // Gateway model ids are matched loosely: lowercased, provider prefixes
 // stripped, and the longest seeded model name that prefixes the id wins.
 func modelPrice(tx *sql.Tx, model string) (tokenPrices, bool) {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if i := strings.LastIndex(model, "/"); i >= 0 {
-		model = model[i+1:]
-	}
+	model = normalizedUsageModel(model)
 	var p tokenPrices
 	if model == "" {
 		return p, false
@@ -264,7 +331,7 @@ func backfillZeroGatewayUsageCostV1(db *sql.DB) error {
 		runs[[2]string{r.tenant, r.runID}] = true
 	}
 	for k := range runs {
-		if _, err := tx.Exec(`UPDATE task_run_summaries SET estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?) WHERE tenant_id=? AND run_id=?`, k[0], k[1], k[0], k[1]); err != nil {
+		if _, err := tx.Exec(`UPDATE task_run_summaries SET estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),cost_approximate=EXISTS(SELECT 1 FROM task_run_usage u WHERE u.tenant_id=task_run_summaries.tenant_id AND u.run_id=task_run_summaries.run_id AND (u.cost_approximate=1 OR u.cost_note!='')) WHERE tenant_id=? AND run_id=?`, k[0], k[1], k[0], k[1]); err != nil {
 			return fmt.Errorf("backfill run summary cost: %w", err)
 		}
 	}
@@ -338,7 +405,7 @@ func backfillSonnet55CacheEstimateV1(db *sql.DB) error {
 		if estimated.Valid {
 			estimated.Float64 *= sonnet55CacheMultiplier
 		}
-		if _, err := tx.Exec(`UPDATE task_run_usage SET committed_cost_usd=?,estimated_cost_usd=?,cost_note=? WHERE id=?`, committed, nullFloat(estimated), note, r.id); err != nil {
+		if _, err := tx.Exec(`UPDATE task_run_usage SET committed_cost_usd=?,estimated_cost_usd=?,cost_note=?,cost_approximate=1 WHERE id=?`, committed, nullFloat(estimated), note, r.id); err != nil {
 			return fmt.Errorf("apply sonnet-5-5 cache estimate: %w", err)
 		}
 		if _, err := tx.Exec(`INSERT INTO usage_daily(tenant_id,day,workspace_name,factory_name,workflow_name,model,input_tokens,output_tokens,total_tokens,cost_usd,updated_at) VALUES(?,?,?,?,?,?,0,0,0,?,?) ON CONFLICT(tenant_id,day,workspace_name,factory_name,workflow_name,model) DO UPDATE SET cost_usd=cost_usd+excluded.cost_usd,updated_at=excluded.updated_at`, r.tenant, r.usageDay, r.workspace, r.factory, r.workflow, r.model, committed-r.committed, now().UnixMilli()); err != nil {
@@ -347,7 +414,7 @@ func backfillSonnet55CacheEstimateV1(db *sql.DB) error {
 		runs[[2]string{r.tenant, r.runID}] = true
 	}
 	for k := range runs {
-		if _, err := tx.Exec(`UPDATE task_run_summaries SET estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?) WHERE tenant_id=? AND run_id=?`, k[0], k[1], k[0], k[1]); err != nil {
+		if _, err := tx.Exec(`UPDATE task_run_summaries SET estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),cost_approximate=EXISTS(SELECT 1 FROM task_run_usage u WHERE u.tenant_id=task_run_summaries.tenant_id AND u.run_id=task_run_summaries.run_id AND (u.cost_approximate=1 OR u.cost_note!='')) WHERE tenant_id=? AND run_id=?`, k[0], k[1], k[0], k[1]); err != nil {
 			return fmt.Errorf("apply sonnet-5-5 cache estimate to summary: %w", err)
 		}
 	}
@@ -421,7 +488,7 @@ func recalibrateSonnet55CacheEstimateV2(db *sql.DB) error {
 		if estimated.Valid {
 			estimated.Float64 *= scale
 		}
-		if _, err := tx.Exec(`UPDATE task_run_usage SET committed_cost_usd=?,estimated_cost_usd=?,cost_note=? WHERE id=?`, committed, nullFloat(estimated), newNote, r.id); err != nil {
+		if _, err := tx.Exec(`UPDATE task_run_usage SET committed_cost_usd=?,estimated_cost_usd=?,cost_note=?,cost_approximate=1 WHERE id=?`, committed, nullFloat(estimated), newNote, r.id); err != nil {
 			return fmt.Errorf("recalibrate sonnet-5-5 cache estimate: %w", err)
 		}
 		if _, err := tx.Exec(`UPDATE usage_daily SET cost_usd=cost_usd+?,updated_at=? WHERE tenant_id=? AND day=? AND workspace_name=? AND factory_name=? AND workflow_name=? AND model=?`, committed-r.committed, now().UnixMilli(), r.tenant, r.usageDay, r.workspace, r.factory, r.workflow, r.model); err != nil {
@@ -430,7 +497,7 @@ func recalibrateSonnet55CacheEstimateV2(db *sql.DB) error {
 		runs[[2]string{r.tenant, r.runID}] = true
 	}
 	for k := range runs {
-		if _, err := tx.Exec(`UPDATE task_run_summaries SET estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?) WHERE tenant_id=? AND run_id=?`, k[0], k[1], k[0], k[1]); err != nil {
+		if _, err := tx.Exec(`UPDATE task_run_summaries SET estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?),cost_approximate=EXISTS(SELECT 1 FROM task_run_usage u WHERE u.tenant_id=task_run_summaries.tenant_id AND u.run_id=task_run_summaries.run_id AND (u.cost_approximate=1 OR u.cost_note!='')) WHERE tenant_id=? AND run_id=?`, k[0], k[1], k[0], k[1]); err != nil {
 			return fmt.Errorf("recalibrate sonnet-5-5 run summary: %w", err)
 		}
 	}

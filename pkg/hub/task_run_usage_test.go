@@ -96,7 +96,7 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	if in != 128_000 || out != 6_300 || total != 134_300 {
 		t.Fatalf("summary = %d/%d/%d, want 128000/6300/134300", in, out, total)
 	}
-	const wantCost = 0.5735 // $0.56 gateway costs + $0.0135 hub pricing for session b.
+	const wantCost = 0.64775 // $0.56 gateway costs + $0.0135 IO at the default 6.5x ratio.
 	if math.Abs(cost-wantCost) > 1e-6 {
 		t.Fatalf("summary cost = %v, want %v", cost, wantCost)
 	}
@@ -312,7 +312,7 @@ func TestTaskRunUsageZeroGatewayCostFallsBackToHubPricing(t *testing.T) {
 	if err := db.QueryRow(`SELECT estimated_cost_usd,cost_source FROM task_run_usage WHERE session_key='a'`).Scan(&cost, &source); err != nil {
 		t.Fatal(err)
 	}
-	const want = 3.0 // 1M input at $2 + 100k output at $10.
+	const want = 19.5 // $3 input/output plus estimated cache at the default 6.5x ratio.
 	if math.Abs(cost-want) > 1e-9 || source != "hub_pricing" {
 		t.Fatalf("cost=%v source=%q, want %v hub_pricing", cost, source, want)
 	}

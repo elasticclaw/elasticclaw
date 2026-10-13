@@ -187,6 +187,7 @@ type Server struct {
 	// a hub restart rather than treating an uncertain outage as an agent failure.
 	reaperMu            sync.Mutex
 	reaperFirstSeen     map[string]time.Time
+	usageCostRatios     sync.Map
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
 

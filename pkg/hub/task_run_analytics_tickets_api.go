@@ -41,6 +41,7 @@ type taskRunAnalyticsTicketsResponse struct {
 }
 
 type taskRunAnalyticsTicketRunSummary struct {
+	Approximate  bool    `json:"approximate,omitempty"`
 	RunID        string  `json:"runId"`
 	Status       string  `json:"status"`
 	Phase        string  `json:"phase"`
@@ -70,6 +71,7 @@ type taskRunAnalyticsTicketStoryEntry struct {
 }
 
 type taskRunAnalyticsTicketView struct {
+	Approximate    bool                               `json:"approximate,omitempty"`
 	TicketKey      string                             `json:"ticketKey"`
 	IssueID        string                             `json:"issueId"`
 	IssueTitle     string                             `json:"issueTitle"`
@@ -225,8 +227,10 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 // callers who may read analytics but are not allowed to see costs.
 func redactTaskRunAnalyticsTicketCost(ticket *taskRunAnalyticsTicketView) {
 	ticket.Cost = 0
+	ticket.Approximate = false
 	for i := range ticket.Runs {
 		ticket.Runs[i].Cost = 0
+		ticket.Runs[i].Approximate = false
 	}
 }
 
@@ -632,9 +636,10 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		runEvents := eventsByRun[run.RunID]
 		ticket.RunIDs = append(ticket.RunIDs, run.RunID)
 		cost, tokens := taskRunTicketCostAndTokens(run)
-		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{RunID: run.RunID, Status: run.Status, Phase: run.Phase, Model: run.Model, AttemptCount: len(attempts), Cost: cost, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
+		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{RunID: run.RunID, Status: run.Status, Phase: run.Phase, Model: run.Model, AttemptCount: len(attempts), Cost: cost, Approximate: run.CostApproximate, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
 		ticket.AttemptCount += len(attempts)
 		ticket.Cost += cost
+		ticket.Approximate = ticket.Approximate || run.CostApproximate
 		ticket.TotalTokens += tokens
 		ticket.HumanTouches += run.HumanInteractionCount
 		if run.Status == "failed" {

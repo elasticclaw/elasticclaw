@@ -173,10 +173,12 @@ export interface TaskRunAnalyticsSummary {
 }
 
 export interface CostBucket {
+  approximateCostUsd?: number
   costUsd: number
 }
 
 export interface CostToday {
+  approximateCostUsd?: number
   costUsd: number
   totalTokens: number
   deltaPctVsYesterday: number | null
@@ -189,6 +191,7 @@ export interface CostProjection {
 }
 
 export interface CostDailyPoint {
+  approximateCostUsd?: number
   date: string
   costUsd: number
   totalTokens: number
@@ -198,6 +201,7 @@ export interface CostDailyPoint {
 export interface CostModelSeries { model: string; dailySeries: CostDailyPoint[] }
 
 export interface CostOverview {
+  approximateCostUsd?: number
   today: CostToday
   week: CostBucket
   month: CostBucket
@@ -231,7 +235,7 @@ export interface AnalyticsEffectiveness {
   ticketSuccessRate: number
   ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[] | null
   runsPerTicket: { bucket: string; tickets: number }[] | null
-  topTicketsByCost: { ticketKey: string; issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[] | null
+  topTicketsByCost: { ticketKey: string; issueId: string; issueTitle: string; costUsd: number; approximate?: boolean; runs: number; outcome: string }[] | null
   prior?: {
     successRate: number
     ticketSuccessRate: number
@@ -241,6 +245,7 @@ export interface AnalyticsEffectiveness {
 }
 
 export interface AnalyticsCostDriver {
+  approximate?: boolean
   name: string
   runs: number
   successRate: number
@@ -299,6 +304,18 @@ export interface TaskRunSummary {
   outputTokens?: number
   totalTokens?: number
   estimatedCostUsd?: number
+  costSource?: "openclaw" | "fallback" | "mixed"
+  costApproximate?: boolean
+  costBreakdown?: {
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheWriteTokens: number
+    inputCostUsd: number
+    outputCostUsd: number
+    cacheReadCostUsd: number
+    cacheWriteCostUsd: number
+  }
   issueTitle?: string
 }
 
@@ -318,6 +335,7 @@ export interface TaskRunsResponse {
 }
 
 export interface AnalyticsTicketRunSummary {
+  approximate?: boolean
   runId: string
   status: string
   phase: string
@@ -346,6 +364,7 @@ export interface AnalyticsTicketStoryEntry {
 }
 
 export interface AnalyticsTicket {
+  approximate?: boolean
   ticketKey: string
   issueId: string
   issueTitle: string
