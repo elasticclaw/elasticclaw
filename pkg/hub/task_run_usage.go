@@ -98,10 +98,11 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	}
 	dRead, dWrite := cacheRead-oldCacheRead.Int64, cacheWrite-oldCacheWrite.Int64
 	firstCounters := !oldCacheRead.Valid && !oldCacheWrite.Valid && (snapshot.CacheReadTokens != nil || snapshot.CacheWriteTokens != nil)
-	// Counters first seen on a gateway-priced session mix cache the gateway
-	// already charged with earlier estimated runs, so they become a baseline
-	// and those estimates stay in place.
-	baseline := firstCounters && found && oldSource == "gateway" && comCost > 0
+	// Counters first seen on a session with gateway-priced runs mix cache the
+	// gateway already charged with earlier estimated runs, so they become a
+	// baseline and those estimates stay in place. Any committed cost outside
+	// the hub's own components came from the gateway.
+	baseline := firstCounters && found && comCost-committed.totalCost() > 1e-9
 	if baseline {
 		dRead, dWrite = 0, 0
 	}

@@ -273,12 +273,12 @@ func TestFallbackCacheCostRatioUsesExactHubPricedRuns(t *testing.T) {
 	_, db, _ := newUsageTestServer(t)
 	defer db.Close()
 	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	for i, cost := range []float64{6, 12, 18, 900} {
+	for i, cost := range []float64{6, 12, 18, 900, 800} {
 		seedRatioUsage(t, db, "claude-sonnet-5-5", cost, at.Add(time.Duration(i)*time.Nanosecond))
 	}
-	// Hub-priced rows with real cache counters are exact; the 900 row is an
-	// estimate and must not feed the ratio back into itself.
-	if _, err := db.Exec(`UPDATE task_run_usage SET cost_source='hub_pricing',cache_read_tokens=1,cost_approximate=CASE WHEN committed_cost_usd=900 THEN 1 ELSE 0 END`); err != nil {
+	// Hub-priced rows with real cache counters are exact. The 900 and 800 rows
+	// carry estimates, hub- and gateway-priced, and must not feed the ratio.
+	if _, err := db.Exec(`UPDATE task_run_usage SET cost_source=CASE WHEN committed_cost_usd=800 THEN 'gateway' ELSE 'hub_pricing' END,cache_read_tokens=1,cost_approximate=CASE WHEN committed_cost_usd>=800 THEN 1 ELSE 0 END`); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := db.Begin()
@@ -292,6 +292,39 @@ func TestFallbackCacheCostRatioUsesExactHubPricedRuns(t *testing.T) {
 	}
 	if math.Abs(ratio-4) > 1e-9 {
 		t.Fatalf("ratio=%v, want 36/9=4", ratio)
+	}
+}
+
+func TestTaskRunUsageColdCacheAfterGatewayRunKeepsEstimate(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	gateway := usageSnapshot("a", 100000, 10000, 1, "claude-sonnet-4-6")
+	gateway.EstimatedCostUSD = ptr(2.0)
+	// The model switches; the first sessions.usage poll comes back cold, so
+	// the run is estimated and the hub-priced source is the latest one.
+	fallback := usageSnapshot("a", 200000, 20000, 1, "claude-sonnet-5-5")
+	recordUsage(t, s, claw, gateway, fallback)
+	var before float64
+	if err := db.QueryRow(`SELECT committed_cost_usd FROM task_run_usage WHERE session_key='a'`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(before-5.9) > 1e-9 {
+		t.Fatalf("before=%v, want 2 gateway + 0.6*6.5 estimate", before)
+	}
+	// Cumulative counters include the gateway run's cache, already charged.
+	fallback.CacheReadTokens = ptr(9000000)
+	fallback.CacheWriteTokens = ptr(900000)
+	recordUsage(t, s, claw, fallback)
+	var after, daily float64
+	var approx bool
+	if err := db.QueryRow(`SELECT committed_cost_usd,cost_approximate FROM task_run_usage WHERE session_key='a'`).Scan(&after, &approx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM usage_daily`).Scan(&daily); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(after-before) > 1e-9 || math.Abs(daily-before) > 1e-9 || !approx {
+		t.Fatalf("after=%v daily=%v approx=%v, want baseline keeping %v", after, daily, approx, before)
 	}
 }
 
