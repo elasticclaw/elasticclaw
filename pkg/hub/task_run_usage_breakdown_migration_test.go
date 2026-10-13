@@ -82,3 +82,45 @@ func TestMigrateFallbackCostBreakdown(t *testing.T) {
 		})
 	}
 }
+
+func TestMigrateFallbackCostBreakdownLegacyEdges(t *testing.T) {
+	_, db, _ := newUsageTestServer(t)
+	defer db.Close()
+	// "mixed": a legacy estimate that later received real counters ($0.45 of
+	// real cache); "corrected": a legacy estimate whose last run the gateway
+	// priced.
+	if _, err := db.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,model,input_tokens,output_tokens,committed_input_tokens,committed_output_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cost_note,cache_read_tokens,cache_write_tokens,first_seen_at,updated_at) VALUES
+		('mixed','tenant','run-usage','mixed','claude-sonnet-5-5',50000,5000,100000,10000,2.40,1.20,'hub_pricing','2026-10-08','cache_estimate_x6.5',1000000,100000,0,0),
+		('corrected','tenant','run-usage','corrected','claude-sonnet-5-5',50000,5000,100000,10000,2.95,1.00,'gateway','2026-10-08','cache_estimate_x6.5',NULL,NULL,0,0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO usage_daily(tenant_id,day,model,cost_usd,updated_at) VALUES('tenant','2026-10-08','claude-sonnet-5-5',5.35,0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='fallback_cost_breakdown_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var estCost, cacheCost float64
+	var read, estRead int64
+	if err := db.QueryRow(`SELECT est_cache_cost_usd,committed_cache_read_cost_usd+committed_cache_write_cost_usd,committed_cache_read_tokens,est_cache_read_tokens FROM task_run_usage WHERE id='mixed'`).Scan(&estCost, &cacheCost, &read, &estRead); err != nil {
+		t.Fatal(err)
+	}
+	// $2.40 − $0.30 input/output − $0.45 real cache = $1.65 estimated.
+	if math.Abs(estCost-1.65) > 1e-12 || math.Abs(cacheCost-2.10) > 1e-12 || read != 1_000_000+estRead {
+		t.Fatalf("mixed row est=%v cache=%v read=%d est read=%d", estCost, cacheCost, read, estRead)
+	}
+	var approximate int
+	if err := db.QueryRow(`SELECT cost_approximate FROM task_run_usage WHERE id='corrected'`).Scan(&approximate); err != nil {
+		t.Fatal(err)
+	}
+	var dailyApprox float64
+	if err := db.QueryRow(`SELECT approx_cost_usd FROM usage_daily WHERE day='2026-10-08'`).Scan(&dailyApprox); err != nil {
+		t.Fatal(err)
+	}
+	if approximate != 1 || math.Abs(dailyApprox-5.35) > 1e-12 {
+		t.Fatalf("corrected row approximate=%d daily approx=%v, want 1 and 5.35", approximate, dailyApprox)
+	}
+}
