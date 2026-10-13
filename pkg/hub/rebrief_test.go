@@ -323,8 +323,8 @@ func TestRenderStageInjectAppendsPushRuleForWritableRepos(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET github_repos=? WHERE id=?`, `[{"repo":"acme/widgets","permissions":"write"}]`, clawID); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.renderStageInject(clawID, stage, ctx); got != "Implement AMA-200\n\n"+pushBranchEachStageRule {
-		t.Fatalf("renderStageInject=%q, want inject followed by the push rule", got)
+	if got := s.renderStageInject(clawID, stage, ctx); got != pushBranchEachStageRule+"\n\nImplement AMA-200" {
+		t.Fatalf("renderStageInject=%q, want the push rule before the inject", got)
 	}
 
 	stage.Terminal = true

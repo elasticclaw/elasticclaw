@@ -1192,16 +1192,63 @@ func (s *Server) renderStageInject(clawID string, stage pipeline.Stage, ctx pipe
 		injectMsg = inputContext + "\n\n" + injectMsg
 	}
 	if !stage.Terminal && s.clawPushesToGitHub(clawID) {
-		injectMsg += "\n\n" + pushBranchEachStageRule
+		// Prepended, not appended: resume paths truncate the inject from the end.
+		injectMsg = pushBranchEachStageRule + "\n\n" + injectMsg
 	}
 	return injectMsg
 }
 
-// pushBranchEachStageRule is appended by the hub to every non-terminal stage
+// pushBranchEachStageRule is prepended by the hub to every non-terminal stage
 // inject of a claw that works in git repos. A sandbox replacement starts from
 // a fresh clone and checkpoints never carry .git, so commits that exist only
 // in the sandbox are lost (NEXT-1407 lost its whole implementation this way).
 const pushBranchEachStageRule = "[hub] Before you send the signal that ends this stage, commit your work on your ticket branch in every repository you changed and push that branch to origin. Never push to the default branch, and pushing is not opening a pull request. This sandbox can be replaced at any moment from a fresh clone: only what is on origin survives."
+
+// stageBranchCheckScript runs in the workspace before a non-entry stage
+// starts. It pushes every repo whose current branch has commits origin lacks,
+// and reports what it cannot fix. It never commits, never forces, and never
+// pushes the default branch. Ranges use "HEAD ^ref" because hub-run commands
+// must not contain "..".
+const stageBranchCheckScript = `for g in */.git; do [ -e "$g" ] || continue; d=${g%/.git}; (
+cd "$d" || exit 0
+[ -n "$(git status --porcelain)" ] && echo "PROBLEM $d: uncommitted changes"
+b=$(git symbolic-ref --quiet --short HEAD) || { echo "PROBLEM $d: detached HEAD"; exit 0; }
+def=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD); def=${def#origin/}
+[ -n "$def" ] || { echo "PROBLEM $d: unknown default branch"; exit 0; }
+if [ "$b" = "$def" ]; then [ "$(git rev-list --count HEAD ^"origin/$b")" = 0 ] || echo "PROBLEM $d: commits on the default branch $b"; exit 0; fi
+if git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null && [ "$(git rev-list --count HEAD ^"origin/$b")" = 0 ]; then exit 0; fi
+if git push --quiet -u origin "$b" >/dev/null 2>&1; then echo "PUSHED $d: $b"; else echo "PROBLEM $d: push of $b failed"; fi
+); done`
+
+// ensureStageBranchesPushed pushes what the previous stage left unpushed and
+// returns a note for the agent about anything it could not fix ("" if none).
+func (s *Server) ensureStageBranchesPushed(clawID string) string {
+	result, err := s.executePipelineCommand(clawID, stageBranchCheckScript, 2*time.Minute)
+	if err != nil || result == nil {
+		log.Printf("[pipeline] branch check for claw %s failed: %v", shortID(clawID), err)
+		return ""
+	}
+	pushed, problems := parseStageBranchCheck(result.Stdout)
+	if len(pushed) > 0 {
+		s.publishHubNotice(clawID, "[hub] Pushed work the previous stage left only in the sandbox: "+strings.Join(pushed, "; "))
+	}
+	if len(problems) == 0 {
+		return ""
+	}
+	return "[hub] Branch check before this stage: " + strings.Join(problems, "; ") + ". Fix this first: commit on your ticket branch and push it to origin."
+}
+
+func parseStageBranchCheck(stdout string) (pushed, problems []string) {
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "PUSHED "); ok {
+			pushed = append(pushed, rest)
+		} else if rest, ok := strings.CutPrefix(line, "PROBLEM "); ok {
+			problems = append(problems, rest)
+		}
+	}
+	return pushed, problems
+}
 
 // clawPushesToGitHub reports whether the claw clones at least one repo it can
 // write to, i.e. whether there is a branch it could push.
@@ -1235,6 +1282,15 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	// required gate could block the stage (and leave the watcher able to kill
 	// the claw on merge/close while the workflow is still blocked).
 	var runStdoutForPRScan string
+	// Before anything else in a non-entry stage, make sure the previous stage's
+	// commits are on origin: a sandbox replacement would lose them otherwise.
+	var branchCheckNote string
+	if !stage.Entry && !stage.Terminal && s.clawPushesToGitHub(clawID) {
+		branchCheckNote = s.ensureStageBranchesPushed(clawID)
+		if branchCheckNote != "" && stage.OnEnter.Inject == "" {
+			s.publishHubNotice(clawID, branchCheckNote)
+		}
+	}
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
 		startMsg := fmt.Sprintf("[hub] ▶ Running workflow command for stage %q", stage.ID)
 		if stage.OnEnter.Run.Timeout != "" {
@@ -1517,6 +1573,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	if stage.OnEnter.Inject != "" {
 		injectMsg := s.renderStageInject(clawID, stage, ctx)
+		if branchCheckNote != "" {
+			injectMsg = branchCheckNote + "\n\n" + injectMsg
+		}
 		if s.clawNeedsInitialPlan(clawID) && s.insertSystemMarker(clawID, s.tenantIDForClaw(clawID), initialPlanRequiredMarker) {
 			injectMsg = initialPlanWakeContent + "\n\nTask context:\n" + injectMsg
 		}
