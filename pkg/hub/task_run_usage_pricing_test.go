@@ -30,7 +30,7 @@ func TestFallbackCacheCostRatio(t *testing.T) {
 		want float64
 	}{
 		{"same model weighted cost", []sample{{"ANTHROPIC/CLAUDE-SONNET-5-5-20261001", 6, 0}, {"claude-sonnet-5-5", 12, 1}, {"claude-sonnet-5-5", 18, 2}, {"claude-sonnet-5", 90, 0}}, 4},
-		{"all models with own prices", []sample{{"claude-sonnet-5-5", 6, 0}, {"anthropic/claude-sonnet-5", 18, 0}, {"claude-sonnet-5", 27, 0}}, 51.0 / 12},
+		{"all models with own prices", []sample{{"claude-sonnet-5-5", 6, 0}, {"anthropic/claude-sonnet-4-6", 18, 0}, {"claude-sonnet-4-6", 27, 0}}, 51.0 / 12},
 		{"default", []sample{{"claude-sonnet-5-5", 6, 0}, {"unknown-model", 900, 0}, {"unknown-model", 800, 1}}, 6.5},
 		{"clamp", []sample{{"claude-sonnet-5-5", .1, 0}, {"claude-sonnet-5-5", .2, 1}, {"claude-sonnet-5-5", .3, 2}}, 1},
 		{"30 day window", []sample{{"claude-sonnet-5-5", 6, 0}, {"claude-sonnet-5-5", 6, 1}, {"claude-sonnet-5-5", 6, 30}, {"claude-sonnet-5-5", 900, 31}, {"claude-sonnet-5-5", 800, -1}}, 2},
@@ -243,39 +243,55 @@ func TestTaskRunUsageReversalPreservesDayAndModel(t *testing.T) {
 	at = at.AddDate(0, 0, 1)
 	snap.InputTokens = ptr(200000)
 	snap.OutputTokens = ptr(20000)
-	snap.Model = "claude-sonnet-5"
+	snap.Model = "claude-sonnet-4-6"
 	recordUsage(t, s, claw, snap)
 	// Correct only the latest run. The first run remains approximate.
 	snap.EstimatedCostUSD = ptr(2.0)
 	recordUsage(t, s, claw, snap)
 	assertUsageCosts(t, db, 3.95, 1.95, 3300000, 396000, true)
-	// First real counters on the gateway-priced session establish a baseline.
+	ledger := func() string {
+		var out string
+		if err := db.QueryRow(`SELECT group_concat(day||'/'||model||'/'||cost_usd||'/'||approx_cost_usd||'/'||cache_read_tokens||'/'||cache_write_tokens,';') FROM (SELECT * FROM usage_daily ORDER BY day)`).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := ledger()
+	// First real counters on the gateway-priced session become a baseline:
+	// they mix cache the gateway already charged with the first run's, so the
+	// first run keeps its estimate instead of losing its cache cost.
 	snap.CacheReadTokens = ptr(9000000)
 	snap.CacheWriteTokens = ptr(900000)
 	recordUsage(t, s, claw, snap)
-	assertUsageCosts(t, db, 2.3, 0, 0, 0, false)
-	rows, err := db.Query(`SELECT day,model,cost_usd,approx_cost_usd,cache_read_tokens,cache_write_tokens FROM usage_daily ORDER BY day`)
+	assertUsageCosts(t, db, 3.95, 1.95, 3300000, 396000, true)
+	if after := ledger(); after != before {
+		t.Fatalf("ledger changed on baseline:\n%s\n%s", before, after)
+	}
+}
+
+func TestFallbackCacheCostRatioUsesExactHubPricedRuns(t *testing.T) {
+	_, db, _ := newUsageTestServer(t)
+	defer db.Close()
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	for i, cost := range []float64{6, 12, 18, 900} {
+		seedRatioUsage(t, db, "claude-sonnet-5-5", cost, at.Add(time.Duration(i)*time.Nanosecond))
+	}
+	// Hub-priced rows with real cache counters are exact; the 900 row is an
+	// estimate and must not feed the ratio back into itself.
+	if _, err := db.Exec(`UPDATE task_run_usage SET cost_source='hub_pricing',cache_read_tokens=1,cost_approximate=CASE WHEN committed_cost_usd=900 THEN 1 ELSE 0 END`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	for i := 0; rows.Next(); i++ {
-		var day, model string
-		var cost, approx float64
-		var r, w int64
-		if err := rows.Scan(&day, &model, &cost, &approx, &r, &w); err != nil {
-			t.Fatal(err)
-		}
-		want := .3
-		if i == 1 {
-			want = 2
-		}
-		if math.Abs(cost-want) > 1e-9 || math.Abs(approx) > 1e-9 || r != 0 || w != 0 {
-			t.Fatalf("%s/%s: cost=%v approx=%v cache=%d/%d", day, model, cost, approx, r, w)
-		}
-	}
-	if err := rows.Err(); err != nil {
+	defer tx.Rollback()
+	ratio, _, err := measureFallbackCacheRatios(tx, "claude-sonnet-5-5", at)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if math.Abs(ratio-4) > 1e-9 {
+		t.Fatalf("ratio=%v, want 36/9=4", ratio)
 	}
 }
 
@@ -313,7 +329,7 @@ func TestTaskRunUsageRealCountersReverseEveryEstimateBucket(t *testing.T) {
 	at = at.AddDate(0, 0, 1)
 	snap.InputTokens = ptr(200000)
 	snap.OutputTokens = ptr(20000)
-	snap.Model = "claude-sonnet-5"
+	snap.Model = "claude-sonnet-4-6"
 	recordUsage(t, s, claw, snap)
 	snap.CacheReadTokens = ptr(1000000)
 	snap.CacheWriteTokens = ptr(100000)

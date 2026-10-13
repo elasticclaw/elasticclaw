@@ -98,11 +98,15 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	}
 	dRead, dWrite := cacheRead-oldCacheRead.Int64, cacheWrite-oldCacheWrite.Int64
 	firstCounters := !oldCacheRead.Valid && !oldCacheWrite.Valid && (snapshot.CacheReadTokens != nil || snapshot.CacheWriteTokens != nil)
-	if firstCounters && found && oldSource == "gateway" && comCost > 0 {
+	// Counters first seen on a gateway-priced session mix cache the gateway
+	// already charged with earlier estimated runs, so they become a baseline
+	// and those estimates stay in place.
+	baseline := firstCounters && found && oldSource == "gateway" && comCost > 0
+	if baseline {
 		dRead, dWrite = 0, 0
 	}
 	cacheKnown := oldCacheRead.Valid || oldCacheWrite.Valid || firstCounters
-	if firstCounters && estimated.cacheCost() > 0 {
+	if firstCounters && !baseline && estimated.cacheCost() > 0 {
 		// Reverse estimates in their original ledger buckets, including the
 		// approximate classification of their otherwise exact input/output.
 		if err := reverseUsageCacheEstimates(tx, ledger, runID, snapshot.SessionKey, ts); err != nil {
