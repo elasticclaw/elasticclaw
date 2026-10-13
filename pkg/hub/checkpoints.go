@@ -34,7 +34,7 @@ const (
 	checkpointMinInterval        = 5 * time.Minute
 	checkpointRequestTimeout     = 2 * time.Minute
 	checkpointTerminationTimeout = 90 * time.Second
-	maxCheckpointBlobBytes       = 256 << 20
+	maxCheckpointBlobBytes       = types.MaxCheckpointBlobBytes
 
 	defaultCheckpointRestoreParallelism = 8
 	checkpointRestoreFileTimeout        = 2 * time.Minute
