@@ -58,9 +58,9 @@ func queryUsageDaily(t *testing.T, db *sql.DB) (in, out, total int, cost float64
 func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	s, db, claw := newUsageTestServer(t)
 	defer db.Close()
-	run1 := usageSnapshot("a", 10_000, 1_000, 99_999, "claude-sonnet-5")
+	run1 := usageSnapshot("a", 10_000, 1_000, 99_999, "claude-sonnet-4-6")
 	run1.EstimatedCostUSD = ptr(0.05)
-	run2 := usageSnapshot("a", 50_000, 2_000, 7, "claude-sonnet-5")
+	run2 := usageSnapshot("a", 50_000, 2_000, 7, "claude-sonnet-4-6")
 	run2.EstimatedCostUSD = ptr(0.20)
 	for _, snap := range []taskRunUsageSnapshot{run1, run1, run2} { // repeated heartbeat
 		if err := s.recordTaskRunUsage(claw, snap); err != nil {
@@ -77,11 +77,11 @@ func TestTaskRunUsageRecordsEachRunAndIgnoresContextTotal(t *testing.T) {
 	}
 	// This run's raw total grows from run2's 7, but it is still a distinct
 	// per-reply total rather than a cumulative counter.
-	run3 := usageSnapshot("a", 60_000, 2_500, 60_000, "claude-sonnet-5")
+	run3 := usageSnapshot("a", 60_000, 2_500, 60_000, "claude-sonnet-4-6")
 	run3.EstimatedCostUSD = ptr(0.30)
-	run4 := usageSnapshot("a", 5_000, 500, 123_456, "claude-sonnet-5")
+	run4 := usageSnapshot("a", 5_000, 500, 123_456, "claude-sonnet-4-6")
 	run4.EstimatedCostUSD = ptr(0.01)
-	for _, snap := range []taskRunUsageSnapshot{run3, run4, usageSnapshot("b", 3_000, 300, 42, "claude-sonnet-5")} {
+	for _, snap := range []taskRunUsageSnapshot{run3, run4, usageSnapshot("b", 3_000, 300, 42, "claude-sonnet-4-6")} {
 		if err := s.recordTaskRunUsage(claw, snap); err != nil {
 			t.Fatal(err)
 		}
