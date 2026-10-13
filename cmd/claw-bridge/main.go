@@ -2347,7 +2347,10 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 		return
 	}
 	usage := gatewayUsage{sessionKey: sessionKey, inputTokens: payload.Session.InputTokens, outputTokens: payload.Session.OutputTokens, totalTokens: payload.Session.TotalTokens, estimatedCostUSD: payload.Session.EstimatedCostUSD, model: payload.Session.Model, modelProvider: payload.Session.ModelProvider}
-	if usage.gatewayCostUnknown() {
+	gs.ctxMu.Lock()
+	prev := gs.usage
+	gs.ctxMu.Unlock()
+	if usage.needsCacheTokens(prev) {
 		usage.cacheReadTokens, usage.cacheWriteTokens = gs.sessionCacheTokens(ctx, sessionKey)
 	}
 	gs.ctxMu.Lock()
@@ -2366,6 +2369,14 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 		gs.contextUsage = usage
 	}
 	gs.ctxMu.Unlock()
+}
+
+// needsCacheTokens reports whether to poll sessions.usage. Polling continues
+// once a session has counters: a gateway-priced turn still advances the
+// cumulative cache, and the hub must baseline it instead of charging it later.
+func (u gatewayUsage) needsCacheTokens(prev gatewayUsage) bool {
+	hasCounters := prev.sessionKey == u.sessionKey && (prev.cacheReadTokens != nil || prev.cacheWriteTokens != nil)
+	return u.gatewayCostUnknown() || hasCounters
 }
 
 // gatewayCostUnknown reports a session that used tokens but has no gateway

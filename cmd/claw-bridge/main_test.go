@@ -4660,6 +4660,20 @@ func TestGatewayCostUnknown(t *testing.T) {
 	}
 }
 
+func TestNeedsCacheTokensAfterGatewayPricing(t *testing.T) {
+	n, cost, read := 10, 0.5, 100
+	priced := gatewayUsage{sessionKey: "a", inputTokens: &n, estimatedCostUSD: &cost}
+	if priced.needsCacheTokens(gatewayUsage{sessionKey: "a"}) {
+		t.Fatal("gateway-priced session without counters must not poll")
+	}
+	if !priced.needsCacheTokens(gatewayUsage{sessionKey: "a", cacheReadTokens: &read}) {
+		t.Fatal("gateway-priced turn after counters must keep the cache baseline current")
+	}
+	if priced.needsCacheTokens(gatewayUsage{sessionKey: "b", cacheReadTokens: &read}) {
+		t.Fatal("another session's counters must not trigger polling")
+	}
+}
+
 func TestMaxIntPtr(t *testing.T) {
 	one, two := 1, 2
 	if got := maxIntPtr(&two, &one); *got != 2 {
