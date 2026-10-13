@@ -535,18 +535,13 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// which is an upper bound rather than a permanent veto (see
 	// TestAgentIdleResumeFiresAfterTheBlindWindowElapses).
 	//
-	// bridge_error_auto_resumes is re-armed for the new sandbox. A pause latched
-	// by a bridge transport error (bridge_error_pause_kind != '') blamed the
-	// sandbox/gateway that is being replaced, so it is lifted here: otherwise
-	// the honest re-brief stays pending behind the pause until a human types
-	// "continue" (NEXT-1407). No auto-lift message is sent -- the re-brief is
-	// the only message and it states the discontinuity, so the NEXT-1293
-	// "nothing was lost" concern does not apply. Pauses with no kind (genuine
-	// no-progress, human) stay latched. Clearing the row is enough: the
-	// successor's connection reads the persisted latch at registration, and
-	// the retry cap (attempt N/3) bounds how often this can happen. SQLite
-	// evaluates SET expressions against the old row, so the CASE sees the kind
-	// before it is cleared.
+	// bridge_error_auto_resumes is re-armed for the new sandbox. A pause tagged
+	// with a bridge_error_pause_kind blamed the sandbox being replaced, so it is
+	// lifted here; otherwise the re-brief waits behind it until a human types
+	// (NEXT-1407: 63h). No auto-lift message is sent: the re-brief already says
+	// the session is new, which was the NEXT-1293 concern. Untagged pauses
+	// (genuine no-progress, human) stay latched. The CASE reads the old row, so
+	// it sees the kind before the same SET clears it.
 	res, err := s.db.Exec(`
 		UPDATE claws
 		   SET status='provisioning', no_progress_paused=CASE WHEN bridge_error_pause_kind!='' THEN 0 ELSE no_progress_paused END, bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,

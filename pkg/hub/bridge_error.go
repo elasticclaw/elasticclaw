@@ -56,9 +56,9 @@ const bridgeErrorPauseThreshold = 2
 // so resetting there would refund the budget on every flap. The caps preserve
 // the NEXT-725 guarantee: a sandbox that keeps failing still stops and then
 // waits for a human. Every other error (ENOSPC, other "Agent run failed"
-// causes, credential or handshake rejections) is never auto-lifted, and neither
-// is a gateway pause carried across a sandbox replacement
-// (resetClawForRetry clears the kind).
+// causes, credential or handshake rejections) is never auto-lifted. A tagged
+// pause is not carried across a sandbox replacement either: resetClawForRetry
+// lifts it outright and the re-brief is the only message (NEXT-1407).
 const (
 	bridgeErrorPauseKindGateway           = "gateway"
 	bridgeErrorPauseKindProviderTransient = "provider_transient"
