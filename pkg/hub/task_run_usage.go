@@ -359,3 +359,86 @@ func backfillSonnet55CacheEstimateV1(db *sql.DB) error {
 	}
 	return tx.Commit()
 }
+
+// sonnet55CacheMultiplierV2 replaces sonnet55CacheMultiplier: it is the
+// aggregate full-to-input/output cost ratio of the first 8 claude-sonnet-5-5
+// runs that reported cache tokens live (2026-10-09..13), measured on the same
+// basis the estimate is applied to. The WAL sample behind v1 covered ~11% of
+// replies and overstated it.
+const sonnet55CacheMultiplierV2 = 6.5
+
+// recalibrateSonnet55CacheEstimateV2 rescales rows estimated by
+// backfillSonnet55CacheEstimateV1 from sonnet55CacheMultiplier to
+// sonnet55CacheMultiplierV2.
+func recalibrateSonnet55CacheEstimateV2(db *sql.DB) error {
+	const migration = "sonnet55_cache_estimate_v2"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check sonnet-5-5 cache estimate recalibration: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	oldNote := fmt.Sprintf("cache_estimate_x%.1f", sonnet55CacheMultiplier)
+	newNote := fmt.Sprintf("cache_estimate_x%.1f", sonnet55CacheMultiplierV2)
+	scale := sonnet55CacheMultiplierV2 / sonnet55CacheMultiplier
+	type estimateRow struct {
+		id, tenant, runID, model, usageDay string
+		workspace, factory, workflow       string
+		committed                          float64
+		estimated                          sql.NullFloat64
+	}
+	rows, err := tx.Query(`SELECT u.id,u.tenant_id,u.run_id,u.model,u.usage_day,tr.workspace_name,tr.factory_name,tr.workflow_name,u.committed_cost_usd,u.estimated_cost_usd
+		FROM task_run_usage u JOIN task_runs tr ON tr.id=u.run_id AND tr.tenant_id=u.tenant_id WHERE u.cost_note=?`, oldNote)
+	if err != nil {
+		return fmt.Errorf("select sonnet-5-5 cache estimates: %w", err)
+	}
+	var pending []estimateRow
+	for rows.Next() {
+		var r estimateRow
+		if err := rows.Scan(&r.id, &r.tenant, &r.runID, &r.model, &r.usageDay, &r.workspace, &r.factory, &r.workflow, &r.committed, &r.estimated); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	runs := map[[2]string]bool{}
+	for _, r := range pending {
+		committed := r.committed * scale
+		estimated := r.estimated
+		if estimated.Valid {
+			estimated.Float64 *= scale
+		}
+		if _, err := tx.Exec(`UPDATE task_run_usage SET committed_cost_usd=?,estimated_cost_usd=?,cost_note=? WHERE id=?`, committed, nullFloat(estimated), newNote, r.id); err != nil {
+			return fmt.Errorf("recalibrate sonnet-5-5 cache estimate: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE usage_daily SET cost_usd=cost_usd+?,updated_at=? WHERE tenant_id=? AND day=? AND workspace_name=? AND factory_name=? AND workflow_name=? AND model=?`, committed-r.committed, now().UnixMilli(), r.tenant, r.usageDay, r.workspace, r.factory, r.workflow, r.model); err != nil {
+			return fmt.Errorf("recalibrate sonnet-5-5 cache estimate in usage_daily: %w", err)
+		}
+		runs[[2]string{r.tenant, r.runID}] = true
+	}
+	for k := range runs {
+		if _, err := tx.Exec(`UPDATE task_run_summaries SET estimated_cost_usd=(SELECT COALESCE(SUM(committed_cost_usd),0) FROM task_run_usage WHERE tenant_id=? AND run_id=?) WHERE tenant_id=? AND run_id=?`, k[0], k[1], k[0], k[1]); err != nil {
+			return fmt.Errorf("recalibrate sonnet-5-5 run summary: %w", err)
+		}
+	}
+	if len(runs) > 0 {
+		log.Printf("[usage] sonnet-5-5 cache estimate recalibrated: %d run(s) from %.1fx to %.1fx", len(runs), sonnet55CacheMultiplier, sonnet55CacheMultiplierV2)
+	}
+	if _, err := tx.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

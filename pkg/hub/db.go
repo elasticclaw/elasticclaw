@@ -1229,7 +1229,10 @@ func migrate(db *sql.DB) error {
 	if err := backfillZeroGatewayUsageCostV1(db); err != nil {
 		return err
 	}
-	return backfillSonnet55CacheEstimateV1(db)
+	if err := backfillSonnet55CacheEstimateV1(db); err != nil {
+		return err
+	}
+	return recalibrateSonnet55CacheEstimateV2(db)
 }
 
 func migrateTicketMetadataKey(db *sql.DB) error {
