@@ -8,15 +8,15 @@ import "strings"
 type ConnectionCapability string
 
 const (
-	CapObserveRuns       ConnectionCapability = "observe_runs"
-	CapObserveChecks     ConnectionCapability = "observe_checks"
-	CapTriggerRun        ConnectionCapability = "trigger_run"
-	CapRetryRun          ConnectionCapability = "retry_run"
-	CapCancelRun         ConnectionCapability = "cancel_run"
-	CapFetchLogs         ConnectionCapability = "fetch_logs"
-	CapReconcile         ConnectionCapability = "reconcile"
-	CapExecuteCommand    ConnectionCapability = "execute_command"
-	CapDependencyUpdate  ConnectionCapability = "dependency_update"
+	CapObserveRuns      ConnectionCapability = "observe_runs"
+	CapObserveChecks    ConnectionCapability = "observe_checks"
+	CapTriggerRun       ConnectionCapability = "trigger_run"
+	CapRetryRun         ConnectionCapability = "retry_run"
+	CapCancelRun        ConnectionCapability = "cancel_run"
+	CapFetchLogs        ConnectionCapability = "fetch_logs"
+	CapReconcile        ConnectionCapability = "reconcile"
+	CapExecuteCommand   ConnectionCapability = "execute_command"
+	CapDependencyUpdate ConnectionCapability = "dependency_update"
 )
 
 // AllConnectionCapabilities is the full set used by CI-style connections.
@@ -78,7 +78,6 @@ func isExecutionProvider(provider string) bool {
 	}
 	return false
 }
-
 
 // ResolveCapabilities intersects provider defaults with workspace restrictions.
 // Restrictions may only set a capability to false; setting true when the

@@ -185,6 +185,9 @@ type CheckpointCreatePayload struct {
 }
 
 // CheckpointFile describes one content-addressed file in a bridge checkpoint.
+// MaxCheckpointBlobBytes is the largest single file the hub accepts in a checkpoint.
+const MaxCheckpointBlobBytes = 256 << 20
+
 type CheckpointFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`

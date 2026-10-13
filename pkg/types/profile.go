@@ -25,7 +25,7 @@ type GlobalConfig struct {
 	ActiveProfile string                 `yaml:"active_profile,omitempty"`
 	Profiles      map[string]*HubProfile `yaml:"profiles,omitempty"`
 	// Hub is the legacy single-hub field. Migrated to Profiles["default"] on first use.
-	Hub           *HubConfig `yaml:"hub,omitempty"`
+	Hub *HubConfig `yaml:"hub,omitempty"`
 }
 
 // LockFile represents .elasticclaw/lock.yaml
@@ -33,8 +33,8 @@ type LockFile struct {
 	Template      TemplateLock `yaml:"template"`
 	Images        []ImageLock  `yaml:"images,omitempty"`
 	LockedAt      string       `yaml:"locked_at"`
-	SchemaVersion string      `yaml:"schema_version,omitempty"`
-	ToolVersion   string      `yaml:"tool_version,omitempty"`
+	SchemaVersion string       `yaml:"schema_version,omitempty"`
+	ToolVersion   string       `yaml:"tool_version,omitempty"`
 }
 
 type TemplateLock struct {

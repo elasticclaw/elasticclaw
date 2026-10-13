@@ -4,16 +4,47 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+func TestCollectCheckpointFilesSkipsOversizedAndBuildCaches(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	ws := filepath.Join(tmpDir, ".openclaw", "workspace")
+	for _, rel := range []string{"a.txt", ".turbo/x.log", ".pnpm-store/v3/f"} {
+		abs := filepath.Join(ws, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	big := filepath.Join(ws, "big.bin")
+	if err := os.WriteFile(big, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(big, types.MaxCheckpointBlobBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	got, err := collectCheckpointFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].entry.Path != "workspace/a.txt" {
+		t.Fatalf("expected only workspace/a.txt, got %+v", got)
+	}
+}
 
 func TestCollectCheckpointFilesExcludesSessionsAndAuthProfiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
 	files := map[string]string{
-		".openclaw/workspace/src/main.go":          "package main",
-		".openclaw/workspace/sessions/data.json":   "[]",
-		".openclaw/openclaw.json":                  "{}",
+		".openclaw/workspace/src/main.go":                   "package main",
+		".openclaw/workspace/sessions/data.json":            "[]",
+		".openclaw/openclaw.json":                           "{}",
 		".openclaw/agents/main/agent/openclaw-agent.sqlite": "sqlite",
 		".openclaw/agents/main/agent/auth-profiles.json":    "auth",
 		".openclaw/agents/main/sessions/session.jsonl":      "{}",

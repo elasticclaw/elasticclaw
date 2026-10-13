@@ -47,7 +47,21 @@ func handleCheckpointCreate(ctx context.Context, payload json.RawMessage) {
 	}
 }
 
+// errCheckpointFileChanged marks a file that changed between hashing and upload.
+// The plan already references its old digest, so the attempt is redone from
+// collection rather than leaving a manifest entry without a blob.
+var errCheckpointFileChanged = errors.New("file changed during checkpoint")
+
 func createCheckpoint(ctx context.Context, req types.CheckpointCreatePayload) error {
+	err := createCheckpointAttempt(ctx, req)
+	if errors.Is(err, errCheckpointFileChanged) {
+		log.Printf("[checkpoint] %v; retrying once", err)
+		err = createCheckpointAttempt(ctx, req)
+	}
+	return err
+}
+
+func createCheckpointAttempt(ctx context.Context, req types.CheckpointCreatePayload) error {
 	files, err := collectCheckpointFiles()
 	if err != nil {
 		return err
@@ -93,6 +107,19 @@ func createCheckpoint(ctx context.Context, req types.CheckpointCreatePayload) er
 			if err != nil {
 				return fmt.Errorf("open blob %s: %w", path, err)
 			}
+			h := sha256.New()
+			if _, err := io.Copy(h, f); err != nil {
+				_ = f.Close()
+				return fmt.Errorf("rehash blob %s: %w", path, err)
+			}
+			if hex.EncodeToString(h.Sum(nil)) != sha {
+				_ = f.Close()
+				return fmt.Errorf("%w: %s", errCheckpointFileChanged, path)
+			}
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				_ = f.Close()
+				return err
+			}
 			body = f
 			if err := putCheckpointBlob(ctx, req, sha, body); err != nil {
 				_ = f.Close()
@@ -128,10 +155,19 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 	var out []checkpointLocalFile
 	skipped := 0
 	firstSkipped := ""
+	oversized := 0
+	firstOversized := ""
+	var firstOversizedSize int64
 	noteSkipped := func(path string) {
 		skipped++
 		if firstSkipped == "" {
 			firstSkipped = path
+		}
+	}
+	noteOversized := func(path string, size int64) {
+		oversized++
+		if firstOversized == "" {
+			firstOversized, firstOversizedSize = path, size
 		}
 	}
 	for _, root := range roots {
@@ -146,6 +182,10 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 			f, err := checkpointFile(root.base, root.label, info)
 			if errors.Is(err, errNotRegularFile) {
 				noteSkipped(root.base)
+				continue
+			}
+			if errors.Is(err, errOversizedFile) {
+				noteOversized(root.base, info.Size())
 				continue
 			}
 			if err != nil {
@@ -181,6 +221,10 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 				noteSkipped(path)
 				return nil
 			}
+			if errors.Is(err, errOversizedFile) {
+				noteOversized(path, info.Size())
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -194,6 +238,9 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 	if skipped > 0 {
 		log.Printf("[checkpoint] skipped %d non-regular file(s) (symlink/socket/fifo/device), first: %s", skipped, firstSkipped)
 	}
+	if oversized > 0 {
+		log.Printf("[checkpoint] skipped %d file(s) larger than %d bytes, first: %s (%d bytes)", oversized, types.MaxCheckpointBlobBytes, firstOversized, firstOversizedSize)
+	}
 	return out, nil
 }
 
@@ -203,7 +250,7 @@ func checkpointExclude(path string, d os.DirEntry) bool {
 		return true
 	}
 	switch name {
-	case "node_modules", ".cache", "tmp", "dist", "build", ".next", "auth-profiles.json", "openclaw-agent.sqlite":
+	case "node_modules", ".cache", ".turbo", ".pnpm-store", "tmp", "dist", "build", ".next", "auth-profiles.json", "openclaw-agent.sqlite":
 		return true
 	}
 	// Only exclude the agent sessions directory, not arbitrary "sessions" folders in the workspace.
@@ -220,9 +267,15 @@ func checkpointExclude(path string, d os.DirEntry) bool {
 // fifos, devices). Callers skip them instead of aborting the whole snapshot.
 var errNotRegularFile = errors.New("not a regular file")
 
+// errOversizedFile marks regular files the hub would reject as too large.
+var errOversizedFile = errors.New("file exceeds checkpoint blob limit")
+
 func checkpointFile(abs, rel string, info os.FileInfo) (checkpointLocalFile, error) {
 	if !info.Mode().IsRegular() {
 		return checkpointLocalFile{}, fmt.Errorf("%w: %s", errNotRegularFile, abs)
+	}
+	if info.Size() > types.MaxCheckpointBlobBytes {
+		return checkpointLocalFile{}, fmt.Errorf("%w: %s", errOversizedFile, abs)
 	}
 	f, err := os.Open(abs)
 	if err != nil {
