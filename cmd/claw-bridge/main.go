@@ -2351,7 +2351,7 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 	prev := gs.usage
 	gs.ctxMu.Unlock()
 	if usage.needsCacheTokens(prev) {
-		usage.cacheReadTokens, usage.cacheWriteTokens = gs.sessionCacheTokens(ctx, sessionKey)
+		usage.cacheReadTokens, usage.cacheWriteTokens = gs.sessionCacheTokens(ctx, sessionKey, usage.newTurnSince(prev))
 	}
 	gs.ctxMu.Lock()
 	if gs.usage.sessionKey == usage.sessionKey {
@@ -2379,6 +2379,16 @@ func (u gatewayUsage) needsCacheTokens(prev gatewayUsage) bool {
 	return u.gatewayCostUnknown() || hasCounters
 }
 
+// newTurnSince reports a completed reply: OpenClaw overwrites the session's
+// input/output totals with each run's own.
+func (u gatewayUsage) newTurnSince(prev gatewayUsage) bool {
+	return prev.sessionKey != u.sessionKey || !equalIntPtr(prev.inputTokens, u.inputTokens) || !equalIntPtr(prev.outputTokens, u.outputTokens)
+}
+
+func equalIntPtr(a, b *int) bool {
+	return a == b || (a != nil && b != nil && *a == *b)
+}
+
 // gatewayCostUnknown reports a session that used tokens but has no gateway
 // cost: OpenClaw reports $0 (or nothing) for models outside its price catalog.
 func (u gatewayUsage) gatewayCostUnknown() bool {
@@ -2393,14 +2403,16 @@ const sessionCacheUsagePollInterval = time.Minute
 // price models the gateway cannot. sessions.usage scans transcripts, so it is
 // polled at most once per sessionCacheUsagePollInterval; between polls, and
 // when a poll fails, the last values for the same session are reused.
-func (gs *gatewaySession) sessionCacheTokens(ctx context.Context, sessionKey string) (read, write *int) {
+func (gs *gatewaySession) sessionCacheTokens(ctx context.Context, sessionKey string, newTurn bool) (read, write *int) {
 	gs.ctxMu.Lock()
 	last := gs.usage
 	sameSession := last.sessionKey == sessionKey
 	if !sameSession {
 		last = gatewayUsage{}
 	}
-	if sameSession && time.Since(gs.cacheUsagePolledAt) < sessionCacheUsagePollInterval {
+	// A new turn always polls: its counters must land with the turn that spent
+	// them, or the next differently-priced turn would absorb them.
+	if sameSession && !newTurn && time.Since(gs.cacheUsagePolledAt) < sessionCacheUsagePollInterval {
 		gs.ctxMu.Unlock()
 		return last.cacheReadTokens, last.cacheWriteTokens
 	}

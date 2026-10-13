@@ -4674,6 +4674,20 @@ func TestNeedsCacheTokensAfterGatewayPricing(t *testing.T) {
 	}
 }
 
+func TestNewTurnSince(t *testing.T) {
+	a, b := 10, 20
+	prev := gatewayUsage{sessionKey: "s", inputTokens: &a, outputTokens: &a}
+	if (gatewayUsage{sessionKey: "s", inputTokens: &a, outputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("same totals are the same turn")
+	}
+	if !(gatewayUsage{sessionKey: "s", inputTokens: &b, outputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("changed input totals are a new turn")
+	}
+	if !(gatewayUsage{sessionKey: "s", inputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("a dropped output total is a new turn")
+	}
+}
+
 func TestMaxIntPtr(t *testing.T) {
 	one, two := 1, 2
 	if got := maxIntPtr(&two, &one); *got != 2 {
