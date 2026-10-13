@@ -106,7 +106,7 @@ func measureFallbackCacheRatios(tx *sql.Tx, model string, at time.Time) (float64
 	}
 	target, _ := match(model)
 	cutoff := at.AddDate(0, 0, -30).UnixMilli()
-	rows, err = tx.Query(`SELECT model,committed_input_tokens,committed_output_tokens,committed_cost_usd FROM task_run_usage WHERE (cost_source='gateway' OR (cost_source='hub_pricing' AND cost_approximate=0 AND cache_read_tokens IS NOT NULL)) AND committed_cost_usd>0 AND updated_at>=? AND updated_at<=?`, cutoff, at.UnixMilli())
+	rows, err = tx.Query(`SELECT model,committed_input_tokens,committed_output_tokens,committed_cost_usd FROM task_run_usage WHERE (cost_source='gateway' OR (cost_source='hub_pricing' AND cache_read_tokens IS NOT NULL)) AND cost_approximate=0 AND committed_cost_usd>0 AND updated_at>=? AND updated_at<=?`, cutoff, at.UnixMilli())
 	if err != nil {
 		return 0, 0, err
 	}
