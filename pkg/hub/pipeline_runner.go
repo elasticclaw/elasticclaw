@@ -1191,7 +1191,31 @@ func (s *Server) renderStageInject(clawID string, stage pipeline.Stage, ctx pipe
 	if inputContext := formatManualTriggerInputs(manualInputs); inputContext != "" {
 		injectMsg = inputContext + "\n\n" + injectMsg
 	}
+	if !stage.Terminal && s.clawPushesToGitHub(clawID) {
+		injectMsg += "\n\n" + pushBranchEachStageRule
+	}
 	return injectMsg
+}
+
+// pushBranchEachStageRule is appended by the hub to every non-terminal stage
+// inject of a claw that works in git repos. A sandbox replacement starts from
+// a fresh clone and checkpoints never carry .git, so commits that exist only
+// in the sandbox are lost (NEXT-1407 lost its whole implementation this way).
+const pushBranchEachStageRule = "[hub] Before you send the signal that ends this stage, commit your work on your ticket branch in every repository you changed and push that branch to origin. Never push to the default branch, and pushing is not opening a pull request. This sandbox can be replaced at any moment from a fresh clone: only what is on origin survives."
+
+// clawPushesToGitHub reports whether the claw clones at least one repo it can
+// write to, i.e. whether there is a branch it could push.
+func (s *Server) clawPushesToGitHub(clawID string) bool {
+	var reposJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&reposJSON)
+	var repos []types.GitHubRepoAccess
+	_ = json.Unmarshal([]byte(reposJSON), &repos)
+	for _, r := range repos {
+		if r.Permissions == "write" && (r.Clone == nil || *r.Clone) {
+			return true
+		}
+	}
+	return false
 }
 
 // runOnEnter executes the on_enter actions for a given stage.
