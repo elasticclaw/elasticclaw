@@ -3,7 +3,7 @@ import type { AIChatSource } from "@/lib/api"
 export function sourceStatus(status: string) {
   switch (status) {
     case "connected": return { label: "Connected", dotClass: "bg-green-500", textClass: "text-muted-foreground", warning: false }
-    case "unreachable": return { label: "Can't reach", dotClass: "bg-amber-500", textClass: "text-amber-600 dark:text-amber-400", warning: true }
+    case "unreachable": return { label: "Can't reach", dotClass: "bg-amber-500", textClass: "text-amber-600 dark:text-amber-500", warning: true }
     case "invalid": return { label: "Invalid", dotClass: "bg-destructive", textClass: "text-destructive", warning: true }
     default: return { label: "Unknown", dotClass: "bg-muted-foreground", textClass: "text-muted-foreground", warning: false }
   }
@@ -42,5 +42,13 @@ export function repositoryNames(kind: string, names: string) {
 
 // Sources left out of a turn say so, since the runner drops their tools.
 export function skipNotice(source: AIChatSource) {
-  return source.status === "unreachable" || source.status === "invalid" ? `Answers skip ${source.name || "this source"} until this is fixed.` : ""
+  const name = source.name || "this source"
+  if (source.status === "invalid") return `Answers will skip ${name} until it is fixed in the workspace configuration.`
+  if (source.status === "unreachable") return `Answers will skip ${name} until a check succeeds.`
+  return ""
+}
+
+export function sourceMessage(source: AIChatSource) {
+  const error = (source.error ?? "").trim()
+  return [error && !/[.!?]$/.test(error) ? `${error}.` : error, skipNotice(source)].filter(Boolean).join(" ")
 }

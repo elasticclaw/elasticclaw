@@ -521,7 +521,7 @@ function findElements(tree, type) {
 
 test("sources popover renders grouped details, read badges, errors, workspace, and refresh", () => {
   const { ChatHeader } = loadComponent("components/ai-chat/header.tsx", {
-    "lucide-react": Object.fromEntries(["Activity", "BarChart3", "BookOpen", "ChevronDown", "Database", "GitBranch", "Plus", "RefreshCw", "Ticket", "TriangleAlert"].map((name) => [name, name])),
+    "lucide-react": Object.fromEntries(["Activity", "BarChart3", "Book", "ChevronDown", "Database", "GitBranch", "Plus", "RefreshCw", "Ticket", "TriangleAlert"].map((name) => [name, name])),
     "@/components/ui/button": { Button: "Button" },
     "@/components/ui/popover": { Popover: "Popover", PopoverContent: "PopoverContent", PopoverTrigger: "PopoverTrigger" },
     "./mode-cards": { chatModes: [] },
@@ -533,23 +533,23 @@ test("sources popover renders grouped details, read badges, errors, workspace, a
     source("repositories", "connected", { name: "Repositories", detail: "acme/web, acme/api, other/tools · default branch" }),
     source("posthog", "connected", { name: "PostHog", detail: "Project Web app · events and saved insights" }),
     source("datadog", "unreachable", { name: "Datadog", error: "The API key was rejected." }),
-    source("issue_tracker", "invalid", { name: "Linear", error: "Choose a team." }),
+    source("issue_tracker", "invalid", { name: "Linear", error: "Choose a team" }),
     source("__proto__", "future-status", { name: "Future provider" }),
   ] }) }
   const tree = ChatHeader(props)
   const text = elementText(tree)
-  for (const expected of ["What this chat can read", "Workspace fasterway", "The assistant reads these and never changes them.", "owner/repo · 61 pages", "3 of 6 sources", "Connected", "Can't reach", "The API key was rejected. Answers skip Datadog until this is fixed.", "Invalid", "Choose a team.", "Future provider", "Unknown", "Set in the workspace configuration, the same for everyone in this workspace."]) assert.ok(text.includes(expected), expected)
+  for (const expected of ["What this chat can read", "Workspace fasterway", "The assistant reads these and never changes them.", "owner/repo · 61 pages", "3 of 6 sources", "Connected", "Can't reach", "The API key was rejected. Answers will skip Datadog until a check succeeds.", "Invalid", "Choose a team. Answers will skip Linear until it is fixed in the workspace configuration.", "web, api, tools", "Future provider", "Unknown", "Set in the workspace configuration, the same for everyone in this workspace."]) assert.ok(text.includes(expected), expected)
   assert.doesNotMatch(text, /create artifacts|create ticket|unchecked/i)
   assert.equal(findElements(tree, "span").filter((item) => elementText(item) === "Read").length, 6)
   assert.equal(findElements(tree, "h3").map(elementText).join(","), "Knowledge,Data,Tracker,Other")
-  assert.ok(findElements(tree, "span").some((item) => elementText(item) === "web, api, tools"))
-  assert.ok(findElements(tree, "span").some((item) => elementText(item) === "owner/repo" && item.props.className.includes("font-mono")))
+  for (const name of ["web", "api", "tools"]) assert.ok(findElements(tree, "span").some((item) => elementText(item) === name && item.props.className === "font-mono"), name)
+  assert.ok(findElements(tree, "span").some((item) => elementText(item) === "owner/repo" && item.props.className === "font-mono"))
   assert.ok(findElement(tree, "Database"))
-  const refresh = findElements(tree, "Button").find((item) => elementText(item) === "Refresh")
+  const refresh = findElements(tree, "Button").find((item) => item.props["aria-label"] === "Refresh sources")
   refresh.props.onClick()
   assert.equal(refreshed, 1)
   const loading = ChatHeader({ ...props, loading: true })
-  assert.equal(findElements(loading, "Button").find((item) => elementText(item) === "Refresh").props.disabled, true)
+  assert.equal(findElements(loading, "Button").find((item) => item.props["aria-label"] === "Refresh sources").props.disabled, true)
   assert.equal(findElement(loading, "Button").props["aria-busy"], true)
 })
 

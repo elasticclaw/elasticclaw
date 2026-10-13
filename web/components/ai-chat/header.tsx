@@ -1,11 +1,11 @@
 "use client"
 
-import { Activity, BarChart3, BookOpen, ChevronDown, Database, GitBranch, Plus, RefreshCw, Ticket, TriangleAlert } from "lucide-react"
+import { Activity, BarChart3, Book, ChevronDown, Database, GitBranch, Plus, RefreshCw, Ticket, TriangleAlert } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import type { AIChatSource, AIChatSources } from "@/lib/api"
 import { chatModes, type ChatMode } from "./mode-cards"
-import { groupSources, repositoryNames, skipNotice, sourceStatus, sourceSummary } from "./sources"
+import { groupSources, repositoryNames, sourceMessage, sourceStatus, sourceSummary } from "./sources"
 
 export function ChatHeader({ mode, title, data, loading = !data, onNewChat, onRefreshSources }: {
   mode: ChatMode | null
@@ -27,12 +27,12 @@ export function ChatHeader({ mode, title, data, loading = !data, onNewChat, onRe
       <div className="ml-auto flex items-center gap-2">
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" size="sm" className="gap-2" disabled={!data} aria-label={`${summary.label} · read-only`} aria-busy={loading}>
+            <Button variant="outline" size="sm" className="gap-2 text-[13px]" disabled={!data} aria-label={`${summary.label} · read-only`} aria-busy={loading}>
               <span className={`size-1.5 rounded-full ${summary.dotClass}`} aria-hidden="true" />
               {summary.label} <span className="text-muted-foreground">· read-only</span><ChevronDown className="size-3" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="end" className="max-h-[var(--radix-popover-content-available-height)] w-[460px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl p-5">
+          <PopoverContent align="end" sideOffset={6} className="max-h-[var(--radix-popover-content-available-height)] w-[460px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-lg px-5 pt-3.5 pb-3">
             <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
               <h2 className="text-sm font-semibold">What this chat can read</h2>
               <span className="text-xs text-muted-foreground">Workspace {data?.workspace}</span>
@@ -45,43 +45,43 @@ export function ChatHeader({ mode, title, data, loading = !data, onNewChat, onRe
                 <div className="space-y-5">{group.sources.map((source, index) => renderSource(source, index))}</div>
               </section>
             ))}
-            <div className="mt-5 flex items-start gap-3 border-t pt-3">
-              <p className="flex-1 text-[11px] leading-relaxed text-muted-foreground">Set in the workspace configuration, the same for everyone in this workspace.</p>
-              <Button variant="ghost" size="sm" className="h-6 shrink-0 gap-1.5 px-1 text-xs text-muted-foreground" disabled={loading} onClick={onRefreshSources}>
-                <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} />Refresh
+            <div className="-mx-3 mt-5 flex items-center gap-2 border-t px-3 pt-3">
+              <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-muted-foreground">Set in the workspace configuration, the same for everyone in this workspace.</p>
+              <Button variant="ghost" size="icon" className="size-6 shrink-0 text-muted-foreground" aria-label="Refresh sources" title="Refresh sources" disabled={loading} onClick={onRefreshSources}>
+                <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} />
               </Button>
             </div>
           </PopoverContent>
         </Popover>
-        <Button variant="outline" size="sm" onClick={onNewChat}><Plus className="size-3.5" />New chat</Button>
+        <Button variant="outline" size="sm" className="text-[13px]" onClick={onNewChat}><Plus className="size-3.5" />New chat</Button>
       </div>
     </header>
   )
 }
 
 function renderSource(source: AIChatSource, index: number) {
-  const icons: Record<string, typeof Database> = { knowledge_base: BookOpen, repositories: GitBranch, posthog: BarChart3, datadog: Activity, issue_tracker: Ticket }
+  const icons: Record<string, typeof Database> = { knowledge_base: Book, repositories: GitBranch, posthog: BarChart3, datadog: Activity, issue_tracker: Ticket }
   const Icon = Object.hasOwn(icons, source.kind) ? icons[source.kind] : Database
   const status = sourceStatus(source.status)
   const repository = source.kind === "knowledge_base" || source.kind === "repositories"
   const [names, ...detail] = (source.detail ?? "").split(" · ")
   return (
     <div key={`${source.kind}-${index}`} className="flex items-start gap-2.5">
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted"><Icon className="size-3.5" aria-hidden="true" /></span>
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-muted"><Icon className="size-3.5" aria-hidden="true" /></span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-xs font-semibold">{source.name || source.kind || "Source"}</span>
+          <span className="text-[13px] font-semibold">{source.name || source.kind || "Source"}</span>
           <span className="rounded border px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">Read</span>
-          <span className={`ml-auto flex items-center gap-1.5 whitespace-nowrap text-[11px] ${status.textClass}`}>
-            {status.warning ? <TriangleAlert className="size-3" aria-hidden="true" /> : <span className={`size-1.5 rounded-full ${status.dotClass}`} aria-hidden="true" />}
-            {status.label}
-          </span>
         </div>
         {source.detail && <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
-          {repository ? <><span className="font-mono text-[11px]">{repositoryNames(source.kind, names)}</span>{detail.length > 0 && ` · ${detail.join(" · ")}`}</> : source.detail}
+          {repository ? <>{repositoryNames(source.kind, names).split(", ").map((name, i) => <span key={name}>{i > 0 && ", "}<span className="font-mono">{name}</span></span>)}{detail.length > 0 && ` · ${detail.join(" · ")}`}</> : source.detail}
         </p>}
-        {source.error && <p className={`mt-1 break-words text-xs leading-relaxed ${status.textClass}`}>{source.error} {skipNotice(source)}</p>}
+        {source.error && <p className={`mt-1 break-words text-xs leading-relaxed ${status.textClass}`}>{sourceMessage(source)}</p>}
       </div>
+      <span className={`mt-0.5 flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] ${status.textClass}`}>
+        {status.warning ? <TriangleAlert className="size-3" aria-hidden="true" /> : <span className={`size-1.5 rounded-full ${status.dotClass}`} aria-hidden="true" />}
+        {status.label}
+      </span>
     </div>
   )
 }
