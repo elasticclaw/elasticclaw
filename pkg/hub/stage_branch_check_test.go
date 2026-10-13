@@ -89,6 +89,10 @@ func TestStageBranchCheckScriptPushesOnlyTicketBranches(t *testing.T) {
 	commitOnNewBranch(t, badRemote, "NEXT-4-work")
 	runGit(t, badRemote, "remote", "set-url", "origin", filepath.Join(home, "missing.git"))
 
+	// Hidden repo directories (a clone of owner/.github) are checked too.
+	hidden, hiddenOrigin := newBranchCheckRepo(t, home, ".github")
+	commitOnNewBranch(t, hidden, "NEXT-6-work")
+
 	// A tag with the branch's name must not make the branch look like a failed push.
 	tagged, taggedOrigin := newBranchCheckRepo(t, home, "tagged")
 	commitOnNewBranch(t, tagged, "NEXT-5-work")
@@ -106,7 +110,7 @@ func TestStageBranchCheckScriptPushesOnlyTicketBranches(t *testing.T) {
 	if !done {
 		t.Fatalf("script did not print %s\nstdout:\n%s", stageBranchCheckDone, result.Stdout)
 	}
-	if want := []string{"offcheckout: NEXT-2-work", "tagged: NEXT-5-work", "unpushed: NEXT-1-work"}; !reflect.DeepEqual(pushed, want) {
+	if want := []string{"offcheckout: NEXT-2-work", "tagged: NEXT-5-work", "unpushed: NEXT-1-work", ".github: NEXT-6-work"}; !reflect.DeepEqual(pushed, want) {
 		t.Fatalf("pushed=%q, want %q\nstdout:\n%s", pushed, want, result.Stdout)
 	}
 	wantProblems := []string{
@@ -129,6 +133,9 @@ func TestStageBranchCheckScriptPushesOnlyTicketBranches(t *testing.T) {
 	}
 	if got, want := runGit(t, taggedOrigin, "rev-parse", "refs/heads/NEXT-5-work"), runGit(t, tagged, "rev-parse", "refs/heads/NEXT-5-work"); got != want {
 		t.Fatalf("origin NEXT-5-work=%s, want %s", got, want)
+	}
+	if got, want := runGit(t, hiddenOrigin, "rev-parse", "NEXT-6-work"), runGit(t, hidden, "rev-parse", "NEXT-6-work"); got != want {
+		t.Fatalf("origin NEXT-6-work=%s, want %s", got, want)
 	}
 	if got := runGit(t, strayOrigin, "for-each-ref", "--format=%(refname:short)", "refs/heads"); got != "develop" {
 		t.Fatalf("origin of stray has branches %q, want only develop", got)

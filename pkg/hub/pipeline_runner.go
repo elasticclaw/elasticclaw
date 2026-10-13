@@ -1211,8 +1211,8 @@ const pushBranchEachStageRule = "[hub] Before you send the signal that ends this
 // master or release/*. It ends with stageBranchCheckDone, so a run that died
 // early is told apart from a clean one. Ranges use "X ^ref" because hub-run
 // commands must not contain "..".
-const stageBranchCheckScript = `{ export GIT_TERMINAL_PROMPT=0; for g in */.git; do [ -e "$g" ] || continue; d=${g%/.git}; (
-cd "$d" || exit 0
+const stageBranchCheckScript = `{ export GIT_TERMINAL_PROMPT=0; for g in */.git .[!.]*/.git; do [ -e "$g" ] || continue; d=${g%/.git}; (
+cd -- "$d" || { echo "PROBLEM $d: cannot enter the repository"; exit 0; }
 [ -n "$(git status --porcelain --untracked-files=no)" ] && echo "PROBLEM $d: uncommitted changes"
 git symbolic-ref --quiet HEAD >/dev/null || echo "PROBLEM $d: detached HEAD"
 def=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD); def=${def#origin/}
@@ -1223,7 +1223,7 @@ b=${r#refs/heads/}
 case "$b" in "$def"|main|master|release/*) continue;; esac
 [ "$(git rev-list --count "$r" ^"refs/remotes/origin/$def")" = 0 ] && continue
 git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null && [ "$(git rev-list --count "$r" ^"refs/remotes/origin/$b")" = 0 ] && continue
-if git push --quiet -u origin "$r:$r" >/dev/null 2>&1; then echo "PUSHED $d: $b"; else echo "PROBLEM $d: push of $b failed"; fi
+if git push --quiet -u origin "$r:$r" </dev/null >/dev/null 2>&1; then echo "PUSHED $d: $b"; else echo "PROBLEM $d: push of $b failed"; fi
 done
 ); done; echo ` + stageBranchCheckDone + `; }`
 
