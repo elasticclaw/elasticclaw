@@ -535,14 +535,21 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// which is an upper bound rather than a permanent veto (see
 	// TestAgentIdleResumeFiresAfterTheBlindWindowElapses).
 	//
-	// bridge_error_auto_resumes is re-armed for the new sandbox, but
-	// bridge_error_pause_kind is cleared WITHOUT lifting no_progress_paused: a
-	// transport-error pause that survives into a replacement stays human-only,
-	// as before NEXT-1293. Both auto-lift messages assume continuity that a
-	// checkpoint restore cannot guarantee.
+	// bridge_error_auto_resumes is re-armed for the new sandbox. A pause latched
+	// by a bridge transport error (bridge_error_pause_kind != '') blamed the
+	// sandbox/gateway that is being replaced, so it is lifted here: otherwise
+	// the honest re-brief stays pending behind the pause until a human types
+	// "continue" (NEXT-1407). No auto-lift message is sent -- the re-brief is
+	// the only message and it states the discontinuity, so the NEXT-1293
+	// "nothing was lost" concern does not apply. Pauses with no kind (genuine
+	// no-progress, human) stay latched. Clearing the row is enough: the
+	// successor's connection reads the persisted latch at registration, and
+	// the retry cap (attempt N/3) bounds how often this can happen. SQLite
+	// evaluates SET expressions against the old row, so the CASE sees the kind
+	// before it is cleared.
 	res, err := s.db.Exec(`
 		UPDATE claws
-		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
+		   SET status='provisioning', no_progress_paused=CASE WHEN bridge_error_pause_kind!='' THEN 0 ELSE no_progress_paused END, bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
 		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
 		       rebrief_pending=1, idle_resume_count=0, bridge_error_auto_resumes=0, bridge_error_pause_kind='', idle_resume_at=0, session_loss_streak=0, session_loss_progress_mark=''
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
