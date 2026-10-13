@@ -116,9 +116,9 @@ func TestLoadRepositories(t *testing.T) {
 	}{
 		{"valid", "[org/one, org/two, org/three]", "unchecked", "", []string{"org/one", "org/two", "org/three"}},
 		{"empty", "[]", "unchecked", "", nil},
-		{"mixed", "[org/one, bad, org/two, worse]", "invalid", "Rejected: bad, worse - expected GitHub owner/repo names", []string{"org/one", "org/two"}},
-		{"malformed entries", "[../private, {repo: org/repo}, '', [org/repo]]", "invalid", "Rejected: ../private, entry 2, entry 3, entry 4 - expected GitHub owner/repo names", nil},
-		{"not a list", "org/repo", "invalid", "Expected a list of GitHub owner/repo names", nil},
+		{"mixed", "[org/one, bad, org/two, worse]", "invalid", "Rejected: bad, worse — expected GitHub owner/repo names.", []string{"org/one", "org/two"}},
+		{"malformed entries", "[../private, {repo: org/repo}, '', [org/repo]]", "invalid", "Rejected: ../private, entry 2, entry 3, entry 4 — expected GitHub owner/repo names.", nil},
+		{"not a list", "org/repo", "invalid", "Expected a list of GitHub owner/repo names.", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
