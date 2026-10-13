@@ -36,11 +36,11 @@ type DependencyUpdateConfig struct {
 // pass finishes. It carries the structured JSON produced by the dependency
 // update script, plus a top-level succeeded flag and a human-readable error.
 type DependencyUpdateReceipt struct {
-	Ecosystems   []string `json:"ecosystems,omitempty"`
-	Manifests    []any    `json:"manifests,omitempty"`
-	Updates      []any    `json:"updates,omitempty"`
-	Commands     []any    `json:"commands,omitempty"`
-	FilesChanged []string `json:"files_changed,omitempty"`
-	Succeeded    bool     `json:"succeeded"`
-	Error        string   `json:"error,omitempty"`
+	Ecosystems   []string        `json:"ecosystems,omitempty"`
+	Manifests    []any             `json:"manifests,omitempty"`
+	Updates      []any             `json:"updates,omitempty"`
+	Commands     []any             `json:"commands,omitempty"`
+	FilesChanged []string        `json:"files_changed,omitempty"`
+	Succeeded    bool            `json:"succeeded"`
+	Error        string          `json:"error,omitempty"`
 }

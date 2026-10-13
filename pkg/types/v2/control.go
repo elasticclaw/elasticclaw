@@ -18,32 +18,32 @@ const (
 type ControlMessageKind string
 
 const (
-	MessageWorkflowSync              ControlMessageKind = "workflow.sync"
-	MessageAgentTaskAssign           ControlMessageKind = "agent.task.assign"
-	MessageAgentTaskCancel           ControlMessageKind = "agent.task.cancel"
-	MessageArtifactRequest           ControlMessageKind = "artifact.request"
-	MessageCheckpointRequest         ControlMessageKind = "checkpoint.request"
-	MessageRunSuspend                ControlMessageKind = "run.suspend"
-	MessageRunResume                 ControlMessageKind = "run.resume"
-	MessageRunTerminate              ControlMessageKind = "run.terminate"
-	MessageAgentTaskStarted          ControlMessageKind = "agent.task.started"
-	MessageAgentTaskHeartbeat        ControlMessageKind = "agent.task.heartbeat"
-	MessageAgentTaskCompleted        ControlMessageKind = "agent.task.completed"
-	MessageAgentTaskFailed           ControlMessageKind = "agent.task.failed"
-	MessageExecRunAssign             ControlMessageKind = "exec.run.assign"
-	MessageExecRunStarted            ControlMessageKind = "exec.run.started"
-	MessageExecRunHeartbeat          ControlMessageKind = "exec.run.heartbeat"
-	MessageExecRunCompleted          ControlMessageKind = "exec.run.completed"
-	MessageExecRunFailed             ControlMessageKind = "exec.run.failed"
-	MessageDependencyUpdateAssign    ControlMessageKind = "dependency.update.assign"
-	MessageDependencyUpdateStarted   ControlMessageKind = "dependency.update.started"
-	MessageDependencyUpdateHeartbeat ControlMessageKind = "dependency.update.heartbeat"
-	MessageDependencyUpdateCompleted ControlMessageKind = "dependency.update.completed"
-	MessageDependencyUpdateFailed    ControlMessageKind = "dependency.update.failed"
-	MessagePlanSubmitted             ControlMessageKind = "plan.submitted"
-	MessageDeliverySubmitted         ControlMessageKind = "delivery.submitted"
-	MessagePullRequestClaimed        ControlMessageKind = "pull_request.claimed"
-	MessageHelpRequested             ControlMessageKind = "help.requested"
+	MessageWorkflowSync             ControlMessageKind = "workflow.sync"
+	MessageAgentTaskAssign            ControlMessageKind = "agent.task.assign"
+	MessageAgentTaskCancel            ControlMessageKind = "agent.task.cancel"
+	MessageArtifactRequest            ControlMessageKind = "artifact.request"
+	MessageCheckpointRequest          ControlMessageKind = "checkpoint.request"
+	MessageRunSuspend                 ControlMessageKind = "run.suspend"
+	MessageRunResume                  ControlMessageKind = "run.resume"
+	MessageRunTerminate               ControlMessageKind = "run.terminate"
+	MessageAgentTaskStarted           ControlMessageKind = "agent.task.started"
+	MessageAgentTaskHeartbeat         ControlMessageKind = "agent.task.heartbeat"
+	MessageAgentTaskCompleted         ControlMessageKind = "agent.task.completed"
+	MessageAgentTaskFailed            ControlMessageKind = "agent.task.failed"
+	MessageExecRunAssign              ControlMessageKind = "exec.run.assign"
+	MessageExecRunStarted             ControlMessageKind = "exec.run.started"
+	MessageExecRunHeartbeat           ControlMessageKind = "exec.run.heartbeat"
+	MessageExecRunCompleted           ControlMessageKind = "exec.run.completed"
+	MessageExecRunFailed              ControlMessageKind = "exec.run.failed"
+	MessageDependencyUpdateAssign     ControlMessageKind = "dependency.update.assign"
+	MessageDependencyUpdateStarted    ControlMessageKind = "dependency.update.started"
+	MessageDependencyUpdateHeartbeat  ControlMessageKind = "dependency.update.heartbeat"
+	MessageDependencyUpdateCompleted  ControlMessageKind = "dependency.update.completed"
+	MessageDependencyUpdateFailed     ControlMessageKind = "dependency.update.failed"
+	MessagePlanSubmitted              ControlMessageKind = "plan.submitted"
+	MessageDeliverySubmitted          ControlMessageKind = "delivery.submitted"
+	MessagePullRequestClaimed         ControlMessageKind = "pull_request.claimed"
+	MessageHelpRequested              ControlMessageKind = "help.requested"
 )
 
 type ControlDirection string
@@ -185,10 +185,10 @@ var taskKinds = map[ControlMessageKind]bool{
 	MessageAgentTaskAssign: true, MessageAgentTaskCancel: true,
 	MessageAgentTaskStarted: true, MessageAgentTaskHeartbeat: true,
 	MessageAgentTaskCompleted: true, MessageAgentTaskFailed: true,
-	MessageExecRunAssign:  true,
+	MessageExecRunAssign: true,
 	MessageExecRunStarted: true, MessageExecRunHeartbeat: true,
 	MessageExecRunCompleted: true, MessageExecRunFailed: true,
-	MessageDependencyUpdateAssign:  true,
+	MessageDependencyUpdateAssign: true,
 	MessageDependencyUpdateStarted: true, MessageDependencyUpdateHeartbeat: true,
 	MessageDependencyUpdateCompleted: true, MessageDependencyUpdateFailed: true,
 }
