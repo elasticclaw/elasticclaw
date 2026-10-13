@@ -89,6 +89,11 @@ func TestStageBranchCheckScriptPushesOnlyTicketBranches(t *testing.T) {
 	commitOnNewBranch(t, badRemote, "NEXT-4-work")
 	runGit(t, badRemote, "remote", "set-url", "origin", filepath.Join(home, "missing.git"))
 
+	// A tag with the branch's name must not make the branch look like a failed push.
+	tagged, taggedOrigin := newBranchCheckRepo(t, home, "tagged")
+	commitOnNewBranch(t, tagged, "NEXT-5-work")
+	runGit(t, tagged, "tag", "NEXT-5-work", "develop")
+
 	clean, _ := newBranchCheckRepo(t, home, "clean")
 	commitOnNewBranch(t, clean, "NEXT-1-done")
 	runGit(t, clean, "push", "-q", "-u", "origin", "NEXT-1-done")
@@ -97,8 +102,11 @@ func TestStageBranchCheckScriptPushesOnlyTicketBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("script: %v\nstderr: %s", err, result.Stderr)
 	}
-	pushed, problems := parseStageBranchCheck(result.Stdout)
-	if want := []string{"offcheckout: NEXT-2-work", "unpushed: NEXT-1-work"}; !reflect.DeepEqual(pushed, want) {
+	pushed, problems, done := parseStageBranchCheck(result.Stdout)
+	if !done {
+		t.Fatalf("script did not print %s\nstdout:\n%s", stageBranchCheckDone, result.Stdout)
+	}
+	if want := []string{"offcheckout: NEXT-2-work", "tagged: NEXT-5-work", "unpushed: NEXT-1-work"}; !reflect.DeepEqual(pushed, want) {
 		t.Fatalf("pushed=%q, want %q\nstdout:\n%s", pushed, want, result.Stdout)
 	}
 	wantProblems := []string{
@@ -119,8 +127,18 @@ func TestStageBranchCheckScriptPushesOnlyTicketBranches(t *testing.T) {
 	if got, want := runGit(t, onDefaultOrigin, "rev-list", "--count", "develop"), "1"; got != want {
 		t.Fatalf("default branch was pushed: origin develop has %s commits, want %s", got, want)
 	}
+	if got, want := runGit(t, taggedOrigin, "rev-parse", "refs/heads/NEXT-5-work"), runGit(t, tagged, "rev-parse", "refs/heads/NEXT-5-work"); got != want {
+		t.Fatalf("origin NEXT-5-work=%s, want %s", got, want)
+	}
 	if got := runGit(t, strayOrigin, "for-each-ref", "--format=%(refname:short)", "refs/heads"); got != "develop" {
 		t.Fatalf("origin of stray has branches %q, want only develop", got)
+	}
+}
+
+func TestStageBranchCheckScriptIsNotDoneWhenTheWorkspaceIsMissing(t *testing.T) {
+	result, _ := executeLocalPipelineRun(context.Background(), `cd "$HOME/no-such-workspace" && `+stageBranchCheckScript)
+	if _, _, done := parseStageBranchCheck(result.Stdout); done {
+		t.Fatalf("script reported done without a workspace\nstdout:\n%s", result.Stdout)
 	}
 }
 
@@ -154,6 +172,20 @@ func TestRunOnEnterReportsBranchCheckThatCouldNotRun(t *testing.T) {
 	}
 	if n := countNotes(); n != 0 {
 		t.Fatalf("entry stage ran the branch check: %d notes", n)
+	}
+
+	// No sandbox yet: nothing to check, so no note.
+	if _, err := db.Exec(`UPDATE claws SET provider_id='' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.runOnEnter(clawID, pipeline.Stage{ID: "review"}, pipelineContext{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := countNotes(); n != 0 {
+		t.Fatalf("claw without a sandbox got %d branch check notes", n)
+	}
+	if _, err := db.Exec(`UPDATE claws SET provider_id='failing-id' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
 	}
 
 	// Without an inject the note goes to the dashboard.

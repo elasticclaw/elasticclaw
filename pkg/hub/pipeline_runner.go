@@ -1208,34 +1208,44 @@ const pushBranchEachStageRule = "[hub] Before you send the signal that ends this
 // starts. In every repo it pushes each local branch that has work origin
 // lacks, whether or not it is checked out, and reports what it cannot fix. It
 // never commits, never forces, and never pushes the default branch, main,
-// master or release/*. Ranges use "X ^ref" because hub-run commands must not
-// contain "..".
-const stageBranchCheckScript = `for g in */.git; do [ -e "$g" ] || continue; d=${g%/.git}; (
+// master or release/*. It ends with stageBranchCheckDone, so a run that died
+// early is told apart from a clean one. Ranges use "X ^ref" because hub-run
+// commands must not contain "..".
+const stageBranchCheckScript = `{ export GIT_TERMINAL_PROMPT=0; for g in */.git; do [ -e "$g" ] || continue; d=${g%/.git}; (
 cd "$d" || exit 0
 [ -n "$(git status --porcelain --untracked-files=no)" ] && echo "PROBLEM $d: uncommitted changes"
 git symbolic-ref --quiet HEAD >/dev/null || echo "PROBLEM $d: detached HEAD"
 def=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD); def=${def#origin/}
 [ -n "$def" ] || { echo "PROBLEM $d: unknown default branch"; exit 0; }
-[ "$(git rev-list --count "refs/heads/$def" ^"origin/$def" 2>/dev/null || echo 0)" = 0 ] || echo "PROBLEM $d: commits on the default branch $def"
-git for-each-ref --format="%(refname:short)" refs/heads | while read -r b; do
+[ "$(git rev-list --count "refs/heads/$def" ^"refs/remotes/origin/$def" 2>/dev/null || echo 0)" = 0 ] || echo "PROBLEM $d: commits on the default branch $def"
+git for-each-ref --format="%(refname)" refs/heads | while read -r r; do
+b=${r#refs/heads/}
 case "$b" in "$def"|main|master|release/*) continue;; esac
-[ "$(git rev-list --count "refs/heads/$b" ^"origin/$def")" = 0 ] && continue
-git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null && [ "$(git rev-list --count "refs/heads/$b" ^"origin/$b")" = 0 ] && continue
-if git push --quiet -u origin "$b" >/dev/null 2>&1; then echo "PUSHED $d: $b"; else echo "PROBLEM $d: push of $b failed"; fi
+[ "$(git rev-list --count "$r" ^"refs/remotes/origin/$def")" = 0 ] && continue
+git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null && [ "$(git rev-list --count "$r" ^"refs/remotes/origin/$b")" = 0 ] && continue
+if git push --quiet -u origin "$r:$r" >/dev/null 2>&1; then echo "PUSHED $d: $b"; else echo "PROBLEM $d: push of $b failed"; fi
 done
-); done; true`
+); done; echo ` + stageBranchCheckDone + `; }`
+
+const stageBranchCheckDone = "BRANCH-CHECK-DONE"
 
 // ensureStageBranchesPushed pushes what the previous stage left unpushed and
 // returns a note for the agent about anything it could not fix ("" if none).
 func (s *Server) ensureStageBranchesPushed(clawID string) string {
-	result, err := s.executePipelineCommand(clawID, stageBranchCheckScript, 2*time.Minute)
-	var pushed, problems []string
-	if result != nil {
-		pushed, problems = parseStageBranchCheck(result.Stdout)
+	var providerID string
+	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&providerID)
+	if providerID == "" {
+		return "" // no sandbox yet, so nothing to push
 	}
-	if err != nil {
+	result, err := s.executePipelineCommand(clawID, stageBranchCheckScript, 2*time.Minute)
+	var stdout string
+	if result != nil {
+		stdout = result.Stdout
+	}
+	pushed, problems, done := parseStageBranchCheck(stdout)
+	if !done {
 		// Report it: the previous stage's commits may still exist only here.
-		log.Printf("[pipeline] branch check for claw %s failed: %v", shortID(clawID), err)
+		log.Printf("[pipeline] branch check for claw %s did not finish: %v", shortID(clawID), err)
 		problems = append(problems, "the hub could not finish checking your branches")
 	}
 	if len(pushed) > 0 {
@@ -1247,16 +1257,18 @@ func (s *Server) ensureStageBranchesPushed(clawID string) string {
 	return "[hub] Branch check before this stage: " + strings.Join(problems, "; ") + ". Fix this first: commit on your ticket branch and push it to origin."
 }
 
-func parseStageBranchCheck(stdout string) (pushed, problems []string) {
+func parseStageBranchCheck(stdout string) (pushed, problems []string, done bool) {
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if rest, ok := strings.CutPrefix(line, "PUSHED "); ok {
 			pushed = append(pushed, rest)
 		} else if rest, ok := strings.CutPrefix(line, "PROBLEM "); ok {
 			problems = append(problems, rest)
+		} else if line == stageBranchCheckDone {
+			done = true
 		}
 	}
-	return pushed, problems
+	return pushed, problems, done
 }
 
 // clawPushesToGitHub reports whether the claw clones at least one repo it can
@@ -1267,7 +1279,7 @@ func (s *Server) clawPushesToGitHub(clawID string) bool {
 	var repos []types.GitHubRepoAccess
 	_ = json.Unmarshal([]byte(reposJSON), &repos)
 	for _, r := range repos {
-		if r.Permissions == "write" && (r.Clone == nil || *r.Clone) {
+		if r.Permissions == "write" && !isRepositoryPattern(r.Repo) && shouldCloneRepo(r) {
 			return true
 		}
 	}

@@ -320,6 +320,13 @@ func TestRenderStageInjectPrependsPushRuleForWritableRepos(t *testing.T) {
 		t.Fatalf("push rule appended for a read-only repo:\n%s", got)
 	}
 
+	if _, err := db.Exec(`UPDATE claws SET github_repos=? WHERE id=?`, `[{"repo":"acme/*","permissions":"write"}]`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.renderStageInject(clawID, stage, ctx); strings.Contains(got, pushBranchEachStageRule) {
+		t.Fatalf("push rule added for a repo pattern that is never cloned:\n%s", got)
+	}
+
 	if _, err := db.Exec(`UPDATE claws SET github_repos=? WHERE id=?`, `[{"repo":"acme/widgets","permissions":"write"}]`, clawID); err != nil {
 		t.Fatal(err)
 	}
