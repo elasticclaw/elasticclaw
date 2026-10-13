@@ -303,7 +303,7 @@ stages:
 	}
 }
 
-func TestRenderStageInjectAppendsPushRuleForWritableRepos(t *testing.T) {
+func TestRenderStageInjectPrependsPushRuleForWritableRepos(t *testing.T) {
 	const clawID = "claw-rebrief-push-rule"
 	s, db := newRebriefTestServer(t, clawID, "connected", "implement")
 	ctx := pipelineContext{Factory: rebriefTestFactory(), IssueID: "AMA-200"}

@@ -1205,30 +1205,39 @@ func (s *Server) renderStageInject(clawID string, stage pipeline.Stage, ctx pipe
 const pushBranchEachStageRule = "[hub] Before you send the signal that ends this stage, commit your work on your ticket branch in every repository you changed and push that branch to origin. Never push to the default branch, and pushing is not opening a pull request. This sandbox can be replaced at any moment from a fresh clone: only what is on origin survives."
 
 // stageBranchCheckScript runs in the workspace before a non-entry stage
-// starts. It pushes every repo whose current branch has commits origin lacks,
-// and reports what it cannot fix. It never commits, never forces, and never
-// pushes the default branch. Ranges use "HEAD ^ref" because hub-run commands
-// must not contain "..".
+// starts. In every repo it pushes each local branch that has work origin
+// lacks, whether or not it is checked out, and reports what it cannot fix. It
+// never commits, never forces, and never pushes the default branch, main,
+// master or release/*. Ranges use "X ^ref" because hub-run commands must not
+// contain "..".
 const stageBranchCheckScript = `for g in */.git; do [ -e "$g" ] || continue; d=${g%/.git}; (
 cd "$d" || exit 0
-[ -n "$(git status --porcelain)" ] && echo "PROBLEM $d: uncommitted changes"
-b=$(git symbolic-ref --quiet --short HEAD) || { echo "PROBLEM $d: detached HEAD"; exit 0; }
+[ -n "$(git status --porcelain --untracked-files=no)" ] && echo "PROBLEM $d: uncommitted changes"
+git symbolic-ref --quiet HEAD >/dev/null || echo "PROBLEM $d: detached HEAD"
 def=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD); def=${def#origin/}
 [ -n "$def" ] || { echo "PROBLEM $d: unknown default branch"; exit 0; }
-if [ "$b" = "$def" ]; then [ "$(git rev-list --count HEAD ^"origin/$b")" = 0 ] || echo "PROBLEM $d: commits on the default branch $b"; exit 0; fi
-if git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null && [ "$(git rev-list --count HEAD ^"origin/$b")" = 0 ]; then exit 0; fi
+[ "$(git rev-list --count "refs/heads/$def" ^"origin/$def" 2>/dev/null || echo 0)" = 0 ] || echo "PROBLEM $d: commits on the default branch $def"
+git for-each-ref --format="%(refname:short)" refs/heads | while read -r b; do
+case "$b" in "$def"|main|master|release/*) continue;; esac
+[ "$(git rev-list --count "refs/heads/$b" ^"origin/$def")" = 0 ] && continue
+git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null && [ "$(git rev-list --count "refs/heads/$b" ^"origin/$b")" = 0 ] && continue
 if git push --quiet -u origin "$b" >/dev/null 2>&1; then echo "PUSHED $d: $b"; else echo "PROBLEM $d: push of $b failed"; fi
-); done`
+done
+); done; true`
 
 // ensureStageBranchesPushed pushes what the previous stage left unpushed and
 // returns a note for the agent about anything it could not fix ("" if none).
 func (s *Server) ensureStageBranchesPushed(clawID string) string {
 	result, err := s.executePipelineCommand(clawID, stageBranchCheckScript, 2*time.Minute)
-	if err != nil || result == nil {
-		log.Printf("[pipeline] branch check for claw %s failed: %v", shortID(clawID), err)
-		return ""
+	var pushed, problems []string
+	if result != nil {
+		pushed, problems = parseStageBranchCheck(result.Stdout)
 	}
-	pushed, problems := parseStageBranchCheck(result.Stdout)
+	if err != nil {
+		// Report it: the previous stage's commits may still exist only here.
+		log.Printf("[pipeline] branch check for claw %s failed: %v", shortID(clawID), err)
+		problems = append(problems, "the hub could not finish checking your branches")
+	}
 	if len(pushed) > 0 {
 		s.publishHubNotice(clawID, "[hub] Pushed work the previous stage left only in the sandbox: "+strings.Join(pushed, "; "))
 	}
