@@ -29,6 +29,7 @@ import { requestAuthToken } from "@/lib/auth-storage"
 import { isWaitingOnYou } from "@/lib/waiting-on-you"
 import { agentSection, type AgentSectionName } from "@/components/ds/agent-section"
 import { Spinner } from "@/components/ui/spinner"
+import { ConversationSkeleton, ShellSkeleton } from "@/components/shell-skeletons"
 
 const AnalyticsCommandCenter = dynamic(() => import("@/components/analytics-command-center").then((module) => module.AnalyticsCommandCenter), {
   loading: () => <div className="flex min-h-64 items-center justify-center text-muted-foreground"><Spinner className="size-5" /></div>,
@@ -393,7 +394,7 @@ export function HomeShell() {
 
   // Show loading state until we know if configured
   if (configuredState === null) {
-    return <div className="flex h-screen-safe bg-background items-center justify-center" />
+    return <ShellSkeleton />
   }
 
   // Show setup screen if not configured
@@ -423,6 +424,8 @@ export function HomeShell() {
       activityLines={sidebarActivity}
       subagentLines={sidebarSubagents}
       isAdmin={isAdmin}
+      adminChecked={adminChecked || adminCheckFailed}
+      loading={loading}
       onSelectWorkflow={setSelectedWorkflow}
       view={view}
       onToggleView={handleToggleView}
@@ -463,7 +466,13 @@ export function HomeShell() {
                 <button type="button" className="mt-4 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground" onClick={() => void loadAdminStatus()}>Retry</button>
               </div>
             </div>
-          ) : null
+          ) : (
+            <div className="flex min-h-64 items-center justify-center text-muted-foreground"><Spinner className="size-5" /></div>
+          )
+        ) : selectedClawId && !selectedClaw && loading ? (
+          // The remembered agent is not in hand until the first list arrives;
+          // showing the board meanwhile would flash it before the agent.
+          <ConversationSkeleton />
         ) : (
           <ConversationView
             claw={selectedClaw}
@@ -491,6 +500,7 @@ export function HomeShell() {
           <MobileTabBar
             view={view}
             isAdmin={isAdmin}
+            adminChecked={adminChecked || adminCheckFailed}
             onSelectAgents={() => { if (view === "analytics") handleToggleView() }}
             onSelectAnalytics={() => { if (view === "agents") handleToggleView() }}
           />

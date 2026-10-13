@@ -49,6 +49,7 @@ import { TagEditor } from "@/components/tag-editor"
 import { useWindowedMessages } from "@/hooks/use-windowed-messages"
 import { useProgrammaticScrollFlag, usePinnedAutoScroll } from "@/hooks/use-pinned-scroll"
 import { Button } from "@/components/ui/button"
+import { BoardSkeleton } from "@/components/shell-skeletons"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
@@ -2128,7 +2129,9 @@ export function ConversationView({
 
         {/* Board view */}
         <div className="flex-1 relative min-h-0">
-          {allClaws.length === 0 && !loading ? (
+          {allClaws.length === 0 && loading ? (
+            <BoardSkeleton isMobile={isMobile} />
+          ) : allClaws.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full gap-6 px-8 text-center">
               <img
                 src={logoUrl || "/mascot.png?v=2"}

@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
@@ -31,6 +32,11 @@ const WORKSPACE_SECTIONS = new Set<Section>([
   "secrets",
   "mcp-servers",
 ])
+
+// What each section waits for before it can render anything true. Until then
+// it shows a placeholder — not nothing, and not content for the wrong scope.
+const NEEDS_SETTINGS = new Set<Section>(["runtimes", "models", "github", "authentication", "issue-trackers", "mcp-servers", "notifier"])
+const NEEDS_WORKSPACE = new Set<Section>(["github", "issue-trackers", "workspaces", "workflows", "secrets"])
 
 interface LLMKeyView {
   name: string
@@ -289,6 +295,33 @@ async function fetchModelAuthLogin(id: string): Promise<ModelAuthLoginJob> {
 // Sentinel value used in static-export paths to represent "select first workspace"
 const WORKSPACE_PLACEHOLDER = "_workspace"
 
+// Every settings URL change remounts this page (the catch-all segment is keyed
+// by its params), so the last list is kept to paint the next mount at once
+// while it is re-fetched.
+let workspacesCache: Workspace[] | null = null
+
+function resolveWorkspace(list: Workspace[], routeWorkspace: string, current: string): string {
+  if (list.length === 0) return ""
+  if (routeWorkspace && list.some((workspace) => workspace.name === routeWorkspace)) return routeWorkspace
+  return list.some((workspace) => workspace.name === current) ? current : list[0].name
+}
+
+function SectionSkeleton() {
+  return (
+    <div className="space-y-6" aria-label="Loading">
+      <div className="space-y-2">
+        <Skeleton className="h-5 w-40" />
+        <Skeleton className="h-4 w-full max-w-md" />
+      </div>
+      <div className="space-y-3 rounded-lg border border-border p-4">
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-10 w-2/3" />
+      </div>
+    </div>
+  )
+}
+
 export default function SettingsSectionPage() {
   const params = useParams()
   const pathname = usePathname()
@@ -337,9 +370,13 @@ export default function SettingsSectionPage() {
   const [success, setSuccess] = useState("")
   const [version, setVersion] = useState("")
   const [hubPublicUrl, setHubPublicUrl] = useState("")
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
-  const [selectedWorkspace, setSelectedWorkspace] = useState("")
-  const selectedWorkspaceLabel = selectedWorkspace || "No workspaces"
+  // null until the first answer: an empty list and "not asked yet" must not
+  // look alike, or every load says "No workspaces" before naming one.
+  const [workspaces, setWorkspaces] = useState<Workspace[] | null>(workspacesCache)
+  const [workspacesFailed, setWorkspacesFailed] = useState(false)
+  const [selectedWorkspace, setSelectedWorkspace] = useState(() => resolveWorkspace(workspacesCache ?? [], routeWorkspace, ""))
+  const workspacesLoading = workspaces === null && !workspacesFailed
+  const selectedWorkspaceLabel = selectedWorkspace || (workspacesFailed ? "Workspaces unavailable" : "No workspaces")
   const selectedWorkspaceInitial = selectedWorkspace ? selectedWorkspace.trim()[0].toUpperCase() : "-"
 
   // Rejects on failure: the re-fetch that follows a save is part of the save,
@@ -362,23 +399,21 @@ export default function SettingsSectionPage() {
   useEffect(() => {
     fetchWorkspaces()
       .then((data) => {
+        workspacesCache = data
         setWorkspaces(data)
-        setSelectedWorkspace((current) => {
-          if (data.length === 0) return ""
-          if (routeWorkspace && data.some((workspace) => workspace.name === routeWorkspace)) return routeWorkspace
-          return data.some((workspace) => workspace.name === current) ? current : data[0].name
-        })
+        setWorkspacesFailed(false)
+        setSelectedWorkspace((current) => resolveWorkspace(data, routeWorkspace, current))
       })
       .catch(() => {
-        setWorkspaces([])
-        setSelectedWorkspace("")
+        setWorkspaces((current) => current ?? [])
+        setWorkspacesFailed(true)
       })
   }, [routeWorkspace])
 
   // When the "_workspace" placeholder is used (static-export sentinel) or no
   // workspace is present in the URL, redirect to the actual first workspace.
   useEffect(() => {
-    if (workspaces.length === 0 || !WORKSPACE_SECTIONS.has(section)) return
+    if (!workspaces || workspaces.length === 0 || !WORKSPACE_SECTIONS.has(section)) return
     const workspace = routeWorkspace && workspaces.some((item) => item.name === routeWorkspace)
       ? routeWorkspace
       : selectedWorkspace || workspaces[0].name
@@ -501,6 +536,11 @@ export default function SettingsSectionPage() {
     }
     return `/settings/${id}`
   }
+  const workspaceReady = !workspacesLoading
+  const showSectionSkeleton = !error && (
+    (NEEDS_SETTINGS.has(section) && !settings) ||
+    (NEEDS_WORKSPACE.has(section) && !workspaceReady)
+  )
   const selectWorkspace = (workspace: string) => {
     setSelectedWorkspace(workspace)
     const targetSection = WORKSPACE_SECTIONS.has(section) ? section : "workspaces"
@@ -522,27 +562,34 @@ export default function SettingsSectionPage() {
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left nav */}
         <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
-          <div className="relative mb-1">
-            <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded bg-blue-600 text-[11px] font-semibold text-white shadow-sm">
-              {selectedWorkspaceInitial}
+          {workspacesLoading ? (
+            <div className="mb-1 flex h-10 items-center gap-3 px-3" aria-label="Loading workspaces">
+              <Skeleton className="size-5 rounded" />
+              <Skeleton className="h-4 flex-1" />
             </div>
-            <select
-              aria-label="Workspace"
-              value={selectedWorkspace}
-              onChange={(event) => selectWorkspace(event.target.value)}
-              disabled={workspaces.length === 0}
-              className="h-10 w-full appearance-none rounded-lg border border-transparent bg-transparent pl-10 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary"
-            >
-              {workspaces.length === 0 ? (
-                <option value="">{selectedWorkspaceLabel}</option>
-              ) : (
-                workspaces.map((workspace) => (
-                  <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
-                ))
-              )}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          </div>
+          ) : (
+            <div className="relative mb-1">
+              <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded bg-blue-600 text-[11px] font-semibold text-white shadow-sm">
+                {selectedWorkspaceInitial}
+              </div>
+              <select
+                aria-label="Workspace"
+                value={selectedWorkspace}
+                onChange={(event) => selectWorkspace(event.target.value)}
+                disabled={!workspaces?.length}
+                className="h-10 w-full appearance-none rounded-lg border border-transparent bg-transparent pl-10 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary"
+              >
+                {!workspaces?.length ? (
+                  <option value="">{selectedWorkspaceLabel}</option>
+                ) : (
+                  workspaces.map((workspace) => (
+                    <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
+                  ))
+                )}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            </div>
+          )}
           <div className="space-y-1 flex-1">
             {navGroups.map((group, groupIdx) => (
               <div key={group.label}>
@@ -582,28 +629,30 @@ export default function SettingsSectionPage() {
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
+          {showSectionSkeleton && <SectionSkeleton />}
+
           {settings && section === "runtimes" && (
             <RuntimesSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "models" && (
             <LLMSection settings={settings} onSave={save} saving={saving} />
           )}
-          {settings && section === "github" && (
+          {settings && workspaceReady && section === "github" && (
             <GitHubSection settings={settings} onSave={save} saving={saving} workspace={selectedWorkspace} />
           )}
           {settings && section === "authentication" && (
             <AuthenticationSection settings={settings} onSave={save} saving={saving} />
           )}
-          {settings && section === "issue-trackers" && (
+          {settings && workspaceReady && section === "issue-trackers" && (
             <IntegrationsSection settings={settings} onSave={save} saving={saving} selectedWorkspace={selectedWorkspace} hubPublicUrl={hubPublicUrl} />
           )}
-          {section === "workspaces" && (
+          {workspaceReady && section === "workspaces" && (
             <WorkspacesSection selectedWorkspace={selectedWorkspace} />
           )}
-          {section === "workflows" && (
+          {workspaceReady && section === "workflows" && (
             <WorkflowsSection selectedWorkspace={selectedWorkspace} />
           )}
-          {section === "secrets" && (
+          {workspaceReady && section === "secrets" && (
             <SecretsSection settings={settings} workspace={selectedWorkspace} />
           )}
           {settings && section === "mcp-servers" && (

@@ -3,14 +3,14 @@
 import { useEffect } from "react"
 import { useBranding } from "@/hooks/use-branding"
 
-const DEFAULT_TITLE = "ElasticClaw"
-
 export function BrandingPageTitle() {
-  const { appName } = useBranding()
+  const { appName, loaded } = useBranding()
 
+  // Until the name is known the static title stands; writing the default here
+  // would only be overwritten a moment later.
   useEffect(() => {
-    document.title = appName || DEFAULT_TITLE
-  }, [appName])
+    if (loaded) document.title = appName
+  }, [appName, loaded])
 
   return null
 }

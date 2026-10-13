@@ -2,6 +2,7 @@
 
 import { BarChart3, LayoutGrid, Settings } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { Skeleton } from "@/components/ui/skeleton"
 import type { HomeView } from "@/components/home-shell"
 
 /**
@@ -13,11 +14,14 @@ import type { HomeView } from "@/components/home-shell"
 export function MobileTabBar({
   view,
   isAdmin,
+  adminChecked = true,
   onSelectAgents,
   onSelectAnalytics,
 }: {
   view: HomeView
   isAdmin: boolean
+  /** False while isAdmin is a guess: the Settings slot is held, so the tabs do not reflow. */
+  adminChecked?: boolean
   onSelectAgents: () => void
   onSelectAnalytics: () => void
 }) {
@@ -36,7 +40,13 @@ export function MobileTabBar({
           active={view === "analytics"}
           onClick={onSelectAnalytics}
         />
-        {isAdmin && (
+        {!adminChecked && (
+          <div className="flex min-h-12 flex-1 flex-col items-center justify-center gap-1 py-1.5" aria-hidden="true">
+            <Skeleton className="size-5" />
+            <Skeleton className="h-2.5 w-10" />
+          </div>
+        )}
+        {adminChecked && isAdmin && (
           <TabItem
             label="Settings"
             icon={Settings}

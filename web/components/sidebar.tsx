@@ -5,6 +5,8 @@ import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Skeleton } from "@/components/ui/skeleton"
+import { SidebarListSkeleton } from "@/components/shell-skeletons"
 import { ClawCard } from "@/components/claw-card"
 import { WorkflowName } from "@/components/workflow-name"
 import { clearConfig, fetchWorkspaces, type Workflow } from "@/lib/api"
@@ -69,6 +71,10 @@ interface SidebarProps {
    */
   subagentLines?: Record<string, string>
   isAdmin?: boolean
+  /** False while isAdmin is still a guess; admin-only items hold a placeholder. */
+  adminChecked?: boolean
+  /** True until the first agent list arrives, so an empty list means "unknown". */
+  loading?: boolean
   onSelectWorkflow?: (workflow: Workflow | null) => void
   view?: "agents" | "analytics"
   onToggleView?: () => void
@@ -153,6 +159,8 @@ export const Sidebar = memo(function Sidebar({
   activityLines,
   subagentLines,
   isAdmin = true,
+  adminChecked = true,
+  loading = false,
   onSelectWorkflow,
   view = "agents",
   onToggleView,
@@ -160,7 +168,7 @@ export const Sidebar = memo(function Sidebar({
 }: SidebarProps) {
   const inDrawer = variant === "drawer"
   const tagKeys = allTags
-  const { appName } = useBranding()
+  const { appName, loaded: brandingLoaded } = useBranding()
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const [manualWorkflows, setManualWorkflows] = useState<Workflow[]>([])
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(false)
@@ -431,9 +439,13 @@ export const Sidebar = memo(function Sidebar({
       >
       {/* py matches the board header so the two hairlines meet at the same height. */}
       <div className={cn("flex items-center justify-between px-4 py-2.5 border-b border-border", inDrawer && "pr-12")}>
-        <h1 className="text-lg font-semibold tracking-tight text-foreground">
-          {appName}
-        </h1>
+        {brandingLoaded ? (
+          <h1 className="text-lg font-semibold tracking-tight text-foreground">
+            {appName}
+          </h1>
+        ) : (
+          <Skeleton className="h-6 w-28" />
+        )}
         <div className="flex items-center gap-1">
           {manualWorkflows.length > 0 && (
             <Button
@@ -536,7 +548,9 @@ export const Sidebar = memo(function Sidebar({
             must scroll with the rest instead of squeezing "All Agents" out. */}
         <ScrollArea className="flex-1 min-h-0 min-w-0 overflow-x-hidden [&>[data-slot=scroll-area-viewport]>div]:!block [&>[data-slot=scroll-area-viewport]>div]:!w-full [&>[data-slot=scroll-area-viewport]>div]:!min-w-0">
           <div className="w-full min-w-0 overflow-hidden">
-            {allClaws.length === 0 ? (
+            {allClaws.length === 0 && loading ? (
+              <SidebarListSkeleton />
+            ) : allClaws.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">
                 No agents found
               </p>
@@ -593,7 +607,13 @@ export const Sidebar = memo(function Sidebar({
           <ViewToggleIcon className="size-4 flex-shrink-0" />
           {viewToggleLabel}
         </button>
-        {isAdmin && (
+        {!adminChecked && (
+          <div className="flex min-h-9 items-center gap-[9px] px-2.5" aria-hidden="true">
+            <Skeleton className="size-4" />
+            <Skeleton className="h-3 w-16" />
+          </div>
+        )}
+        {adminChecked && isAdmin && (
           <button
             onClick={() => { window.location.href = "/settings" }}
             className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"

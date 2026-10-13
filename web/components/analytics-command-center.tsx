@@ -54,6 +54,7 @@ import { RunStatusBadge } from "@/components/ds/run-status-badge"
 import { TicketStatusBadge } from "@/components/ds/ticket-status-badge"
 import { WorkflowName } from "@/components/workflow-name"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   Select,
   SelectContent,
@@ -534,6 +535,10 @@ function AnalyticsCommandCenterInner({ canViewCosts = false }: { canViewCosts?: 
   const clearSelectedDay = useCallback(() => setFilters({ from: undefined, to: undefined }), [setFilters])
   const modelData = useModelData(costs)
 
+  // Until the first load settles every widget would say "no data"; that is a
+  // claim about the period, not about the request still in flight.
+  const initialLoading = summary === undefined && !error
+
   return (
     <main className="h-full overflow-auto bg-background">
       <div className="mx-auto max-w-[1400px] space-y-5 p-5 lg:p-6">
@@ -543,6 +548,7 @@ function AnalyticsCommandCenterInner({ canViewCosts = false }: { canViewCosts?: 
         <FilterBar filters={filters} options={options} workspaces={workspaceNames} onChange={setFilters} />
         {error && <p className="text-sm text-destructive">{error}</p>}
 
+        {initialLoading ? <AnalyticsSkeleton canViewCosts={canViewCosts} /> : (<>
         <KpiStrip>
           <KpiGroupLabel title="Effectiveness" />
             <Kpi
@@ -676,6 +682,7 @@ function AnalyticsCommandCenterInner({ canViewCosts = false }: { canViewCosts?: 
           <CostDrivers drivers={drivers} />
           </>
         )}
+        </>)}
       </div>
       <RunDetailPanel
         canViewCosts={canViewCosts}
@@ -890,6 +897,23 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
   const bad = cost ? (change ?? 0) > 0 : good ? (change ?? 0) < 0 : (change ?? 0) > 0
   return <KpiTile label={label} value={value} info={title} delta={change == null ? undefined : `${Math.abs(change * 100).toFixed(1)}%`} deltaDirection={change != null && change < 0 ? "down" : "up"} deltaTone={bad ? "bad" : "good"} onClick={onClick} className={onClick ? "cursor-pointer" : undefined} />
 }
+function AnalyticsSkeleton({ canViewCosts }: { canViewCosts: boolean }) {
+  return (
+    <div className="space-y-5" aria-label="Loading analytics">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+        {Array.from({ length: canViewCosts ? 6 : 3 }, (_, index) => <Skeleton key={index} className="h-[72px]" />)}
+      </div>
+      {[0, 1].map((row) => (
+        <div key={row} className="grid gap-5 lg:grid-cols-2">
+          <Skeleton className="h-80" />
+          <Skeleton className="h-80" />
+        </div>
+      ))}
+      <Skeleton className="h-64" />
+    </div>
+  )
+}
+
 // Memoized: the home shell re-renders on every WS chunk while the hub is
 // streaming, and this page (with recharts) must not re-render with it.
 export const AnalyticsCommandCenter = memo(AnalyticsCommandCenterInner)
