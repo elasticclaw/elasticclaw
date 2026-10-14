@@ -598,8 +598,11 @@ export async function removeBetaTester(login: string): Promise<void> {
 export interface AIChatSource {
   kind: string
   name: string
-  status: "unchecked" | "invalid"
+  status: string
+  detail?: string
   error?: string
+  checkedAt?: string
+  access?: "read"
 }
 
 export interface AIChatSources {
@@ -610,9 +613,11 @@ export interface AIChatSources {
   sources: AIChatSource[]
 }
 
-export function fetchAIChatSources(workspace = ""): Promise<AIChatSources> {
-  const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""
-  return apiFetch<AIChatSources>(`/api/ai-chat/sources${query}`)
+export function fetchAIChatSources(workspace = "", refresh = false): Promise<AIChatSources> {
+  const query = new URLSearchParams()
+  if (workspace) query.set("workspace", workspace)
+  if (refresh) query.set("refresh", "1")
+  return apiFetch<AIChatSources>(`/api/ai-chat/sources${query.size ? `?${query}` : ""}`)
 }
 
 export interface AIChatThread {

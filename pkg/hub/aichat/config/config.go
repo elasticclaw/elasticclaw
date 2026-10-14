@@ -59,6 +59,7 @@ type Datadog struct {
 	AppKey string `yaml:"app_key"`
 }
 type IssueTracker struct {
+	Name          string `yaml:"name"`
 	Provider      string `yaml:"provider"`
 	DefaultFields struct {
 		Team   string   `yaml:"team"`
@@ -72,10 +73,14 @@ type Retention struct {
 	ArtifactVersionsDays int `yaml:"artifact_versions_days"`
 }
 type Source struct {
-	Kind   string `json:"kind"`
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Detail    string   `json:"detail"`
+	CheckedAt string   `json:"checkedAt,omitempty"`
+	Access    string   `json:"access"`
+	Events    []string `json:"-"`
+	Kind      string   `json:"kind"`
+	Name      string   `json:"name"`
+	Status    string   `json:"status"`
+	Error     string   `json:"error,omitempty"`
 }
 
 var repoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
@@ -129,12 +134,12 @@ func Load(managedDir string) (*Config, error) {
 		}
 		cfg.KnowledgeBase = &v
 		return true
-	}, "Expected provider github, repo owner/repo and a relative entry file")
+	}, "Expected provider github, repo owner/repo and a relative entry file.")
 	if n, ok := nodes["repositories"]; ok {
-		source := Source{Kind: "repositories", Name: "Repositories", Status: "unchecked"}
+		source := Source{Kind: "repositories", Name: "Repositories", Status: "unchecked", Access: "read"}
 		if n.Kind != yaml.SequenceNode {
 			source.Status = "invalid"
-			source.Error = "Expected a list of GitHub owner/repo names"
+			source.Error = "Expected a list of GitHub owner/repo names."
 		} else {
 			var rejected []string
 			for i, item := range n.Content {
@@ -151,7 +156,7 @@ func Load(managedDir string) (*Config, error) {
 			}
 			if len(rejected) > 0 {
 				source.Status = "invalid"
-				source.Error = "Rejected: " + strings.Join(rejected, ", ") + " - expected GitHub owner/repo names"
+				source.Error = "Rejected: " + strings.Join(rejected, ", ") + " — expected GitHub owner/repo names."
 			}
 		}
 		cfg.Sources = append(cfg.Sources, source)
@@ -163,7 +168,7 @@ func Load(managedDir string) (*Config, error) {
 		}
 		cfg.PostHog = &v
 		return true
-	}, "Expected an HTTP(S) host, project_id and api_key secret name")
+	}, "Expected an HTTP(S) host, project_id and api_key secret name.")
 	cfg.decodeSource(nodes, "datadog", "Datadog", func(n yaml.Node) bool {
 		var v Datadog
 		if n.Decode(&v) != nil || !validDatadogSite(v.Site) || strings.TrimSpace(v.Env) == "" || !validSecret(v.APIKey) || !validSecret(v.AppKey) {
@@ -171,7 +176,7 @@ func Load(managedDir string) (*Config, error) {
 		}
 		cfg.Datadog = &v
 		return true
-	}, "Expected a Datadog site, env and api_key/app_key secret names")
+	}, "Expected a Datadog site, env and api_key/app_key secret names.")
 	cfg.decodeSource(nodes, "issue_tracker", "Linear", func(n yaml.Node) bool {
 		var v IssueTracker
 		if n.Decode(&v) != nil || v.Provider != "linear" || strings.TrimSpace(v.DefaultFields.Team) == "" {
@@ -179,7 +184,7 @@ func Load(managedDir string) (*Config, error) {
 		}
 		cfg.IssueTracker = &v
 		return true
-	}, "Expected provider linear and default_fields.team")
+	}, "Expected provider linear and default_fields.team.")
 	return cfg, nil
 }
 
@@ -188,7 +193,7 @@ func (c *Config) decodeSource(nodes map[string]yaml.Node, kind, name string, dec
 	if !ok {
 		return
 	}
-	source := Source{Kind: kind, Name: name, Status: "unchecked"}
+	source := Source{Kind: kind, Name: name, Status: "unchecked", Access: "read"}
 	if n.Kind != yaml.MappingNode || !decode(n) {
 		source.Status = "invalid"
 		source.Error = message

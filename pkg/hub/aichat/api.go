@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
@@ -206,7 +207,10 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
-	_ = a.runner.Run(ctx, t, m, cfg, provider, streamWriter(w))
+	emit, stopHeartbeat := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Cancel(t) })
+	defer stopHeartbeat()
+	_ = a.runner.Run(ctx, t, m, cfg, provider, emit)
+	stopHeartbeat()
 	release()
 	a.publish(t)
 }
