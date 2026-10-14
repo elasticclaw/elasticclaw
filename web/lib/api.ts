@@ -635,7 +635,48 @@ export type AIChatBlock = { id: string; at: number } & (
   | { type: "callout"; data: { tone: "info" | "warning" | "success"; title?: string; text: string } }
   | { type: "table"; data: { columns: string[]; rows: string[][] } }
   | { type: "actions"; actions: AIChatAction[] }
+  | { type: "action"; kind: "artifact"; state: "working" | "created" | "failed"; card: AIChatArtifactCard }
 )
+export interface AIChatArtifactRequest { kind: "artifact"; artifactId?: string; title?: string; brief?: string }
+export interface AIChatArtifactCard {
+  artifactId?: string
+  title: string
+  brief?: string
+  slug?: string
+  version?: number
+  bytes?: number
+  lines?: number
+  error?: string
+  shareUrl?: string
+}
+export interface AIChatArtifact {
+  slug: string
+  title: string
+  ownerLogin: string
+  version: number
+  currentVersion: number
+  bytes: number
+  createdAt: number
+  rawUrl: string
+  downloadUrl: string
+  shareUrl: string
+}
+export function fetchAIChatArtifact(slug: string, version?: number, signal?: AbortSignal): Promise<AIChatArtifact> {
+  return apiFetch(`/api/ai-chat/artifacts/${encodeURIComponent(slug)}${version ? `?v=${version}` : ""}`, { signal })
+}
+export async function streamAIChatAction(id: string, action: AIChatArtifactRequest, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void): Promise<void> {
+  const token = await resolveToken()
+  const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/actions`, {
+    method: "POST", signal,
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify(action),
+  })
+  if (response.status === 401) return handleSessionExpired<void>()
+  if (!response.ok) throw new ApiError((await response.text()).trim() || "Unable to start artifact.", response.status)
+  if (!response.body) throw new Error("Streaming is unavailable.")
+  const { readAIChatEvents } = await import("./ai-chat-stream")
+  await readAIChatEvents(response.body, onEvent)
+}
 export interface AIChatQuestion {
   id: string
   prompt: string

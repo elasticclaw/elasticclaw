@@ -5,14 +5,15 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Sparkles } from "lucide-react"
 import { AnswersSummary, InlineBlock, splitContent } from "./blocks"
+import { ArtifactActionCard } from "./artifact-card"
 import { InterviewCard } from "./interview-card"
-import type { AIChatAnswersSummary, AIChatMessage, AIChatStepAnswers } from "@/lib/api"
+import type { AIChatArtifactRequest, AIChatAnswersSummary, AIChatMessage, AIChatStepAnswers } from "@/lib/api"
 
 function isAnswers(message: AIChatMessage): message is AIChatMessage & { interview: AIChatAnswersSummary } {
   return message.role === "user" && !!message.interview && "answers" in message.interview
 }
 
-export function MessageList({ messages, reading, streaming = false, interviewDisabled = false, onAnswer }: { messages: AIChatMessage[]; reading: string; streaming?: boolean; interviewDisabled?: boolean; onAnswer?: (id: string, steps: AIChatStepAnswers[]) => void }) {
+export function MessageList({ messages, reading, streaming = false, interviewDisabled = false, onAnswer, onArtifact, onCancel }: { messages: AIChatMessage[]; reading: string; streaming?: boolean; interviewDisabled?: boolean; onArtifact?: (action?: AIChatArtifactRequest) => void; onCancel?: () => void; onAnswer?: (id: string, steps: AIChatStepAnswers[]) => void }) {
   const end = useRef<HTMLDivElement>(null)
   useEffect(() => { end.current?.scrollIntoView({ block: "end" }) }, [messages, reading])
   return (
@@ -32,7 +33,7 @@ export function MessageList({ messages, reading, streaming = false, interviewDis
             <div className="space-y-3 break-words leading-relaxed [&>*:first-child]:mt-0 [&_p]:my-3 [&_p:first-child]:mt-0 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-1.5 [&_li]:text-muted-foreground [&_li_strong]:text-foreground [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted [&_pre]:p-3 [&_a]:text-primary [&_a]:underline">
               {previous && isAnswers(previous) && <AnswersSummary summary={previous.interview} />}
               {splitContent(message.content || (!message.blocks?.length && !message.interview && message.status === "streaming" ? "Thinking…" : ""), message.blocks).map((part, partIndex) => typeof part === "string" ?
-                <ReactMarkdown key={partIndex} remarkPlugins={[remarkGfm]} components={{ img: () => null, a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a> }}>{part}</ReactMarkdown> : <InlineBlock key={part.id} block={part} />)}
+                <ReactMarkdown key={partIndex} remarkPlugins={[remarkGfm]} components={{ img: () => null, a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a> }}>{part}</ReactMarkdown> : part.type === "action" ? <ArtifactActionCard key={part.id} block={part} onStop={streaming ? onCancel : undefined} onRetry={!interviewDisabled && !streaming && index === messages.length - 1 ? onArtifact : undefined} /> : <InlineBlock key={part.id} block={part} onAction={!interviewDisabled && !streaming && message.status === "completed" && index === messages.length - 1 && onArtifact ? (kind) => { if (kind === "artifact") onArtifact() } : undefined} />)}
               {message.interview && "steps" in message.interview && !message.interview.answered && <InterviewCard key={message.interview.questionSetId} interview={message.interview} disabled={interviewDisabled || streaming || message.status !== "completed" || index !== messages.length - 1} onAnswer={onAnswer} />}
             </div>
           )}

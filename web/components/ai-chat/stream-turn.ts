@@ -1,7 +1,8 @@
-import type { AIChatMessage, AIChatAnswers, AIChatAnswersSummary, AIChatInterview, AIChatBlock } from "@/lib/api"
+import type { AIChatMessage, AIChatAnswers, AIChatAnswersSummary, AIChatInterview, AIChatBlock, AIChatArtifactRequest, AIChatArtifactCard } from "@/lib/api"
 
 // Progress of one streamed turn, updated in place as SSE events arrive.
 export type StreamTurn = {
+  action?: AIChatArtifactRequest
   answers?: AIChatAnswers
   answersSummary?: AIChatAnswersSummary
   threadId: string
@@ -26,12 +27,12 @@ export function applyStreamEvent(turn: StreamTurn, event: string, payload: Recor
       turn.assistantId = payload.messageId
       // Clear the composer only if it still holds what was just sent; a retry
       // sends no text, and the user may have started typing something else.
-      if (!turn.retry && !turn.answers) view.setDraft((draft) => (draft.trim() === turn.text.trim() ? "" : draft))
+      if (!turn.retry && !turn.answers && !turn.action) view.setDraft((draft) => (draft.trim() === turn.text.trim() ? "" : draft))
       const base = { threadId: turn.threadId, seq: 0, model: "", inputTokens: 0, outputTokens: 0, createdAt: Date.now() }
       view.setMessages((previous) => [...previous.map((message) =>
         turn.answers && message.role === "assistant" && message.interview?.questionSetId === turn.answers.questionSetId && "steps" in message.interview
           ? { ...message, interview: { ...message.interview, answered: true } } : message),
-        ...(!turn.retry ? [{ ...base, id: `user-${turn.assistantId}`, role: "user" as const, content: turn.text, interview: turn.answersSummary, status: "completed" }] : []),
+        ...(!turn.retry && !turn.action ? [{ ...base, id: `user-${turn.assistantId}`, role: "user" as const, content: turn.text, interview: turn.answersSummary, status: "completed" }] : []),
         { ...base, id: turn.assistantId, role: "assistant", content: "", status: "streaming", model: String(payload.model ?? "") },
       ])
       break
@@ -42,6 +43,16 @@ export function applyStreamEvent(turn: StreamTurn, event: string, payload: Recor
     case "block":
       if (["stat_tiles", "callout", "table", "actions"].includes(String(payload.type)) && typeof payload.id === "string" && typeof payload.at === "number" && Number.isInteger(payload.at) && payload.at >= 0) {
         updateAssistant(turn, view, (message) => ({ ...message, blocks: [...(message.blocks ?? []), payload as AIChatBlock] }))
+      }
+      break
+    case "action":
+      if (payload.kind === "artifact" && ["working", "created", "failed"].includes(String(payload.state)) && payload.card && typeof payload.card === "object" && typeof (payload.card as AIChatArtifactCard).title === "string") {
+        updateAssistant(turn, view, (message) => {
+          const blocks = message.blocks ?? []
+          const previous = blocks.find((block) => block.type === "action" && block.kind === "artifact")
+          const block: AIChatBlock = { id: previous?.id ?? `${message.id}-artifact`, at: previous?.at ?? Array.from(message.content).length, type: "action", kind: "artifact", state: payload.state as "working" | "created" | "failed", card: payload.card as AIChatArtifactCard }
+          return { ...message, blocks: previous ? blocks.map((item) => item === previous ? block : item) : [...blocks, block] }
+        })
       }
       break
     case "interview":
