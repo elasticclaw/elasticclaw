@@ -114,7 +114,7 @@ func (s *Store) History(ctx context.Context, threadID string) ([]Message, error)
 func (s *Store) messages(ctx context.Context, threadID string, limit int, completedOnly bool) ([]Message, error) {
 	query := `SELECT id,thread_id,seq,role,content,COALESCE(model,''),input_tokens,output_tokens,status,created_at,blocks_json,interview_json FROM ai_chat_messages WHERE thread_id=?`
 	if completedOnly {
-		query += ` AND status='completed'`
+		query += ` AND (status='completed' OR (status IN ('error','cancelled') AND EXISTS(SELECT 1 FROM json_each(COALESCE(blocks_json,'[]')) WHERE json_extract(value,'$.type')='action')))`
 	}
 	query += ` ORDER BY seq DESC`
 	args := []any{threadID}
@@ -146,7 +146,11 @@ func (s *Store) messages(ctx context.Context, threadID string, limit int, comple
 
 var ErrRetry = errors.New("no failed turn to retry")
 
-const interruptMessagesSQL = `UPDATE ai_chat_messages SET status='error' WHERE thread_id=? AND role='assistant' AND status='streaming'`
+const interruptMessagesSQL = `UPDATE ai_chat_messages SET status='error', blocks_json=CASE
+ WHEN EXISTS(SELECT 1 FROM ai_chat_tool_runs WHERE message_id=ai_chat_messages.id AND tool='artifact')
+ AND NOT EXISTS(SELECT 1 FROM json_each(COALESCE(blocks_json,'[]')) WHERE json_extract(value,'$.type')='action' AND json_extract(value,'$.kind')='artifact')
+ THEN json_insert(COALESCE(blocks_json,'[]'),'$[#]',json_object('id',id||'-artifact','type','action','kind','artifact','state','failed','at',length(content),'card',json_patch(json_object('title','HTML artifact'),json_patch(COALESCE((SELECT args_json FROM ai_chat_tool_runs WHERE message_id=ai_chat_messages.id AND tool='artifact' LIMIT 1),'{}'),json_object('error','The generation was interrupted.')))))
+ ELSE blocks_json END WHERE thread_id=? AND role='assistant' AND status='streaming'`
 
 // RecoverInterrupted requires the runner to exclude an active turn for this thread.
 func (s *Store) RecoverInterrupted(ctx context.Context, threadID string) error {
