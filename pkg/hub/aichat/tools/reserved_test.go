@@ -16,6 +16,8 @@ func TestReservedBlockValidation(t *testing.T) {
 		{"callout", `{"type":"callout","data":{"tone":"warning","title":"Check","text":"Evidence"}}`, true},
 		{"table", `{"type":"table","data":{"columns":["A","B"],"rows":[["","b"]]}}`, true},
 		{"unknown type", `{"type":"chart","data":{}}`, false},
+		{"mismatched type and data", `{"type":"stat_tiles","data":{"tone":"info","text":"Evidence"}}`, false},
+		{"mixed data variants", `{"type":"callout","data":{"tone":"info","text":"Evidence","tiles":[{"label":"Users","value":"42"}]}}`, false},
 		{"unknown field", `{"type":"callout","data":{"tone":"info","text":"ok","html":"bad"}}`, false},
 		{"missing data", `{"type":"callout"}`, false},
 		{"null data", `{"type":"callout","data":null}`, false},

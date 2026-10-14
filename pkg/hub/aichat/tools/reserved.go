@@ -76,18 +76,17 @@ func ReservedDefinitions() []llm.Tool {
 	tile := objectSchema(map[string]any{"label": stringSchema(60), "value": stringSchema(24), "caption": stringSchema(80)}, "label", "value")
 	cell := stringSchema(120)
 	cell["minLength"] = 0
-	variants := []any{}
-	for _, variant := range []struct {
-		name string
-		data any
-	}{
-		{"stat_tiles", objectSchema(map[string]any{"tiles": arraySchema(tile, 1, 4)}, "tiles")},
-		{"callout", objectSchema(map[string]any{"tone": enumSchema("info", "warning", "success"), "title": stringSchema(80), "text": stringSchema(600)}, "tone", "text")},
-		{"table", objectSchema(map[string]any{"columns": arraySchema(stringSchema(40), 1, 6), "rows": arraySchema(arraySchema(cell, 1, 6), 1, 20)}, "columns", "rows")},
-	} {
-		variants = append(variants, objectSchema(map[string]any{"type": enumSchema(variant.name), "data": variant.data}, "type", "data"))
+	data := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"tiles": arraySchema(tile, 1, 4),
+			"tone":  enumSchema("info", "warning", "success"), "title": stringSchema(80), "text": stringSchema(600),
+			"columns": arraySchema(stringSchema(40), 1, 6), "rows": arraySchema(arraySchema(cell, 1, 6), 1, 20),
+		},
+		"additionalProperties": false,
+		"description":          "Fields by type: stat_tiles requires tiles; callout requires tone and text with optional title; table requires columns and rows. Use only fields for the selected type.",
 	}
-	blockSchema, _ := json.Marshal(map[string]any{"type": "object", "oneOf": variants})
+	blockSchema, _ := json.Marshal(objectSchema(map[string]any{"type": enumSchema("stat_tiles", "callout", "table"), "data": data}, "type", "data"))
 	option := objectSchema(map[string]any{"label": stringSchema(60), "detail": stringSchema(90)}, "label")
 	question := objectSchema(map[string]any{"id": stringSchema(60), "prompt": stringSchema(160), "kind": enumSchema("single", "multi"), "options": arraySchema(option, 2, 5)}, "prompt", "kind", "options")
 	step := objectSchema(map[string]any{"questions": arraySchema(question, 1, 3)}, "questions")
