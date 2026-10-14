@@ -25,7 +25,7 @@ export function InlineBlock({ block, onAction, ticketCaption }: { block: AIChatB
       return <div className={`my-3 grid grid-cols-1 gap-2.5 ${columns}`}>
         {block.data.tiles.map((tile, index) => <div key={index} className="min-w-0 rounded-xl border bg-card px-3.5 py-3 leading-snug">
           <div className="text-[11.5px] text-muted-foreground">{tile.label}</div>
-          <div className="my-1.5 text-[22px] leading-tight font-bold tracking-tight">{tile.value}</div>
+          <div className="my-2.5 text-[22px] leading-tight font-bold tracking-tight">{tile.value}</div>
           {tile.caption && <div className="text-[11.5px] text-muted-foreground">{tile.caption}</div>}
         </div>)}
       </div>
