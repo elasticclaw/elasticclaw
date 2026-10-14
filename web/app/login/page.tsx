@@ -4,18 +4,13 @@ import { useState, useEffect, Suspense } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { getHubUrl } from "@/lib/hub-url"
 import { clearConfig } from "@/lib/api"
+import { safeNextPath } from "@/lib/auth-redirect"
 import { setGitHubToken, setHubToken, getOAuthState, setOAuthState, removeOAuthState, getOAuthNext, setOAuthNext, removeOAuthNext } from "@/lib/auth-storage"
 import { useBranding } from "@/hooks/use-branding"
 
 interface AuthConfig {
   github_oauth_enabled: boolean
   password_auth_enabled: boolean
-}
-
-function safeNextPath(next: string | null): string | null {
-  if (!next) return null
-  if (!next.startsWith("/") || next.startsWith("//")) return null
-  return next
 }
 
 function randomState(): string {

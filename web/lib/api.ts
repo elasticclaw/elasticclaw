@@ -24,6 +24,7 @@ import type {
   WorkflowV2RunsResponse,
 } from "./types"
 import { getHubUrl, setHubUrl } from "./hub-url"
+import { loginRedirectPath } from "./auth-redirect"
 import { getAuthToken, requestAuthToken, clearAuthTokens } from "./auth-storage"
 
 // Token is resolved once and cached.
@@ -126,7 +127,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 function handleSessionExpired<T>(): Promise<T> {
   clearConfig()
   if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-    window.location.href = "/login"
+    window.location.href = loginRedirectPath(window.location.pathname)
     // Return a never-resolving promise to prevent the error from propagating
     // and triggering the "Cannot reach hub" error screen before navigation completes
     return new Promise(() => {})

@@ -976,6 +976,69 @@ test("artifact page loads an isolated frame and shows pinned version metadata", 
     assert.equal(frame.props.sandbox, "allow-scripts")
     assert.equal(frame.props.referrerPolicy, "no-referrer")
     assert.equal(frame.props.src, artifact.rawUrl)
-    assert.ok(findElements(tree, "a").some((link) => link.props.href === artifact.downloadUrl))
+    assert.ok(findElements(tree, "Button").some((button) => elementText(button).includes("Download .html")))
   } finally { window.location = previousLocation }
+})
+
+
+const authRedirectHelpers = loadComponent("lib/auth-redirect.ts", {})
+
+test("login redirects preserve shared artifact versions and reject unsafe next paths", () => {
+  for (const path of ["/artifacts/meal-abcdef", "/artifacts/meal-abcdef/v/2/", "/ai-chat?thread=abc"]) {
+    assert.equal(authRedirectHelpers.safeNextPath(path), path)
+    const url = new URL(authRedirectHelpers.loginRedirectPath(path), "https://hub.test")
+    assert.equal(url.pathname, "/login")
+    assert.equal(url.searchParams.get("next"), path)
+  }
+  for (const path of [null, "", "https://outside.test", "//outside.test", "/\\outside.test", "/\t/outside.test", "/\n/outside.test", "relative"]) {
+    assert.equal(authRedirectHelpers.safeNextPath(path), null)
+    assert.equal(authRedirectHelpers.loginRedirectPath(path), "/login")
+  }
+})
+
+test("artifact download refreshes an expired URL without a focus event and preserves the displayed version", async () => {
+  const previousLocation = window.location
+  try {
+    for (const expired of [false, true]) {
+      const hooks = createHooks()
+      window.location = { pathname: "/artifacts/meal-abcdef", origin: "https://hub.test" }
+      const expiry = Math.floor(Date.now() / 1000) + (expired ? -1 : 900)
+      const artifact = { slug: "meal-abcdef", title: "Meal", ownerLogin: "ana", version: 2, currentVersion: 2, createdAt: 100000, rawUrl: `/raw?exp=${expiry}`, downloadUrl: `/raw?download=1&exp=${expiry}` }
+      const fresh = { ...artifact, currentVersion: 3, rawUrl: `/raw?exp=${expiry + 900}`, downloadUrl: `/raw?download=1&exp=${expiry + 900}` }
+      const requests = []
+      const { default: Page } = loadComponent("app/artifacts/page.tsx", {
+        react: hooks.react, "next/link": { default: "Link" }, "lucide-react": {},
+        "@/lib/api": { ApiError, fetchAIChatArtifact: async (slug, version) => { requests.push({ slug, version }); return requests.length === 1 ? artifact : fresh } },
+        "@/lib/auth-storage": { requestAuthToken: async () => "token" }, "@/lib/hub-url": { getHubUrl: () => "" },
+        "@/lib/ai-chat-artifacts": artifactHelpers, "@/components/ui/button": { Button: "Button" }, "@/components/ai-chat/artifact-card": { CopyArtifactLink: "CopyArtifactLink" },
+      })
+      hooks.render(Page)
+      await flush()
+      const button = findElements(hooks.render(Page), "Button").find((button) => elementText(button).includes("Download .html"))
+      button.props.onClick()
+      await flush()
+      assert.equal(window.location.href, expired ? fresh.downloadUrl : artifact.downloadUrl)
+      assert.deepEqual(requests, expired ? [{ slug: artifact.slug, version: undefined }, { slug: artifact.slug, version: 2 }] : [{ slug: artifact.slug, version: undefined }])
+    }
+  } finally { window.location = previousLocation }
+})
+
+test("artifact API 401 returns through login to the same pinned path", async () => {
+  const previousLocation = window.location
+  const previousFetch = global.fetch
+  window.location = { pathname: "/artifacts/meal-abcdef/v/2" }
+  global.fetch = async () => ({ status: 401 })
+  let cleared = false
+  try {
+    const { fetchAIChatArtifact } = loadComponent("lib/api.ts", {
+      "./hub-url": { getHubUrl: () => "" },
+      "./auth-storage": { getAuthToken: () => "expired-token", clearAuthTokens: () => { cleared = true } },
+      "./auth-redirect": authRedirectHelpers,
+    })
+    // Session expiry deliberately leaves this promise pending until navigation.
+    void fetchAIChatArtifact("meal-abcdef", 2)
+    await flush()
+    assert.equal(cleared, true)
+    assert.equal(window.location.href, "/login?next=%2Fartifacts%2Fmeal-abcdef%2Fv%2F2")
+  } finally { window.location = previousLocation; global.fetch = previousFetch }
 })
