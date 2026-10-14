@@ -1112,3 +1112,64 @@ func prStateForFixture(fixture apiRunFixture) string {
 	}
 	return taskRunPRStateUnknown
 }
+
+func TestTaskRunAnalyticsCostMetadata(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	for i, source := range []string{"", "gateway", "hub_pricing", "mixed"} {
+		runID := fmt.Sprintf("cost-metadata-%d", i)
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: runID, AttemptID: runID + "-attempt", TenantID: "test-tenant-id", OwnerType: "manual", StartedAt: 1760000000000 + int64(i)})
+		if source == "" {
+			continue
+		}
+		sources := []string{source}
+		if source == "mixed" {
+			sources = []string{"gateway", "hub_pricing", "hub_pricing"}
+		}
+		for j, src := range sources {
+			_, err := db.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,cost_source,committed_input_tokens,committed_output_tokens,committed_cache_read_tokens,committed_cache_write_tokens,committed_input_cost_usd,committed_output_cost_usd,committed_cache_read_cost_usd,committed_cache_write_cost_usd,cost_approximate,first_seen_at,updated_at) VALUES(?,'test-tenant-id',?,?,?,10,20,30,40,1,2,3,4,?,0,0)`, fmt.Sprintf("%s-%d", runID, j), runID, fmt.Sprint(j), src, boolInt(src == "hub_pricing"))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.Exec(`UPDATE task_run_summaries SET cost_approximate=?, usage_updated_at=1, estimated_cost_usd=10 WHERE run_id=?`, boolInt(source != "gateway"), runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var list taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", "test-token"), &list)
+	if len(list.Runs) != 4 {
+		t.Fatalf("runs = %d", len(list.Runs))
+	}
+	for _, run := range list.Runs {
+		var detail taskRunAnalyticsRunDetailResponse
+		decodeTaskRunAnalyticsAPI(t, requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/"+run.RunID, "test-token"), &detail)
+		for _, got := range []taskRunAnalyticsRunView{run, detail.Run} {
+			wantSource := map[string]string{"cost-metadata-0": "", "cost-metadata-1": "openclaw", "cost-metadata-2": "fallback", "cost-metadata-3": "mixed"}[got.RunID]
+			if got.CostSource != wantSource || got.CostApproximate != (wantSource == "fallback" || wantSource == "mixed") {
+				t.Fatalf("metadata = %#v", got)
+			}
+			if wantSource == "fallback" || wantSource == "mixed" {
+				n := int64(1)
+				if wantSource == "mixed" {
+					n = 2
+				}
+				want := taskRunAnalyticsCostBreakdown{InputTokens: 10 * n, OutputTokens: 20 * n, CacheReadTokens: 30 * n, CacheWriteTokens: 40 * n, InputCostUsd: float64(n), OutputCostUsd: 2 * float64(n), CacheReadCostUsd: 3 * float64(n), CacheWriteCostUsd: 4 * float64(n)}
+				if got.CostBreakdown == nil || *got.CostBreakdown != want {
+					t.Fatalf("breakdown = %+v, want %+v", got.CostBreakdown, want)
+				}
+			} else if got.CostBreakdown != nil {
+				t.Fatalf("unexpected breakdown: %+v", got.CostBreakdown)
+			}
+			redactTaskRunAnalyticsRunCost(&got)
+			data, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"estimatedCostUsd", "costSource", "costApproximate", "costBreakdown"} {
+				if strings.Contains(string(data), `"`+field+`"`) {
+					t.Fatalf("redacted run contains %s: %s", field, data)
+				}
+			}
+		}
+	}
+}
