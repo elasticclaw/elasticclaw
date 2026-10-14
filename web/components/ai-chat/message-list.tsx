@@ -24,7 +24,7 @@ export function MessageList({ messages, reading, streaming = false, interviewDis
             <div className="space-y-3 break-words leading-relaxed [&_p]:my-3 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted [&_pre]:p-3 [&_a]:text-primary [&_a]:underline">
               {splitContent(message.content || (!message.blocks?.length && !message.interview && message.status === "streaming" ? "Thinking…" : ""), message.blocks).map((part, partIndex) => typeof part === "string" ?
                 <ReactMarkdown key={partIndex} remarkPlugins={[remarkGfm]} components={{ img: () => null, a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a> }}>{part}</ReactMarkdown> : <InlineBlock key={part.id} block={part} />)}
-              {message.interview && "steps" in message.interview && !message.interview.answered && <InterviewCard key={message.interview.questionSetId} interview={message.interview} disabled={interviewDisabled || streaming || index !== messages.length - 1} onAnswer={onAnswer} />}
+              {message.interview && "steps" in message.interview && !message.interview.answered && <InterviewCard key={message.interview.questionSetId} interview={message.interview} disabled={interviewDisabled || streaming || message.status !== "completed" || index !== messages.length - 1} onAnswer={onAnswer} />}
             </div>
           )}
           {message.status === "cancelled" && <p className="mt-2 text-xs text-muted-foreground">Response cancelled.</p>}

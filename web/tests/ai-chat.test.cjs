@@ -703,9 +703,9 @@ test("interview single, multi and other choices follow their selection rules", (
   many = helpers.selectChoice(multi, many, "Clients")
   assert.deepEqual(many.choices, ["Coaches"])
   assert.equal(many.other, "Friends")
-  assert.equal(helpers.stepComplete([single, multi], { q1: answer }), false)
-  assert.equal(helpers.stepComplete([single, multi], { q1: answer, q2: many }), true)
-  assert.equal(helpers.stepComplete([single], { q1: { choices: [], other: "  " } }), false)
+  assert.equal(helpers.stepComplete([single, multi], new Map([["q1", answer]])), false)
+  assert.equal(helpers.stepComplete([single, multi], new Map([["q1", answer], ["q2", many]])), true)
+  assert.equal(helpers.stepComplete([single], new Map([["q1", { choices: [], other: "  " }]])), false)
 })
 
 test("interview card enables Continue only with answers, walks steps, and allows Skip", () => {
@@ -750,6 +750,34 @@ test("answers summary renders question labels, answers and skipped steps", () =>
   assert.deepEqual(findElements(tree, "strong").map(elementText), ["When?:", "Who?:"])
 })
 
+for (const id of ["constructor", "__proto__", "toString"]) {
+  test(`interview handles prototype question id ${id}`, () => {
+    const hooks = createHooks()
+    const { InterviewCard, stepComplete } = loadComponent("components/ai-chat/interview-card.tsx", {
+      react: hooks.react, "lucide-react": { ArrowRight: "ArrowRight" }, "@/components/ui/button": { Button: "Button" },
+    })
+    const question = { ...interviewFixture().steps[0].questions[0], id }
+    const interview = { ...interviewFixture(), steps: [{ skippable: true, questions: [question] }] }
+    const submissions = []
+    const render = () => hooks.render(() => InterviewCard({ interview, disabled: false, onAnswer: (...args) => submissions.push(args) }))
+    const continueButton = (tree) => findElements(tree, "Button").find((button) => elementText(button) === "Continue")
+    assert.equal(stepComplete([question], new Map()), false)
+    let tree = render()
+    assert.equal(continueButton(tree).props.disabled, true)
+    assert.ok(findElements(tree, "input").filter((input) => input.props.type === "radio").every((input) => input.props.checked === false))
+    findElements(tree, "input").find((input) => input.props.type === "text").props.onChange({ target: { value: "At dinner" } })
+    tree = render()
+    assert.equal(findElements(tree, "input").find((input) => input.props["aria-label"] === "Other: When?").props.checked, true)
+    assert.equal(continueButton(tree).props.disabled, false)
+    findElements(tree, "input").find((input) => input.props.type === "radio").props.onChange()
+    tree = render()
+    assert.equal(findElements(tree, "input").find((input) => input.props["aria-label"] === "Other: When?").props.checked, false)
+    assert.equal(continueButton(tree).props.disabled, false)
+    continueButton(tree).props.onClick()
+    assert.deepEqual(submissions, [["set-1", [{ skipped: false, answers: [{ questionId: id, choices: ["Planning"] }] }]]])
+  })
+}
+
 test("only the latest unanswered interview is interactive, and answered cards disappear", () => {
   const hooks = createHooks()
   const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
@@ -761,6 +789,9 @@ test("only the latest unanswered interview is interactive, and answered cards di
   const render = (messages, streaming = false) => hooks.render(() => MessageList({ messages, streaming, reading: "", onAnswer() {} }))
   assert.equal(findElement(render([base]), "InterviewCard").props.disabled, false)
   assert.equal(findElement(render([base], true), "InterviewCard").props.disabled, true)
+  for (const status of ["streaming", "cancelled", "error", "limit"]) {
+    assert.equal(findElement(render([{ ...base, status }]), "InterviewCard").props.disabled, true, status)
+  }
   assert.equal(findElement(render([base, { ...base, id: "user", role: "user", interview: undefined }]), "InterviewCard").props.disabled, true)
   assert.equal(findElement(render([{ ...base, interview: { ...base.interview, answered: true } }]), "InterviewCard"), undefined)
   const summary = { questionSetId: "set-1", title: "Framing", answers: [], skipped: 2 }

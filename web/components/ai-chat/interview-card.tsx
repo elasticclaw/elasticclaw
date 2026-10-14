@@ -12,9 +12,9 @@ export function selectChoice(question: AIChatQuestion, current: AIChatAnswer, ch
 export function enterOther(question: AIChatQuestion, current: AIChatAnswer, other: string): AIChatAnswer {
   return { ...current, choices: question.kind === "single" ? [] : current.choices, other }
 }
-export function stepComplete(questions: AIChatQuestion[], answers: Record<string, AIChatAnswer>): boolean {
+export function stepComplete(questions: AIChatQuestion[], answers: ReadonlyMap<string, AIChatAnswer>): boolean {
   return questions.every((question) => {
-    const answer = answers[question.id]
+    const answer = answers.get(question.id)
     return !!answer && (answer.choices.length > 0 || !!answer.other?.trim())
   })
 }
@@ -25,13 +25,13 @@ export function InterviewCard({ interview, disabled, onAnswer }: {
   onAnswer?: (questionSetId: string, steps: AIChatStepAnswers[]) => void
 }) {
   const [step, setStep] = useState(0)
-  const [answers, setAnswers] = useState<Record<string, AIChatAnswer>>({})
+  const [answers, setAnswers] = useState(new Map<string, AIChatAnswer>())
   const [completed, setCompleted] = useState<AIChatStepAnswers[]>([])
-  const [otherSelected, setOtherSelected] = useState<Record<string, boolean>>({})
+  const [otherSelected, setOtherSelected] = useState(new Map<string, boolean>())
   const questions = interview.steps[step].questions
   const inactive = disabled || !onAnswer
-  const answerFor = (question: AIChatQuestion): AIChatAnswer => answers[question.id] ?? { questionId: question.id, choices: [] }
-  const update = (answer: AIChatAnswer) => setAnswers((previous) => ({ ...previous, [answer.questionId]: answer }))
+  const answerFor = (question: AIChatQuestion): AIChatAnswer => answers.get(question.id) ?? { questionId: question.id, choices: [] }
+  const update = (answer: AIChatAnswer) => setAnswers((previous) => new Map(previous).set(answer.questionId, answer))
   const advance = (skipped: boolean) => {
     if (inactive || (!skipped && !stepComplete(questions, answers))) return
     const steps = [...completed, { skipped, answers: skipped ? [] : questions.map(answerFor) }]
@@ -47,7 +47,7 @@ export function InterviewCard({ interview, disabled, onAnswer }: {
     <div className="mt-3 flex gap-1" aria-hidden="true">{interview.steps.map((_, index) => <div key={index} className={`h-0.5 flex-1 rounded-full ${index <= step ? "bg-foreground" : "bg-border"}`} />)}</div>
     <div className="mt-4 space-y-5">{questions.map((question, index) => {
       const answer = answerFor(question)
-      const other = !!otherSelected[question.id] || !!answer.other
+      const other = !!otherSelected.get(question.id) || !!answer.other
       const inputType = question.kind === "single" ? "radio" : "checkbox"
       const name = `${interview.questionSetId}-${question.id}`
       const tileClass = (selected: boolean) => `flex items-start gap-2.5 rounded-lg border p-2.5 focus-within:ring-2 focus-within:ring-ring ${selected ? "border-foreground bg-muted/50" : "border-border"}`
@@ -57,19 +57,19 @@ export function InterviewCard({ interview, disabled, onAnswer }: {
           {question.options.map((option, optionIndex) => <label key={optionIndex} className={tileClass(answer.choices.includes(option.label))}>
             <input className="mt-0.5 accent-foreground" type={inputType} name={name} checked={answer.choices.includes(option.label)} onChange={() => {
               update(selectChoice(question, answer, option.label))
-              if (question.kind === "single") setOtherSelected((previous) => ({ ...previous, [question.id]: false }))
+              if (question.kind === "single") setOtherSelected((previous) => new Map(previous).set(question.id, false))
             }} />
             <span className="text-sm"><span className="block">{option.label}</span>{option.detail && <span className="mt-1 block text-xs text-muted-foreground">{option.detail}</span>}</span>
           </label>)}
           <div className={tileClass(other)}>
             <input aria-label={`Other: ${question.prompt}`} className="mt-1 accent-foreground" type={inputType} name={name} checked={other} onChange={() => {
               const selected = inputType === "radio" || !other
-              setOtherSelected((previous) => ({ ...previous, [question.id]: selected }))
+              setOtherSelected((previous) => new Map(previous).set(question.id, selected))
               update(enterOther(question, answer, selected ? answer.other ?? "" : ""))
             }} />
             <label className="min-w-0 flex-1"><span className="sr-only">Your other answer: {question.prompt}</span>
               <input type="text" value={answer.other ?? ""} placeholder="Type your answer…" onChange={(event) => {
-                setOtherSelected((previous) => ({ ...previous, [question.id]: true }))
+                setOtherSelected((previous) => new Map(previous).set(question.id, true))
                 update(enterOther(question, answer, Array.from(event.target.value).slice(0, 300).join("")))
               }} className="w-full rounded border bg-background px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
             </label>
