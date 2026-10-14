@@ -571,16 +571,24 @@ func TestTaskRunUsageCacheCostEdgeCases(t *testing.T) {
 			t.Fatalf("committed = %v, want 0.80", got)
 		}
 	})
-	t.Run("first cache counters on a gateway-priced session are a baseline", func(t *testing.T) {
+	t.Run("first cache counters on a gateway-priced session estimate the new run", func(t *testing.T) {
 		s, db, claw := newUsageTestServer(t)
 		defer db.Close()
 		// Run A priced by the gateway ($1, cache included), then run B unpriced
-		// with 2M cumulative cache reads, of which only 1M is new — but the hub
-		// cannot tell, so none of the pre-existing tally is charged.
+		// with 2M cumulative cache reads. The hub cannot split them between A
+		// and B, so B's cache is estimated (default 6.5x) and later counter
+		// growth is charged exactly.
 		record(t, s, claw, snap(100_000, 10_000, 1.0, nil), snap(200_000, 20_000, 0, &[2]int{2_000_000, 0}), snap(200_000, 20_000, 0, &[2]int{3_000_000, 0}))
-		// $1 + $0.60 run B in/out + 1M new cache reads ($0.20).
-		if got := committed(t, db, "a"); math.Abs(got-1.80) > 1e-9 {
-			t.Fatalf("committed = %v, want 1.80", got)
+		// $1 + $0.60 run B in/out + $3.30 estimated cache + 1M new reads ($0.20).
+		if got := committed(t, db, "a"); math.Abs(got-5.10) > 1e-6 {
+			t.Fatalf("committed = %v, want 5.10", got)
+		}
+		var approx bool
+		if err := db.QueryRow(`SELECT cost_approximate FROM task_run_usage WHERE session_key='a'`).Scan(&approx); err != nil {
+			t.Fatal(err)
+		}
+		if !approx {
+			t.Fatal("baseline run with estimated cache must be approximate")
 		}
 	})
 	t.Run("stale snapshot does not re-bill cache", func(t *testing.T) {

@@ -104,6 +104,8 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	// the hub's own components came from the gateway.
 	baseline := firstCounters && found && comCost-committed.totalCost() > 1e-9
 	if baseline {
+		// The baseline also hides this run's own cache, so a new run is
+		// estimated like a cold session instead of being charged nothing.
 		dRead, dWrite = 0, 0
 	}
 	cacheKnown := oldCacheRead.Valid || oldCacheWrite.Valid || firstCounters
@@ -183,7 +185,7 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	var newEstimate usageCostComponents
 	if source == "hub_pricing" && cost.Valid && priced {
 		cache := usageCostComponents{}
-		if cacheKnown {
+		if cacheKnown && !(baseline && newRun) {
 			cache = usageCostComponents{readTokens: dRead, writeTokens: dWrite, readCost: float64(dRead) * p.cacheRead, writeCost: float64(dWrite) * p.cacheWrite}
 		} else if newRun {
 			ratio, w, err := s.fallbackCacheRatios(tx, effectiveModel, usageNow)
