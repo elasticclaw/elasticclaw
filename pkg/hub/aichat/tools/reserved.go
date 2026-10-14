@@ -17,6 +17,9 @@ type Block struct {
 	Type    string          `json:"type"`
 	Data    json.RawMessage `json:"data,omitempty"`
 	Actions []string        `json:"actions,omitempty"`
+	Kind    string          `json:"kind,omitempty"`
+	State   string          `json:"state,omitempty"`
+	Card    json.RawMessage `json:"card,omitempty"`
 	At      int             `json:"at"`
 }
 type StatTile struct {
@@ -96,6 +99,7 @@ func ReservedDefinitions() []llm.Tool {
 	actions := arraySchema(enumSchema("artifact", "ticket"), 1, 2)
 	actions["uniqueItems"] = true
 	return []llm.Tool{
+		Define(StartArtifact, "Build an HTML artifact only when the user asks for a page, prototype, document or a revision. Ends the turn. Include the decisions and numbers from the conversation in brief. Only revise an artifact from this thread, using its artifactId.", map[string]any{"title": stringSchema(80), "brief": stringSchema(4000), "artifactId": stringSchema(80)}, "title", "brief"),
 		{Name: EmitBlock, Description: "Show plain-text inline stat tiles, a callout or a table. Use 1–4 key numbers only when backed by a read tool result, never invent them. Stat data is {tiles:[{label,value,caption?}]}. Table rows must match the columns. No HTML or Markdown.", InputSchema: blockSchema},
 		Define(AskInterview, "End this turn with a short interview at the start of exploration, only if the answers change your advice and sources cannot answer them. Ask at most once. Do not include Other or Skip: the runner adds these. IDs, if supplied, must be unique.", map[string]any{"title": stringSchema(60), "steps": arraySchema(step, 1, 3)}, "title", "steps"),
 		Define(OfferActions, "Offer available wrap-up actions after giving your answer. This only shows buttons; it never creates an artifact or ticket.", map[string]any{"actions": actions}, "actions"),
@@ -105,6 +109,23 @@ func ReservedDefinitions() []llm.Tool {
 
 func validText(s string, max int) bool {
 	return strings.TrimSpace(s) != "" && utf8.RuneCountInString(s) <= max
+}
+
+type ArtifactRequest struct {
+	ArtifactID string `json:"artifactId,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Brief      string `json:"brief,omitempty"`
+}
+
+func ParseArtifact(raw json.RawMessage) (ArtifactRequest, error) {
+	var args ArtifactRequest
+	if err := decodeReserved(raw, &args); err != nil {
+		return args, err
+	}
+	if !validText(args.Title, 80) || !validText(args.Brief, 4000) || !optionalText(args.ArtifactID, 80) {
+		return args, ArgError("artifact requires title (1–80 chars), brief (1–4000 chars), and optional artifactId")
+	}
+	return args, nil
 }
 func optionalText(s string, max int) bool { return s == "" || validText(s, max) }
 

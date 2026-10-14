@@ -37,6 +37,9 @@ func (p *Anthropic) Stream(ctx context.Context, req Request, token func(string) 
 		}
 	}
 	body := map[string]any{"model": p.Model(), "max_tokens": 4096, "system": req.System, "messages": messages, "stream": true}
+	if req.MaxTokens > 0 {
+		body["max_tokens"] = req.MaxTokens
+	}
 	if len(req.Tools) > 0 {
 		body["tools"] = req.Tools
 	}

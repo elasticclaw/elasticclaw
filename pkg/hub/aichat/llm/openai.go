@@ -26,6 +26,9 @@ func (p *OpenAI) Stream(ctx context.Context, req Request, token func(string) err
 		messages = append(messages, message)
 	}
 	body := map[string]any{"model": p.Model(), "messages": messages, "stream": true, "stream_options": map[string]bool{"include_usage": true}}
+	if req.MaxTokens > 0 {
+		body["max_completion_tokens"] = req.MaxTokens
+	}
 	if len(req.Tools) > 0 {
 		definitions := []any{}
 		for _, tool := range req.Tools {

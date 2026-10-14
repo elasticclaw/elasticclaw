@@ -31,9 +31,10 @@ type Message struct {
 	IsError    bool
 }
 type Request struct {
-	System   string
-	Messages []Message
-	Tools    []Tool
+	MaxTokens int
+	System    string
+	Messages  []Message
+	Tools     []Tool
 }
 type Response struct {
 	Text         string
