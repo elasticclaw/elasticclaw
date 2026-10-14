@@ -3,7 +3,8 @@
 import { ArrowUp, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
-export function ChatComposer({ value, onChange, onSend, onCancel, streaming, disabled }: {
+export function ChatComposer({ value, onChange, onSend, onCancel, streaming, disabled, placeholder = "Ask anything..." }: {
+  placeholder?: string
   value: string
   onChange: (value: string) => void
   onSend: () => void
@@ -13,7 +14,7 @@ export function ChatComposer({ value, onChange, onSend, onCancel, streaming, dis
 }) {
   return (
     <div className="rounded-xl border bg-card p-3">
-      <textarea aria-label="Message" placeholder="Ask anything..." value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled || streaming}
+      <textarea aria-label="Message" placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled || streaming}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault()
