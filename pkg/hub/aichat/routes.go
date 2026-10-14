@@ -1,6 +1,7 @@
 package aichat
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -17,12 +18,16 @@ import (
 // Deps is the hub boundary. Connectors and runner dependencies are added when
 // they are needed; this package never imports its parent hub package.
 type Deps struct {
-	GitHubToken func(string) string
-	GitHubAPI   string
-	Secret      func(workspace, name string) (string, bool)
-	LinearToken func(workspace string) (string, bool)
-	HTTPClient  *http.Client
-	health      *sourceHealth
+	ArtifactsDir string
+	ArtifactKey  func() string
+	FeatureStage func(context.Context, string) string
+	PublicURL    func() string
+	GitHubToken  func(string) string
+	GitHubAPI    string
+	Secret       func(workspace, name string) (string, bool)
+	LinearToken  func(workspace string) (string, bool)
+	HTTPClient   *http.Client
+	health       *sourceHealth
 
 	DB          *sql.DB
 	TenantID    func(*http.Request) string
@@ -48,7 +53,9 @@ func Routes(deps Deps) http.Handler {
 	deps.health = newSourceHealth()
 	mux := http.NewServeMux()
 	api := &api{deps: deps, store: &Store{DB: deps.DB}}
-	api.runner = &Runner{Store: api.store, PrepareReads: deps.prepareReads}
+	api.runner = &Runner{Store: api.store, PrepareReads: deps.prepareReads, ArtifactsDir: deps.ArtifactsDir, PublicURL: deps.PublicURL, AvailableActions: func(*config.Config) []string { return []string{"artifact"} }}
+	mux.HandleFunc("GET /api/ai-chat/artifacts/{slug}", api.getArtifact)
+	mux.HandleFunc("POST /api/ai-chat/threads/{id}/actions", api.runAction)
 	mux.HandleFunc("GET /api/ai-chat/threads", api.listThreads)
 	mux.HandleFunc("POST /api/ai-chat/threads", api.createThread)
 	mux.HandleFunc("GET /api/ai-chat/threads/{id}", api.getThread)
