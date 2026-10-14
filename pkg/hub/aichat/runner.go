@@ -139,6 +139,9 @@ func (r *Runner) Run(ctx context.Context, t Thread, m Message, cfg *config.Confi
 	case runErr != nil:
 		m.Status, code, message = "error", "turn_failed", "Unable to complete this turn. Try again."
 	}
+	if m.Status != "completed" {
+		m.Interview = nil
+	}
 	// Request cancellation must not cancel the final database write.
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
@@ -217,6 +220,9 @@ func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Con
 		m.InputTokens += response.InputTokens
 		m.OutputTokens += response.OutputTokens
 		if err != nil {
+			return err
+		}
+		if err := emitText(redactor.Flush()); err != nil {
 			return err
 		}
 		if response.Truncated || len(response.ToolCalls) == 0 {
