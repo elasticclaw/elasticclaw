@@ -1268,6 +1268,8 @@ type gatewaySession struct {
 	usage        gatewayUsage
 	// cacheUsagePolledAt throttles the sessions.usage transcript scan.
 	cacheUsagePolledAt time.Time
+	// cacheUsagePollFailed lifts the throttle until a poll succeeds again.
+	cacheUsagePollFailed bool
 
 	// ready is true once the gateway session is established and ready for messages
 	readyMu sync.RWMutex
@@ -2412,29 +2414,30 @@ func (gs *gatewaySession) sessionCacheTokens(ctx context.Context, sessionKey str
 	}
 	// A new turn always polls: its counters must land with the turn that spent
 	// them, or the next differently-priced turn would absorb them.
-	if sameSession && !newTurn && time.Since(gs.cacheUsagePolledAt) < sessionCacheUsagePollInterval {
+	if sameSession && !newTurn && !gs.cacheUsagePollFailed && time.Since(gs.cacheUsagePolledAt) < sessionCacheUsagePollInterval {
 		gs.ctxMu.Unlock()
 		return last.cacheReadTokens, last.cacheWriteTokens
 	}
 	gs.ctxMu.Unlock()
 
-	// Only a successful poll starts the throttle window, so a failed one is
-	// retried on the next refresh while the turn that spent the cache is current.
+	// A failed poll is retried on the next refresh, even inside the window of
+	// an earlier success, while the turn that spent the cache is current.
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	resp, err := gs.sendReq(pollCtx, "sessions.usage", map[string]any{"key": sessionKey, "range": "all", "groupBy": "family", "limit": 1})
+	if err == nil {
+		read, write, err = parseSessionCacheTokens(resp.Payload)
+	}
+	gs.ctxMu.Lock()
+	gs.cacheUsagePollFailed = err != nil
+	if err == nil {
+		gs.cacheUsagePolledAt = time.Now()
+	}
+	gs.ctxMu.Unlock()
 	if err != nil {
 		log.Printf("[session] sessions.usage for cache tokens: %v", err)
 		return last.cacheReadTokens, last.cacheWriteTokens
 	}
-	read, write, err = parseSessionCacheTokens(resp.Payload)
-	if err != nil {
-		log.Printf("[session] parse sessions.usage response: %v", err)
-		return last.cacheReadTokens, last.cacheWriteTokens
-	}
-	gs.ctxMu.Lock()
-	gs.cacheUsagePolledAt = time.Now()
-	gs.ctxMu.Unlock()
 	return read, write
 }
 

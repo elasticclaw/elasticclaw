@@ -126,7 +126,8 @@ func TestSessionCacheTokensRetriesFailedPollWithinThrottle(t *testing.T) {
 			if ok {
 				res.Error, res.Payload = nil, mustJSON(map[string]any{"sessions": []any{map[string]any{"key": "s", "usage": map[string]int{"cacheRead": 2000, "cacheWrite": 100}}}})
 			}
-			if err := wsjson.Write(ctx, conn, res); err != nil {
+			// Background: cancel() at teardown must not race the last write.
+			if err := wsjson.Write(context.Background(), conn, res); err != nil {
 				t.Error(err)
 				return
 			}
@@ -134,12 +135,13 @@ func TestSessionCacheTokensRetriesFailedPollWithinThrottle(t *testing.T) {
 		<-ctx.Done()
 	}))
 	stale, n := 1000, 10
-	gs := &gatewaySession{sessionKey: "s", conn: conn, pending: make(map[string]chan gwFrame), usage: gatewayUsage{sessionKey: "s", inputTokens: &n, cacheReadTokens: &stale}}
+	// A recent success must not hold back the retry of a later failed poll.
+	gs := &gatewaySession{sessionKey: "s", conn: conn, pending: make(map[string]chan gwFrame), cacheUsagePolledAt: time.Now(), usage: gatewayUsage{sessionKey: "s", inputTokens: &n, cacheReadTokens: &stale}}
 	go gs.readLoop(ctx)
 	if read, _ := gs.sessionCacheTokens(ctx, "s", true); read == nil || *read != stale {
 		t.Fatalf("failed poll read = %v, want stale %d", read, stale)
 	}
-	// The failed poll must not start the throttle window.
+	// The failed poll lifts the throttle window.
 	if read, write := gs.sessionCacheTokens(ctx, "s", false); read == nil || write == nil || *read != 2000 || *write != 100 {
 		t.Fatalf("retry = %v/%v, want 2000/100", read, write)
 	}
