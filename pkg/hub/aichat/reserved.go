@@ -127,12 +127,17 @@ func historyContent(m Message) string {
 	if json.Unmarshal(m.Blocks, &blocks) == nil {
 		for _, b := range blocks {
 			text := ""
+			label := "Shown"
 			switch b.Type {
 			case "stat_tiles":
 				var v tools.StatTiles
 				if json.Unmarshal(b.Data, &v) == nil {
 					for _, tile := range v.Tiles {
-						text += tile.Label + ": " + tile.Value + " (" + tile.Caption + "); "
+						text += tile.Label + ": " + tile.Value
+						if tile.Caption != "" {
+							text += " (" + tile.Caption + ")"
+						}
+						text += "; "
 					}
 				}
 			case "callout":
@@ -149,10 +154,11 @@ func historyContent(m Message) string {
 					}
 				}
 			case "actions":
+				label = "Offered wrap-up"
 				text = strings.Join(b.Actions, ", ")
 			}
 			if text != "" {
-				parts = append(parts, "[Shown: "+capRendering(text)+"]")
+				parts = append(parts, "["+label+": "+capRendering(text)+"]")
 			}
 		}
 	}
