@@ -50,6 +50,9 @@ func TestArtifactValidation(t *testing.T) {
 		{"style attr", `<div style="background: url(https://evil.test/a)"></div>`, false},
 		{"refresh", `<meta http-equiv="REFRESH" content="0; URL='https://evil.test/a'">`, false},
 		{"refresh whitespace", `<meta http-equiv="refresh" content=" 0; url=https://evil.test/">`, false},
+		{"refresh space separator", `<meta http-equiv="refresh" content="0 URL=https://outside.example/">`, false},
+		{"refresh comma separator", `<meta http-equiv="refresh" content="0, URL=https://outside.example/">`, false},
+		{"refresh reload", `<meta http-equiv="refresh" content="0">`, false},
 		{"refresh without url", `<meta http-equiv="refresh" content="0; https://evil.test/">`, false},
 		{"base", `<base href="https://evil.test/a">`, false},
 		{"form", `<form action="https://evil.test/a"><button formaction="https://evil.test/b">Go</button></form>`, false},
@@ -291,7 +294,7 @@ func TestArtifactGeneration(t *testing.T) {
 			r := &Runner{Store: s, ArtifactsDir: t.TempDir()}
 			calls := 0
 			p := fakeProvider{stream: func(_ context.Context, req llm.Request, token func(string) error) (llm.Response, error) {
-				if req.MaxTokens != 32000 || len(req.Tools) != 0 {
+				if req.MaxTokens != artifactMaxTokens || len(req.Tools) != 0 {
 					t.Fatal(req)
 				}
 				if calls >= len(tc.outputs) {
@@ -673,5 +676,143 @@ func TestInterruptedArtifactRevisionKeepsTarget(t *testing.T) {
 	messages, _ := s.Messages(ctx, thread.ID, 0)
 	if !strings.Contains(string(messages[len(messages)-1].Blocks), a.ID) {
 		t.Fatal("lost revision target")
+	}
+}
+
+func TestArtifactRootPermissionsAndSymlinks(t *testing.T) {
+	for _, rootSymlink := range []bool{false, true} {
+		t.Run(fmt.Sprint(rootSymlink), func(t *testing.T) {
+			s := testStore(t)
+			thread := testThread(t, s)
+			ctx := context.Background()
+			m, _ := s.beginAction(ctx, thread, "fake", "")
+			root := t.TempDir()
+			if err := os.Chmod(root, 0750); err != nil {
+				t.Fatal(err)
+			}
+			dir := root
+			if rootSymlink {
+				dir = filepath.Join(t.TempDir(), "artifacts")
+				if err := os.Symlink(root, dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a, err := s.publishArtifact(ctx, dir, thread, &m, tools.ArtifactRequest{Title: "Test"}, testHTML)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, want := range map[string]os.FileMode{root: 0750, filepath.Join(dir, thread.TenantID): 0700, filepath.Dir(a.Path): 0700} {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.Mode().Perm() != want {
+					t.Fatalf("%s: %o, want %o", path, info.Mode().Perm(), want)
+				}
+			}
+			// Private components still cannot redirect publication elsewhere.
+			for _, path := range []string{filepath.Dir(a.Path), filepath.Join(dir, thread.TenantID)} {
+				moved := path + "-moved"
+				if err := os.Rename(path, moved); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(moved, path); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.publishArtifact(ctx, dir, thread, &m, tools.ArtifactRequest{ArtifactID: a.ID, Title: "Test"}, testHTML); err == nil {
+					t.Fatal("accepted private symlink")
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(moved, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestArtifactDeadline(t *testing.T) {
+	for _, beforeGeneration := range []bool{false, true} {
+		t.Run(fmt.Sprint(beforeGeneration), func(t *testing.T) {
+			s := testStore(t)
+			thread := testThread(t, s)
+			m, _ := s.beginAction(context.Background(), thread, "fake", "")
+			// Exercise both the early fallback and the generation failure card.
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer cancel()
+			r := &Runner{Store: s, ArtifactsDir: t.TempDir()}
+			p := fakeProvider{stream: func(context.Context, llm.Request, func(string) error) (llm.Response, error) {
+				t.Fatal("called provider after deadline")
+				return llm.Response{}, nil
+			}}
+			var events strings.Builder
+			err := r.RunArtifact(ctx, thread, m, &config.Config{}, p, tools.ArtifactRequest{Title: "Test"}, func(event string, payload any) error {
+				raw, _ := json.Marshal(payload)
+				events.WriteString(event + string(raw))
+				if beforeGeneration && event == EventMessageStarted {
+					return ctx.Err()
+				}
+				return nil
+			})
+			if err != nil && !beforeGeneration {
+				t.Fatal(err)
+			}
+			messages, err := s.Messages(context.Background(), thread.ID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(messages) != 1 || messages[0].Status != "error" || !strings.Contains(string(messages[0].Blocks), artifactTimeoutMessage) {
+				t.Fatal(messages)
+			}
+			if !strings.Contains(events.String(), `"code":"timeout"`) || strings.Contains(events.String(), "Stopped.") {
+				t.Fatal(events.String())
+			}
+			var count int
+			if err := s.DB.QueryRow(`SELECT count(*) FROM ai_chat_artifacts`).Scan(&count); err != nil || count != 0 {
+				t.Fatal(count, err)
+			}
+		})
+	}
+}
+
+func TestArtifactOutputBudgetRetry(t *testing.T) {
+	for _, failAgain := range []bool{false, true} {
+		t.Run(fmt.Sprint(failAgain), func(t *testing.T) {
+			s := testStore(t)
+			thread := testThread(t, s)
+			ctx := context.Background()
+			m, _ := s.beginAction(ctx, thread, "fake", "")
+			calls := 0
+			p := fakeProvider{stream: func(_ context.Context, req llm.Request, emit func(string) error) (llm.Response, error) {
+				calls++
+				if calls == 1 {
+					if req.MaxTokens != artifactMaxTokens {
+						t.Fatal(req.MaxTokens)
+					}
+					return llm.Response{}, llm.ErrOutputTokenLimit
+				}
+				if calls != 2 || req.MaxTokens != 4096 {
+					t.Fatal(calls, req.MaxTokens)
+				}
+				if failAgain {
+					return llm.Response{}, llm.ErrOutputTokenLimit
+				}
+				return llm.Response{}, emit(testHTML)
+			}}
+			r := &Runner{Store: s, ArtifactsDir: t.TempDir()}
+			if err := r.RunArtifact(ctx, thread, m, &config.Config{}, p, tools.ArtifactRequest{Title: "Test"}, func(string, any) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			messages, _ := s.Messages(ctx, thread.ID, 0)
+			want := `"state":"created"`
+			if failAgain {
+				want = `"state":"failed"`
+			}
+			if calls != 2 || !strings.Contains(string(messages[0].Blocks), want) {
+				t.Fatal(calls, messages)
+			}
+		})
 	}
 }

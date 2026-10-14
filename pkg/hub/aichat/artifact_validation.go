@@ -28,7 +28,6 @@ func (e artifactHostsError) Error() string {
 var cssComments = regexp.MustCompile(`(?s)/\*.*?\*/`)
 var cssEscapes = regexp.MustCompile(`\\([0-9a-fA-F]{1,6}[\t\n\r\f ]?|[^\n\r\f])`)
 var cssURLs = regexp.MustCompile(`(?is)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)|@import\s+(?:"([^"]*)"|'([^']*)')`)
-var refreshURL = regexp.MustCompile(`(?is)^[0-9.]+\s*[;,]\s*(?:url\s*=\s*)?(.*)$`)
 
 func stripHTMLFence(s string) string {
 	s = strings.TrimSpace(s)
@@ -159,9 +158,7 @@ func validateArtifact(s string) error {
 				}
 			}
 			if token.Data == "meta" && strings.EqualFold(strings.TrimSpace(attrs["http-equiv"]), "refresh") {
-				if m := refreshURL.FindStringSubmatch(strings.TrimSpace(attrs["content"])); m != nil {
-					check(m[1])
-				}
+				return errors.New("Meta refresh is not allowed in artifacts.")
 			}
 		case html.TextToken:
 			if inStyle {

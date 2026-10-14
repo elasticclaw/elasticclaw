@@ -13,6 +13,9 @@ import (
 	"strings"
 )
 
+// ErrOutputTokenLimit exposes only the error category, never provider text.
+var ErrOutputTokenLimit = errors.New("LLM output token limit exceeded")
+
 type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
@@ -90,6 +93,21 @@ func (c Client) stream(ctx context.Context, body any, anthropic bool, consume fu
 	defer res.Body.Close()
 	// Provider error bodies may echo credentials or request data.
 	if res.StatusCode != http.StatusOK {
+		if res.StatusCode == http.StatusBadRequest {
+			var envelope struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.NewDecoder(io.LimitReader(res.Body, 64*1024)).Decode(&envelope) == nil {
+				message := strings.ToLower(envelope.Error.Message)
+				tokens := strings.Contains(message, "max_tokens") || strings.Contains(message, "max_completion_tokens") || strings.Contains(message, "max_output_tokens")
+				limit := strings.Contains(message, "at most") || strings.Contains(message, "maximum") || strings.Contains(message, "exceed") || strings.Contains(message, "too large") || strings.Contains(message, "less than")
+				if tokens && limit {
+					return ErrOutputTokenLimit
+				}
+			}
+		}
 		return fmt.Errorf("LLM returned HTTP %d", res.StatusCode)
 	}
 	scanner := bufio.NewScanner(res.Body)
