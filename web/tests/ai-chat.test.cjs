@@ -513,6 +513,13 @@ function elementText(tree) {
   if (typeof tree !== "object") return String(tree)
   return elementText(tree.props?.children)
 }
+// Interview controls are wrapped in a Choice component, so match them by input type too.
+function findInputs(tree) {
+  if (!tree || typeof tree !== "object") return []
+  if (Array.isArray(tree)) return tree.flatMap(findInputs)
+  const own = tree.type === "input" || (typeof tree.type === "function" && ["radio", "checkbox"].includes(tree.props?.type)) ? [tree] : []
+  return [...own, ...findInputs(tree.props?.children)]
+}
 function findElements(tree, type) {
   if (!tree || typeof tree !== "object") return []
   if (Array.isArray(tree)) return tree.flatMap((item) => findElements(item, type))
@@ -620,7 +627,7 @@ const interviewFixture = () => ({
   steps: [
     { skippable: true, questions: [
       { id: "q1", prompt: "When?", kind: "single", options: [{ label: "Planning", detail: "Before shopping" }, { label: "Shopping" }], other: true },
-      { id: "q2", prompt: "Who?", kind: "multi", options: [{ label: "Clients" }, { label: "Coaches" }], other: true },
+      { id: "q2", prompt: "Who?", label: "Who", kind: "multi", options: [{ label: "Clients" }, { label: "Coaches" }], other: true },
     ] },
     { skippable: true, questions: [{ id: "q3", prompt: "Where?", kind: "single", options: [{ label: "Home" }, { label: "Away" }], other: true }] },
   ],
@@ -677,7 +684,7 @@ test("stream events retain blocks and interview, and answers create a summary in
   applyStreamEvent(turn, "block", { id: "future", type: "future", at: 1 }, view)
   applyStreamEvent(turn, "interview", { ...interview, step: 1, total: 2 }, view)
   assert.equal(messages[0].interview.answered, true)
-  assert.equal(messages[1].interview.answers[1].answer, "Clients; Coaches; Friends")
+  assert.equal(messages[1].interview.answers[1].answer, "Clients, Coaches, Friends")
   assert.equal(messages[1].content, "")
   assert.equal(draft, "unrelated draft")
   assert.deepEqual(messages[2].blocks, [block])
@@ -720,7 +727,7 @@ test("interview card enables Continue only with answers, walks steps, and allows
   let tree = render()
   assert.equal(button(tree, "Continue").props.disabled, true)
   const fields = findElements(tree, "fieldset")
-  findElements(fields[0], "input").find((input) => input.props.type === "radio").props.onChange()
+  findInputs(fields[0]).find((input) => input.props.type === "radio").props.onChange()
   tree = render()
   assert.equal(button(tree, "Continue").props.disabled, true)
   const other = findElements(findElements(tree, "fieldset")[1], "input").find((input) => input.props.type === "text")
@@ -746,8 +753,8 @@ test("answers summary renders question labels, answers and skipped steps", () =>
   const { summarizeInterview } = loadComponent("components/ai-chat/stream-turn.ts", {})
   const summary = summarizeInterview(interviewFixture(), answersFixture())
   const tree = blockHelpers.AnswersSummary({ summary })
-  assert.equal(elementText(tree), "Your answersWhen?: Shopping · Who?: Clients; Coaches; Friends · 1 step skipped")
-  assert.deepEqual(findElements(tree, "strong").map(elementText), ["When?:", "Who?:"])
+  assert.equal(elementText(tree), "Your answersWhen?: Shopping · Who: Clients, Coaches, Friends · 1 step skipped")
+  assert.deepEqual(findElements(tree, "strong").map(elementText), ["When?:", "Who:"])
 })
 
 for (const id of ["constructor", "__proto__", "toString"]) {
@@ -764,14 +771,14 @@ for (const id of ["constructor", "__proto__", "toString"]) {
     assert.equal(stepComplete([question], new Map()), false)
     let tree = render()
     assert.equal(continueButton(tree).props.disabled, true)
-    assert.ok(findElements(tree, "input").filter((input) => input.props.type === "radio").every((input) => input.props.checked === false))
-    findElements(tree, "input").find((input) => input.props.type === "text").props.onChange({ target: { value: "At dinner" } })
+    assert.ok(findInputs(tree).filter((input) => input.props.type === "radio").every((input) => input.props.checked === false))
+    findInputs(tree).find((input) => input.props.type === "text").props.onChange({ target: { value: "At dinner" } })
     tree = render()
-    assert.equal(findElements(tree, "input").find((input) => input.props["aria-label"] === "Other: When?").props.checked, true)
+    assert.equal(findInputs(tree).find((input) => input.props["aria-label"] === "Other: When?").props.checked, true)
     assert.equal(continueButton(tree).props.disabled, false)
-    findElements(tree, "input").find((input) => input.props.type === "radio").props.onChange()
+    findInputs(tree).find((input) => input.props.type === "radio").props.onChange()
     tree = render()
-    assert.equal(findElements(tree, "input").find((input) => input.props["aria-label"] === "Other: When?").props.checked, false)
+    assert.equal(findInputs(tree).find((input) => input.props["aria-label"] === "Other: When?").props.checked, false)
     assert.equal(continueButton(tree).props.disabled, false)
     continueButton(tree).props.onClick()
     assert.deepEqual(submissions, [["set-1", [{ skipped: false, answers: [{ questionId: id, choices: ["Planning"] }] }]]])
@@ -798,6 +805,11 @@ test("only the latest unanswered interview is interactive, and answered cards di
   const tree = render([{ ...base, role: "user", interview: summary }])
   assert.ok(findElement(tree, "AnswersSummary"))
   assert.ok(!findElement(tree, "article").props.className.includes("w-fit"))
+  const folded = render([{ ...base, role: "user", id: "answers", interview: summary }, { ...base, id: "reply", interview: undefined, content: "Three directions" }])
+  const articles = findElements(folded, "article")
+  assert.equal(articles.length, 1)
+  assert.equal(findElement(articles[0], "AnswersSummary").props.summary, summary)
+  assert.ok(elementText(articles[0]).includes("Assistant"))
 })
 
 for (const lostStart of [false, true]) {

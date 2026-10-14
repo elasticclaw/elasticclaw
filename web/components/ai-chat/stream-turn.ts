@@ -71,7 +71,7 @@ export function summarizeInterview(interview: AIChatInterview, answers: AIChatAn
       if (!submitted || submitted.skipped) return []
       return step.questions.map((question) => {
         const answer = submitted.answers.find((item) => item.questionId === question.id)
-        return { question: question.prompt, answer: [...(answer?.choices ?? []), ...(answer?.other?.trim() ? [answer.other.trim()] : [])].join("; ") }
+        return { question: question.label || question.prompt, answer: [...(answer?.choices ?? []), ...(answer?.other?.trim() ? [answer.other.trim()] : [])].join(", ") }
       })
     }),
   }

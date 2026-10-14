@@ -639,6 +639,7 @@ export type AIChatBlock = { id: string; at: number } & (
 export interface AIChatQuestion {
   id: string
   prompt: string
+  label?: string
   kind: "single" | "multi"
   options: { label: string; detail?: string }[]
   other: boolean
