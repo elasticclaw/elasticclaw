@@ -49,9 +49,9 @@ export function InterviewCard({ interview, disabled, onAnswer }: {
   }
   const firstNumber = interview.steps.slice(0, step).reduce((count, item) => count + item.questions.length, 0)
 
-  return <div className={`my-3 rounded-xl border bg-card p-4 ${inactive ? "opacity-60" : ""}`}>
+  return <div className={`my-3 rounded-xl border bg-card p-4 leading-snug ${inactive ? "opacity-60" : ""}`}>
     <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
-      <h3 className="font-semibold uppercase tracking-wide">{interview.title}</h3><span>Step {step + 1} of {interview.steps.length}</span>
+      <h3 className="font-semibold uppercase tracking-wide">{interview.title}</h3><span className="text-xs">Step {step + 1} of {interview.steps.length}</span>
     </div>
     <div className="mt-3 flex gap-1" aria-hidden="true">{interview.steps.map((_, index) => <div key={index} className={`h-0.5 flex-1 rounded-full ${index <= step ? "bg-foreground" : "bg-border"}`} />)}</div>
     <div className="mt-4 space-y-4">{questions.map((question, index) => {
@@ -61,8 +61,8 @@ export function InterviewCard({ interview, disabled, onAnswer }: {
       const name = `${interview.questionSetId}-${question.id}`
       const tileClass = (selected: boolean) => `flex items-start gap-2.5 rounded-lg border p-2.5 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring ${selected ? "border-foreground bg-muted/50" : "border-border"}`
       return <fieldset key={question.id} disabled={inactive}>
-        <legend className="mb-2 flex w-full items-baseline gap-2 text-[13px]"><span className="text-xs text-muted-foreground">{firstNumber + index + 1}</span><span className="flex-1 font-medium">{question.prompt}</span><span className="shrink-0 text-xs text-muted-foreground">{question.kind === "single" ? "Pick one" : "Pick any"}</span></legend>
-        <div className="grid gap-2 sm:grid-cols-2">
+        <legend className="mb-2 flex w-full items-baseline gap-2 text-[13px]"><span className="text-xs text-muted-foreground">{firstNumber + index + 1}</span><span className="flex-1 font-medium">{question.prompt}</span><span className="shrink-0 text-[11px] text-muted-foreground">{question.kind === "single" ? "Pick one" : "Pick any"}</span></legend>
+        <div className="grid gap-1.5 sm:grid-cols-2">
           {question.options.map((option, optionIndex) => <label key={optionIndex} className={tileClass(answer.choices.includes(option.label))}>
             <Choice type={inputType} name={name} checked={answer.choices.includes(option.label)} onChange={() => {
               update(selectChoice(question, answer, option.label))
@@ -86,7 +86,7 @@ export function InterviewCard({ interview, disabled, onAnswer }: {
         </div>
       </fieldset>
     })}</div>
-    <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t pt-3">
+    <div className="mt-3.5 flex flex-wrap items-center justify-between gap-3 border-t pt-3">
       <span className="text-xs text-muted-foreground">Or just type in the composer.</span>
       <div className="ml-auto flex gap-2"><Button variant="ghost" size="sm" className="font-semibold" disabled={inactive} onClick={() => advance(true)}>Skip</Button>
         <Button size="sm" disabled={inactive || !stepComplete(questions, answers)} onClick={() => advance(false)}><ArrowRight className="size-3.5" />Continue</Button></div>

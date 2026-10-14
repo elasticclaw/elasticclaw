@@ -23,9 +23,9 @@ export function InlineBlock({ block, onAction, ticketCaption }: { block: AIChatB
     case "stat_tiles": {
       const columns = ["", "sm:grid-cols-1", "sm:grid-cols-2", "sm:grid-cols-3", "sm:grid-cols-2 lg:grid-cols-4"][block.data.tiles.length]
       return <div className={`my-3 grid grid-cols-1 gap-2.5 ${columns}`}>
-        {block.data.tiles.map((tile, index) => <div key={index} className="min-w-0 rounded-xl border bg-card px-3.5 py-3">
+        {block.data.tiles.map((tile, index) => <div key={index} className="min-w-0 rounded-xl border bg-card px-3.5 py-3 leading-snug">
           <div className="text-[11.5px] text-muted-foreground">{tile.label}</div>
-          <div className="my-1.5 text-[22px] font-bold tracking-tight">{tile.value}</div>
+          <div className="my-1.5 text-[22px] leading-tight font-bold tracking-tight">{tile.value}</div>
           {tile.caption && <div className="text-[11.5px] text-muted-foreground">{tile.caption}</div>}
         </div>)}
       </div>
@@ -59,7 +59,7 @@ export function InlineBlock({ block, onAction, ticketCaption }: { block: AIChatB
 
 export function AnswersSummary({ summary }: { summary: AIChatAnswersSummary }) {
   const shorten = (text: string) => Array.from(text).length > 60 ? Array.from(text).slice(0, 60).join("") + "…" : text
-  return <div className="rounded-xl border bg-card px-3.5 py-3 text-[13px]">
+  return <div className="rounded-xl border bg-card px-3.5 py-3 text-[13px] leading-snug">
     <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Your answers</div>
     <div>{summary.answers.map((item, index) => <span key={index}>{index > 0 && <span className="text-muted-foreground"> · </span>}<strong className="font-semibold">{shorten(item.question)}:</strong> <span className="text-muted-foreground">{item.answer}</span></span>)}
       {summary.skipped > 0 && <span className="text-muted-foreground">{summary.answers.length > 0 && " · "}{summary.skipped} {summary.skipped === 1 ? "step" : "steps"} skipped</span>}
