@@ -184,6 +184,9 @@ type CheckpointCreatePayload struct {
 	ClawToken    string `json:"claw_token"`
 }
 
+// MaxCheckpointBlobBytes is the largest single file the hub accepts in a checkpoint.
+const MaxCheckpointBlobBytes = 256 << 20
+
 // CheckpointFile describes one content-addressed file in a bridge checkpoint.
 type CheckpointFile struct {
 	Path   string `json:"path"`
