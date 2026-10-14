@@ -79,6 +79,10 @@ func RawArtifactRoutes(deps Deps) http.Handler {
 	return mux
 }
 func (a *api) rawArtifact(w http.ResponseWriter, r *http.Request) {
+	// The signed URL is the capability; no other origin needs to read it.
+	for _, header := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods"} {
+		w.Header().Del(header)
+	}
 	q := r.URL.Query()
 	slug := r.PathValue("slug")
 	tenant := q.Get("tenant")

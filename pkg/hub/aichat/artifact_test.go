@@ -189,7 +189,12 @@ func TestArtifactSignedServing(t *testing.T) {
 	for _, download := range []string{"0", "1"} {
 		signed := api.signedArtifactURL(v, download)
 		rec := httptest.NewRecorder()
+		// The hub's global CORS middleware runs first; raw must drop its headers.
+		rec.Header().Set("Access-Control-Allow-Origin", "*")
 		handler.ServeHTTP(rec, httptest.NewRequest("GET", signed, nil))
+		if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Fatal("raw kept CORS headers")
+		}
 		disposition := "inline"
 		if download == "1" {
 			disposition = "attachment"
