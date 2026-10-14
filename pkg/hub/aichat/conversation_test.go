@@ -333,7 +333,7 @@ func apiFixture(t *testing.T, p llm.Provider) (http.Handler, *Store, *[]Thread) 
 	}
 	published := &[]Thread{}
 	var mu sync.Mutex
-	deps := Deps{DB: s.DB, WebAuth: func(next http.HandlerFunc) http.HandlerFunc {
+	deps := Deps{DB: s.DB, ArtifactsDir: filepath.Join(dir, "artifacts"), WebAuth: func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Login") == "" {
 				http.Error(w, "unauthorized", 401)
