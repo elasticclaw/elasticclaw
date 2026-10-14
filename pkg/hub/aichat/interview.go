@@ -40,9 +40,9 @@ type AnswerSummary struct {
 var ErrInterviewStale = errors.New("interview is no longer available")
 
 func acceptInterview(ctx context.Context, tx *sql.Tx, threadID string, answers InterviewAnswers) (string, json.RawMessage, error) {
-	var id, role string
+	var id, role, status string
 	var raw sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT id,role,interview_json FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, threadID).Scan(&id, &role, &raw)
+	err := tx.QueryRowContext(ctx, `SELECT id,role,status,interview_json FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, threadID).Scan(&id, &role, &status, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, ErrInterviewStale
 	}
@@ -50,7 +50,7 @@ func acceptInterview(ctx context.Context, tx *sql.Tx, threadID string, answers I
 		return "", nil, err
 	}
 	var interview tools.Interview
-	if role != "assistant" || json.Unmarshal([]byte(raw.String), &interview) != nil || interview.QuestionSetID == "" || interview.QuestionSetID != answers.QuestionSetID || interview.Answered {
+	if role != "assistant" || status != "completed" || json.Unmarshal([]byte(raw.String), &interview) != nil || interview.QuestionSetID == "" || interview.QuestionSetID != answers.QuestionSetID || interview.Answered {
 		return "", nil, ErrInterviewStale
 	}
 	text, summary, err := summarizeAnswers(interview, answers)
