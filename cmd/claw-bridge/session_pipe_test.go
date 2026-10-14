@@ -100,3 +100,47 @@ func TestGatewaySessionClearsTurnMessageIDAfterSuccess(t *testing.T) {
 		t.Fatalf("idle reconnect would report stale interrupted_message_id %q", gs.turnMessageID)
 	}
 }
+
+func TestSessionCacheTokensRetriesFailedPollWithinThrottle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	handlerDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-handlerDone
+	}()
+	conn := dialPipeGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		for _, ok := range []bool{false, true} {
+			var req gwFrame
+			if err := wsjson.Read(ctx, conn, &req); err != nil || req.Method != "sessions.usage" {
+				t.Errorf("read sessions.usage: %s, %v", req.Method, err)
+				return
+			}
+			res := gwFrame{Type: "res", ID: req.ID, OK: ok, Error: &gwError{Message: "timeout"}}
+			if ok {
+				res.Error, res.Payload = nil, mustJSON(map[string]any{"sessions": []any{map[string]any{"key": "s", "usage": map[string]int{"cacheRead": 2000, "cacheWrite": 100}}}})
+			}
+			if err := wsjson.Write(ctx, conn, res); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		<-ctx.Done()
+	}))
+	stale, n := 1000, 10
+	gs := &gatewaySession{sessionKey: "s", conn: conn, pending: make(map[string]chan gwFrame), usage: gatewayUsage{sessionKey: "s", inputTokens: &n, cacheReadTokens: &stale}}
+	go gs.readLoop(ctx)
+	if read, _ := gs.sessionCacheTokens(ctx, "s", true); read == nil || *read != stale {
+		t.Fatalf("failed poll read = %v, want stale %d", read, stale)
+	}
+	// The failed poll must not start the throttle window.
+	if read, write := gs.sessionCacheTokens(ctx, "s", false); read == nil || write == nil || *read != 2000 || *write != 100 {
+		t.Fatalf("retry = %v/%v, want 2000/100", read, write)
+	}
+}

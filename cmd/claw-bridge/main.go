@@ -2416,9 +2416,10 @@ func (gs *gatewaySession) sessionCacheTokens(ctx context.Context, sessionKey str
 		gs.ctxMu.Unlock()
 		return last.cacheReadTokens, last.cacheWriteTokens
 	}
-	gs.cacheUsagePolledAt = time.Now()
 	gs.ctxMu.Unlock()
 
+	// Only a successful poll starts the throttle window, so a failed one is
+	// retried on the next refresh while the turn that spent the cache is current.
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	resp, err := gs.sendReq(pollCtx, "sessions.usage", map[string]any{"key": sessionKey, "range": "all", "groupBy": "family", "limit": 1})
@@ -2431,6 +2432,9 @@ func (gs *gatewaySession) sessionCacheTokens(ctx context.Context, sessionKey str
 		log.Printf("[session] parse sessions.usage response: %v", err)
 		return last.cacheReadTokens, last.cacheWriteTokens
 	}
+	gs.ctxMu.Lock()
+	gs.cacheUsagePolledAt = time.Now()
+	gs.ctxMu.Unlock()
 	return read, write
 }
 
