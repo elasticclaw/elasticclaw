@@ -7,11 +7,13 @@ import { ApiError, fetchAIChatArtifact, type AIChatArtifact } from "@/lib/api"
 import { requestAuthToken } from "@/lib/auth-storage"
 import { getHubUrl } from "@/lib/hub-url"
 import { artifactLocation, artifactPageError, artifactShareURL, artifactURLExpired } from "@/lib/ai-chat-artifacts"
-import { CopyArtifactLink } from "@/components/ai-chat/artifact-card"
+import { CopyArtifactLink, displayURL } from "@/components/ai-chat/artifact-card"
+import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 
 export default function ArtifactPage() {
   const [artifact, setArtifact] = useState<AIChatArtifact | null>(null)
+  const { appName } = useBranding()
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
   const [downloading, setDownloading] = useState(false)
@@ -61,10 +63,10 @@ export default function ArtifactPage() {
   const share = artifactShareURL(artifact.slug, artifact.shareUrl)
   const pinned = artifactLocation(window.location.pathname)?.version !== undefined
   return <main className="flex h-full flex-col">
-    <header className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b bg-card px-5 py-3 text-xs">
-      <div className="flex min-w-0 items-center gap-3"><Link className="shrink-0 text-sm font-semibold" href="/">Faster Factory</Link><span className="text-muted-foreground">/</span><FileCode2 className="size-3.5 shrink-0 text-muted-foreground" /><h1 className="truncate text-sm font-semibold">{artifact.title}</h1></div>
+    <header className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b bg-card px-5 py-2.5 text-xs">
+      <div className="flex min-w-0 items-center gap-3"><Link className="shrink-0 text-sm font-semibold" href="/">{appName || "ElasticClaw"}</Link><span className="text-muted-foreground">/</span><FileCode2 className="size-3.5 shrink-0 text-muted-foreground" /><h1 className="truncate text-sm font-semibold">{artifact.title}</h1></div>
       <div className="text-muted-foreground">v{artifact.version}{pinned && ` of ${artifact.currentVersion}`} · by {artifact.ownerLogin} · from AI Chat · {new Date(artifact.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}{pinned && <a className="ml-2 underline" href={share}>Latest version</a>}</div>
-      <div className="ml-auto flex flex-wrap items-center gap-2"><span className="max-w-96 truncate font-mono text-muted-foreground">{share}</span><CopyArtifactLink url={share} /><Button variant="outline" size="sm" disabled={downloading} onClick={() => void download()}><Download className="size-3.5" />Download .html</Button></div>
+      <div className="ml-auto flex flex-wrap items-center gap-2"><span className="hidden min-w-0 max-w-96 truncate font-mono text-muted-foreground sm:block">{displayURL(share)}</span><CopyArtifactLink url={share} className="h-7 text-xs font-semibold" /><Button variant="outline" size="sm" className="h-7 text-xs font-semibold" disabled={downloading} onClick={() => void download()}><Download className="size-3.5" />Download .html</Button></div>
     </header>
     <iframe className="min-h-0 w-full flex-1 border-0 bg-white" src={`${getHubUrl()}${artifact.rawUrl}`} sandbox="allow-scripts" referrerPolicy="no-referrer" title={artifact.title} />
   </main>

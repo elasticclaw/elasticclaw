@@ -865,6 +865,7 @@ test("artifact cards render working, created and failed states with the right ac
   assert.match(elementText(tree), /Ask for changes and I will publish a new version at the same link/)
   assert.equal(findElement(tree, "a").props.href, "https://hub.test/artifacts/meal-swap-abcdef")
   assert.equal(findElement(tree, "a").props.target, "_blank")
+  assert.ok(elementText(tree).includes("hub.test/artifacts/meal-swap-abcdef") && !elementText(tree).includes("https://"))
   assert.ok(!elementText(tree).includes("Linear"))
   let retry
   tree = ArtifactActionCard({ block: { type: "action", kind: "artifact", state: "failed", card: { ...card, error: "Stopped. Nothing was published." } }, onRetry: (action) => { retry = action } })
@@ -965,7 +966,7 @@ test("artifact page loads an isolated frame and shows pinned version metadata", 
     react: hooks.react, "next/link": { default: "Link" }, "lucide-react": { Download: "Download", FileCode2: "FileCode2", Loader2: "Loader2" },
     "@/lib/api": { ApiError, fetchAIChatArtifact: async (slug, version) => { assert.equal(slug, "meal-abcdef"); assert.equal(version, 1); return artifact } },
     "@/lib/auth-storage": { requestAuthToken: async () => "token" }, "@/lib/hub-url": { getHubUrl: () => "" },
-    "@/lib/ai-chat-artifacts": artifactHelpers, "@/components/ui/button": { Button: "Button" }, "@/components/ai-chat/artifact-card": { CopyArtifactLink: "CopyArtifactLink" },
+    "@/lib/ai-chat-artifacts": artifactHelpers, "@/components/ui/button": { Button: "Button" }, "@/components/ai-chat/artifact-card": { CopyArtifactLink: "CopyArtifactLink", displayURL: (url) => url.replace(/^https?:\/\//, "") }, "@/hooks/use-branding": { useBranding: () => ({ appName: "Faster Factory" }) },
   })
   try {
     assert.match(elementText(hooks.render(Page)), /Loading artifact/)
@@ -1010,7 +1011,7 @@ test("artifact download refreshes an expired URL without a focus event and prese
         react: hooks.react, "next/link": { default: "Link" }, "lucide-react": {},
         "@/lib/api": { ApiError, fetchAIChatArtifact: async (slug, version) => { requests.push({ slug, version }); return requests.length === 1 ? artifact : fresh } },
         "@/lib/auth-storage": { requestAuthToken: async () => "token" }, "@/lib/hub-url": { getHubUrl: () => "" },
-        "@/lib/ai-chat-artifacts": artifactHelpers, "@/components/ui/button": { Button: "Button" }, "@/components/ai-chat/artifact-card": { CopyArtifactLink: "CopyArtifactLink" },
+        "@/lib/ai-chat-artifacts": artifactHelpers, "@/components/ui/button": { Button: "Button" }, "@/components/ai-chat/artifact-card": { CopyArtifactLink: "CopyArtifactLink", displayURL: (url) => url.replace(/^https?:\/\//, "") }, "@/hooks/use-branding": { useBranding: () => ({ appName: "Faster Factory" }) },
       })
       hooks.render(Page)
       await flush()
