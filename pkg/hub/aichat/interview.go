@@ -124,8 +124,12 @@ func summarizeAnswers(interview tools.Interview, answers InterviewAnswers) (stri
 			if other != "" {
 				selected = append(selected, other)
 			}
-			display := strings.Join(selected, "; ")
-			summary.Answers = append(summary.Answers, AnswerSummary{Question: q.Prompt, Answer: display})
+			display := strings.Join(selected, ", ")
+			name := q.Label
+			if name == "" {
+				name = q.Prompt
+			}
+			summary.Answers = append(summary.Answers, AnswerSummary{Question: name, Answer: display})
 			lines = append(lines, "- "+q.Prompt+" "+display)
 		}
 	}

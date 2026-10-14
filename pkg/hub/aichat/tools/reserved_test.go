@@ -100,13 +100,13 @@ func TestReservedBlockValidation(t *testing.T) {
 }
 
 func TestReservedInterviewValidation(t *testing.T) {
-	valid := `{"title":"Framing","steps":[{"questions":[{"prompt":"When?","kind":"single","options":[{"label":"Now"},{"label":"Later"},{"label":"OTHER"}]},{"id":"q1","prompt":"Who?","kind":"multi","options":[{"label":"Me"},{"label":"Us"}]}]}]}`
+	valid := `{"title":"Framing","steps":[{"questions":[{"prompt":"When?","kind":"single","options":[{"label":"Now"},{"label":"Later"},{"label":"OTHER"}]},{"id":"q1","prompt":"Who?","label":"Who","kind":"multi","options":[{"label":"Me"},{"label":"Us"}]}]}]}`
 	interview, err := ParseInterview(json.RawMessage(valid))
 	if err != nil {
 		t.Fatal(err)
 	}
 	q := interview.Steps[0].Questions
-	if q[0].ID != "q2" || q[1].ID != "q1" || !q[0].Other || len(q[0].Options) != 2 || !interview.Steps[0].Skippable {
+	if q[0].ID != "q2" || q[1].ID != "q1" || !q[0].Other || len(q[0].Options) != 2 || !interview.Steps[0].Skippable || q[1].Label != "Who" || q[0].Label != "" {
 		t.Fatalf("%+v", interview)
 	}
 	for _, raw := range []string{
@@ -117,6 +117,7 @@ func TestReservedInterviewValidation(t *testing.T) {
 		strings.Replace(valid, `"prompt":"When?"`, `"prompt":"When?","other":true`, 1),
 		`{"title":"x","steps":[]}`, `{"title":"x","steps":[{"questions":[]}]}`,
 		strings.Replace(valid, `"label":"Later"`, `"label":"Now"`, 1),
+		strings.Replace(valid, `"label":"Who"`, `"label":"`+strings.Repeat("x", 25)+`"`, 1),
 	} {
 		if _, err := ParseInterview(json.RawMessage(raw)); err == nil {
 			t.Fatalf("accepted %s", raw)

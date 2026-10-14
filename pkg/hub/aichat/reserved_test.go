@@ -14,7 +14,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tools"
 )
 
-const testInterviewArgs = `{"title":"Framing the problem","steps":[{"questions":[{"prompt":"When?","kind":"single","options":[{"label":"Planning"},{"label":"Shopping"},{"label":"Other"}]},{"prompt":"Who?","kind":"multi","options":[{"label":"Clients"},{"label":"Coaches"}]}]},{"questions":[{"prompt":"Where?","kind":"single","options":[{"label":"Home"},{"label":"Away"}]}]}]}`
+const testInterviewArgs = `{"title":"Framing the problem","steps":[{"questions":[{"prompt":"When?","kind":"single","options":[{"label":"Planning"},{"label":"Shopping"},{"label":"Other"}]},{"prompt":"Who?","label":"Who","kind":"multi","options":[{"label":"Clients"},{"label":"Coaches"}]}]},{"questions":[{"prompt":"Where?","kind":"single","options":[{"label":"Home"},{"label":"Away"}]}]}]}`
 const testBlockArgs = `{"type":"stat_tiles","data":{"tiles":[{"label":"Users","value":"42","caption":"PostHog"}]}}`
 
 func TestOfferedToolSchemasHaveObjectRoots(t *testing.T) {
@@ -464,7 +464,7 @@ func TestInterviewAnswersAPI(t *testing.T) {
 				t.Fatal(err)
 			}
 			if scenario == "happy" {
-				if len(summary.Answers) != 2 || summary.Answers[1].Answer != "Clients; Coaches; Friends" || summary.Skipped != 1 || !strings.Contains(messages[2].Content, "- When? Shopping") || !strings.Contains(messages[2].Content, "(Skipped step 2)") {
+				if len(summary.Answers) != 2 || summary.Answers[0].Question != "When?" || summary.Answers[1].Question != "Who" || summary.Answers[1].Answer != "Clients, Coaches, Friends" || summary.Skipped != 1 || !strings.Contains(messages[2].Content, "- When? Shopping") || !strings.Contains(messages[2].Content, "(Skipped step 2)") {
 					t.Fatal(summary, messages[2])
 				}
 			} else if summary.Skipped != 2 || len(summary.Answers) != 0 {

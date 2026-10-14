@@ -43,6 +43,7 @@ type InterviewOption struct {
 type InterviewQuestion struct {
 	ID      string            `json:"id,omitempty"`
 	Prompt  string            `json:"prompt"`
+	Label   string            `json:"label,omitempty"`
 	Kind    string            `json:"kind"`
 	Options []InterviewOption `json:"options"`
 	Other   bool              `json:"other"`
@@ -88,7 +89,9 @@ func ReservedDefinitions() []llm.Tool {
 	}
 	blockSchema, _ := json.Marshal(objectSchema(map[string]any{"type": enumSchema("stat_tiles", "callout", "table"), "data": data}, "type", "data"))
 	option := objectSchema(map[string]any{"label": stringSchema(60), "detail": stringSchema(90)}, "label")
-	question := objectSchema(map[string]any{"id": stringSchema(60), "prompt": stringSchema(160), "kind": enumSchema("single", "multi"), "options": arraySchema(option, 2, 5)}, "prompt", "kind", "options")
+	labelSchema := stringSchema(24)
+	labelSchema["description"] = "Short name for the question in the answers summary, e.g. \"When\" or \"Who\"."
+	question := objectSchema(map[string]any{"id": stringSchema(60), "prompt": stringSchema(160), "label": labelSchema, "kind": enumSchema("single", "multi"), "options": arraySchema(option, 2, 5)}, "prompt", "kind", "options")
 	step := objectSchema(map[string]any{"questions": arraySchema(question, 1, 3)}, "questions")
 	actions := arraySchema(enumSchema("artifact", "ticket"), 1, 2)
 	actions["uniqueItems"] = true
@@ -177,6 +180,7 @@ func ParseInterview(raw json.RawMessage) (Interview, error) {
 	type question struct {
 		ID      string            `json:"id,omitempty"`
 		Prompt  string            `json:"prompt"`
+		Label   string            `json:"label,omitempty"`
 		Kind    string            `json:"kind"`
 		Options []InterviewOption `json:"options"`
 	}
@@ -214,6 +218,9 @@ func ParseInterview(raw json.RawMessage) (Interview, error) {
 			if !validText(q.Prompt, 160) || (q.Kind != "single" && q.Kind != "multi") {
 				return Interview{}, ArgError("question requires prompt (1–160 chars) and kind single or multi")
 			}
+			if !optionalText(q.Label, 24) {
+				return Interview{}, ArgError("question label is up to 24 chars")
+			}
 			options := []InterviewOption{}
 			labels := map[string]bool{}
 			for _, o := range q.Options {
@@ -237,7 +244,7 @@ func ParseInterview(raw json.RawMessage) (Interview, error) {
 				ids[q.ID] = true
 				next++
 			}
-			step.Questions = append(step.Questions, InterviewQuestion{ID: q.ID, Prompt: q.Prompt, Kind: q.Kind, Options: options, Other: true})
+			step.Questions = append(step.Questions, InterviewQuestion{ID: q.ID, Prompt: q.Prompt, Label: q.Label, Kind: q.Kind, Options: options, Other: true})
 		}
 		result.Steps = append(result.Steps, step)
 	}
