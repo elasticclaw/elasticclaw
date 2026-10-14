@@ -32,7 +32,7 @@ export function ArtifactActionCard({ block, onStop, onRetry }: { block: ActionBl
     {onStop && <Button variant="outline" size="sm" onClick={onStop}><X className="size-3.5" />Stop</Button>}
   </div>
   if (state === "failed") return <div role="alert" className="my-3 flex items-center gap-3 rounded-xl border bg-card p-3.5">
-    <div className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/40"><TriangleAlert className="size-4 text-amber-500" /></div><div className="min-w-0 flex-1"><div className="font-semibold">Could not save the artifact</div><div className="mt-0.5 text-[13px] text-muted-foreground">{card.error}</div></div>
+    <div className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/40"><TriangleAlert className="size-4 text-amber-500" /></div><div className="min-w-0 flex-1 leading-snug"><div className="font-semibold">Could not save the artifact</div><div className="mt-0.5 text-[13px] text-muted-foreground">{card.error}</div></div>
     {onRetry && <Button variant="outline" size="sm" onClick={() => onRetry({ kind: "artifact", artifactId: card.artifactId, title: card.title, brief: card.brief })}><RotateCcw className="size-3.5" />Try again</Button>}
   </div>
   if (state !== "created" || !card.slug) return null
