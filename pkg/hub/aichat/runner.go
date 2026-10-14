@@ -23,6 +23,10 @@ const MaxIterations = 12
 const MaxToolCalls = 20
 const TurnTimeout = 5 * time.Minute
 
+// ArtifactTimeout bounds a whole action, including an artifact generation started
+// from a chat turn; the model loop of a turn keeps the shorter TurnTimeout.
+const ArtifactTimeout = 10 * time.Minute
+
 var ErrBusy = errors.New("too many in-flight turns")
 var errLimit = errors.New("turn limit reached")
 
@@ -67,7 +71,7 @@ func (r *Runner) Acquire(ctx context.Context, t Thread) (context.Context, func()
 	if _, busy := r.flights[t.ID]; busy || r.users[owner] >= 3 {
 		return nil, nil, ErrBusy
 	}
-	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
+	ctx, cancel := context.WithTimeout(ctx, ArtifactTimeout)
 	r.flights[t.ID] = flight{owner, cancel}
 	r.users[owner]++
 	var once sync.Once
@@ -137,7 +141,7 @@ func (r *Runner) finishRun(ctx context.Context, m Message, runErr error, emit Em
 	m.Status = "completed"
 	code, message := "", ""
 	switch {
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+	case errors.Is(ctx.Err(), context.DeadlineExceeded), ctx.Err() == nil && errors.Is(runErr, context.DeadlineExceeded):
 		m.Status, code, message = "error", "timeout", "The turn timed out. Try again."
 	case ctx.Err() != nil:
 		m.Status = "cancelled"
@@ -165,6 +169,10 @@ func (r *Runner) finishRun(ctx context.Context, m Message, runErr error, emit Em
 }
 
 func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Config, provider llm.Provider, emit Emit) error {
+	// A generation started by start_artifact runs on the action deadline.
+	actionCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
+	defer cancel()
 	if err := emit(EventMessageStarted, map[string]string{"messageId": m.ID, "model": m.Model}); err != nil {
 		return err
 	}
@@ -256,7 +264,7 @@ func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Con
 			if call.Name == tools.StartArtifact && slices.Contains(available, "artifact") {
 				input, parseErr := tools.ParseArtifact(json.RawMessage(call.Arguments))
 				if parseErr == nil {
-					return r.generateArtifact(ctx, t, m, provider, input, secrets, count, emit)
+					return r.generateArtifact(actionCtx, t, m, provider, input, secrets, count, emit)
 				}
 				result = llm.Message{Role: "tool", ToolCallID: readhttp.Redact(call.ID, secrets), Content: readhttp.Redact(parseErr.Error(), secrets), IsError: true}
 			} else if tools.Reserved(call.Name) {

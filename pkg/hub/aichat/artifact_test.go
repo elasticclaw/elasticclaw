@@ -410,7 +410,9 @@ func TestArtifactCancelRecoveryAndSecrets(t *testing.T) {
 func TestStartArtifactEndsBatchAndAvailability(t *testing.T) {
 	for _, available := range []bool{false, true} {
 		t.Run(fmt.Sprint(available), func(t *testing.T) {
-			ctx := context.Background()
+			// Mirror Acquire: the action deadline is longer than the chat loop's.
+			ctx, cancel := context.WithTimeout(context.Background(), ArtifactTimeout)
+			defer cancel()
 			s := testStore(t)
 			thread := testThread(t, s)
 			m, _ := s.BeginTurn(ctx, thread, "Create a prototype", "fake", false)
@@ -419,8 +421,12 @@ func TestStartArtifactEndsBatchAndAvailability(t *testing.T) {
 				r.AvailableActions = func(*config.Config) []string { return []string{"artifact"} }
 			}
 			calls := 0
-			p := fakeProvider{stream: func(_ context.Context, req llm.Request, token func(string) error) (llm.Response, error) {
+			p := fakeProvider{stream: func(callCtx context.Context, req llm.Request, token func(string) error) (llm.Response, error) {
 				calls++
+				deadline, _ := callCtx.Deadline()
+				if chat := time.Until(deadline) <= TurnTimeout; chat != (calls == 1 || !available) {
+					t.Fatalf("call %d has %s left", calls, time.Until(deadline))
+				}
 				if calls == 1 {
 					found := false
 					for _, tool := range req.Tools {
@@ -793,7 +799,7 @@ func TestArtifactOutputBudgetRetry(t *testing.T) {
 					}
 					return llm.Response{}, llm.ErrOutputTokenLimit
 				}
-				if calls != 2 || req.MaxTokens != 4096 {
+				if calls != 2 || req.MaxTokens != 8192 {
 					t.Fatal(calls, req.MaxTokens)
 				}
 				if failAgain {

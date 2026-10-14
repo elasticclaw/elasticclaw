@@ -21,8 +21,8 @@ const artifactPrompt = `Build the HTML artifact requested by the user using the 
 
 const artifactTimeoutMessage = "The generation timed out before the page finished. Try a smaller page."
 
-// Use a smaller output budget to reduce timeouts under the shared turn deadline.
-const artifactMaxTokens = 8192
+// About 60 KB of HTML; fits ArtifactTimeout at typical output speeds.
+const artifactMaxTokens = 16000
 
 type ArtifactCard struct {
 	tools.ArtifactRequest
@@ -223,7 +223,7 @@ func (r *Runner) generateArtifact(ctx context.Context, t Thread, m *Message, p l
 		response, e := p.Stream(ctx, req, onToken)
 		if errors.Is(e, llm.ErrOutputTokenLimit) && !budgetRetried && output.Len() == 0 && ctx.Err() == nil {
 			budgetRetried = true
-			req.MaxTokens = 4096
+			req.MaxTokens = 8192
 			response, e = p.Stream(ctx, req, onToken)
 		}
 		m.InputTokens += response.InputTokens
