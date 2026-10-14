@@ -17,7 +17,7 @@ import (
 
 func (s *Server) aiChatDeps() aichat.Deps {
 	return aichat.Deps{
-		ArtifactsDir: filepath.Join(s.dataDir, "artifacts"),
+		ArtifactsDir: filepath.Join(s.dataDir, "ai_chat", "artifacts"),
 		ArtifactKey:  s.webSessionSecret,
 		FeatureStage: func(ctx context.Context, key string) string {
 			flag, ok := findFeatureFlag(key)

@@ -141,8 +141,9 @@ func (s *Store) publishArtifact(ctx context.Context, dir string, t Thread, m *Me
 	if err != nil {
 		return Artifact{}, err
 	}
-	// Create each private component explicitly; existing directories must not be symlinks.
-	for _, p := range []string{dir, filepath.Join(dir, t.TenantID), filepath.Dir(a.Path)} {
+	// The configured root may be an administrator-managed symlink. Only enforce
+	// private permissions and reject symlinks on our tenant and slug directories.
+	for _, p := range []string{filepath.Join(dir, t.TenantID), filepath.Dir(a.Path)} {
 		if err = os.MkdirAll(p, 0700); err != nil {
 			return Artifact{}, err
 		}
