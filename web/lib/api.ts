@@ -629,7 +629,39 @@ export interface AIChatThread {
   updatedAt: number
   archivedAt: number | null
 }
+export type AIChatAction = "artifact" | "ticket"
+export type AIChatBlock = { id: string; at: number } & (
+  | { type: "stat_tiles"; data: { tiles: { label: string; value: string; caption?: string }[] } }
+  | { type: "callout"; data: { tone: "info" | "warning" | "success"; title?: string; text: string } }
+  | { type: "table"; data: { columns: string[]; rows: string[][] } }
+  | { type: "actions"; actions: AIChatAction[] }
+)
+export interface AIChatQuestion {
+  id: string
+  prompt: string
+  label?: string
+  kind: "single" | "multi"
+  options: { label: string; detail?: string }[]
+  other: boolean
+}
+export interface AIChatInterview {
+  questionSetId: string
+  title: string
+  steps: { questions: AIChatQuestion[]; skippable: boolean }[]
+  answered: boolean
+}
+export interface AIChatAnswer { questionId: string; choices: string[]; other?: string }
+export interface AIChatStepAnswers { skipped: boolean; answers: AIChatAnswer[] }
+export interface AIChatAnswers { questionSetId: string; steps: AIChatStepAnswers[] }
+export interface AIChatAnswersSummary {
+  questionSetId: string
+  title: string
+  answers: { question: string; answer: string }[]
+  skipped: number
+}
 export interface AIChatMessage {
+  blocks?: AIChatBlock[]
+  interview?: AIChatInterview | AIChatAnswersSummary
   id: string
   threadId: string
   seq: number
@@ -651,12 +683,12 @@ export function fetchAIChatThread(id: string, signal?: AbortSignal): Promise<AIC
 export function cancelAIChatTurn(id: string): Promise<void> {
   return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel`, { method: "POST" })
 }
-export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void): Promise<void> {
+export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, answers?: AIChatAnswers): Promise<void> {
   const token = await resolveToken()
   const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/messages`, {
     method: "POST", signal,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ text, retry }),
+    body: JSON.stringify(answers ? { answers } : { text, retry }),
   })
   if (response.status === 401) return handleSessionExpired<void>()
   if (!response.ok) throw new ApiError((await response.text()).trim() || "Unable to send message.", response.status)

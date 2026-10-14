@@ -82,3 +82,27 @@ func TestStreamRedactorHandlesEverySplit(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamRedactorHandlesFlushBetweenWrites(t *testing.T) {
+	for _, secret := range []string{"ghp_x", "sentinel-secret", "sentinel-secret-longer"} {
+		for split := 0; split <= len(secret); split++ {
+			redactor := StreamRedactor{Secrets: []string{"ghp_x", "sentinel-secret", "sentinel-secret-longer"}}
+			output := redactor.Write("before "+secret[:split]) + redactor.Flush()
+			if got := redactor.Flush(); got != "" {
+				t.Fatalf("repeated flush emitted %q", got)
+			}
+			output += redactor.Write(secret[split:]+" after") + redactor.Flush()
+			if strings.Contains(output, secret) || !strings.Contains(output, "[redacted]") || !strings.HasSuffix(output, " after") {
+				t.Fatalf("secret %q split %d: %q", secret, split, output)
+			}
+		}
+	}
+	redactor := StreamRedactor{Secrets: []string{"ghp_x"}}
+	var output string
+	for _, char := range "ghp_x" {
+		output += redactor.Write(string(char)) + redactor.Flush()
+	}
+	if output != "ghp_[redacted]" {
+		t.Fatalf("flush after every byte: %q", output)
+	}
+}

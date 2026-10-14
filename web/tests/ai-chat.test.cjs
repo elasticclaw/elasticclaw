@@ -513,6 +513,13 @@ function elementText(tree) {
   if (typeof tree !== "object") return String(tree)
   return elementText(tree.props?.children)
 }
+// Interview controls are wrapped in a Choice component, so match them by input type too.
+function findInputs(tree) {
+  if (!tree || typeof tree !== "object") return []
+  if (Array.isArray(tree)) return tree.flatMap(findInputs)
+  const own = tree.type === "input" || (typeof tree.type === "function" && ["radio", "checkbox"].includes(tree.props?.type)) ? [tree] : []
+  return [...own, ...findInputs(tree.props?.children)]
+}
 function findElements(tree, type) {
   if (!tree || typeof tree !== "object") return []
   if (Array.isArray(tree)) return tree.flatMap((item) => findElements(item, type))
@@ -610,3 +617,228 @@ test("SSE heartbeat comments do not appear as events", async () => {
   await readAIChatEvents(byteStream(': ping\n\nevent: token\ndata: {"text":"Hi"}\n\n: ping\n\nevent: done\ndata: {"status":"completed"}\n\n'), (event, data) => events.push([event, data]))
   assert.deepEqual(events, [["token", { text: "Hi" }], ["done", { status: "completed" }]])
 })
+
+const blockHelpers = loadComponent("components/ai-chat/blocks.tsx", {
+  "lucide-react": Object.fromEntries(["CircleCheck", "FileCode2", "Info", "Ticket", "TriangleAlert"].map((name) => [name, name])),
+  "@/components/ui/button": { Button: "Button" },
+})
+const interviewFixture = () => ({
+  questionSetId: "set-1", title: "Framing the problem", answered: false,
+  steps: [
+    { skippable: true, questions: [
+      { id: "q1", prompt: "When?", kind: "single", options: [{ label: "Planning", detail: "Before shopping" }, { label: "Shopping" }], other: true },
+      { id: "q2", prompt: "Who?", label: "Who", kind: "multi", options: [{ label: "Clients" }, { label: "Coaches" }], other: true },
+    ] },
+    { skippable: true, questions: [{ id: "q3", prompt: "Where?", kind: "single", options: [{ label: "Home" }, { label: "Away" }], other: true }] },
+  ],
+})
+const answersFixture = () => ({ questionSetId: "set-1", steps: [
+  { skipped: false, answers: [{ questionId: "q1", choices: ["Shopping"] }, { questionId: "q2", choices: ["Clients", "Coaches"], other: " Friends " }] },
+  { skipped: true, answers: [] },
+] })
+
+test("blocks split content at Unicode code points, preserve order, and ignore future blocks", () => {
+  const a = { id: "a", type: "callout", at: 2, data: { tone: "info", text: "A" } }
+  const b = { ...a, id: "b", type: "table", data: { columns: ["C"], rows: [["R"]] } }
+  const c = { ...a, id: "c", at: 4 }
+  assert.deepEqual(blockHelpers.splitContent("A😀界Z", [a, b, { type: "future", at: 3 }, c]), ["A😀", a, b, "界Z", c])
+  assert.deepEqual(blockHelpers.splitContent("hello"), ["hello"])
+  assert.deepEqual(blockHelpers.splitContent("", [a]), [a])
+})
+
+test("wrap-up is absent without an action handler and dispatches only with a handler", () => {
+  const block = { id: "a", at: 0, type: "actions", actions: ["artifact", "ticket"] }
+  assert.equal(blockHelpers.InlineBlock({ block }), null)
+  const actions = []
+  const tree = blockHelpers.InlineBlock({ block, onAction: (action) => actions.push(action) })
+  assert.match(elementText(tree), /Wrap up.*Create HTML artifact.*Open Linear ticket/)
+  findElements(tree, "Button").forEach((button) => button.props.onClick())
+  assert.deepEqual(actions, ["artifact", "ticket"])
+})
+
+test("stat tiles, callouts and tables render model data as plain text", () => {
+  const html = "<img src=x onerror=alert(1)> **bold**"
+  for (const block of [
+    { type: "stat_tiles", data: { tiles: [{ label: html, value: "42", caption: "PostHog" }] } },
+    { type: "callout", data: { tone: "warning", title: "Check", text: html } },
+    { type: "table", data: { columns: ["Column"], rows: [[html]] } },
+  ]) {
+    const tree = blockHelpers.InlineBlock({ block })
+    assert.ok(elementText(tree).includes(html))
+    assert.equal(findElements(tree, "img").length, 0)
+  }
+})
+
+test("stream events retain blocks and interview, and answers create a summary instead of a text bubble", () => {
+  const { applyStreamEvent, summarizeInterview } = loadComponent("components/ai-chat/stream-turn.ts", {})
+  const interview = interviewFixture()
+  const answers = answersFixture()
+  let messages = [{ id: "old", role: "assistant", interview }]
+  let draft = "unrelated draft"
+  const turn = { threadId: "t", text: "", retry: false, answers, answersSummary: summarizeInterview(interview, answers), started: false, assistantId: "", error: "" }
+  const view = { setMessages: (fn) => { messages = fn(messages) }, setDraft: (fn) => { draft = fn(draft) }, setReading() {} }
+  applyStreamEvent(turn, "message_started", { messageId: "new" }, view)
+  const block = { id: "block", type: "callout", at: 1, data: { tone: "info", text: "Shown" } }
+  applyStreamEvent(turn, "token", { text: "😀" }, view)
+  applyStreamEvent(turn, "block", block, view)
+  applyStreamEvent(turn, "block", { id: "future", type: "future", at: 1 }, view)
+  applyStreamEvent(turn, "interview", { ...interview, step: 1, total: 2 }, view)
+  assert.equal(messages[0].interview.answered, true)
+  assert.equal(messages[1].interview.answers[1].answer, "Clients, Coaches, Friends")
+  assert.equal(messages[1].content, "")
+  assert.equal(draft, "unrelated draft")
+  assert.deepEqual(messages[2].blocks, [block])
+  assert.deepEqual(messages[2].interview, interview)
+})
+
+test("interview single, multi and other choices follow their selection rules", () => {
+  const helpers = loadComponent("components/ai-chat/interview-card.tsx", { react: {}, "lucide-react": {} })
+  const [single, multi] = interviewFixture().steps[0].questions
+  let answer = { questionId: single.id, choices: [] }
+  answer = helpers.selectChoice(single, answer, "Planning")
+  answer = helpers.selectChoice(single, answer, "Shopping")
+  assert.deepEqual(answer.choices, ["Shopping"])
+  answer = helpers.enterOther(single, answer, "At dinner")
+  assert.deepEqual(answer.choices, [])
+  answer = helpers.selectChoice(single, answer, "Planning")
+  assert.equal(answer.other, undefined)
+  let many = { questionId: multi.id, choices: [] }
+  many = helpers.selectChoice(multi, many, "Clients")
+  many = helpers.selectChoice(multi, many, "Coaches")
+  many = helpers.enterOther(multi, many, "Friends")
+  assert.deepEqual(many.choices, ["Clients", "Coaches"])
+  many = helpers.selectChoice(multi, many, "Clients")
+  assert.deepEqual(many.choices, ["Coaches"])
+  assert.equal(many.other, "Friends")
+  assert.equal(helpers.stepComplete([single, multi], new Map([["q1", answer]])), false)
+  assert.equal(helpers.stepComplete([single, multi], new Map([["q1", answer], ["q2", many]])), true)
+  assert.equal(helpers.stepComplete([single], new Map([["q1", { choices: [], other: "  " }]])), false)
+})
+
+test("interview card enables Continue only with answers, walks steps, and allows Skip", () => {
+  const hooks = createHooks()
+  const { InterviewCard } = loadComponent("components/ai-chat/interview-card.tsx", {
+    react: hooks.react, "lucide-react": { ArrowRight: "ArrowRight" }, "@/components/ui/button": { Button: "Button" },
+  })
+  const submissions = []
+  const props = { interview: interviewFixture(), disabled: false, onAnswer: (...args) => submissions.push(args) }
+  const render = () => hooks.render(() => InterviewCard(props))
+  const button = (tree, label) => findElements(tree, "Button").find((item) => elementText(item) === label)
+  let tree = render()
+  assert.equal(button(tree, "Continue").props.disabled, true)
+  const fields = findElements(tree, "fieldset")
+  findInputs(fields[0]).find((input) => input.props.type === "radio").props.onChange()
+  tree = render()
+  assert.equal(button(tree, "Continue").props.disabled, true)
+  const other = findElements(findElements(tree, "fieldset")[1], "input").find((input) => input.props.type === "text")
+  other.props.onChange({ target: { value: "Friends" } })
+  tree = render()
+  assert.equal(button(tree, "Continue").props.disabled, false)
+  button(tree, "Continue").props.onClick()
+  tree = render()
+  assert.match(elementText(tree), /Step 2 of 2/)
+  assert.equal(submissions.length, 0)
+  button(tree, "Skip").props.onClick()
+  assert.equal(submissions.length, 1)
+  assert.equal(submissions[0][0], "set-1")
+  assert.equal(submissions[0][1][0].answers[1].other, "Friends")
+  assert.deepEqual(submissions[0][1][1], { skipped: true, answers: [] })
+  props.disabled = true
+  tree = render()
+  assert.ok(findElements(tree, "fieldset").every((field) => field.props.disabled))
+  assert.equal(button(tree, "Skip").props.disabled, true)
+})
+
+test("answers summary renders question labels, answers and skipped steps", () => {
+  const { summarizeInterview } = loadComponent("components/ai-chat/stream-turn.ts", {})
+  const summary = summarizeInterview(interviewFixture(), answersFixture())
+  const tree = blockHelpers.AnswersSummary({ summary })
+  assert.equal(elementText(tree), "Your answersWhen?: Shopping · Who: Clients, Coaches, Friends · 1 step skipped")
+  assert.deepEqual(findElements(tree, "strong").map(elementText), ["When?:", "Who:"])
+})
+
+for (const id of ["constructor", "__proto__", "toString"]) {
+  test(`interview handles prototype question id ${id}`, () => {
+    const hooks = createHooks()
+    const { InterviewCard, stepComplete } = loadComponent("components/ai-chat/interview-card.tsx", {
+      react: hooks.react, "lucide-react": { ArrowRight: "ArrowRight" }, "@/components/ui/button": { Button: "Button" },
+    })
+    const question = { ...interviewFixture().steps[0].questions[0], id }
+    const interview = { ...interviewFixture(), steps: [{ skippable: true, questions: [question] }] }
+    const submissions = []
+    const render = () => hooks.render(() => InterviewCard({ interview, disabled: false, onAnswer: (...args) => submissions.push(args) }))
+    const continueButton = (tree) => findElements(tree, "Button").find((button) => elementText(button) === "Continue")
+    assert.equal(stepComplete([question], new Map()), false)
+    let tree = render()
+    assert.equal(continueButton(tree).props.disabled, true)
+    assert.ok(findInputs(tree).filter((input) => input.props.type === "radio").every((input) => input.props.checked === false))
+    findInputs(tree).find((input) => input.props.type === "text").props.onChange({ target: { value: "At dinner" } })
+    tree = render()
+    assert.equal(findInputs(tree).find((input) => input.props["aria-label"] === "Other: When?").props.checked, true)
+    assert.equal(continueButton(tree).props.disabled, false)
+    findInputs(tree).find((input) => input.props.type === "radio").props.onChange()
+    tree = render()
+    assert.equal(findInputs(tree).find((input) => input.props["aria-label"] === "Other: When?").props.checked, false)
+    assert.equal(continueButton(tree).props.disabled, false)
+    continueButton(tree).props.onClick()
+    assert.deepEqual(submissions, [["set-1", [{ skipped: false, answers: [{ questionId: id, choices: ["Planning"] }] }]]])
+  })
+}
+
+test("only the latest unanswered interview is interactive, and answered cards disappear", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+    "./blocks": { ...blockHelpers, InlineBlock: "InlineBlock", AnswersSummary: "AnswersSummary" },
+    "./interview-card": { InterviewCard: "InterviewCard" },
+  })
+  const base = { id: "a", role: "assistant", content: "", createdAt: 0, status: "completed", interview: interviewFixture() }
+  const render = (messages, streaming = false) => hooks.render(() => MessageList({ messages, streaming, reading: "", onAnswer() {} }))
+  assert.equal(findElement(render([base]), "InterviewCard").props.disabled, false)
+  assert.equal(findElement(render([base], true), "InterviewCard").props.disabled, true)
+  for (const status of ["streaming", "cancelled", "error", "limit"]) {
+    assert.equal(findElement(render([{ ...base, status }]), "InterviewCard").props.disabled, true, status)
+  }
+  assert.equal(findElement(render([base, { ...base, id: "user", role: "user", interview: undefined }]), "InterviewCard").props.disabled, true)
+  assert.equal(findElement(render([{ ...base, interview: { ...base.interview, answered: true } }]), "InterviewCard"), undefined)
+  const summary = { questionSetId: "set-1", title: "Framing", answers: [], skipped: 2 }
+  const tree = render([{ ...base, role: "user", interview: summary }])
+  assert.ok(findElement(tree, "AnswersSummary"))
+  assert.ok(!findElement(tree, "article").props.className.includes("w-fit"))
+  const folded = render([{ ...base, role: "user", id: "answers", interview: summary }, { ...base, id: "reply", interview: undefined, content: "Three directions" }])
+  const articles = findElements(folded, "article")
+  assert.equal(articles.length, 1)
+  assert.equal(findElement(articles[0], "AnswersSummary").props.summary, summary)
+  assert.ok(elementText(articles[0]).includes("Assistant"))
+})
+
+for (const lostStart of [false, true]) {
+  test(`interview submission retry preserves the right request (${lostStart ? "lost message_started" : "HTTP rejection"})`, async () => {
+    const interview = interviewFixture()
+    const initial = { id: "interview", role: "assistant", status: "completed", content: "", interview }
+    const attempts = []
+    const fixture = chatFixture({ thread: "t", api: {
+      fetchAIChatThread: async () => ({ thread: thread("t"), messages: attempts.length && lostStart ? [initial, { id: "failed", role: "assistant", status: "error", content: "" }] : [initial] }),
+      streamAIChatTurn: async (_id, text, retry, _signal, _onEvent, answers) => {
+        attempts.push({ text, retry, answers })
+        if (lostStart) throw new Error("connection lost")
+        throw new ApiError("Too many turns", 429)
+      },
+    } })
+    fixture.render()
+    fixture.requests[0].resolve(sources("A", ["A"]))
+    await flush()
+    let tree = fixture.render()
+    assert.equal(findElement(tree, "ChatComposer").props.placeholder, "Answer here instead, or ask something…")
+    findElement(tree, "MessageList").props.onAnswer("set-1", answersFixture().steps)
+    await flush()
+    tree = fixture.render()
+    const alert = findElement(tree, "section").props.children.find((child) => child?.props?.role === "alert")
+    alert.props.children[1].props.onClick()
+    await flush()
+    assert.equal(attempts.length, 2)
+    assert.deepEqual(attempts[0].answers, answersFixture())
+    assert.equal(attempts[1].retry, lostStart)
+    assert.deepEqual(attempts[1].answers, lostStart ? undefined : answersFixture())
+  })
+}

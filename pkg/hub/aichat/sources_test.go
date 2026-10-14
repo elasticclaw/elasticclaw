@@ -119,7 +119,7 @@ func TestRunnerOmitsUnreachableSource(t *testing.T) {
 	deps := Deps{health: newSourceHealth()}
 	runner := Runner{Store: store, PrepareReads: deps.prepareReads}
 	provider := fakeProvider{stream: func(_ context.Context, req llm.Request, _ func(string) error) (llm.Response, error) {
-		if len(req.Tools) != 0 {
+		if len(req.Tools) != 2 || req.Tools[0].Name != "emit_block" || req.Tools[1].Name != "ask_interview" {
 			t.Fatalf("unreachable source advertised: %+v", req.Tools)
 		}
 		if !strings.Contains(req.System, "Datadog is unreachable this turn; tell the user answers skip it") || strings.Contains(req.System, "unchecked") {

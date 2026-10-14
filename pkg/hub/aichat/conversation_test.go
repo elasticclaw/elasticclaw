@@ -149,7 +149,7 @@ func TestRunnerToolLoopAndRecording(t *testing.T) {
 	count := 0
 	p := fakeProvider{stream: func(ctx context.Context, req llm.Request, emit func(string) error) (llm.Response, error) {
 		count++
-		if len(req.Tools) != 1 || req.Tools[0].Name != "read_test" {
+		if len(req.Tools) != 3 || req.Tools[0].Name != "read_test" {
 			t.Errorf("tools=%+v", req.Tools)
 		}
 		if count == 1 {
@@ -313,8 +313,8 @@ func TestPromptAndHistory(t *testing.T) {
 				t.Fatal(positions)
 			}
 		}
-		if strings.Contains(req.System, "SECRET_MUST_NOT_APPEAR") || len(req.Tools) != 0 {
-			t.Fatal("secret or reserved tools in prompt")
+		if strings.Contains(req.System, "SECRET_MUST_NOT_APPEAR") || len(req.Tools) != 2 {
+			t.Fatal("secret or missing reserved tools in prompt")
 		}
 		return llm.Response{}, nil
 	}}

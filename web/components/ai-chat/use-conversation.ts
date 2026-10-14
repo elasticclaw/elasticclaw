@@ -2,14 +2,14 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { ApiError, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
+import { ApiError, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, type AIChatAnswers, type AIChatAnswersSummary, type AIChatStepAnswers, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
 import type { ChatMode } from "./mode-cards"
-import { applyStreamEvent, type StreamTurn } from "./stream-turn"
+import { summarizeInterview, applyStreamEvent, type StreamTurn } from "./stream-turn"
 import { useChatSources } from "./use-chat-sources"
 
 // `rejected` marks a message the hub refused before starting a turn (an HTTP
 // error such as 429): it was never sent, so it must be resent, not retried.
-type TurnError = { message: string; text: string; retry: boolean; rejected?: boolean; afterMessageId?: string }
+type TurnError = { answers?: AIChatAnswers; answersSummary?: AIChatAnswersSummary; message: string; text: string; retry: boolean; rejected?: boolean; afterMessageId?: string }
 
 const unfinishedStatuses = ["error", "cancelled", "limit"]
 
@@ -21,7 +21,7 @@ function reconcileError(error: TurnError | null, messages: AIChatMessage[]): Tur
   const last = messages[messages.length - 1]
   if (!error || error.rejected || last?.role !== "assistant" || last.id === error.afterMessageId) return error
   if (last.status === "completed") return null
-  return isUnfinishedReply(last) ? { ...error, retry: true } : error
+  return isUnfinishedReply(last) ? { ...error, retry: true, answers: undefined, answersSummary: undefined } : error
 }
 
 function errorMessage(error: unknown, fallback: string) {
@@ -184,7 +184,7 @@ export function useConversation() {
     }
     await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, (event, payload) => {
       if (isCurrent()) applyStreamEvent(turn, event, payload, { setMessages, setDraft, setReading })
-    })
+    }, turn.answers)
   }
 
   const finishTurn = async (turn: StreamTurn, isCurrent: () => boolean) => {
@@ -198,12 +198,12 @@ export function useConversation() {
     active.current = null
   }
 
-  const send = async (text: string, retry = false) => {
-    if (!data?.configured || !canStartTurn(text, retry)) return
+  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary) => {
+    if (!data?.configured || !canStartTurn(answers ? "answers" : text, retry)) return
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
-    const turn: StreamTurn = { threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
+    const turn: StreamTurn = { answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
     const afterMessageId = messages[messages.length - 1]?.id
     try {
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
@@ -211,14 +211,21 @@ export function useConversation() {
     } catch (error) {
       if (isCurrent() && !controller.signal.aborted) {
         const rejected = error instanceof ApiError && !turn.started
-        setTurnError({ message: errorMessage(error, "Unable to send message."), text, retry: turn.started || retry, rejected, afterMessageId })
+        setTurnError({ message: errorMessage(error, "Unable to send message."), text, retry: turn.started || retry, rejected, afterMessageId, answers: turn.started ? undefined : answers, answersSummary: turn.started ? undefined : answersSummary })
       }
     } finally {
       await finishTurn(turn, isCurrent)
     }
   }
 
-  const retryTurn = () => send(turnError?.text ?? "", turnError?.retry ?? true)
+  const answerInterview = (questionSetId: string, steps: AIChatStepAnswers[]) => {
+    const interview = messages[messages.length - 1]?.interview
+    if (!interview || !("steps" in interview) || interview.answered || interview.questionSetId !== questionSetId) return
+    const answers = { questionSetId, steps }
+    return send("", false, answers, summarizeInterview(interview, answers))
+  }
+
+  const retryTurn = () => send(turnError?.text ?? "", turnError?.retry ?? true, turnError?.answers, turnError?.answersSummary)
 
   const cancel = async () => {
     const controller = active.current
@@ -239,6 +246,6 @@ export function useConversation() {
 
   return {
     requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry,
-    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, retryTurn, cancel,
+    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, retryTurn, cancel,
   }
 }

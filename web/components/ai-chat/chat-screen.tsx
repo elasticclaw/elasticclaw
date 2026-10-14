@@ -11,7 +11,7 @@ import { ModeCards, type ChatMode } from "./mode-cards"
 import { ChatComposer } from "./composer"
 import { MessageList } from "./message-list"
 import { useConversation } from "./use-conversation"
-import type { AIChatMessage, AIChatSources, AIChatThread } from "@/lib/api"
+import type { AIChatMessage, AIChatStepAnswers, AIChatSources, AIChatThread } from "@/lib/api"
 
 export function ChatScreen() {
   const enabled = useFeatureFlag("ai-chat")
@@ -29,26 +29,28 @@ export function ChatScreen() {
 function Conversation() {
   const {
     requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry,
-    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, retryTurn, cancel,
+    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, retryTurn, cancel,
   } = useConversation()
-  const composer = <ChatComposer value={draft} onChange={setDraft} onSend={() => void send(draft)} onCancel={() => void cancel()} streaming={streaming} disabled={!data?.configured || !!thread?.archivedAt} />
+  const latestInterview = messages[messages.length - 1]?.interview
+  const interviewPending = !!latestInterview && "steps" in latestInterview && !latestInterview.answered
+  const composer = <ChatComposer placeholder={interviewPending ? "Answer here instead, or ask something…" : undefined} value={draft} onChange={setDraft} onSend={() => void send(draft)} onCancel={() => void cancel()} streaming={streaming} disabled={!data?.configured || !!thread?.archivedAt} />
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
       <ChatHeader mode={mode} title={thread?.title} data={data} loading={!current} onNewChat={newChat} onRefreshSources={refresh} />
-      <div className={`min-h-0 flex-1 overflow-y-auto px-8 ${thread ? "py-6" : "py-16"}`}>
+      <div className={`min-h-0 flex-1 overflow-y-auto px-4 sm:px-8 ${thread ? "py-6" : "py-16"}`}>
         <div className={`mx-auto space-y-5 ${thread ? "max-w-[760px]" : "max-w-[860px]"}`}>
           {!thread && !requestedThread && data && data.workspaces.length > 1 && renderWorkspaceSelect(data, selectWorkspace)}
-          {renderBody({ loadingThread, loadError, thread, messages, reading, current, data, mode, setMode, setDraft, refresh, composer })}
+          {renderBody({ streaming, onAnswer: answerInterview, loadingThread, loadError, thread, messages, reading, current, data, mode, setMode, setDraft, refresh, composer })}
         </div>
       </div>
       {(turnError || (!streaming && canRetry)) && (
-        <div role="alert" className="mx-auto flex w-full max-w-[824px] items-center gap-3 px-8 pb-3 text-sm">
+        <div role="alert" className="mx-auto flex w-full max-w-[824px] items-center gap-3 px-4 sm:px-8 pb-3 text-sm">
           <p className="text-destructive">{turnError?.message ?? "The last response did not finish."}</p>
           <Button variant="outline" size="sm" disabled={streaming} onClick={() => void retryTurn()}>Retry</Button>
         </div>
       )}
-      {thread && <div className="mx-auto w-full max-w-[824px] px-8 pb-5">
+      {thread && <div className="mx-auto w-full max-w-[824px] px-4 sm:px-8 pb-5">
         {thread.archivedAt && <p className="mb-2 text-xs text-muted-foreground">This conversation is archived.</p>}
         {!data?.configured && <p className="mb-2 text-xs text-muted-foreground">{!current ? "Loading workspace sources…" : "Not configured for this workspace"}</p>}
         {composer}
@@ -64,6 +66,8 @@ const suggestions = [
 ]
 
 type BodyState = {
+  streaming: boolean
+  onAnswer: (id: string, steps: AIChatStepAnswers[]) => void
   loadingThread: boolean
   loadError: string
   thread: AIChatThread | null
@@ -79,10 +83,10 @@ type BodyState = {
 }
 
 // Plain render helpers (not components) keep the element tree flat for tests.
-function renderBody({ loadingThread, loadError, thread, messages, reading, current, data, refresh, ...newChat }: BodyState) {
+function renderBody({ streaming, onAnswer, loadingThread, loadError, thread, messages, reading, current, data, refresh, ...newChat }: BodyState) {
   if (loadingThread) return <p role="status" className="text-sm text-muted-foreground">Loading conversation…</p>
   if (loadError) return renderRetry(loadError, () => window.location.reload())
-  if (thread) return <MessageList messages={messages} reading={reading} />
+  if (thread) return <MessageList messages={messages} reading={reading} streaming={streaming} interviewDisabled={!!thread.archivedAt || !data?.configured} onAnswer={onAnswer} />
   if (!current) return <p role="status" className="text-center text-sm text-muted-foreground">Loading workspace sources...</p>
   if (current.error) return renderRetry(current.error, refresh)
   if (!data?.configured) return renderNotConfigured(data?.error)
