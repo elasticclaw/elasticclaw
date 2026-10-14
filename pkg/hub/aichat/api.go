@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tools"
 )
 
 type api struct {
@@ -163,14 +164,19 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Text  string `json:"text"`
-		Retry bool   `json:"retry"`
+		Answers *InterviewAnswers `json:"answers"`
+		Text    string            `json:"text"`
+		Retry   bool              `json:"retry"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
 	body.Text = strings.TrimSpace(body.Text)
-	if (!body.Retry && body.Text == "") || len(body.Text) > 32*1024 {
+	if body.Answers != nil && (body.Text != "" || body.Retry) {
+		http.Error(w, "send text or answers, not both", 400)
+		return
+	}
+	if (body.Answers == nil && !body.Retry && body.Text == "") || len(body.Text) > 32*1024 {
 		http.Error(w, "message must contain 1 to 32768 bytes", 400)
 		return
 	}
@@ -195,8 +201,13 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unavailable", 500)
 		return
 	}
-	m, err := a.store.BeginTurn(ctx, t, body.Text, provider.Model(), body.Retry)
-	if errors.Is(err, ErrRetry) {
+	m, err := a.store.beginTurn(ctx, t, body.Text, provider.Model(), body.Retry, body.Answers)
+	var argErr tools.ArgError
+	if errors.As(err, &argErr) {
+		http.Error(w, argErr.Error(), 400)
+		return
+	}
+	if errors.Is(err, ErrRetry) || errors.Is(err, ErrInterviewStale) {
 		http.Error(w, err.Error(), 409)
 		return
 	}
