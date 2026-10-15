@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { artifactShareURL } from "@/lib/ai-chat-artifacts"
 import { deleteAIChatArtifact, fetchAIChatArtifacts, fetchAIChatThreads, type AIChatArtifactListItem, type AIChatThread } from "@/lib/api"
 import { chatModes } from "./mode-cards"
 
@@ -131,7 +132,7 @@ export function HistoryPopover({ threadId }: { threadId?: string }) {
               {items.map((item) => <div key={item.id} className="rounded-lg px-2.5 py-2 hover:bg-accent">
                 <div className="flex items-center gap-2.5">
                   <span className="rounded-md bg-muted p-1.5"><FileCode2 className="size-3.5 text-muted-foreground" /></span>
-                  <span className="min-w-0 flex-1"><a href={item.url} target="_blank" rel="noreferrer" className="block truncate rounded text-[13px] leading-tight font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{item.title}</a><span className="block text-xs leading-4 text-muted-foreground">v{item.currentVersion} · {historyTime(item.updatedAt, now).label} · <button type="button" className="rounded hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={item.threadTitle} onClick={() => openChat(item.threadId)}>Open chat</button></span></span>
+                  <span className="min-w-0 flex-1"><a href={artifactShareURL(item.slug, item.url)} target="_blank" rel="noreferrer" className="block truncate rounded text-[13px] leading-tight font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{item.title}</a><span className="block text-xs leading-4 text-muted-foreground">v{item.currentVersion} · {historyTime(item.updatedAt, now).label} · <button type="button" className="rounded hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={item.threadTitle} onClick={() => openChat(item.threadId)}>Open chat</button></span></span>
                   <Button variant="ghost" size="icon" className="size-7" aria-label={`Delete ${item.title}`} disabled={!!deleting} onClick={() => setConfirm(item.id)}><Trash2 className="size-3.5" /></Button>
                 </div>
                 {confirm === item.id && <div className="mt-2 rounded-md border p-2 text-xs"><p>Delete this artifact? The link stops working.</p><div className="mt-2 flex justify-end gap-2"><Button variant="outline" size="sm" disabled={!!deleting} onClick={() => setConfirm("")}>Cancel</Button><Button variant="destructive" size="sm" disabled={!!deleting} onClick={() => void remove(item)}>{deleting === item.id ? "Deleting…" : "Delete"}</Button></div></div>}

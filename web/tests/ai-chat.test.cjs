@@ -1582,6 +1582,8 @@ function historyFixture(api = {}) {
     "@/components/ui/popover": { Popover: "Popover", PopoverContent: "PopoverContent", PopoverTrigger: "PopoverTrigger" },
     "@/components/ui/tabs": { Tabs: "Tabs", TabsContent: "TabsContent", TabsList: "TabsList", TabsTrigger: "TabsTrigger" },
     "./mode-cards": { chatModes: [{ id: "explore_idea", name: "Explore idea", icon: "Lightbulb" }] },
+    // The web UI may run on another origin than the hub that serves artifact pages.
+    "@/lib/ai-chat-artifacts": loadComponent("lib/ai-chat-artifacts.ts", { "./hub-url": { getHubUrl: () => "https://hub.test" } }),
     "@/lib/api": { fetchAIChatThreads: async () => [], fetchAIChatArtifacts: async () => [], ...api },
   })
   const render = () => hooks.render(() => HistoryPopover({ threadId: "today" }))
@@ -1645,7 +1647,7 @@ test("history artifact deletion confirms, removes the row and opens its chat", a
     assert.match(elementText(tree), /v3/)
     assert.match(elementText(tree), /Only you can see your artifacts/)
     const link = findElement(tree, "a")
-    assert.equal(link.props.href, artifact.url)
+    assert.equal(link.props.href, "https://hub.test/artifacts/prototype-abcdef")
     assert.equal(link.props.target, "_blank")
     findElements(tree, "button").find((b) => elementText(b) === "Open chat").props.onClick()
     assert.deepEqual(fixture.navigation, ["/chat?thread=t"])
