@@ -130,7 +130,10 @@ func TestLinearCreateSafeErrors(t *testing.T) {
 		{"403", 403, secret, "The workspace token cannot create issues in team Product."},
 		{"permission", 200, `{"errors":[{"message":"` + secret + `","extensions":{"code":"FORBIDDEN"}}]}`, "The workspace token cannot create issues in team Product."},
 		{"permission text", 200, `{"errors":[{"message":"Permission denied ` + secret + `"}]}`, "The workspace token cannot create issues in team Product."},
-		{"graphql", 200, `{"errors":[{"message":"` + secret + `"}]}`, LinearRejected},
+		{"graphql", 200, `{"errors":[{"message":"` + secret + `"}]}`, LinearUnconfirmed},
+		{"validation", 200, `{"errors":[{"message":"` + secret + `","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`, LinearRejected},
+		{"parse", 200, `{"errors":[{"message":"` + secret + `","extensions":{"code":"GRAPHQL_PARSE_FAILED"}}]}`, LinearRejected},
+		{"execution and permission", 200, `{"data":null,"errors":[{"extensions":{"code":"FORBIDDEN"}},{"message":"` + secret + `"}]}`, LinearUnconfirmed},
 		{"http", 400, secret, LinearRejected},
 		{"gateway", 502, secret, LinearUnconfirmed},
 		{"malformed", 200, `{`, LinearUnconfirmed},
@@ -245,8 +248,9 @@ func TestLinearCreateSkipsLabelGroups(t *testing.T) {
 
 func TestLinearCreatePartialResponses(t *testing.T) {
 	for _, tc := range []struct{ name, data, want string }{
-		{"null data", `null`, LinearRejected},
-		{"null mutation", `{"issueCreate":null}`, LinearRejected},
+		{"null data", `null`, LinearUnconfirmed},
+		{"null mutation", `{"issueCreate":null}`, LinearUnconfirmed},
+		{"absent mutation", `{}`, LinearUnconfirmed},
 		{"success without issue", `{"issueCreate":{"success":true,"issue":null}}`, LinearUnconfirmed},
 		{"issue without success", `{"issueCreate":{"issue":{"identifier":"PRO-1","url":"https://linear.app/PRO-1"}}}`, LinearUnconfirmed},
 		{"incomplete issue", `{"issueCreate":{"success":true,"issue":{"identifier":"PRO-1"}}}`, LinearUnconfirmed},
@@ -259,7 +263,7 @@ func TestLinearCreatePartialResponses(t *testing.T) {
 				want := tc.want
 				if permission {
 					message = "Permission denied " + secret
-					if want == LinearRejected {
+					if tc.data == "null" || tc.data == `{"issueCreate":null}` || tc.data == `{}` {
 						want = "The workspace token cannot create issues in team Product."
 					}
 				}

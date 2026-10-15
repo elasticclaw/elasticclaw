@@ -100,15 +100,27 @@ func (l *Linear) createRequest(ctx context.Context, query string, variables any,
 				return l.unconfirmedError()
 			}
 		}
+		message, definite := LinearRejected, true
 		for _, e := range response.Errors {
 			category := strings.ToLower(e.Extensions.Code + " " + e.Extensions.Type + " " + e.Message)
+			permission := false
 			for _, word := range []string{"permission", "forbidden", "unauthorized", "authentication", "access denied", "not authorized"} {
 				if strings.Contains(category, word) {
-					return l.permissionError(team)
+					permission = true
+					break
 				}
 			}
+			if permission {
+				message = fmt.Sprintf("The workspace token cannot create issues in team %s.", team)
+			} else if e.Extensions.Code != "GRAPHQL_VALIDATION_FAILED" && e.Extensions.Code != "GRAPHQL_PARSE_FAILED" {
+				definite = false
+			}
 		}
-		return l.createError(LinearRejected)
+		// Execution can fail after creation even when GraphQL returns no mutation data.
+		if mutation && !definite {
+			return l.unconfirmedError()
+		}
+		return l.createError(message)
 	}
 	if len(response.Data) == 0 || string(response.Data) == "null" || json.Unmarshal(response.Data, out) != nil {
 		if mutation {
