@@ -4,10 +4,12 @@ import { Activity, BarChart3, Book, ChevronDown, Database, GitBranch, Plus, Refr
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import type { AIChatSource, AIChatSources } from "@/lib/api"
+import { HistoryPopover } from "./history-popover"
 import { chatModes, type ChatMode } from "./mode-cards"
 import { groupSources, repositoryNames, sourceMessage, sourceStatus, sourceSummary } from "./sources"
 
-export function ChatHeader({ mode, title, data, loading = !data, onNewChat, onRefreshSources }: {
+export function ChatHeader({ threadId, mode, title, data, loading = !data, onNewChat, onRefreshSources }: {
+  threadId?: string
   mode: ChatMode | null
   title?: string
   data?: AIChatSources
@@ -53,6 +55,7 @@ export function ChatHeader({ mode, title, data, loading = !data, onNewChat, onRe
             </div>
           </PopoverContent>
         </Popover>
+        <HistoryPopover threadId={threadId} />
         <Button variant="outline" size="sm" className="text-[13px]" onClick={onNewChat}><Plus className="size-3.5" />New chat</Button>
       </div>
     </header>

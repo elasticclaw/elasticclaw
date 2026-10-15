@@ -37,7 +37,7 @@ function Conversation() {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
-      <ChatHeader mode={mode} title={thread?.title} data={data} loading={!current} onNewChat={newChat} onRefreshSources={refresh} />
+      <ChatHeader threadId={thread?.id} mode={mode} title={thread?.title} data={data} loading={!current} onNewChat={newChat} onRefreshSources={refresh} />
       <div className={`min-h-0 flex-1 overflow-y-auto px-4 sm:px-8 ${thread ? "py-6" : "py-16"}`}>
         <div className={`mx-auto space-y-5 ${thread ? "max-w-[760px]" : "max-w-[860px]"}`}>
           {!thread && !requestedThread && data && data.workspaces.length > 1 && renderWorkspaceSelect(data, selectWorkspace)}

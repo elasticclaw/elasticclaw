@@ -624,6 +624,8 @@ export function fetchAIChatSources(workspace = "", refresh = false): Promise<AIC
 }
 
 export interface AIChatThread {
+  artifactCount?: number
+  ticket?: string
   id: string
   workspace: string
   title: string
@@ -663,6 +665,7 @@ export interface AIChatTicketCard extends AIChatTicketTarget {
 }
 export interface AIChatArtifactRequest { kind: "artifact"; artifactId?: string; title?: string; brief?: string }
 export interface AIChatArtifactCard {
+  deleted?: boolean
   artifactId?: string
   title: string
   brief?: string
@@ -763,4 +766,24 @@ export async function streamAIChatTurn(id: string, text: string, retry: boolean,
   if (!response.body) throw new Error("Streaming is unavailable.")
   const { readAIChatEvents } = await import("./ai-chat-stream")
   await readAIChatEvents(response.body, onEvent)
+}
+
+export interface AIChatArtifactListItem {
+  id: string
+  slug: string
+  title: string
+  currentVersion: number
+  threadId: string
+  threadTitle: string
+  updatedAt: number
+  url: string
+}
+export function fetchAIChatThreads(signal?: AbortSignal): Promise<AIChatThread[]> {
+  return apiFetch("/api/ai-chat/threads", { signal })
+}
+export function fetchAIChatArtifacts(signal?: AbortSignal): Promise<AIChatArtifactListItem[]> {
+  return apiFetch("/api/ai-chat/artifacts", { signal })
+}
+export function deleteAIChatArtifact(slug: string): Promise<void> {
+  return apiFetch(`/api/ai-chat/artifacts/${encodeURIComponent(slug)}`, { method: "DELETE" })
 }

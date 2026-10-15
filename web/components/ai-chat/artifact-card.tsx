@@ -26,6 +26,7 @@ export function CopyArtifactLink({ url, className }: { url: string; className?: 
 export function ArtifactActionCard({ block, onStop, onRetry, ticket, onTicket }: { block: ActionBlock; ticket?: AIChatTicketTarget; onTicket?: (action: AIChatTicketRequest) => void; onStop?: () => void; onRetry?: (action: AIChatArtifactRequest) => void }) {
   if (block.kind !== "artifact") return null
   const { card, state } = block
+  if (card.deleted) return <div className="my-3 rounded-xl border bg-muted/30 p-3.5 text-sm text-muted-foreground">This artifact was deleted.</div>
   if (state === "working") return <div role="status" className="my-3 flex items-center gap-4 rounded-xl border bg-card p-3.5">
     <div className="flex h-24 w-36 shrink-0 items-center justify-center rounded-lg border bg-muted/40"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
     <div className="min-w-0 flex-1"><div className="font-semibold">Building “{card.title}”</div><div className="mt-1 text-xs text-muted-foreground">Writing HTML · {card.lines ?? 0} lines so far</div><div className="mt-3 h-1 overflow-hidden rounded bg-muted"><div className="h-full w-2/3 animate-pulse bg-foreground/70" /></div></div>

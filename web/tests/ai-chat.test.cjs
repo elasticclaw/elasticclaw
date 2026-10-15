@@ -52,7 +52,16 @@ function createHooks() {
         if (!(index in states)) states[index] = { current }
         return states[index]
       },
-      useEffectEvent: (callback) => callback,
+      useEffectEvent(callback) {
+        const index = cursor++
+        if (!(index in states)) {
+          const cell = { callback }
+          cell.invoke = (...args) => cell.callback(...args)
+          states[index] = cell
+        }
+        states[index].callback = callback
+        return states[index].invoke
+      },
       Suspense: "Suspense",
       useCallback: (callback) => callback,
       useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
@@ -262,6 +271,7 @@ for (const syncFails of [false, true]) {
       } })
       fixture.render()
       windowEvents.emit("ai-chat-thread-updated", { threadId: "existing" })
+    await new Promise((resolve) => setTimeout(resolve, 320))
       assert.equal(loads.length, 2)
       if (syncFails) loads[1].reject(new Error("offline"))
       else loads[1].resolve({ thread: thread("existing"), messages: [{ id: "a", role: "assistant", content: "Done", status: "completed" }] })
@@ -285,6 +295,7 @@ test("a late initial load failure cannot hide a newer cross-tab sync", async () 
     } })
     fixture.render()
     windowEvents.emit("ai-chat-thread-updated", { threadId: "existing" })
+    await new Promise((resolve) => setTimeout(resolve, 320))
     loads[1].resolve({ thread: thread("existing"), messages: [{ id: "a", role: "assistant", content: "Done", status: "completed" }] })
     await flush()
     loads[0].reject(new Error("offline"))
@@ -426,6 +437,7 @@ test("a message the hub rejected is resent, never retried as another tab's faile
     // Another tab's turn on this thread fails afterwards.
     saved = { thread: thread("existing"), messages: [...saved.messages, { id: "a2", role: "assistant", content: "", status: "cancelled" }] }
     windowEvents.emit("ai-chat-thread-updated", { threadId: "existing" })
+    await new Promise((resolve) => setTimeout(resolve, 320))
     await flush()
     const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
     alert.props.children[1].props.onClick()
@@ -1556,4 +1568,150 @@ for (const outcome of ["completed", "bounded", "navigate"]) test(`Stop resyncs a
   assert.equal(loads, outcome === "completed" ? 4 : outcome === "bounded" ? 22 : 3)
   if (outcome === "completed") assert.equal(findElement(tree, "MessageList").props.messages[0].blocks[0].state, "created")
   if (outcome === "navigate") assert.deepEqual(findElement(tree, "MessageList").props.messages, [])
+})
+
+function historyFixture(api = {}) {
+  const hooks = createHooks()
+  const navigation = []
+  const { HistoryPopover, historyTime } = loadComponent("components/ai-chat/history-popover.tsx", {
+    react: hooks.react,
+    "next/navigation": { useRouter: () => ({ replace: (url) => navigation.push(url) }) },
+    "lucide-react": { Eye: "Eye", FileCode2: "FileCode2", History: "History", Ticket: "Ticket", Trash2: "Trash2" },
+    "@/components/ui/button": { Button: "Button" },
+    "@/components/ui/popover": { Popover: "Popover", PopoverContent: "PopoverContent", PopoverTrigger: "PopoverTrigger" },
+    "@/components/ui/tabs": { Tabs: "Tabs", TabsContent: "TabsContent", TabsList: "TabsList", TabsTrigger: "TabsTrigger" },
+    "./mode-cards": { chatModes: [{ id: "explore_idea", name: "Explore idea", icon: "Lightbulb" }] },
+    "@/lib/api": { fetchAIChatThreads: async () => [], fetchAIChatArtifacts: async () => [], ...api },
+  })
+  const render = () => hooks.render(() => HistoryPopover({ threadId: "today" }))
+  return { render, historyTime, navigation, open: () => findElement(render(), "Popover").props.onOpenChange(true) }
+}
+
+test("history groups rows by calendar time, highlights current chat and shows badges", async () => {
+  const now = new Date(2026, 9, 15, 12).getTime()
+  const rows = [
+    { id: "today", title: "Prototype", mode: "explore_idea", updatedAt: now, artifactCount: 2, ticket: "PRO-1423" },
+    { id: "week", title: "Recent", mode: "explore_idea", updatedAt: new Date(2026, 9, 12).getTime() },
+    { id: "old", title: "Earlier", mode: "explore_idea", updatedAt: new Date(2025, 8, 1).getTime() },
+  ]
+  const fixture = historyFixture({ fetchAIChatThreads: async () => rows })
+  assert.deepEqual(fixture.historyTime(now, now), { group: "Today", label: "12:00" })
+  assert.equal(fixture.historyTime(rows[1].updatedAt, now).group, "Last 7 days")
+  assert.match(fixture.historyTime(rows[2].updatedAt, now).label, /2025/)
+  const clock = Date.now
+  Date.now = () => now
+  try { fixture.open() } finally { Date.now = clock }
+  assert.match(elementText(fixture.render()), /Loading history/)
+  await flush()
+  const tree = fixture.render()
+  assert.match(elementText(tree), /Today.*Prototype.*Explore idea.*12:00.*2.*PRO-1423.*Last 7 days.*Recent.*Older.*Earlier/s)
+  assert.match(elementText(tree), /Only you can see your chats/)
+  const current = findElements(tree, "button").find((row) => row.props["aria-current"] === "page")
+  assert.ok(current.props.className.includes("bg-accent"))
+  current.props.onClick()
+  assert.deepEqual(fixture.navigation, ["/chat?thread=today"])
+  assert.equal(findElement(fixture.render(), "Popover").props.open, false)
+})
+
+test("history handles empty, error and retry states inline", async () => {
+  let fail = true
+  const fixture = historyFixture({ fetchAIChatThreads: async () => { if (fail) throw Error("offline"); return [] } })
+  fixture.open()
+  await flush()
+  assert.match(elementText(fixture.render()), /Unable to load history/)
+  fail = false
+  findElements(fixture.render(), "Button").find((button) => elementText(button) === "Retry").props.onClick()
+  await flush()
+  const tree = fixture.render()
+  assert.match(elementText(tree), /No chats yet/)
+  assert.match(elementText(tree), /No artifacts yet. Ask for a prototype in any chat/)
+})
+
+test("history artifact deletion confirms, removes the row and opens its chat", async () => {
+  const deleted = []
+  const previous = window.dispatchEvent
+  window.dispatchEvent = () => {}
+  try {
+    const artifact = { id: "a", slug: "prototype-abcdef", title: "Prototype", currentVersion: 3, threadId: "t", threadTitle: "Chat", updatedAt: Date.now(), url: "/artifacts/prototype-abcdef" }
+    const fixture = historyFixture({ fetchAIChatArtifacts: async () => [artifact], deleteAIChatArtifact: async (slug) => { deleted.push(slug) } })
+    fixture.open()
+    await flush()
+    findElement(fixture.render(), "Tabs").props.onValueChange("artifacts")
+    let tree = fixture.render()
+    assert.match(elementText(tree), /v3/)
+    assert.match(elementText(tree), /Only you can see your artifacts/)
+    const link = findElement(tree, "a")
+    assert.equal(link.props.href, artifact.url)
+    assert.equal(link.props.target, "_blank")
+    findElements(tree, "Button").find((b) => elementText(b) === "Open chat").props.onClick()
+    assert.deepEqual(fixture.navigation, ["/chat?thread=t"])
+    fixture.open()
+    await flush()
+    const trash = () => findElements(fixture.render(), "Button").find((b) => b.props["aria-label"] === "Delete Prototype")
+    trash().props.onClick()
+    assert.match(elementText(fixture.render()), /Delete this artifact\? The link stops working\./)
+    findElements(fixture.render(), "Button").find((b) => elementText(b) === "Cancel").props.onClick()
+    assert.doesNotMatch(elementText(fixture.render()), /Delete this artifact/)
+    assert.deepEqual(deleted, [])
+    trash().props.onClick()
+    findElements(fixture.render(), "Button").find((b) => elementText(b) === "Delete").props.onClick()
+    await flush()
+    assert.deepEqual(deleted, [artifact.slug])
+    assert.equal(findElement(fixture.render(), "a"), undefined)
+    assert.match(elementText(fixture.render()), /No artifacts yet/)
+  } finally { window.dispatchEvent = previous }
+})
+
+test("history refreshes open lists on debounced updates and reloads on reopen", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const events = captureWindowListeners()
+  let loads = 0
+  try {
+    const fixture = historyFixture({ fetchAIChatThreads: async () => { loads++; return [] } })
+    fixture.open(); fixture.render(); await flush()
+    for (let i = 0; i < 4; i++) events.emit("ai-chat-thread-updated", { threadId: "any" })
+    t.mock.timers.tick(299)
+    assert.equal(loads, 1)
+    t.mock.timers.tick(1); await flush()
+    assert.equal(loads, 2)
+    findElement(fixture.render(), "Popover").props.onOpenChange(false); fixture.render()
+    events.emit("ai-chat-thread-updated", { threadId: "any" }); t.mock.timers.tick(300)
+    assert.equal(loads, 2)
+    fixture.open(); await flush()
+    assert.equal(loads, 3)
+  } finally { events.restore() }
+})
+
+test("WS bursts resync only the open conversation and never replace a local stream", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const events = captureWindowListeners()
+  let loads = 0, finish
+  try {
+    const fixture = chatFixture({ thread: "existing", api: {
+      fetchAIChatThread: async () => { loads++; return { thread: thread("existing"), messages: [] } },
+      streamAIChatTurn: () => new Promise((resolve) => { finish = resolve }),
+    } })
+    fixture.render(); fixture.requests[0].resolve(sources("A", ["A"])); await flush()
+    events.emit("ai-chat-thread-updated", { threadId: "other" }); t.mock.timers.tick(300)
+    assert.equal(loads, 1)
+    for (let i = 0; i < 4; i++) events.emit("ai-chat-thread-updated", { threadId: "existing" })
+    t.mock.timers.tick(299); assert.equal(loads, 1)
+    t.mock.timers.tick(1); await flush(); assert.equal(loads, 2)
+    // A turn starting during the debounce must suppress the queued sync too.
+    events.emit("ai-chat-thread-updated", { threadId: "existing" })
+    findElement(fixture.render(), "ChatComposer").props.onChange("Question")
+    findElement(fixture.render(), "ChatComposer").props.onSend(); await flush()
+    t.mock.timers.tick(300); assert.equal(loads, 2)
+    events.emit("ai-chat-thread-updated", { threadId: "existing" }); t.mock.timers.tick(300)
+    assert.equal(loads, 2)
+    finish(); await flush(); assert.equal(loads, 3)
+  } finally { events.restore() }
+})
+
+test("deleted artifact cards are neutral and expose no links or ticket actions", () => {
+  const { ArtifactActionCard } = loadComponent("components/ai-chat/artifact-card.tsx", { react: createHooks().react, "lucide-react": {}, "@/components/ui/button": { Button: "Button" } })
+  const tree = ArtifactActionCard({ block: { type: "action", kind: "artifact", state: "created", card: { deleted: true, title: "Prototype", slug: "prototype-abcdef", artifactId: "a" } }, ticket: { tracker: "Linear" }, onTicket() {} })
+  assert.equal(elementText(tree), "This artifact was deleted.")
+  assert.equal(findElement(tree, "Button"), undefined)
+  assert.equal(findElement(tree, "a"), undefined)
 })
