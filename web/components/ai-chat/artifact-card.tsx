@@ -1,9 +1,9 @@
 "use client"
 
 import { useState } from "react"
-import { Check, Copy, ExternalLink, FileCode2, Loader2, RotateCcw, TriangleAlert, X } from "lucide-react"
+import { Check, Copy, ExternalLink, FileCode2, Loader2, RotateCcw, TriangleAlert, Ticket, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import type { AIChatArtifactRequest, AIChatBlock } from "@/lib/api"
+import type { AIChatArtifactRequest, AIChatBlock, AIChatTicketRequest, AIChatTicketTarget } from "@/lib/api"
 import { artifactShareURL } from "@/lib/ai-chat-artifacts"
 
 type ActionBlock = Extract<AIChatBlock, { type: "action" }>
@@ -23,7 +23,7 @@ export function CopyArtifactLink({ url, className }: { url: string; className?: 
   return <Button variant="outline" size="sm" className={className} onClick={() => void copy()}>{copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{failed ? "Could not copy" : copied ? "Copied" : "Copy link"}</Button>
 }
 
-export function ArtifactActionCard({ block, onStop, onRetry }: { block: ActionBlock; onStop?: () => void; onRetry?: (action: AIChatArtifactRequest) => void }) {
+export function ArtifactActionCard({ block, onStop, onRetry, ticket, onTicket }: { block: ActionBlock; ticket?: AIChatTicketTarget; onTicket?: (action: AIChatTicketRequest) => void; onStop?: () => void; onRetry?: (action: AIChatArtifactRequest) => void }) {
   if (block.kind !== "artifact") return null
   const { card, state } = block
   if (state === "working") return <div role="status" className="my-3 flex items-center gap-4 rounded-xl border bg-card p-3.5">
@@ -46,5 +46,6 @@ export function ArtifactActionCard({ block, onStop, onRetry }: { block: ActionBl
       </div>
     </div>
     <div className="mt-2 text-sm text-muted-foreground">Ask for changes and I will publish a new version at the same link.</div>
+    {ticket && onTicket && card.artifactId && <Button variant="link" className="mt-1 h-auto px-0 text-sm" onClick={() => onTicket({ kind: "ticket", artifactId: card.artifactId })}><Ticket className="size-3.5" />{ticket.verb} with this artifact</Button>}
   </div>
 }

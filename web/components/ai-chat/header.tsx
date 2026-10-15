@@ -37,7 +37,7 @@ export function ChatHeader({ mode, title, data, loading = !data, onNewChat, onRe
               <h2 className="text-sm font-semibold">What this chat can read</h2>
               <span className="text-xs text-muted-foreground">Workspace {data?.workspace}</span>
             </div>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">The assistant reads these and never changes them.</p>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">The assistant reads these and never changes them.{data?.ticket && ` It can only create artifacts and ${data.ticket.tracker} tickets.`}</p>
             {sources.length === 0 && <p className="mt-5 text-xs text-muted-foreground">No sources configured.</p>}
             {groupSources(sources).map((group) => (
               <section key={group.name} className="mt-5">
@@ -71,7 +71,7 @@ function renderSource(source: AIChatSource, index: number) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-[13px] font-semibold">{source.name || source.kind || "Source"}</span>
-          <span className="rounded border px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">Read</span>
+          <span className="rounded border px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">{source.access === "read_create_ticket" ? "Read + create ticket" : "Read"}</span>
         </div>
         {source.detail && <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
           {repository ? <>{repositoryNames(source.kind, names).split(", ").map((name, i) => <span key={name}>{i > 0 && ", "}<span className="font-mono">{name}</span></span>)}{detail.length > 0 && ` · ${detail.join(" · ")}`}</> : source.detail}

@@ -603,10 +603,12 @@ export interface AIChatSource {
   detail?: string
   error?: string
   checkedAt?: string
-  access?: "read"
+  access?: "read" | "read_create_ticket"
 }
 
 export interface AIChatSources {
+  actions?: AIChatAction[]
+  ticket?: AIChatTicketTarget
   configured: boolean
   error?: string
   workspaces: string[]
@@ -635,9 +637,24 @@ export type AIChatBlock = { id: string; at: number } & (
   | { type: "stat_tiles"; data: { tiles: { label: string; value: string; caption?: string }[] } }
   | { type: "callout"; data: { tone: "info" | "warning" | "success"; title?: string; text: string } }
   | { type: "table"; data: { columns: string[]; rows: string[][] } }
-  | { type: "actions"; actions: AIChatAction[] }
+  | { type: "actions"; actions: AIChatAction[]; ticket?: AIChatTicketTarget }
+  | { type: "action"; kind: "ticket"; state: "working" | "created" | "failed"; card: AIChatTicketCard }
   | { type: "action"; kind: "artifact"; state: "working" | "created" | "failed"; card: AIChatArtifactCard }
 )
+export interface AIChatTicketTarget { tracker: string; verb: string; team: string; state?: string; labels?: string[] }
+export interface AIChatTicketRequest { kind: "ticket"; title?: string; body?: string; artifactId?: string }
+export type AIChatActionRequest = AIChatArtifactRequest | AIChatTicketRequest
+export interface AIChatTicketCard extends AIChatTicketTarget {
+  outcomeUnknown?: boolean
+  title: string
+  body: string
+  summary: string
+  artifactId?: string
+  identifier?: string
+  url?: string
+  artifact?: { slug: string; title: string; shareUrl: string }
+  error?: string
+}
 export interface AIChatArtifactRequest { kind: "artifact"; artifactId?: string; title?: string; brief?: string }
 export interface AIChatArtifactCard {
   artifactId?: string
@@ -665,7 +682,7 @@ export interface AIChatArtifact {
 export function fetchAIChatArtifact(slug: string, version?: number, signal?: AbortSignal): Promise<AIChatArtifact> {
   return apiFetch(`/api/ai-chat/artifacts/${encodeURIComponent(slug)}${version ? `?v=${version}` : ""}`, { signal })
 }
-export async function streamAIChatAction(id: string, action: AIChatArtifactRequest, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void): Promise<void> {
+export async function streamAIChatAction(id: string, action: AIChatActionRequest, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void): Promise<void> {
   const token = await resolveToken()
   const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/actions`, {
     method: "POST", signal,
@@ -673,7 +690,7 @@ export async function streamAIChatAction(id: string, action: AIChatArtifactReque
     body: JSON.stringify(action),
   })
   if (response.status === 401) return handleSessionExpired<void>()
-  if (!response.ok) throw new ApiError((await response.text()).trim() || "Unable to start artifact.", response.status)
+  if (!response.ok) throw new ApiError((await response.text()).trim() || "Unable to start action.", response.status)
   if (!response.body) throw new Error("Streaming is unavailable.")
   const { readAIChatEvents } = await import("./ai-chat-stream")
   await readAIChatEvents(response.body, onEvent)
