@@ -2,7 +2,7 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { ApiError, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, streamAIChatAction, type AIChatArtifactRequest, type AIChatActionRequest, type AIChatTicketRequest, type AIChatAnswers, type AIChatAnswersSummary, type AIChatStepAnswers, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
+import { ApiError, dismissAIChatTicketAttempt, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, streamAIChatAction, type AIChatArtifactRequest, type AIChatActionRequest, type AIChatTicketRequest, type AIChatAnswers, type AIChatAnswersSummary, type AIChatStepAnswers, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
 import type { ChatMode } from "./mode-cards"
 import { summarizeInterview, applyStreamEvent, type StreamTurn } from "./stream-turn"
 import { useChatSources } from "./use-chat-sources"
@@ -259,11 +259,18 @@ export function useConversation() {
     if (!threadRef.current || thread?.archivedAt || !data?.actions?.includes("ticket")) return
     return send("", false, undefined, undefined, action)
   }
+  const dismissTicket = async (attemptId: string) => {
+    const id = threadRef.current
+    const version = generation.current
+    if (!id || sending.current) throw new Error("Wait for the current response to finish.")
+    await dismissAIChatTicketAttempt(id, attemptId)
+    if (isSameConversation(version)) await syncThread(id)
+  }
   const last = messages[messages.length - 1]
   const canRetry = isUnfinishedReply(last) && !last?.blocks?.some((block) => block.type === "action")
 
   return {
     requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry,
-    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, startTicket, retryTurn, cancel,
+    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, startTicket, dismissTicket, retryTurn, cancel,
   }
 }

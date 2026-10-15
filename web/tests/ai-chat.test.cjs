@@ -1048,6 +1048,7 @@ const ticketTarget = { tracker: "Linear", verb: "Open Linear ticket", team: "Pro
 const ticketDraft = { ...ticketTarget, actionKey: "ticket-click-1", attemptId: "attempt-1", title: "Swap from the shopping list", body: "Clients ask 31 times a week.\n\nEvidence: 12% found swap.", summary: "Clients ask 31 times a week.", artifactId: "artifact-id" }
 const ticketMocks = {
   ...artifactCardMocks,
+  react: { useState: (initial) => [initial, () => {}] },
   "lucide-react": Object.fromEntries(["Check", "Copy", "ExternalLink", "FileCode2", "Loader2", "RotateCcw", "Ticket", "TriangleAlert"].map((name) => [name, name])),
   "./artifact-card": { CopyArtifactLink: "CopyArtifactLink", displayURL: (url) => url.replace(/^https?:\/\//, "") },
 }
@@ -1295,7 +1296,7 @@ test("unknown confirmation remains reachable after chatting and created replays"
   const onTicket = () => {}
   const render = (messages, props = {}) => hooks.render(() => MessageList({ messages, reading: "", ticket: ticketTarget, onTicket, ...props }))
   assert.equal(findElement(render([unknown, chat]), "TicketActionCard").props.onRetry, onTicket)
-  assert.equal(findElement(render([unknown, chat], { streaming: true }), "TicketActionCard").props.onRetry, undefined)
+  assert.equal(findElement(render([unknown, chat], { streaming: true }), "TicketActionCard").props.disabled, true)
   const newer = { ...unknown, id: "newer", blocks: [{ ...unknown.blocks[0], id: "newer-ticket", state: "created", card: ticketDraft }] }
   assert.equal(findElement(render([unknown, chat, newer]), "TicketActionCard").props.onRetry, onTicket)
   const confirmed = { ...newer, blocks: [{ ...newer.blocks[0], card: { ...ticketDraft, attemptId: "attempt-2", confirmedUnknown: ticketDraft.attemptId } }] }
@@ -1339,4 +1340,104 @@ for (const status of [409, "lost stream"]) test(`ticket retry preserves its acti
   findElement(fixture.render(), "MessageList").props.onTicket()
   await flush()
   assert.notEqual(attempts[2].actionKey, attempts[0].actionKey)
+})
+
+test("unknown ticket dismissal is available beside confirmation and displays a durable acknowledgement", () => {
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  const block = { id: "attempt-1-ticket", kind: "ticket", state: "failed", card: { ...ticketDraft, tracker: "Example", outcomeUnknown: true, error: "Check Example first." } }
+  const props = { block, onRetry() {}, onDismiss: async () => {} }
+  let tree = TicketActionCard(props)
+  const buttons = findElements(tree, "Button")
+  assert.deepEqual(buttons.map(elementText), ["I checked Example — create anyway", "It's already in Example"])
+  assert.equal(buttons[1].props.variant, "outline")
+  for (const overrides of [{ onRetry: undefined }, { block: { ...block, card: ticketDraft } }, { block: { ...block, state: "created" } }, { block: { ...block, state: "working" } }]) {
+    assert.doesNotMatch(elementText(TicketActionCard({ ...props, ...overrides })), /It's already in/)
+  }
+  tree = TicketActionCard({ ...props, block: { ...block, card: { ...block.card, dismissed: true } } })
+  assert.match(elementText(tree), /Example did not confirm the ticketYou confirmed the ticket exists in Example\./)
+  assert.doesNotMatch(elementText(tree), /Check Example first|I checked|It's already in|Try again/)
+  assert.equal(findAll(tree, (item) => typeof item.type === "function" && item.type.name === "CopyTicketText").length, 1)
+})
+
+test("ticket dismissal disables both buttons while pending or streaming and reports an inline error", async () => {
+  const hooks = createHooks()
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", { ...ticketMocks, react: hooks.react })
+  let rejectDismiss, dismissed
+  const props = {
+    block: { id: "attempt-1-ticket", kind: "ticket", state: "failed", card: { ...ticketDraft, outcomeUnknown: true } },
+    onRetry() {},
+    onDismiss: (id) => { dismissed = id; return new Promise((_resolve, reject) => { rejectDismiss = reject }) },
+  }
+  const render = (disabled = false) => hooks.render(() => TicketActionCard({ ...props, disabled }))
+  assert.ok(findElements(render(true), "Button").every((button) => button.props.disabled))
+  findElements(render(), "Button")[1].props.onClick()
+  assert.equal(dismissed, ticketDraft.attemptId)
+  assert.ok(findElements(render(), "Button").every((button) => button.props.disabled))
+  rejectDismiss(new Error("Unable to dismiss ticket attempt"))
+  await flush()
+  const tree = render()
+  assert.ok(findElements(tree, "Button").every((button) => !button.props.disabled))
+  assert.match(elementText(tree), /Unable to dismiss ticket attempt/)
+  assert.equal(findElements(tree, "p")[0].props.role, "alert")
+})
+
+test("only the latest unresolved unknown card offers dismissal, including after a repeated refusal", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+    "./blocks": { ...blockHelpers, InlineBlock: "InlineBlock" }, "./ticket-card": { TicketActionCard: "TicketActionCard" },
+  })
+  const unknown = { id: "m", role: "assistant", content: "", createdAt: 0, status: "completed", blocks: [{ id: "m-ticket", type: "action", kind: "ticket", state: "failed", at: 0, card: { ...ticketDraft, outcomeUnknown: true } }] }
+  const repeated = { ...unknown, id: "repeat", blocks: [{ ...unknown.blocks[0], id: "repeat-ticket" }] }
+  const onDismissTicket = async () => {}
+  const render = (messages) => hooks.render(() => MessageList({ messages, reading: "", ticket: ticketTarget, onTicket() {}, onDismissTicket }))
+  let cards = findElements(render([unknown, repeated]), "TicketActionCard")
+  assert.equal(cards[0].props.onDismiss, undefined)
+  assert.equal(cards[1].props.onDismiss, onDismissTicket)
+  const dismissed = { ...unknown, blocks: [{ ...unknown.blocks[0], card: { ...unknown.blocks[0].card, dismissed: true } }] }
+  cards = findElements(render([dismissed, repeated]), "TicketActionCard")
+  assert.ok(cards.every((card) => !card.props.onRetry && !card.props.onDismiss))
+})
+
+for (const navigate of [false, true]) test(`ticket dismissal resyncs only the conversation it belongs to (navigate=${navigate})`, async () => {
+  let finishDismiss
+  const loads = [], dismissals = []
+  const saved = { id: "unknown", role: "assistant", status: "completed", content: "", createdAt: 0, blocks: [{ id: "ticket", type: "action", kind: "ticket", state: "failed", at: 0, card: { ...ticketDraft, outcomeUnknown: true } }] }
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async (id) => { loads.push(id); return { thread: thread(id), messages: [{ ...saved, blocks: [{ ...saved.blocks[0], card: { ...saved.blocks[0].card, dismissed: dismissals.length > 0 } }] }] } },
+    dismissAIChatTicketAttempt: (id, attemptId) => { dismissals.push({ id, attemptId }); return new Promise((resolve) => { finishDismiss = resolve }) },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve({ ...sources("A", ["A"]), actions: ["ticket"], ticket: ticketTarget })
+  await flush()
+  const pending = findElement(fixture.render(), "MessageList").props.onDismissTicket(ticketDraft.attemptId)
+  assert.deepEqual(dismissals, [{ id: "t", attemptId: ticketDraft.attemptId }])
+  if (navigate) {
+    fixture.navigate("other")
+    fixture.render()
+    await flush()
+  }
+  finishDismiss()
+  await pending
+  const list = findElement(fixture.render(), "MessageList")
+  assert.deepEqual(loads, navigate ? ["t", "other"] : ["t", "t"])
+  assert.equal(list.props.messages[0].blocks[0].card.dismissed, true)
+})
+
+test("ticket dismissal uses an authenticated non-streaming POST and accepts 204", async () => {
+  const { dismissAIChatTicketAttempt } = loadComponent("lib/api.ts", {
+    "./hub-url": { getHubUrl: () => "https://hub.test" },
+    "./auth-storage": { getAuthToken: () => "session-token" },
+  })
+  const original = global.fetch
+  let request
+  global.fetch = async (url, options) => { request = { url, options }; return { ok: true, status: 204 } }
+  try {
+    await dismissAIChatTicketAttempt("thread/id", "attempt/id")
+    assert.equal(request.url, "https://hub.test/api/ai-chat/threads/thread%2Fid/ticket-attempts/attempt%2Fid/dismiss")
+    assert.equal(request.options.method, "POST")
+    assert.equal(request.options.headers.Authorization, "Bearer session-token")
+    assert.equal(request.options.body, undefined)
+    assert.equal(request.options.headers.Accept, undefined)
+  } finally { global.fetch = original }
 })

@@ -650,6 +650,7 @@ export interface AIChatTicketCard extends AIChatTicketTarget {
   confirmedUnknown?: string
   actionKey?: string
   outcomeUnknown?: boolean
+  dismissed?: boolean
   failureHeadline?: string
   title: string
   body: string
@@ -743,6 +744,9 @@ export function createAIChatThread(workspace: string, mode: string, signal?: Abo
 }
 export function fetchAIChatThread(id: string, signal?: AbortSignal): Promise<AIChatConversation> {
   return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}`, { signal })
+}
+export function dismissAIChatTicketAttempt(id: string, attemptId: string): Promise<void> {
+  return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/ticket-attempts/${encodeURIComponent(attemptId)}/dismiss`, { method: "POST" })
 }
 export function cancelAIChatTurn(id: string): Promise<void> {
   return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel`, { method: "POST" })
