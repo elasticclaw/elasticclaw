@@ -205,6 +205,7 @@ export function useConversation() {
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
+    if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: crypto.randomUUID() }
     const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
     const afterMessageId = messages[messages.length - 1]?.id
     try {

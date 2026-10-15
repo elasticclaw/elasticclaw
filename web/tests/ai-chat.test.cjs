@@ -1045,7 +1045,7 @@ test("artifact API 401 returns through login to the same pinned path", async () 
 })
 
 const ticketTarget = { tracker: "Linear", verb: "Open Linear ticket", team: "Product", state: "Backlog", labels: ["ai-chat"] }
-const ticketDraft = { ...ticketTarget, title: "Swap from the shopping list", body: "Clients ask 31 times a week.\n\nEvidence: 12% found swap.", summary: "Clients ask 31 times a week.", artifactId: "artifact-id" }
+const ticketDraft = { ...ticketTarget, actionKey: "ticket-click-1", title: "Swap from the shopping list", body: "Clients ask 31 times a week.\n\nEvidence: 12% found swap.", summary: "Clients ask 31 times a week.", artifactId: "artifact-id" }
 const ticketMocks = {
   ...artifactCardMocks,
   "lucide-react": Object.fromEntries(["Check", "Copy", "ExternalLink", "FileCode2", "Loader2", "RotateCcw", "Ticket", "TriangleAlert"].map((name) => [name, name])),
@@ -1072,7 +1072,7 @@ test("ticket cards show working, created and failed states, linked artifact and 
   tree = TicketActionCard({ block: { kind: "ticket", state: "failed", card: { ...ticketDraft, failureHeadline: "Could not create the ticket in Linear", error: "The workspace token cannot create issues in team Product." } }, onRetry: (value) => { retry = value } })
   assert.match(elementText(tree), /Could not create the ticket in LinearThe workspace token cannot create issues in team Product.Try again/)
   findElement(tree, "Button").props.onClick()
-  assert.deepEqual(retry, { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: "artifact-id" })
+  assert.deepEqual(retry, { kind: "ticket", actionKey: ticketDraft.actionKey, title: ticketDraft.title, body: ticketDraft.body, artifactId: "artifact-id" })
   const copy = findAll(tree, (item) => typeof item.type === "function" && item.type.name === "CopyTicketText")[0]
   assert.equal(copy.props.title, ticketDraft.title)
   assert.equal(copy.props.body, ticketDraft.body)
@@ -1190,7 +1190,8 @@ test("ticket action reaches the action stream with the retry draft unchanged", a
   const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
   alert.props.children[1].props.onClick()
   await flush()
-  assert.deepEqual(attempts, [{ id: "t", action }, { id: "t", action }])
+  assert.match(attempts[0].action.actionKey, /^[a-f0-9-]{36}$/)
+  assert.deepEqual(attempts, [{ id: "t", action: { ...action, actionKey: attempts[0].action.actionKey } }, { id: "t", action: attempts[0].action }])
 })
 
 test("tracker source badge reflects create-ticket access from the API", () => {
@@ -1271,5 +1272,56 @@ test("unknown ticket outcome requires an explicitly labeled acknowledgement and 
   const button = findElement(tree, "Button")
   assert.equal(elementText(button), "I checked Linear — create anyway")
   button.props.onClick()
-  assert.deepEqual(retry, { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: ticketDraft.artifactId, confirmUnknown: true })
+  assert.deepEqual(retry, { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: ticketDraft.artifactId, actionKey: ticketDraft.actionKey, confirmUnknown: true })
+})
+
+test("unknown confirmation remains on the most recent ticket after chatting", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+    "./blocks": { ...blockHelpers, InlineBlock: "InlineBlock" }, "./ticket-card": { TicketActionCard: "TicketActionCard" },
+  })
+  const base = { role: "assistant", content: "", createdAt: 0, status: "completed" }
+  const unknown = { ...base, id: "unknown", blocks: [{ id: "ticket", type: "action", kind: "ticket", state: "failed", at: 0, card: { ...ticketDraft, outcomeUnknown: true } }] }
+  const chat = { ...base, id: "chat", content: "Continuing the discussion" }
+  const onTicket = () => {}
+  const render = (messages, props = {}) => hooks.render(() => MessageList({ messages, reading: "", ticket: ticketTarget, onTicket, ...props }))
+  assert.equal(findElement(render([unknown, chat]), "TicketActionCard").props.onRetry, onTicket)
+  assert.equal(findElement(render([unknown, chat], { streaming: true }), "TicketActionCard").props.onRetry, undefined)
+  const newer = { ...unknown, id: "newer", blocks: [{ ...unknown.blocks[0], id: "newer-ticket", state: "created", card: ticketDraft }] }
+  assert.equal(findElement(render([unknown, chat, newer]), "TicketActionCard").props.onRetry, undefined)
+})
+
+for (const status of [409, "lost stream"]) test(`ticket retry preserves its action key and displays the server error (${status})`, async () => {
+  const attempts = []
+  let loads = 0
+  const message = "Example did not confirm the previous ticket. Check Example first, then use the ticket card to confirm creating another ticket."
+  const saved = { id: "unknown", role: "assistant", status: "completed", content: "", createdAt: 0, blocks: [{ id: "ticket", type: "action", kind: "ticket", state: "failed", at: 0, card: { ...ticketDraft, outcomeUnknown: true } }] }
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => {
+      if (loads++ && status === "lost stream") throw new Error("offline")
+      return { thread: thread("t"), messages: [saved, { id: "chat", role: "assistant", content: "Still chatting", status: "completed", createdAt: 0 }] }
+    },
+    streamAIChatAction: async (_id, action) => {
+      attempts.push(action)
+      if (status === 409) throw new ApiError(message, 409)
+      throw new Error("connection lost")
+    },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve({ ...sources("A", ["A"]), actions: ["artifact", "ticket"], ticket: ticketTarget })
+  await flush()
+  findElement(fixture.render(), "MessageList").props.onTicket()
+  await flush()
+  let tree = fixture.render()
+  assert.match(elementText(tree), status === 409 ? /Example did not confirm the previous ticket/ : /connection lost/)
+  const alert = findElement(tree, "section").props.children.find((child) => child?.props?.role === "alert")
+  alert.props.children[1].props.onClick()
+  await flush()
+  assert.match(attempts[0].actionKey, /^[a-f0-9-]{36}$/)
+  assert.deepEqual(attempts[1], attempts[0])
+  // A separate user click gets a new key.
+  findElement(fixture.render(), "MessageList").props.onTicket()
+  await flush()
+  assert.notEqual(attempts[2].actionKey, attempts[0].actionKey)
 })

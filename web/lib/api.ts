@@ -642,9 +642,10 @@ export type AIChatBlock = { id: string; at: number } & (
   | { type: "action"; kind: "artifact"; state: "working" | "created" | "failed"; card: AIChatArtifactCard }
 )
 export interface AIChatTicketTarget { tracker: string; verb: string; team: string; state?: string; labels?: string[] }
-export interface AIChatTicketRequest { kind: "ticket"; title?: string; body?: string; artifactId?: string; confirmUnknown?: boolean }
+export interface AIChatTicketRequest { kind: "ticket"; actionKey?: string; title?: string; body?: string; artifactId?: string; confirmUnknown?: boolean }
 export type AIChatActionRequest = AIChatArtifactRequest | AIChatTicketRequest
 export interface AIChatTicketCard extends AIChatTicketTarget {
+  actionKey?: string
   outcomeUnknown?: boolean
   failureHeadline?: string
   title: string
