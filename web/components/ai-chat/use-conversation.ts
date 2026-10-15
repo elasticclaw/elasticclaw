@@ -95,6 +95,7 @@ export function useConversation() {
     shownSync.current = revision
     showThread(saved)
     setTurnError((error) => reconcileError(error, saved.messages))
+    return saved
   }
 
   // Whichever of the initial load or a cross-tab sync lands first completes
@@ -211,10 +212,11 @@ export function useConversation() {
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
-    if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: newActionKey() }
     const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
     const afterMessageId = messages[messages.length - 1]?.id
     try {
+      if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: newActionKey() }
+      turn.action = action
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
       if (turn.error) setTurnError({ action, message: turn.error, text, retry: true, afterMessageId })
     } catch (error) {
@@ -267,6 +269,25 @@ export function useConversation() {
     if (isSameConversation(version)) await syncThread(id)
   }
   const last = messages[messages.length - 1]
+  const resyncPending = useEffectEvent(() => syncThread(threadRef.current))
+  useEffect(() => {
+    if (streaming || last?.status !== "streaming") return
+    let stopped = false
+    let attempts = 0
+    let timer: ReturnType<typeof setTimeout>
+    // A sent ticket mutation may finish after Stop closes the SSE connection.
+    const poll = async () => {
+      if (stopped || sending.current) return
+      attempts++
+      try {
+        const saved = await resyncPending()
+        if (saved && saved.messages.at(-1)?.status !== "streaming") return
+      } catch { /* A temporary disconnect should not prevent the next resync. */ }
+      if (!stopped && attempts < 20) timer = setTimeout(poll, 2000)
+    }
+    timer = setTimeout(poll, 2000)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [streaming, last?.id, last?.status])
   const canRetry = isUnfinishedReply(last) && !last?.blocks?.some((block) => block.type === "action")
 
   return {

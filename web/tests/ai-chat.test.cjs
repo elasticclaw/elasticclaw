@@ -1398,6 +1398,10 @@ test("only the latest unresolved unknown card offers dismissal, including after 
   cards = findElements(render([dismissed, repeated]), "TicketActionCard")
   assert.ok(cards.every((card) => !card.props.onRetry && !card.props.onDismiss))
   assert.equal(cards[1].props.block.card.dismissed, true)
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  const repeatedText = elementText(TicketActionCard(cards[1].props))
+  assert.match(repeatedText, /You confirmed the ticket exists in Linear/)
+  assert.doesNotMatch(repeatedText, /Check Linear before trying again/)
 })
 
 for (const navigate of [false, true]) test(`ticket dismissal resyncs only the conversation it belongs to (navigate=${navigate})`, async () => {
@@ -1441,4 +1445,94 @@ test("ticket dismissal uses an authenticated non-streaming POST and accepts 204"
     assert.equal(request.options.body, undefined)
     assert.equal(request.options.headers.Accept, undefined)
   } finally { global.fetch = original }
+})
+
+test("ticket action keys fall back outside secure contexts and key failures clear streaming", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto")
+  try {
+    for (const fail of [false, true]) {
+      Object.defineProperty(globalThis, "crypto", { configurable: true, value: { randomUUID: undefined, getRandomValues: (bytes) => {
+        if (fail) throw new Error("Random source unavailable")
+        return bytes.fill(171)
+      } } })
+      const attempts = []
+      const fixture = chatFixture({ thread: "t", api: {
+        fetchAIChatThread: async () => ({ thread: thread("t"), messages: [] }),
+        streamAIChatAction: async (_id, action) => { attempts.push(action) },
+      } })
+      fixture.render()
+      fixture.requests[0].resolve({ ...sources("A", ["A"]), actions: ["ticket"], ticket: ticketTarget })
+      await flush()
+      await findElement(fixture.render(), "MessageList").props.onTicket()
+      const tree = fixture.render()
+      assert.equal(findElement(tree, "ChatComposer").props.streaming, false)
+      if (fail) {
+        assert.equal(attempts.length, 0)
+        assert.match(elementText(tree), /Random source unavailable/)
+        // A subsequent successful click can still start a turn.
+        globalThis.crypto.getRandomValues = (bytes) => bytes.fill(1)
+        await findElement(tree, "MessageList").props.onTicket()
+        assert.equal(attempts.length, 1)
+      } else {
+        assert.equal(attempts.length, 1)
+        assert.equal(attempts[0].actionKey, "ab".repeat(16))
+        assert.match(attempts[0].actionKey, /^[A-Za-z0-9-]{1,64}$/)
+      }
+    }
+  } finally { Object.defineProperty(globalThis, "crypto", descriptor) }
+})
+
+test("a persisted streaming ticket shows its working card without Thinking", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+    "./blocks": blockHelpers, "./ticket-card": { TicketActionCard: "TicketActionCard" },
+  })
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  const message = { id: "working", role: "assistant", content: "", status: "streaming", createdAt: 0, blocks: [{ id: "working-ticket", type: "action", kind: "ticket", state: "working", at: 0, card: ticketDraft }] }
+  const tree = hooks.render(() => MessageList({ messages: [message], reading: "", streaming: false }))
+  assert.doesNotMatch(elementText(tree), /Thinking/)
+  assert.match(elementText(TicketActionCard(findElement(tree, "TicketActionCard").props)), /Opening ticket in Linear/)
+})
+
+for (const outcome of ["completed", "bounded", "navigate"]) test(`Stop resyncs a detached ticket until ${outcome}`, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  let loads = 0
+  const working = { id: "working", role: "assistant", content: "", status: "streaming", createdAt: 0, blocks: [{ id: "working-ticket", type: "action", kind: "ticket", state: "working", at: 0, card: ticketDraft }] }
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async (id) => {
+      loads++
+      const complete = outcome === "completed" && loads >= 4
+      return { thread: thread(id), messages: loads === 1 || id !== "t" ? [] : [{ ...working, status: complete ? "cancelled" : "streaming", blocks: [{ ...working.blocks[0], state: complete ? "created" : "working" }] }] }
+    },
+    streamAIChatAction: (_id, _action, signal, onEvent) => {
+      onEvent("message_started", { messageId: "working" })
+      onEvent("action", { kind: "ticket", state: "working", card: ticketDraft })
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted"))))
+    },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve({ ...sources("A", ["A"]), actions: ["ticket"], ticket: ticketTarget })
+  await flush()
+  const pending = findElement(fixture.render(), "MessageList").props.onTicket()
+  await flush()
+  findElement(fixture.render(), "ChatComposer").props.onCancel()
+  await pending
+  let tree = fixture.render()
+  assert.equal(findElement(tree, "ChatComposer").props.streaming, false)
+  assert.equal(findElement(tree, "MessageList").props.messages[0].blocks[0].state, "working")
+  if (outcome === "navigate") {
+    fixture.navigate("other")
+    fixture.render()
+    await flush()
+    fixture.render()
+  }
+  for (let i = 0; i < 25; i++) {
+    t.mock.timers.tick(2000)
+    await flush()
+    tree = fixture.render()
+  }
+  assert.equal(loads, outcome === "completed" ? 4 : outcome === "bounded" ? 22 : 3)
+  if (outcome === "completed") assert.equal(findElement(tree, "MessageList").props.messages[0].blocks[0].state, "created")
+  if (outcome === "navigate") assert.deepEqual(findElement(tree, "MessageList").props.messages, [])
 })
