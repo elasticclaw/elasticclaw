@@ -241,3 +241,54 @@ func TestLinearCreateSkipsLabelGroups(t *testing.T) {
 		})
 	}
 }
+
+func TestLinearCreatePartialResponses(t *testing.T) {
+	for _, tc := range []struct{ name, data, want string }{
+		{"null data", `null`, LinearRejected},
+		{"null mutation", `{"issueCreate":null}`, LinearRejected},
+		{"success without issue", `{"issueCreate":{"success":true,"issue":null}}`, LinearUnconfirmed},
+		{"issue without success", `{"issueCreate":{"issue":{"identifier":"PRO-1","url":"https://linear.app/PRO-1"}}}`, LinearUnconfirmed},
+		{"incomplete issue", `{"issueCreate":{"success":true,"issue":{"identifier":"PRO-1"}}}`, LinearUnconfirmed},
+		{"empty mutation", `{"issueCreate":{}}`, LinearUnconfirmed},
+		{"complete issue", `{"issueCreate":{"success":true,"issue":{"identifier":"PRO-1","url":"https://linear.app/PRO-1"}}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, permission := range []bool{false, true} {
+				message := secret
+				want := tc.want
+				if permission {
+					message = "Permission denied " + secret
+					if want == LinearRejected {
+						want = "The workspace token cannot create issues in team Product."
+					}
+				}
+				l := NewLinear("Product", secret, fake(func(w http.ResponseWriter, r *http.Request) {
+					var req struct{ Query string }
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					if req.Query == createTeamQuery {
+						fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team","name":"Product"}]}}}`)
+						return
+					}
+					fmt.Fprintf(w, `{"data":%s,"errors":[{"message":%q}]}`, tc.data, message)
+				}))
+				issue, err := l.Create(context.Background(), Draft{Title: "Draft", Body: "Evidence"})
+				if want == "" {
+					if err != nil || issue.Identifier != "PRO-1" || issue.URL != "https://linear.app/PRO-1" {
+						t.Fatal(issue, err)
+					}
+				} else if err == nil || err.Error() != want {
+					t.Fatal(issue, err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestLinearCreateQueryErrorsStillRejectPartialData(t *testing.T) {
+	l := NewLinear("Product", secret, fake(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team","name":"Product"}]}},"errors":[{"message":"nested failure"}]}`)
+	}))
+	if _, err := l.Target(context.Background()); err == nil || err.Error() != LinearRejected {
+		t.Fatal(err)
+	}
+}

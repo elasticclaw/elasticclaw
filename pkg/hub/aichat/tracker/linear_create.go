@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/internal/readhttp"
@@ -16,6 +17,13 @@ const createTeamQuery = `query TicketTeam($filter: TeamFilter!) { teams(first: 2
 const createStatesQuery = `query TicketStates($filter: WorkflowStateFilter!, $after: String) { workflowStates(first: 100, filter: $filter, after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } }`
 const createLabelsQuery = `query TicketLabels($filter: IssueLabelFilter!, $after: String) { issueLabels(first: 100, filter: $filter, after: $after) { nodes { id name isGroup } pageInfo { hasNextPage endCursor } } }`
 const createIssueMutation = `mutation CreateChatTicket($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { identifier url title state { name } } } }`
+
+type issueCreateResult struct {
+	IssueCreate *struct {
+		Success bool
+		Issue   *issue
+	}
+}
 
 type namedID struct {
 	ID, Name string
@@ -68,6 +76,21 @@ func (l *Linear) createRequest(ctx context.Context, query string, variables any,
 		return l.createError(LinearRejected)
 	}
 	if len(response.Errors) > 0 {
+		if mutation {
+			var result issueCreateResult
+			if len(response.Data) > 0 && json.Unmarshal(response.Data, &result) != nil {
+				return l.createError(LinearUnconfirmed)
+			}
+			if result.IssueCreate != nil {
+				v := result.IssueCreate.Issue
+				if result.IssueCreate.Success && v != nil && v.Identifier != "" && v.URL != "" {
+					if json.Unmarshal(response.Data, out) == nil {
+						return nil
+					}
+				}
+				return l.createError(LinearUnconfirmed)
+			}
+		}
 		for _, e := range response.Errors {
 			category := strings.ToLower(e.Extensions.Code + " " + e.Extensions.Type + " " + e.Message)
 			for _, word := range []string{"permission", "forbidden", "unauthorized", "authentication", "access denied", "not authorized"} {
@@ -194,14 +217,14 @@ func (l *Linear) Create(ctx context.Context, draft Draft) (Issue, error) {
 			return Issue{}, err
 		}
 	}
-	var result struct {
-		IssueCreate struct {
-			Success bool
-			Issue   *issue
-		}
-	}
-	if err := l.createRequest(ctx, createIssueMutation, map[string]any{"input": input}, &result, team.Name, true); err != nil {
+	mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	var result issueCreateResult
+	if err := l.createRequest(mutationCtx, createIssueMutation, map[string]any{"input": input}, &result, team.Name, true); err != nil {
 		return Issue{}, err
+	}
+	if result.IssueCreate == nil {
+		return Issue{}, l.createError(LinearUnconfirmed)
 	}
 	if !result.IssueCreate.Success {
 		return Issue{}, l.createError(LinearRejected)
