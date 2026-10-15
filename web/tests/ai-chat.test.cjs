@@ -1128,7 +1128,7 @@ test("created artifact offers a ticket only with availability and a latest-messa
   const onTicket = (value) => { action = value }
   let tree = ArtifactActionCard({ block, ticket: ticketTarget, onTicket })
   assert.match(elementText(tree), /Open Linear ticket with this artifact/)
-  findAll(tree, (item) => item.type === "Button" && item.props.variant === "link")[0].props.onClick()
+  findAll(tree, (item) => item.type === "Button" && elementText(item).includes("with this artifact"))[0].props.onClick()
   assert.deepEqual(action, { kind: "ticket", artifactId: "a" })
   for (const props of [{ block, onTicket }, { block, ticket: ticketTarget }, { block: { ...block, state: "working" }, ticket: ticketTarget, onTicket }, { block: { ...block, state: "failed" }, ticket: ticketTarget, onTicket }]) {
     tree = ArtifactActionCard(props)
@@ -1221,7 +1221,7 @@ test("created ticket follows its completion sentence during streaming as well as
   const view = { setMessages: (fn) => { messages = fn(messages) }, setDraft() {}, setReading() {} }
   applyStreamEvent(turn, "message_started", { messageId: "m" }, view)
   applyStreamEvent(turn, "action", { kind: "ticket", state: "working", card: ticketDraft }, view)
-  const text = "Done. The ticket is in Product backlog."
+  const text = "Done. The ticket is in the Product backlog."
   applyStreamEvent(turn, "token", { text }, view)
   applyStreamEvent(turn, "action", { kind: "ticket", state: "created", card: { ...ticketDraft, identifier: "PRO-1423", url: "https://linear.app/PRO-1423" } }, view)
   const [sentence, block] = blockHelpers.splitContent(messages[0].content, messages[0].blocks)

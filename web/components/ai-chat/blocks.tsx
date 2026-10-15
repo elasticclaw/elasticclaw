@@ -49,7 +49,7 @@ export function InlineBlock({ block, onAction }: { block: AIChatBlock; onAction?
         <div className="grid gap-2.5 sm:grid-cols-2">{actions.map((action) => {
           const Icon = action === "ticket" ? Ticket : FileCode2
           return <Button key={action} variant="outline" className="h-auto justify-start gap-3 rounded-xl p-3 text-left" onClick={() => onAction(action)}>
-            <Icon className="size-4 shrink-0" /><span><span className="block font-semibold">{action === "ticket" ? block.ticket?.verb : "Create HTML artifact"}</span>
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/40"><Icon className="size-4" /></span><span><span className="block font-semibold">{action === "ticket" ? block.ticket?.verb : "Create HTML artifact"}</span>
               <span className="block text-xs font-normal text-muted-foreground">{action === "ticket" ? [block.ticket?.team, block.ticket?.state].filter(Boolean).join(" · ") : "A page served by the factory"}</span></span>
           </Button>
         })}</div>

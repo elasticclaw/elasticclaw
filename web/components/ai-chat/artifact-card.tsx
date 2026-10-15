@@ -46,6 +46,6 @@ export function ArtifactActionCard({ block, onStop, onRetry, ticket, onTicket }:
       </div>
     </div>
     <div className="mt-2 text-sm text-muted-foreground">Ask for changes and I will publish a new version at the same link.</div>
-    {ticket && onTicket && card.artifactId && <Button variant="link" className="mt-1 h-auto px-0 text-sm" onClick={() => onTicket({ kind: "ticket", artifactId: card.artifactId })}><Ticket className="size-3.5" />{ticket.verb} with this artifact</Button>}
+    {ticket && onTicket && card.artifactId && <Button variant="outline" size="sm" className="mt-2" onClick={() => onTicket({ kind: "ticket", artifactId: card.artifactId })}><Ticket className="size-3.5" />{ticket.verb} with this artifact</Button>}
   </div>
 }
