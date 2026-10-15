@@ -720,18 +720,24 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		ticket.LastActivity = runs[len(runs)-1].StartedAt
 	}
 	// Queue time is separate: the lead window starts at the first run.
+	var intervals []taskRunWorkInterval
+	for _, run := range runs {
+		intervals = append(intervals, intervalsByRun[run.RunID]...)
+	}
 	leadEnd := ticket.LastActivity
 	if mergedAt > 0 {
 		leadEnd = mergedAt
 	} else if ticket.Status == "pr_open" {
 		leadEnd = requestNow
+	} else {
+		// An undelivered ticket keeps running while the agent works, even
+		// when the work has not produced a new event yet.
+		for _, interval := range intervals {
+			leadEnd = max(leadEnd, interval.End)
+		}
 	}
-	if firstStart > 0 && (len(events) > 0 || ticket.Status == "pr_open") {
+	if firstStart > 0 && (len(events) > 0 || ticket.Status == "pr_open" || leadEnd > ticket.LastActivity) {
 		ticket.LeadTime = max(int64(0), leadEnd-firstStart)
-	}
-	var intervals []taskRunWorkInterval
-	for _, run := range runs {
-		intervals = append(intervals, intervalsByRun[run.RunID]...)
 	}
 	ticket.FactoryTime, ticket.AwaitingMergeTime, ticket.WorkTimeTracked = computeTicketWorkTimes(intervals, firstStart, firstStart+ticket.LeadTime, openedAt, mergedAt, requestNow)
 

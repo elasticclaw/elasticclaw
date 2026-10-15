@@ -821,3 +821,19 @@ func TestTaskRunAnalyticsTicketWorkTimesAcrossRuns(t *testing.T) {
 		t.Fatalf("first merge metrics=%#v", ticket)
 	}
 }
+
+func TestTaskRunAnalyticsTicketInProgressWorkExtendsLeadTime(t *testing.T) {
+	s := &Server{}
+	runs := []taskRunAnalyticsRunView{{RunID: "run", StartedAt: 1000}}
+	events := map[string][]taskRunAnalyticsEventView{"run": {{EventType: "agent_started", EventTime: 1000}}}
+	// The agent keeps working past its last event; that work must not be clipped.
+	intervals := map[string][]taskRunWorkInterval{"run": {{1000, 7000}}}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, nil, events, nil, metadata, false, intervals, 7000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.LeadTime != 6000 || ticket.FactoryTime != 6000 || ticket.AwaitingMergeTime != 0 {
+		t.Fatalf("in-progress metrics=%#v", ticket)
+	}
+}

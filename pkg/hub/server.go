@@ -768,7 +768,11 @@ func (s *Server) Run(opts ...RunOptions) error {
 func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 	go s.runWorkflowV2Worker(ctx)
 	go s.runWorkflowV2GitHubReconciler(ctx)
-	go s.runTaskRunWorkCheckpointer(ctx)
+	workCheckpointerDone := make(chan struct{})
+	go func() {
+		defer close(workCheckpointerDone)
+		s.runTaskRunWorkCheckpointer(ctx)
+	}()
 	noWebUI := len(opts) > 0 && opts[0].NoWebUI
 	mux := http.NewServeMux()
 	s.mux = mux
@@ -824,6 +828,13 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		s.stopScheduledNotifier(10 * time.Second)
 		s.stopInfraNotifier(10 * time.Second)
 		s.stopDependencyWatcher(10 * time.Second)
+		// The checkpointer's final write must land before the DB closes, or
+		// the last in-flight turn interval is lost on shutdown.
+		select {
+		case <-workCheckpointerDone:
+		case <-time.After(10 * time.Second):
+			log.Printf("[hub] work interval checkpointer did not stop within 10s")
+		}
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}
