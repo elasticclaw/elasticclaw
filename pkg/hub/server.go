@@ -369,7 +369,7 @@ type clawConn struct {
 	contextWarningSent     bool            // true once the context-nearly-full warning has been injected this turn
 	awaitingResponse       bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused       bool            // automatic delivery is paused after repeated turns with unchanged progress
-	bridgeErrorPauseKind   string          // persisted bridge-error pause reason; gateway and provider_transient are auto-liftable
+	bridgeErrorPauseKind   string          // persisted bridge-error pause reason; recognized transient kinds are auto-liftable
 	gatewayHealthySince    time.Time       // start of the current unbroken gateway healthy+ready heartbeat run; zero = not healthy
 	bridgeErrorStreak      int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
 	llmLimitedUntil        time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
