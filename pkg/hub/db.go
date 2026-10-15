@@ -113,7 +113,8 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
 	// bridge_error_pause_kind records WHY a bridge-error pause latched ('gateway' =
 	// auto-liftable after sustained health, 'provider_transient' = immediately
-	// auto-liftable malformed tool-call JSON, '' = needs a human) and
+	// auto-liftable malformed tool-call JSON, 'model_transport' = bounded backoff
+	// for interrupted model requests, '' = needs a human) and
 	// bridge_error_auto_resumes counts those auto-lifts per unit of work. Both are
 	// referenced by the pause, resume and retry UPDATEs, so a missing column must
 	// abort startup rather than break those paths at runtime.
