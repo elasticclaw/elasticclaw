@@ -280,7 +280,7 @@ func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Con
 			} else if call.Name == tools.StartTicket && slices.Contains(available, "ticket") {
 				input, parseErr := tools.ParseTicket(json.RawMessage(call.Arguments))
 				if parseErr == nil {
-					return r.createTicket(actionCtx, t, m, provider, input, "", creator, target, secrets, count, false, false, emit)
+					return r.createTicket(actionCtx, t, m, provider, input, "", creator, target, secrets, count, false, "", emit)
 				}
 				result = llm.Message{Role: "tool", ToolCallID: readhttp.Redact(call.ID, secrets), Content: readhttp.Redact(parseErr.Error(), secrets), IsError: true}
 			} else if tools.Reserved(call.Name) {

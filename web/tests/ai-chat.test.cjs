@@ -1045,7 +1045,7 @@ test("artifact API 401 returns through login to the same pinned path", async () 
 })
 
 const ticketTarget = { tracker: "Linear", verb: "Open Linear ticket", team: "Product", state: "Backlog", labels: ["ai-chat"] }
-const ticketDraft = { ...ticketTarget, actionKey: "ticket-click-1", title: "Swap from the shopping list", body: "Clients ask 31 times a week.\n\nEvidence: 12% found swap.", summary: "Clients ask 31 times a week.", artifactId: "artifact-id" }
+const ticketDraft = { ...ticketTarget, actionKey: "ticket-click-1", attemptId: "attempt-1", title: "Swap from the shopping list", body: "Clients ask 31 times a week.\n\nEvidence: 12% found swap.", summary: "Clients ask 31 times a week.", artifactId: "artifact-id" }
 const ticketMocks = {
   ...artifactCardMocks,
   "lucide-react": Object.fromEntries(["Check", "Copy", "ExternalLink", "FileCode2", "Loader2", "RotateCcw", "Ticket", "TriangleAlert"].map((name) => [name, name])),
@@ -1272,10 +1272,18 @@ test("unknown ticket outcome requires an explicitly labeled acknowledgement and 
   const button = findElement(tree, "Button")
   assert.equal(elementText(button), "I checked Linear — create anyway")
   button.props.onClick()
-  assert.deepEqual(retry, { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: ticketDraft.artifactId, actionKey: ticketDraft.actionKey, confirmUnknown: true })
+  assert.deepEqual(retry, { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: ticketDraft.artifactId, actionKey: ticketDraft.actionKey, confirmUnknown: ticketDraft.attemptId })
+  const original = retry
+  const second = TicketActionCard({
+    block: { kind: "ticket", state: "failed", card: { ...ticketDraft, attemptId: "attempt-2", confirmedUnknown: ticketDraft.attemptId, outcomeUnknown: true } },
+    onRetry: (action) => { retry = action },
+  })
+  findElement(second, "Button").props.onClick()
+  assert.equal(retry.confirmUnknown, "attempt-2")
+  assert.equal(original.confirmUnknown, ticketDraft.attemptId)
 })
 
-test("unknown confirmation remains on the most recent ticket after chatting", () => {
+test("unknown confirmation remains reachable after chatting and created replays", () => {
   const hooks = createHooks()
   const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
     react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
@@ -1289,7 +1297,13 @@ test("unknown confirmation remains on the most recent ticket after chatting", ()
   assert.equal(findElement(render([unknown, chat]), "TicketActionCard").props.onRetry, onTicket)
   assert.equal(findElement(render([unknown, chat], { streaming: true }), "TicketActionCard").props.onRetry, undefined)
   const newer = { ...unknown, id: "newer", blocks: [{ ...unknown.blocks[0], id: "newer-ticket", state: "created", card: ticketDraft }] }
-  assert.equal(findElement(render([unknown, chat, newer]), "TicketActionCard").props.onRetry, undefined)
+  assert.equal(findElement(render([unknown, chat, newer]), "TicketActionCard").props.onRetry, onTicket)
+  const confirmed = { ...newer, blocks: [{ ...newer.blocks[0], card: { ...ticketDraft, attemptId: "attempt-2", confirmedUnknown: ticketDraft.attemptId } }] }
+  assert.equal(findElement(render([unknown, chat, confirmed]), "TicketActionCard").props.onRetry, undefined)
+  const secondUnknown = { ...confirmed, blocks: [{ ...confirmed.blocks[0], state: "failed", card: { ...confirmed.blocks[0].card, outcomeUnknown: true } }] }
+  const cards = findElements(render([unknown, secondUnknown, newer]), "TicketActionCard")
+  assert.equal(cards[0].props.onRetry, undefined)
+  assert.equal(cards[1].props.onRetry, onTicket)
 })
 
 for (const status of [409, "lost stream"]) test(`ticket retry preserves its action key and displays the server error (${status})`, async () => {
@@ -1311,7 +1325,7 @@ for (const status of [409, "lost stream"]) test(`ticket retry preserves its acti
   fixture.render()
   fixture.requests[0].resolve({ ...sources("A", ["A"]), actions: ["artifact", "ticket"], ticket: ticketTarget })
   await flush()
-  findElement(fixture.render(), "MessageList").props.onTicket()
+  findElement(fixture.render(), "MessageList").props.onTicket({ kind: "ticket", confirmUnknown: ticketDraft.attemptId })
   await flush()
   let tree = fixture.render()
   assert.match(elementText(tree), status === 409 ? /Example did not confirm the previous ticket/ : /connection lost/)
@@ -1320,6 +1334,7 @@ for (const status of [409, "lost stream"]) test(`ticket retry preserves its acti
   await flush()
   assert.match(attempts[0].actionKey, /^[a-f0-9-]{36}$/)
   assert.deepEqual(attempts[1], attempts[0])
+  assert.equal(attempts[1].confirmUnknown, ticketDraft.attemptId)
   // A separate user click gets a new key.
   findElement(fixture.render(), "MessageList").props.onTicket()
   await flush()

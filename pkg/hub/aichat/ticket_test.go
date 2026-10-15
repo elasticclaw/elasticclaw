@@ -426,7 +426,7 @@ func TestTicketUnknownOutcomeAndRecovery(t *testing.T) {
 	cfg := &config.Config{IssueTracker: &config.IssueTracker{}}
 	cfg.IssueTracker.DefaultFields.Team = "Product"
 	r := &Runner{Store: s, TicketCreator: d.ticketCreator}
-	if err := r.RunTicket(ctx, thread, m, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, "", false, func(string, any) error { return nil }); err != nil && !errors.Is(err, context.Canceled) {
+	if err := r.RunTicket(ctx, thread, m, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, "", "", func(string, any) error { return nil }); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	_, _, card := latestTicket(t, s, thread)
@@ -484,7 +484,7 @@ func TestStartTicketInterruptedBeforeSendRecoversDraft(t *testing.T) {
 				t.Error("expected simulated restart")
 			}
 		}()
-		_ = r.createTicket(ctx, thread, &m, nil, input, "", creator, tracker.LinearTarget("Product", "", nil), []string{ticketSecret}, 1, false, false, func(event string, _ any) error {
+		_ = r.createTicket(ctx, thread, &m, nil, input, "", creator, tracker.LinearTarget("Product", "", nil), []string{ticketSecret}, 1, false, "", func(event string, _ any) error {
 			if event == EventAction {
 				panic("restart")
 			}
@@ -563,14 +563,14 @@ func TestTicketUnknownOutcomeRequiresAcknowledgement(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := &Runner{Store: s, TicketCreator: deps.ticketCreator}
-			if err = runner.RunTicket(ctx, thread, modelMessage, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, "", false, func(string, any) error { return nil }); err != nil {
+			if err = runner.RunTicket(ctx, thread, modelMessage, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, "", "", func(string, any) error { return nil }); err != nil {
 				t.Fatal(err)
 			}
 			_, _, blocked := latestTicket(t, s, thread)
 			if !blocked.OutcomeUnknown || writes != 1 {
 				t.Fatal(blocked, writes)
 			}
-			confirmed := `{"kind":"ticket","title":"Swap","body":"31 requests","confirmUnknown":true}`
+			confirmed := fmt.Sprintf(`{"kind":"ticket","title":"Swap","body":"31 requests","confirmUnknown":%q}`, blocked.AttemptID)
 			rec := request(h, "POST", path, confirmed, "octocat", "on")
 			_, block, _ := latestTicket(t, s, thread)
 			if rec.Code != 200 || writes != 2 || block.State != "created" {

@@ -232,7 +232,7 @@ func TestTicketFailureHeadlinesByPhase(t *testing.T) {
 	cfg := &config.Config{IssueTracker: &config.IssueTracker{}}
 	creator, target, secrets := d.ticketCreator(thread.Workspace, cfg)
 	r := &Runner{Store: s}
-	if err := r.createTicket(ctx, thread, &m, nil, tools.TicketRequest{Title: "Draft"}, "", creator, target, secrets, 1, false, false, func(string, any) error { return nil }); err != nil {
+	if err := r.createTicket(ctx, thread, &m, nil, tools.TicketRequest{Title: "Draft"}, "", creator, target, secrets, 1, false, "", func(string, any) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	_, _, card := latestTicket(t, s, thread)
@@ -280,5 +280,125 @@ func TestSourcesRejectedTokenOmitsTicketAction(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatal("availability repeated the health call", calls)
+	}
+}
+
+func TestTicketConfirmationCannotAuthorizeAnotherUnknownAttempt(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		t.Run(fmt.Sprint(interrupted), func(t *testing.T) {
+			writes := 0
+			var deps Deps
+			h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, v map[string]any) {
+				writes++
+				if writes <= 2 {
+					w.WriteHeader(502)
+					return
+				}
+				ticketSuccess(w, v["title"].(string))
+			}), func(d *Deps) { deps = *d })
+			thread := testThread(t, s)
+			path := "/api/ai-chat/threads/" + thread.ID + "/actions"
+			body := `{"kind":"ticket","actionKey":"click","title":"Draft","body":"Evidence"}`
+			if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 200 {
+				t.Fatal(rec.Code, rec.Body)
+			}
+			_, _, first := latestTicket(t, s, thread)
+			confirmed := fmt.Sprintf(`{"kind":"ticket","actionKey":"click","title":"Draft","body":"Evidence","confirmUnknown":%q}`, first.AttemptID)
+			if rec := request(h, "POST", path, confirmed, "octocat", "on"); rec.Code != 200 {
+				t.Fatal(rec.Code, rec.Body)
+			}
+			m, _, second := latestTicket(t, s, thread)
+			if writes != 2 || !second.OutcomeUnknown || second.AttemptID == first.AttemptID || second.ConfirmedUnknown != first.AttemptID {
+				t.Fatal(writes, first, second)
+			}
+			if interrupted {
+				// The send marker must retain both attempt identity and acknowledgement.
+				if _, err := s.DB.Exec(`UPDATE ai_chat_messages SET status='streaming',blocks_json=NULL WHERE id=?`, m.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h = Routes(deps)
+			if rec := request(h, "POST", path, confirmed, "octocat", "on"); rec.Code != 409 || writes != 2 {
+				t.Fatal(rec.Code, rec.Body, writes)
+			}
+			// The runner also rejects stale confirmation if called without the HTTP gate.
+			ctx := context.Background()
+			cfg, err := config.Load(deps.ManagedDir(thread.Workspace))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, err = s.beginAction(ctx, thread, "", "", "ticket")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &Runner{Store: s, TicketCreator: deps.ticketCreator}
+			if err = runner.RunTicket(ctx, thread, m, cfg, nil, first.TicketRequest, "click", first.AttemptID, func(string, any) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			_, _, blocked := latestTicket(t, s, thread)
+			if writes != 2 || !blocked.OutcomeUnknown || blocked.AttemptID != second.AttemptID || blocked.ConfirmedUnknown != "" {
+				t.Fatal(writes, blocked)
+			}
+			// A new explicit check authorizes only the second unknown attempt.
+			confirmed = strings.Replace(confirmed, first.AttemptID, second.AttemptID, 1)
+			for i := 0; i < 2; i++ {
+				if rec := request(h, "POST", path, confirmed, "octocat", "on"); rec.Code != 200 || writes != 3 {
+					t.Fatal(rec.Code, rec.Body, writes)
+				}
+			}
+			previous, err := s.ticketActions(ctx, thread.ID, "")
+			if err != nil || unknownTicketAction(previous) != nil {
+				t.Fatal("confirmed attempts still block creation", previous, err)
+			}
+		})
+	}
+}
+
+func TestTicketCreatedReplayDoesNotHideUnknownAttempt(t *testing.T) {
+	writes := 0
+	var deps Deps
+	h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, v map[string]any) {
+		writes++
+		if writes == 2 {
+			w.WriteHeader(502)
+			return
+		}
+		ticketSuccess(w, v["title"].(string))
+	}), func(d *Deps) { deps = *d })
+	thread := testThread(t, s)
+	path := "/api/ai-chat/threads/" + thread.ID + "/actions"
+	a := `{"kind":"ticket","actionKey":"tab-a","title":"A","body":"Evidence A"}`
+	b := `{"kind":"ticket","actionKey":"tab-b","title":"B","body":"Evidence B"}`
+	for _, body := range []string{a, b} {
+		if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 200 {
+			t.Fatal(rec.Code, rec.Body)
+		}
+	}
+	_, _, unknown := latestTicket(t, s, thread)
+	h = Routes(deps)
+	if rec := request(h, "POST", path, a, "octocat", "on"); rec.Code != 200 || writes != 2 {
+		t.Fatal(rec.Code, rec.Body, writes)
+	}
+	_, block, _ := latestTicket(t, s, thread)
+	if block.State != "created" {
+		t.Fatal(block)
+	}
+	fresh := strings.Replace(b, "tab-b", "new-click", 1)
+	if rec := request(h, "POST", path, fresh, "octocat", "on"); rec.Code != 409 || writes != 2 {
+		t.Fatal(rec.Code, rec.Body, writes)
+	}
+	// A stale boolean acknowledgement cannot authorize any unknown attempt.
+	legacy := strings.TrimSuffix(fresh, "}") + `,"confirmUnknown":true}`
+	if rec := request(h, "POST", path, legacy, "octocat", "on"); rec.Code != 400 || writes != 2 {
+		t.Fatal(rec.Code, rec.Body, writes)
+	}
+	confirmed := strings.TrimSuffix(fresh, "}") + fmt.Sprintf(`,"confirmUnknown":%q}`, unknown.AttemptID)
+	if rec := request(h, "POST", path, confirmed, "octocat", "on"); rec.Code != 200 || writes != 3 {
+		t.Fatal(rec.Code, rec.Body, writes)
+	}
+	// The acknowledged old attempt must not block subsequent distinct tickets.
+	fresh = `{"kind":"ticket","actionKey":"next","title":"C","body":"Evidence C"}`
+	if rec := request(h, "POST", path, fresh, "octocat", "on"); rec.Code != 200 || writes != 4 {
+		t.Fatal(rec.Code, rec.Body, writes)
 	}
 }

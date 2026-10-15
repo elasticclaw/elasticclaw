@@ -157,7 +157,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		ActionKey      string `json:"actionKey,omitempty"`
 		Kind           string `json:"kind"`
 		Body           string `json:"body,omitempty"`
-		ConfirmUnknown bool   `json:"confirmUnknown,omitempty"`
+		ConfirmUnknown string `json:"confirmUnknown,omitempty"`
 		tools.ArtifactRequest
 	}
 	if !decode(w, r, &body) {
@@ -210,7 +210,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		existing = createdTicketAction(previous, body.ActionKey)
-		if prior := unknownTicketAction(previous, body.ActionKey); existing == nil && prior != nil && !body.ConfirmUnknown {
+		if prior := unknownTicketAction(previous); existing == nil && prior != nil && body.ConfirmUnknown != prior.attemptID {
 			name := prior.card.Tracker
 			if name == "" {
 				_, target, _ := a.deps.ticketCreator(t.Workspace, cfg)

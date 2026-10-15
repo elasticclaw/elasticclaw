@@ -25,10 +25,14 @@ type TicketArtifact struct {
 	Title    string `json:"title"`
 	ShareURL string `json:"shareUrl"`
 }
+
+// AttemptID identifies one creation attempt; ConfirmedUnknown records the checked attempt.
 type TicketCard struct {
-	ActionKey       string `json:"actionKey"`
-	OutcomeUnknown  bool   `json:"outcomeUnknown,omitempty"`
-	FailureHeadline string `json:"failureHeadline,omitempty"`
+	AttemptID        string `json:"attemptId"`
+	ConfirmedUnknown string `json:"confirmedUnknown,omitempty"`
+	ActionKey        string `json:"actionKey"`
+	OutcomeUnknown   bool   `json:"outcomeUnknown,omitempty"`
+	FailureHeadline  string `json:"failureHeadline,omitempty"`
 	tracker.Target
 	tools.TicketRequest
 	Summary    string          `json:"summary"`
@@ -87,7 +91,7 @@ func ticketSummary(body string) string {
 	return string(text)
 }
 
-func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config.Config, p llm.Provider, input tools.TicketRequest, actionKey string, confirmUnknown bool, emit Emit) error {
+func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config.Config, p llm.Provider, input tools.TicketRequest, actionKey, confirmUnknown string, emit Emit) error {
 	var creator tracker.Creator
 	var target tracker.Target
 	var secrets []string
@@ -175,7 +179,7 @@ func (r *Runner) draftTicket(ctx context.Context, t Thread, m *Message, p llm.Pr
 	return tools.TicketRequest{}, fail
 }
 
-func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.Provider, input tools.TicketRequest, actionKey string, creator tracker.Creator, target tracker.Target, secrets []string, seq int, button, confirmUnknown bool, emit Emit) error {
+func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.Provider, input tools.TicketRequest, actionKey string, creator tracker.Creator, target tracker.Target, secrets []string, seq int, button bool, confirmUnknown string, emit Emit) error {
 	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
 	defer cancel()
 	provider := target.Provider
@@ -185,8 +189,8 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		actionKey = uuid.NewString()
 	}
 	actionKey = readhttp.Redact(actionKey, secrets)
-	card := TicketCard{ActionKey: actionKey, Target: target, TicketRequest: input, Summary: ticketSummary(input.Body)}
-	run := ToolRun{ID: uuid.NewString(), MessageID: m.ID, Seq: seq, Tool: "ticket", Provider: "AI Chat", Args: string(redactedJSON(card, secrets)), Result: "null"}
+	card := TicketCard{AttemptID: m.ID, ActionKey: actionKey, Target: target, TicketRequest: input, Summary: ticketSummary(input.Body)}
+	run := ToolRun{ID: uuid.NewString(), MessageID: m.ID, Seq: seq, Tool: "ticket", Provider: "AI Chat", Result: "null"}
 	started := time.Now()
 	sent := false
 	action := func(state string) error {
@@ -209,6 +213,12 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		_ = action("failed")
 		return err
 	}
+	created := createdTicketAction(previous, actionKey)
+	unknown := unknownTicketAction(previous)
+	if created == nil && unknown != nil && confirmUnknown == unknown.attemptID {
+		card.ConfirmedUnknown = unknown.attemptID
+	}
+	run.Args = string(redactedJSON(card, secrets))
 	// A pending row supports recovery even if the process stops before the card.
 	err = save(func(c context.Context) error {
 		e := r.Store.DB.QueryRowContext(c, `SELECT id FROM ai_chat_tool_runs WHERE message_id=? AND tool='ticket' AND provider='AI Chat' LIMIT 1`, m.ID).Scan(&run.ID)
@@ -225,14 +235,15 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		setTicketBlock(m, "failed", TicketCard{ActionKey: actionKey, Target: target, TicketRequest: input, Error: "Unable to save the ticket draft.", FailureHeadline: "Could not prepare the ticket"})
 		return err
 	}
-	if prior := createdTicketAction(previous, actionKey); prior != nil {
-		card = prior.card
+	if created != nil {
+		card = created.card
 		_ = json.Unmarshal(redactedJSON(card, secrets), &card)
 		setTicketBlock(m, "created", card)
 		_ = action("created")
 		return nil
 	}
-	if prior := unknownTicketAction(previous, actionKey); prior != nil && !confirmUnknown {
+	if prior := unknown; prior != nil && card.ConfirmedUnknown == "" {
+		card.AttemptID = prior.attemptID
 		if prior.card.Tracker != "" {
 			card.Tracker = readhttp.Redact(prior.card.Tracker, secrets)
 		}
@@ -315,7 +326,9 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 	card.Summary = ticketSummary(card.Body)
 	for _, prior := range previous {
 		if prior.state == "created" && (prior.draft == card.TicketRequest || prior.card.TicketRequest == card.TicketRequest) {
+			confirmed := card.ConfirmedUnknown
 			card = prior.card
+			card.ConfirmedUnknown = confirmed
 			_ = json.Unmarshal(redactedJSON(card, secrets), &card)
 			setTicketBlock(m, "created", card)
 			_ = action("created")
