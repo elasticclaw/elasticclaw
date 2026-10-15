@@ -2,8 +2,9 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
-import { Eye, FileCode2, History, Ticket, Trash2 } from "lucide-react"
+import { Eye, FileCode2, History, Search, Ticket, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { deleteAIChatArtifact, fetchAIChatArtifacts, fetchAIChatThreads, type AIChatArtifactListItem, type AIChatThread } from "@/lib/api"
@@ -31,6 +32,7 @@ export function HistoryPopover({ threadId }: { threadId?: string }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const [confirm, setConfirm] = useState("")
+  const [query, setQuery] = useState("")
   const [deleting, setDeleting] = useState("")
   const request = useRef<AbortController | null>(null)
   const removePending = useRef(false)
@@ -63,6 +65,7 @@ export function HistoryPopover({ threadId }: { threadId?: string }) {
   const changeOpen = (value: boolean) => {
     setOpen(value)
     setConfirm("")
+    setQuery("")
     if (value) void refresh()
     else { request.current?.abort(); setLoading(false) }
   }
@@ -84,29 +87,35 @@ export function HistoryPopover({ threadId }: { threadId?: string }) {
     finally { removePending.current = false; setDeleting("") }
   }
 
+  const matches = (title: string) => title.toLowerCase().includes(query.trim().toLowerCase())
+  const shownChats = chats.filter((item) => matches(item.title || "New chat"))
+  const shownArtifacts = artifacts.filter((item) => matches(item.title))
+
   // Radix calls onOpenChange from interaction handlers, never during render.
   // eslint-disable-next-line react-hooks/purity
   return <Popover open={open} onOpenChange={(value) => { if (value) setNow(Date.now()); changeOpen(value) }}>
     <PopoverTrigger asChild><Button variant="outline" size="sm" className="text-[13px]"><History className="size-3.5" />History</Button></PopoverTrigger>
     <PopoverContent align="end" sideOffset={6} className="w-[420px] max-w-[calc(100vw-2rem)] rounded-xl p-2.5" aria-label="History">
       <Tabs value={tab} onValueChange={(value) => { setTab(value); setConfirm("") }}>
-        <TabsList className="w-full"><TabsTrigger value="chats">Chats</TabsTrigger><TabsTrigger value="artifacts">Artifacts</TabsTrigger></TabsList>
+        <TabsList className="w-full"><TabsTrigger value="chats" className="text-[13px] font-semibold">Chats</TabsTrigger><TabsTrigger value="artifacts" className="text-[13px] font-semibold">Artifacts</TabsTrigger></TabsList>
+        <div className="relative mt-2"><Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tab === "chats" ? "Search my chats" : "Search my artifacts"} aria-label={tab === "chats" ? "Search my chats" : "Search my artifacts"} className="h-8 pl-8 text-[13px]" /></div>
         {loading && <p role="status" className="p-3 text-xs text-muted-foreground">Loading history…</p>}
         {error && <div role="alert" className="p-3 text-xs text-destructive">{error}<Button variant="ghost" size="sm" onClick={() => void refresh()}>Retry</Button></div>}
         <TabsContent value="chats" className="max-h-[min(60vh,480px)] overflow-y-auto">
           {!loading && !error && chats.length === 0 && <p className="p-3 text-sm text-muted-foreground">No chats yet.</p>}
+          {!loading && !error && chats.length > 0 && shownChats.length === 0 && <p className="p-3 text-sm text-muted-foreground">No chats match.</p>}
           {["Today", "Last 7 days", "Older"].map((group) => {
-            const items = chats.filter((item) => historyTime(item.updatedAt, now).group === group)
+            const items = shownChats.filter((item) => historyTime(item.updatedAt, now).group === group)
             return items.length > 0 && <section key={group}>
               <h3 className="px-2.5 pt-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</h3>
               {items.map((item) => {
                 const mode = chatModes.find((mode) => mode.id === item.mode)
                 const Icon = mode?.icon ?? History
-                return <button key={item.id} type="button" aria-current={item.id === threadId ? "page" : undefined} onClick={() => openChat(item.id)} className={`flex w-full items-center gap-2.5 rounded-lg p-2.5 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${item.id === threadId ? "bg-accent" : ""}`}>
+                return <button key={item.id} type="button" aria-current={item.id === threadId ? "page" : undefined} onClick={() => openChat(item.id)} className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${item.id === threadId ? "bg-accent" : ""}`}>
                   <span className="rounded-md bg-muted p-1.5"><Icon className="size-3.5 text-muted-foreground" /></span>
-                  <span className="min-w-0 flex-1"><span className="block truncate text-[13px] font-medium">{item.title || "New chat"}</span><span className="block text-xs text-muted-foreground">{mode?.name ?? item.mode} · {historyTime(item.updatedAt, now).label}</span></span>
-                  {!!item.artifactCount && <span aria-label={`${item.artifactCount} artifacts`} className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground"><FileCode2 className="size-3" />{item.artifactCount}</span>}
-                  {item.ticket && <span className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground"><Ticket className="size-3" />{item.ticket}</span>}
+                  <span className="min-w-0 flex-1"><span className="block truncate text-[13px] leading-tight font-medium">{item.title || "New chat"}</span><span className="block text-xs leading-4 text-muted-foreground">{mode?.name ?? item.mode} · {historyTime(item.updatedAt, now).label}</span></span>
+                  {!!item.artifactCount && <span aria-label={`${item.artifactCount} artifacts`} className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] text-muted-foreground"><FileCode2 className="size-3" />{item.artifactCount}</span>}
+                  {item.ticket && <span className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] text-muted-foreground"><Ticket className="size-3" />{item.ticket}</span>}
                 </button>
               })}
             </section>
@@ -114,17 +123,17 @@ export function HistoryPopover({ threadId }: { threadId?: string }) {
         </TabsContent>
         <TabsContent value="artifacts" className="max-h-[min(60vh,480px)] overflow-y-auto">
           {!loading && !error && artifacts.length === 0 && <p className="p-3 text-sm text-muted-foreground">No artifacts yet. Ask for a prototype in any chat.</p>}
+          {!loading && !error && artifacts.length > 0 && shownArtifacts.length === 0 && <p className="p-3 text-sm text-muted-foreground">No artifacts match.</p>}
           {["Today", "Last 7 days", "Older"].map((group) => {
-            const items = artifacts.filter((item) => historyTime(item.updatedAt, now).group === group)
+            const items = shownArtifacts.filter((item) => historyTime(item.updatedAt, now).group === group)
             return items.length > 0 && <section key={group}>
               <h3 className="px-2.5 pt-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</h3>
-              {items.map((item) => <div key={item.id} className="rounded-lg p-2.5 hover:bg-accent">
+              {items.map((item) => <div key={item.id} className="rounded-lg px-2.5 py-2 hover:bg-accent">
                 <div className="flex items-center gap-2.5">
-                  <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
-                  <a href={item.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><span className="block truncate text-[13px] font-medium">{item.title}</span><span className="text-xs text-muted-foreground">v{item.currentVersion} · {historyTime(item.updatedAt, now).label}</span></a>
+                  <span className="rounded-md bg-muted p-1.5"><FileCode2 className="size-3.5 text-muted-foreground" /></span>
+                  <span className="min-w-0 flex-1"><a href={item.url} target="_blank" rel="noreferrer" className="block truncate rounded text-[13px] leading-tight font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{item.title}</a><span className="block text-xs leading-4 text-muted-foreground">v{item.currentVersion} · {historyTime(item.updatedAt, now).label} · <button type="button" className="rounded hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={item.threadTitle} onClick={() => openChat(item.threadId)}>Open chat</button></span></span>
                   <Button variant="ghost" size="icon" className="size-7" aria-label={`Delete ${item.title}`} disabled={!!deleting} onClick={() => setConfirm(item.id)}><Trash2 className="size-3.5" /></Button>
                 </div>
-                <Button variant="link" size="sm" className="ml-6 h-6 px-0 text-xs text-muted-foreground" title={item.threadTitle} onClick={() => openChat(item.threadId)}>Open chat</Button>
                 {confirm === item.id && <div className="mt-2 rounded-md border p-2 text-xs"><p>Delete this artifact? The link stops working.</p><div className="mt-2 flex justify-end gap-2"><Button variant="outline" size="sm" disabled={!!deleting} onClick={() => setConfirm("")}>Cancel</Button><Button variant="destructive" size="sm" disabled={!!deleting} onClick={() => void remove(item)}>{deleting === item.id ? "Deleting…" : "Delete"}</Button></div></div>}
               </div>)}
             </section>

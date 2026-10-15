@@ -1576,8 +1576,9 @@ function historyFixture(api = {}) {
   const { HistoryPopover, historyTime } = loadComponent("components/ai-chat/history-popover.tsx", {
     react: hooks.react,
     "next/navigation": { useRouter: () => ({ replace: (url) => navigation.push(url) }) },
-    "lucide-react": { Eye: "Eye", FileCode2: "FileCode2", History: "History", Ticket: "Ticket", Trash2: "Trash2" },
+    "lucide-react": { Eye: "Eye", FileCode2: "FileCode2", History: "History", Search: "Search", Ticket: "Ticket", Trash2: "Trash2" },
     "@/components/ui/button": { Button: "Button" },
+    "@/components/ui/input": { Input: "Input" },
     "@/components/ui/popover": { Popover: "Popover", PopoverContent: "PopoverContent", PopoverTrigger: "PopoverTrigger" },
     "@/components/ui/tabs": { Tabs: "Tabs", TabsContent: "TabsContent", TabsList: "TabsList", TabsTrigger: "TabsTrigger" },
     "./mode-cards": { chatModes: [{ id: "explore_idea", name: "Explore idea", icon: "Lightbulb" }] },
@@ -1646,7 +1647,7 @@ test("history artifact deletion confirms, removes the row and opens its chat", a
     const link = findElement(tree, "a")
     assert.equal(link.props.href, artifact.url)
     assert.equal(link.props.target, "_blank")
-    findElements(tree, "Button").find((b) => elementText(b) === "Open chat").props.onClick()
+    findElements(tree, "button").find((b) => elementText(b) === "Open chat").props.onClick()
     assert.deepEqual(fixture.navigation, ["/chat?thread=t"])
     fixture.open()
     await flush()
@@ -1663,6 +1664,29 @@ test("history artifact deletion confirms, removes the row and opens its chat", a
     assert.equal(findElement(fixture.render(), "a"), undefined)
     assert.match(elementText(fixture.render()), /No artifacts yet/)
   } finally { window.dispatchEvent = previous }
+})
+
+test("history search filters rows by title in each tab", async () => {
+  const now = Date.now()
+  const fixture = historyFixture({
+    fetchAIChatThreads: async () => [{ id: "a", title: "Swap meals", mode: "explore_idea", updatedAt: now }, { id: "b", title: "Quiz completion", mode: "explore_idea", updatedAt: now }],
+    fetchAIChatArtifacts: async () => [{ id: "x", slug: "meal-swap", title: "Meal swap prototype", currentVersion: 1, threadId: "a", threadTitle: "Swap meals", updatedAt: now, url: "/artifacts/meal-swap" }],
+  })
+  fixture.open()
+  await flush()
+  const search = () => findElement(fixture.render(), "Input")
+  assert.equal(search().props.placeholder, "Search my chats")
+  search().props.onChange({ target: { value: "QUIZ" } })
+  let text = elementText(fixture.render())
+  assert.match(text, /Quiz completion/)
+  assert.doesNotMatch(text, /Swap meals/)
+  search().props.onChange({ target: { value: "nothing" } })
+  assert.match(elementText(fixture.render()), /No chats match\./)
+  findElement(fixture.render(), "Tabs").props.onValueChange("artifacts")
+  assert.equal(search().props.placeholder, "Search my artifacts")
+  assert.match(elementText(fixture.render()), /No artifacts match\./)
+  search().props.onChange({ target: { value: "meal" } })
+  assert.match(elementText(fixture.render()), /Meal swap prototype/)
 })
 
 test("history refreshes open lists on debounced updates and reloads on reopen", async (t) => {
