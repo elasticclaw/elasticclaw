@@ -13,6 +13,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/llm"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tracker"
 )
 
 // Deps is the hub boundary. Connectors and runner dependencies are added when
@@ -53,7 +54,7 @@ func Routes(deps Deps) http.Handler {
 	deps.health = newSourceHealth()
 	mux := http.NewServeMux()
 	api := &api{deps: deps, store: &Store{DB: deps.DB}}
-	api.runner = &Runner{Store: api.store, PrepareReads: deps.prepareReads, ArtifactsDir: deps.ArtifactsDir, PublicURL: deps.PublicURL, AvailableActions: func(*config.Config) []string { return []string{"artifact"} }}
+	api.runner = &Runner{Store: api.store, PrepareReads: deps.prepareReads, ArtifactsDir: deps.ArtifactsDir, PublicURL: deps.PublicURL, AvailableActions: deps.availableActions, TicketCreator: deps.ticketCreator}
 	mux.HandleFunc("GET /api/ai-chat/artifacts/{slug}", api.getArtifact)
 	mux.HandleFunc("POST /api/ai-chat/threads/{id}/actions", api.runAction)
 	mux.HandleFunc("GET /api/ai-chat/threads", api.listThreads)
@@ -67,6 +68,8 @@ func Routes(deps Deps) http.Handler {
 }
 
 type SourcesResponse struct {
+	Actions    []string        `json:"actions"`
+	Ticket     *tracker.Target `json:"ticket,omitempty"`
 	Configured bool            `json:"configured"`
 	Workspaces []string        `json:"workspaces"`
 	Workspace  string          `json:"workspace"`
@@ -100,7 +103,19 @@ func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
 	if known {
 		if cfg, err := config.Load(deps.ManagedDir(response.Workspace)); err == nil {
 			response.Configured = true
-			response.Sources, _, _ = deps.checkSources(r.Context(), response.Workspace, cfg, r.URL.Query().Get("refresh") == "1")
+			var secrets []string
+			response.Sources, _, secrets = deps.checkSources(r.Context(), response.Workspace, cfg, r.URL.Query().Get("refresh") == "1")
+			response.Actions = deps.availableActions(response.Workspace, cfg)
+			if creator, target, ticketSecrets := deps.ticketCreator(response.Workspace, cfg); creator != nil {
+				secrets = append(secrets, ticketSecrets...)
+				_ = json.Unmarshal(redactedJSON(target, secrets), &target)
+				response.Ticket = &target
+				for i := range response.Sources {
+					if response.Sources[i].Kind == "issue_tracker" {
+						response.Sources[i].Access = "read_create_ticket"
+					}
+				}
+			}
 		} else if !os.IsNotExist(err) {
 			response.Error = err.Error()
 			var pathError *os.PathError

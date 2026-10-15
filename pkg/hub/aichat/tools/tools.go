@@ -23,12 +23,13 @@ const (
 	AskInterview  = "ask_interview"
 	OfferActions  = "offer_actions"
 	StartArtifact = "start_artifact"
+	StartTicket   = "start_ticket"
 	SetPanel      = "set_panel"
 )
 
 func Reserved(name string) bool {
 	switch name {
-	case EmitBlock, AskInterview, OfferActions, SetPanel, StartArtifact:
+	case EmitBlock, AskInterview, OfferActions, SetPanel, StartArtifact, StartTicket:
 		return true
 	}
 	return false

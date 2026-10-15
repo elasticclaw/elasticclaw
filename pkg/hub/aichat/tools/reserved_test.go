@@ -158,3 +158,26 @@ func TestReservedFullUnicodeTable(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReservedTicketValidation(t *testing.T) {
+	for _, raw := range []string{
+		`{"title":"Title","body":"Summary with 31 requests."}`,
+		`{"title":"Title","body":"Body","artifactId":"artifact-id"}`,
+	} {
+		if _, err := ParseTicket([]byte(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, raw := range []string{
+		`{"title":"","body":"Body"}`, `{"title":"Title","body":" "}`, `{"title":"Title"}`, `{"body":"Body"}`,
+		`{"title":"Title","body":"Body","team":"Other"}`, `{"title":"Title","body":"Body","artifactId":null}`,
+		`{"title":"Title","title":"Other","body":"Body"}`, `{"Title":"Title","body":"Body"}`,
+	} {
+		if _, err := ParseTicket([]byte(raw)); err == nil {
+			t.Errorf("accepted %s", raw)
+		}
+	}
+	if !Reserved(StartTicket) {
+		t.Fatal("ticket must not enter the read registry")
+	}
+}

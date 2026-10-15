@@ -20,7 +20,7 @@ func redactedJSON(value any, secrets []string) json.RawMessage {
 	return json.RawMessage(readhttp.RedactJSON(string(raw), secrets))
 }
 
-func (r *Runner) runReserved(ctx context.Context, m *Message, seq int, call llm.ToolCall, emit Emit, available, secrets []string, at int) (llm.Message, bool, error) {
+func (r *Runner) runReserved(ctx context.Context, m *Message, seq int, call llm.ToolCall, emit Emit, available, secrets []string, at int, ticket ...json.RawMessage) (llm.Message, bool, error) {
 	run := ToolRun{ID: uuid.NewString(), MessageID: m.ID, Seq: seq, Tool: readhttp.Redact(call.Name, secrets), Provider: "AI Chat", Args: readhttp.RedactJSON(call.Arguments, secrets)}
 	started := time.Now()
 	var blocks []tools.Block
@@ -86,6 +86,9 @@ func (r *Runner) runReserved(ctx context.Context, m *Message, seq int, call llm.
 				toolErr = tools.ArgError("Tool not available in this release.")
 			}
 			block.Type = "actions"
+			if slices.Contains(block.Actions, "ticket") && len(ticket) > 0 {
+				block.Ticket = ticket[0]
+			}
 			run.Summary = "Offered wrap-up"
 		}
 	default:
@@ -130,6 +133,16 @@ func historyContent(m Message) string {
 			label := "Shown"
 			switch b.Type {
 			case "action":
+				if b.Kind == "ticket" {
+					var card TicketCard
+					if json.Unmarshal(b.Card, &card) == nil {
+						if b.State == "created" {
+							parts = append(parts, fmt.Sprintf("[%s ticket %s created: %s]", card.Tracker, card.Identifier, card.URL))
+						} else if b.State == "failed" {
+							parts = append(parts, "[Ticket failed: "+card.Error+"]")
+						}
+					}
+				}
 				var card ArtifactCard
 				if b.Kind == "artifact" && json.Unmarshal(b.Card, &card) == nil {
 					if b.State == "created" {
