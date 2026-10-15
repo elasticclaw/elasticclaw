@@ -129,7 +129,7 @@ func TestTicketActionDraftArtifactRecordsAndRedaction(t *testing.T) {
 		if drafts == 1 {
 			return llm.Response{Text: "not JSON"}, nil
 		}
-		return llm.Response{Text: `{"title":"Swap ` + ticketSecret + `","body":"Clients ask 31 times a week. ` + ticketSecret + `\n\nEvidence: 12% found swap."}`, InputTokens: 7, OutputTokens: 9}, nil
+		return llm.Response{Text: `{"title":"Swap ` + ticketSecret + `","body":"## Summary\nClients ask 31 times a week. ` + ticketSecret + `\n\nEvidence: 12% found swap."}`, InputTokens: 7, OutputTokens: 9}, nil
 	}}
 	var input map[string]any
 	h, s := ticketFixture(t, p, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, v map[string]any) {
@@ -140,13 +140,28 @@ func TestTicketActionDraftArtifactRecordsAndRedaction(t *testing.T) {
 	thread := testThread(t, s)
 	old := addTicketArtifact(t, s, thread, "Old")
 	artifact := addTicketArtifact(t, s, thread, "Prototype")
-	// Make ordering deterministic even on a coarse system clock.
-	_, _ = s.DB.Exec(`UPDATE ai_chat_artifacts SET updated_at=updated_at-1000 WHERE id=?`, old.ID)
+	// Revising A after creating B must still auto-link B.
+	ctx := context.Background()
+	revision, err := s.beginAction(ctx, thread, "fake", old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.publishArtifact(ctx, t.TempDir(), thread, &revision, tools.ArtifactRequest{ArtifactID: old.ID, Title: "Revised old artifact"}, testHTML); err != nil {
+		t.Fatal(err)
+	}
+	revision.Status = "completed"
+	if err = s.FinishMessage(ctx, revision); err != nil {
+		t.Fatal(err)
+	}
+	// Force equal creation times and a later revision to exercise the tie-break.
+	if _, err = s.DB.Exec(`UPDATE ai_chat_artifacts SET created_at=1,updated_at=CASE WHEN id=? THEN 3 ELSE 2 END WHERE thread_id=?`, old.ID, thread.ID); err != nil {
+		t.Fatal(err)
+	}
 	rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", `{"kind":"ticket"}`, "octocat", "on")
 	if rec.Code != 200 || drafts != 2 || writes != 1 {
 		t.Fatalf("%d %s drafts=%d writes=%d", rec.Code, rec.Body, drafts, writes)
 	}
-	expectedBody := "Clients ask 31 times a week. [redacted]\n\nEvidence: 12% found swap.\n\nArtifact: Prototype — https://hub.test/artifacts/" + artifact.Slug + "\n\n---\nFrom AI Chat · octocat"
+	expectedBody := "## Summary\nClients ask 31 times a week. [redacted]\n\nEvidence: 12% found swap.\n\nArtifact: Prototype — https://hub.test/artifacts/" + artifact.Slug + "\n\n---\nFrom AI Chat · octocat"
 	want := map[string]any{"teamId": "team", "title": "Swap [redacted]", "description": expectedBody, "stateId": "state", "labelIds": []any{"label"}}
 	if !reflect.DeepEqual(input, want) {
 		t.Fatalf("input %#v", input)
@@ -244,7 +259,7 @@ func TestTicketDraftFailureAndAvailability(t *testing.T) {
 			rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", `{"kind":"ticket"}`, "octocat", "on")
 			if mode == "invalid JSON" {
 				_, b, card := latestTicket(t, s, thread)
-				if calls != 2 || b.State != "failed" || card.Error != "Could not draft the ticket." {
+				if calls != 2 || b.State != "failed" || card.Error != "Could not draft the ticket." || card.FailureHeadline != "Could not prepare the ticket" {
 					t.Fatal(calls, b, card)
 				}
 			} else if rec.Code != 400 || !strings.Contains(rec.Body.String(), "not available") || calls != 0 {
@@ -411,7 +426,7 @@ func TestTicketUnknownOutcomeAndRecovery(t *testing.T) {
 	cfg := &config.Config{IssueTracker: &config.IssueTracker{}}
 	cfg.IssueTracker.DefaultFields.Team = "Product"
 	r := &Runner{Store: s, TicketCreator: d.ticketCreator}
-	if err := r.RunTicket(ctx, thread, m, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, func(string, any) error { return nil }); err != nil && !errors.Is(err, context.Canceled) {
+	if err := r.RunTicket(ctx, thread, m, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, false, func(string, any) error { return nil }); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	_, _, card := latestTicket(t, s, thread)
@@ -469,7 +484,7 @@ func TestStartTicketInterruptedBeforeSendRecoversDraft(t *testing.T) {
 				t.Error("expected simulated restart")
 			}
 		}()
-		_ = r.createTicket(ctx, thread, &m, nil, input, creator, tracker.LinearTarget("Product", "", nil), []string{ticketSecret}, 1, false, func(event string, _ any) error {
+		_ = r.createTicket(ctx, thread, &m, nil, input, creator, tracker.LinearTarget("Product", "", nil), []string{ticketSecret}, 1, false, false, func(event string, _ any) error {
 			if event == EventAction {
 				panic("restart")
 			}
@@ -482,5 +497,118 @@ func TestStartTicketInterruptedBeforeSendRecoversDraft(t *testing.T) {
 	_, b, card := latestTicket(t, s, thread)
 	if b.State != "failed" || card.Error != "Stopped. Nothing was created." || card.Body != "31 requests" || card.OutcomeUnknown {
 		t.Fatal(b, card)
+	}
+}
+
+func TestTicketSummaryPlainText(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{"## Summary\nClients ask coaches\n  31 times\t a week.\n\nEvidence", "Clients ask coaches 31 times a week."},
+		{"# Summary\n\n- Clients ask\n* Coaches answer\n2. Teams follow up\n\nEvidence", "Clients ask Coaches answer Teams follow up"},
+		{"  First\r\nparagraph.\r\n\r\nSecond", "First paragraph."},
+		{"## Summary", ""},
+		{strings.Repeat("界", 300), strings.Repeat("界", 279) + "…"},
+	} {
+		if got := ticketSummary(tc.body); got != tc.want {
+			t.Errorf("ticketSummary(%q) = %q, want %q", tc.body, got, tc.want)
+		}
+	}
+}
+
+func TestTicketUnknownOutcomeRequiresAcknowledgement(t *testing.T) {
+	for _, interrupted := range []bool{false, true} {
+		t.Run(fmt.Sprint(interrupted), func(t *testing.T) {
+			writes := 0
+			var deps Deps
+			h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, v map[string]any) {
+				writes++
+				if writes == 1 {
+					// Linear may have created the issue, but its response was lost.
+					w.WriteHeader(502)
+					return
+				}
+				ticketSuccess(w, v["title"].(string))
+			}), func(d *Deps) { deps = *d })
+			thread := testThread(t, s)
+			path := "/api/ai-chat/threads/" + thread.ID + "/actions"
+			body := `{"kind":"ticket","title":"Swap","body":"31 requests"}`
+			if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 200 {
+				t.Fatal(rec.Code, rec.Body)
+			}
+			m, _, card := latestTicket(t, s, thread)
+			if !card.OutcomeUnknown || writes != 1 {
+				t.Fatal(card, writes)
+			}
+			if interrupted {
+				// Simulate process exit after BeforeSend, before saving a final card.
+				if _, err := s.DB.Exec(`UPDATE ai_chat_messages SET status='streaming',blocks_json=NULL WHERE id=?`, m.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A fresh handler has no in-memory history or lock from the first action.
+			h = Routes(deps)
+			for _, retry := range []string{body, `{"kind":"ticket"}`} {
+				rec := request(h, "POST", path, retry, "octocat", "on")
+				if rec.Code != 409 || !strings.Contains(rec.Body.String(), "Check Linear first") || writes != 1 {
+					t.Fatal(rec.Code, rec.Body, writes)
+				}
+			}
+			// The model-initiated path must not bypass the HTTP guard either.
+			ctx := context.Background()
+			modelMessage, err := s.BeginTurn(ctx, thread, "Open the ticket", "fake", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(deps.ManagedDir(thread.Workspace))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &Runner{Store: s, TicketCreator: deps.ticketCreator}
+			if err = runner.RunTicket(ctx, thread, modelMessage, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, false, func(string, any) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			_, _, blocked := latestTicket(t, s, thread)
+			if !blocked.OutcomeUnknown || writes != 1 {
+				t.Fatal(blocked, writes)
+			}
+			confirmed := `{"kind":"ticket","title":"Swap","body":"31 requests","confirmUnknown":true}`
+			rec := request(h, "POST", path, confirmed, "octocat", "on")
+			_, block, _ := latestTicket(t, s, thread)
+			if rec.Code != 200 || writes != 2 || block.State != "created" {
+				t.Fatal(rec.Code, rec.Body, writes, block)
+			}
+		})
+	}
+}
+
+func TestTicketSuccessResendReusesCreatedCard(t *testing.T) {
+	writes := 0
+	var deps Deps
+	h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, v map[string]any) {
+		writes++
+		ticketSuccess(w, v["title"].(string))
+	}), func(d *Deps) { deps = *d })
+	thread := testThread(t, s)
+	artifact := addTicketArtifact(t, s, thread, "Prototype")
+	path := "/api/ai-chat/threads/" + thread.ID + "/actions"
+	body := `{"kind":"ticket","title":"Swap","body":"31 requests"}`
+	if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 200 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	_, _, original := latestTicket(t, s, thread)
+	h = Routes(deps)
+	for _, retry := range []string{body, `{"kind":"ticket","title":"Swap","body":"31 requests","artifactId":"` + artifact.ID + `"}`} {
+		rec := request(h, "POST", path, retry, "octocat", "on")
+		_, block, card := latestTicket(t, s, thread)
+		if rec.Code != 200 || writes != 1 || block.State != "created" || !reflect.DeepEqual(original, card) {
+			t.Fatal(rec.Code, rec.Body, writes, block, card)
+		}
+	}
+	var handoffs int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM ai_chat_handoffs WHERE thread_id=?`, thread.ID).Scan(&handoffs); err != nil || handoffs != 1 {
+		t.Fatal(handoffs, err)
+	}
+	// A genuinely different draft is a new ticket action.
+	if rec := request(h, "POST", path, `{"kind":"ticket","title":"Swap","body":"Different evidence"}`, "octocat", "on"); rec.Code != 200 || writes != 2 {
+		t.Fatal(rec.Code, rec.Body, writes)
 	}
 }

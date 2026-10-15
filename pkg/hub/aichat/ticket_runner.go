@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,7 +26,8 @@ type TicketArtifact struct {
 	ShareURL string `json:"shareUrl"`
 }
 type TicketCard struct {
-	OutcomeUnknown bool `json:"outcomeUnknown,omitempty"`
+	OutcomeUnknown  bool   `json:"outcomeUnknown,omitempty"`
+	FailureHeadline string `json:"failureHeadline,omitempty"`
 	tracker.Target
 	tools.TicketRequest
 	Summary    string          `json:"summary"`
@@ -58,16 +60,33 @@ func hasTicketBlock(m Message) bool {
 	}
 	return false
 }
+
+var ticketHeading = regexp.MustCompile(`^#+\s`)
+var ticketListMarker = regexp.MustCompile(`^(?:[-+*]|[0-9]+[.)])\s+`)
+
 func ticketSummary(body string) string {
-	first := strings.TrimSpace(strings.SplitN(strings.TrimSpace(body), "\n\n", 2)[0])
-	text := []rune(first)
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
+		line = strings.TrimSpace(line)
+		if ticketHeading.MatchString(line) {
+			continue
+		}
+		if line == "" {
+			if len(lines) > 0 {
+				break
+			}
+			continue
+		}
+		lines = append(lines, ticketListMarker.ReplaceAllString(line, ""))
+	}
+	text := []rune(strings.Join(strings.Fields(strings.Join(lines, " ")), " "))
 	if len(text) > 280 {
 		text = append(text[:279], '…')
 	}
 	return string(text)
 }
 
-func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config.Config, p llm.Provider, input tools.TicketRequest, emit Emit) error {
+func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config.Config, p llm.Provider, input tools.TicketRequest, confirmUnknown bool, emit Emit) error {
 	var creator tracker.Creator
 	var target tracker.Target
 	var secrets []string
@@ -85,7 +104,7 @@ func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config
 		cancel()
 		ctx = failedCtx
 	}
-	err := r.createTicket(ctx, t, &m, p, input, creator, target, secrets, 1, true, emit)
+	err := r.createTicket(ctx, t, &m, p, input, creator, target, secrets, 1, true, confirmUnknown, emit)
 	return r.finishRun(ctx, m, err, emit)
 }
 
@@ -148,7 +167,7 @@ func (r *Runner) draftTicket(ctx context.Context, t Thread, m *Message, p llm.Pr
 	return tools.TicketRequest{}, fail
 }
 
-func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.Provider, input tools.TicketRequest, creator tracker.Creator, target tracker.Target, secrets []string, seq int, button bool, emit Emit) error {
+func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.Provider, input tools.TicketRequest, creator tracker.Creator, target tracker.Target, secrets []string, seq int, button, confirmUnknown bool, emit Emit) error {
 	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
 	defer cancel()
 	provider := target.Provider
@@ -166,8 +185,27 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		defer cancel()
 		return fn(saveCtx)
 	}
-	// A pending row supports recovery even if the process stops before the card.
+	var previous []savedTicketAction
 	err := save(func(c context.Context) error {
+		var err error
+		previous, err = r.Store.ticketActions(c, t.ID, m.ID)
+		return err
+	})
+	if err != nil {
+		card.Error, card.FailureHeadline = "Unable to check previous ticket actions.", "Could not prepare the ticket"
+		setTicketBlock(m, "failed", card)
+		_ = action("failed")
+		return err
+	}
+	if len(previous) > 0 && previous[0].unknown && !confirmUnknown {
+		card.OutcomeUnknown = true
+		card.Error = target.Tracker + " did not confirm the ticket. Check " + target.Tracker + " before trying again."
+		setTicketBlock(m, "failed", card)
+		_ = action("failed")
+		return nil
+	}
+	// A pending row supports recovery even if the process stops before the card.
+	err = save(func(c context.Context) error {
 		e := r.Store.DB.QueryRowContext(c, `SELECT id FROM ai_chat_tool_runs WHERE message_id=? AND tool='ticket' LIMIT 1`, m.ID).Scan(&run.ID)
 		if errors.Is(e, sql.ErrNoRows) {
 			return r.Store.RecordToolRun(c, run)
@@ -179,15 +217,20 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		return e
 	})
 	if err != nil {
-		setTicketBlock(m, "failed", TicketCard{Target: target, TicketRequest: input, Error: "Unable to save the ticket draft."})
+		setTicketBlock(m, "failed", TicketCard{Target: target, TicketRequest: input, Error: "Unable to save the ticket draft.", FailureHeadline: "Could not prepare the ticket"})
 		return err
 	}
+	failureHeadline := "Could not prepare the ticket"
 	fail := func(message string) error {
 		if ctx.Err() != nil && !sent {
 			message = "Stopped. Nothing was created."
 		}
 		if sent && ctx.Err() != nil {
 			message = target.Tracker + " did not confirm the ticket. Check " + target.Tracker + " before trying again."
+		}
+		card.FailureHeadline = failureHeadline
+		if message == "Stopped. Nothing was created." {
+			card.FailureHeadline = "Ticket creation stopped"
 		}
 		card.Error = readhttp.Redact(message, secrets)
 		card.OutcomeUnknown = message == target.Tracker+" did not confirm the ticket. Check "+target.Tracker+" before trying again."
@@ -242,6 +285,15 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		return fail("Could not draft the ticket.")
 	}
 	card.Summary = ticketSummary(card.Body)
+	for _, prior := range previous {
+		if prior.state == "created" && (prior.draft == card.TicketRequest || prior.card.TicketRequest == card.TicketRequest) {
+			card = prior.card
+			_ = json.Unmarshal(redactedJSON(card, secrets), &card)
+			setTicketBlock(m, "created", card)
+			_ = action("created")
+			return nil
+		}
+	}
 	// Keep the original draft in the card; append server-owned material only once.
 	description := card.Body
 	if card.Artifact != nil {
@@ -256,6 +308,7 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 	}); err != nil {
 		return fail("Unable to save the ticket draft.")
 	}
+	failureHeadline = "Could not create the ticket in " + target.Tracker
 	issue, err := creator.Create(ctx, tracker.Draft{Title: card.Title, Body: description, Team: target.Team, State: target.State, Labels: target.Labels, BeforeSend: func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -305,7 +358,7 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 
 func (r *Runner) ticketArtifact(ctx context.Context, t Thread, id string) (*Artifact, error) {
 	if id == "" {
-		err := r.Store.DB.QueryRowContext(ctx, `SELECT id FROM ai_chat_artifacts WHERE thread_id=? AND tenant_id=? AND owner_login=? AND deleted_at IS NULL ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 1`, t.ID, t.TenantID, t.OwnerLogin).Scan(&id)
+		err := r.Store.DB.QueryRowContext(ctx, `SELECT id FROM ai_chat_artifacts WHERE thread_id=? AND tenant_id=? AND owner_login=? AND deleted_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 1`, t.ID, t.TenantID, t.OwnerLogin).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}

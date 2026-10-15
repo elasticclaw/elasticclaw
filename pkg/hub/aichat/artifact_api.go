@@ -154,8 +154,9 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Kind string `json:"kind"`
-		Body string `json:"body,omitempty"`
+		Kind           string `json:"kind"`
+		Body           string `json:"body,omitempty"`
+		ConfirmUnknown bool   `json:"confirmUnknown,omitempty"`
 		tools.ArtifactRequest
 	}
 	if !decode(w, r, &body) {
@@ -188,6 +189,17 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 	if body.ArtifactID != "" {
 		if _, err = a.store.ownedArtifact(ctx, t, body.ArtifactID); err != nil {
 			http.NotFound(w, r)
+			return
+		}
+	}
+	if body.Kind == "ticket" && !body.ConfirmUnknown {
+		previous, err := a.store.ticketActions(ctx, t.ID, "")
+		if err != nil {
+			http.Error(w, "Unable to check previous ticket actions.", 500)
+			return
+		}
+		if len(previous) > 0 && previous[0].unknown {
+			http.Error(w, "Linear did not confirm the previous ticket. Check Linear first, then use the ticket card to confirm creating another ticket.", 409)
 			return
 		}
 	}
@@ -225,7 +237,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 	emit, stop := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Cancel(t) })
 	defer stop()
 	if body.Kind == "ticket" {
-		_ = a.runner.RunTicket(ctx, t, m, cfg, p, tools.TicketRequest{Title: body.Title, Body: body.Body, ArtifactID: body.ArtifactID}, emit)
+		_ = a.runner.RunTicket(ctx, t, m, cfg, p, tools.TicketRequest{Title: body.Title, Body: body.Body, ArtifactID: body.ArtifactID}, body.ConfirmUnknown, emit)
 	} else {
 		_ = a.runner.RunArtifact(ctx, t, m, cfg, p, body.ArtifactRequest, emit)
 	}
