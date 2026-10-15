@@ -18,23 +18,36 @@ import (
 )
 
 func TestTicketPartialResponseBlocksRetry(t *testing.T) {
-	writes := 0
-	h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
-		writes++
-		fmt.Fprint(w, `{"data":{"issueCreate":{"success":true,"issue":null}},"errors":[{"message":"Permission denied sentinel-ticket-token"}]}`)
-	}))
-	thread := testThread(t, s)
-	path := "/api/ai-chat/threads/" + thread.ID + "/actions"
-	body := `{"kind":"ticket","actionKey":"click","title":"Draft","body":"Evidence"}`
-	if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 200 || strings.Contains(rec.Body.String(), ticketSecret) {
-		t.Fatal(rec.Code, rec.Body)
-	}
-	_, block, card := latestTicket(t, s, thread)
-	if block.State != "failed" || !card.OutcomeUnknown || card.Error != tracker.LinearUnconfirmed {
-		t.Fatal(block, card)
-	}
-	if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 409 || writes != 1 {
-		t.Fatal(rec.Code, rec.Body, writes)
+	for _, response := range []string{
+		`{"data":{"issueCreate":{"success":true,"issue":null}},"errors":[{"message":"Permission denied sentinel-ticket-token"}]}`,
+		`{"data":null,"errors":[{"message":"Execution failed sentinel-ticket-token"}]}`,
+		`{"data":{"issueCreate":null},"errors":[{"message":"Execution failed sentinel-ticket-token"}]}`,
+		`{"errors":[{"message":"Execution failed sentinel-ticket-token"}]}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			writes := 0
+			h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+				writes++
+				fmt.Fprint(w, response)
+			}))
+			thread := testThread(t, s)
+			path := "/api/ai-chat/threads/" + thread.ID + "/actions"
+			body := `{"kind":"ticket","actionKey":"click","title":"Draft","body":"Evidence"}`
+			if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 200 || strings.Contains(rec.Body.String(), ticketSecret) {
+				t.Fatal(rec.Code, rec.Body)
+			}
+			_, block, card := latestTicket(t, s, thread)
+			if block.State != "failed" || !card.OutcomeUnknown || card.Error != tracker.LinearUnconfirmed {
+				t.Fatal(block, card)
+			}
+			if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 409 || writes != 1 {
+				t.Fatal(rec.Code, rec.Body, writes)
+			}
+			var handoffs int
+			if err := s.DB.QueryRow(`SELECT COUNT(*) FROM ai_chat_handoffs WHERE thread_id=?`, thread.ID).Scan(&handoffs); err != nil || handoffs != 0 {
+				t.Fatal(handoffs, err)
+			}
+		})
 	}
 }
 
@@ -197,6 +210,14 @@ func TestDismissUnknownTicketAttempt(t *testing.T) {
 	var blocks []tools.Block
 	if json.Unmarshal(conversation.Messages[0].Blocks, &blocks) != nil || len(blocks) != 1 || blocks[0].State != "failed" || !strings.Contains(string(blocks[0].Card), `"dismissed":true`) {
 		t.Fatal(blocks)
+	}
+	var repeated []tools.Block
+	if len(conversation.Messages) != 3 || conversation.Messages[2].ID != m.ID || json.Unmarshal(conversation.Messages[2].Blocks, &repeated) != nil || len(repeated) != 1 {
+		t.Fatal(conversation.Messages)
+	}
+	var repeatedCard TicketCard
+	if json.Unmarshal(repeated[0].Card, &repeatedCard) != nil || !repeatedCard.Dismissed || repeatedCard.AttemptID != card.AttemptID || repeatedCard.Title != "Other" || repeated[0].State != "failed" {
+		t.Fatal(repeated)
 	}
 	previous, err := (&Store{DB: deps.DB}).ticketActions(context.Background(), thread.ID, "")
 	if err != nil || unknownTicketAction(previous) != nil {

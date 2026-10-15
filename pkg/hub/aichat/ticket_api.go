@@ -81,13 +81,23 @@ func (s *Store) dismissTicketAttempt(ctx context.Context, threadID, attemptID st
 	if !found {
 		return sql.ErrNoRows
 	}
-	if marker.Dismissed {
-		return nil
-	}
 	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_tool_runs SET result_json=json_set(result_json,'$.dismissed',json('true')) WHERE id=?`, runID); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_messages SET blocks_json=? WHERE id=?`, string(redactedJSON(blocks, nil)), attemptID); err != nil {
+		return err
+	}
+	// Refusals can repeat the same attempt on later messages. Persist their dismissal too.
+	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_messages SET blocks_json=(
+		SELECT json_group_array(json(CASE
+			WHEN json_extract(value,'$.type')='action' AND json_extract(value,'$.kind')='ticket'
+			AND json_extract(value,'$.card.attemptId')=?
+			THEN json_set(value,'$.card.dismissed',json('true')) ELSE value END))
+		FROM json_each(ai_chat_messages.blocks_json))
+		WHERE thread_id=? AND id<>? AND EXISTS(
+			SELECT 1 FROM json_each(ai_chat_messages.blocks_json)
+			WHERE json_extract(value,'$.type')='action' AND json_extract(value,'$.kind')='ticket'
+			AND json_extract(value,'$.card.attemptId')=?)`, attemptID, threadID, attemptID, attemptID); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at=? WHERE id=?`, time.Now().UnixMilli(), threadID); err != nil {
