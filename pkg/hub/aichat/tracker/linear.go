@@ -1,5 +1,5 @@
-// Package tracker provides read-only issue tracking. Creation belongs to the
-// separate user-initiated action registry introduced with ticket handoffs.
+// Package tracker provides read-only issue tracking and a separate creation
+// interface used exclusively by user-initiated ticket actions.
 package tracker
 
 import (
