@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/llm"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tools"
 	"github.com/google/uuid"
 )
@@ -153,23 +155,28 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Kind string `json:"kind"`
+		Body string `json:"body,omitempty"`
 		tools.ArtifactRequest
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	if body.Kind != "artifact" {
+	if body.Kind != "artifact" && body.Kind != "ticket" {
 		http.Error(w, "not available", 400)
 		return
 	}
 	for _, v := range []struct {
 		s   string
 		max int
-	}{{body.Title, 80}, {body.Brief, 4000}, {body.ArtifactID, 80}} {
+	}{{body.Title, 80}, {body.Brief, 4000}, {body.Body, 8000}, {body.ArtifactID, 80}} {
 		if utf8.RuneCountInString(v.s) > v.max || v.s != "" && strings.TrimSpace(v.s) == "" {
 			http.Error(w, "invalid action", 400)
 			return
 		}
+	}
+	if body.Kind == "ticket" && (utf8.RuneCountInString(body.Title) > 70 || (body.Title == "") != (body.Body == "") || body.Brief != "") {
+		http.Error(w, "invalid action", 400)
+		return
 	}
 	ctx, release, err := a.runner.Acquire(r.Context(), t)
 	if err != nil {
@@ -189,16 +196,25 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Not configured for this workspace", 400)
 		return
 	}
-	p, err := a.deps.LLM(cfg.LLM)
-	if err != nil {
-		http.Error(w, "No usable LLM key configured for this workspace", 503)
+	if a.runner.AvailableActions == nil || !slices.Contains(a.runner.AvailableActions(t.Workspace, cfg), body.Kind) {
+		http.Error(w, "not available", 400)
 		return
+	}
+	var p llm.Provider
+	model := ""
+	if body.Kind == "artifact" || body.Title == "" {
+		p, err = a.deps.LLM(cfg.LLM)
+		if err != nil {
+			http.Error(w, "No usable LLM key configured for this workspace", 503)
+			return
+		}
+		model = p.Model()
 	}
 	if _, ok := w.(http.Flusher); !ok {
 		http.Error(w, "streaming unavailable", 500)
 		return
 	}
-	m, err := a.store.beginAction(ctx, t, p.Model(), body.ArtifactID)
+	m, err := a.store.beginAction(ctx, t, model, body.ArtifactID, body.Kind)
 	if err != nil {
 		http.Error(w, "Unable to save action.", 500)
 		return
@@ -208,13 +224,17 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	emit, stop := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Cancel(t) })
 	defer stop()
-	_ = a.runner.RunArtifact(ctx, t, m, cfg, p, body.ArtifactRequest, emit)
+	if body.Kind == "ticket" {
+		_ = a.runner.RunTicket(ctx, t, m, cfg, p, tools.TicketRequest{Title: body.Title, Body: body.Body, ArtifactID: body.ArtifactID}, emit)
+	} else {
+		_ = a.runner.RunArtifact(ctx, t, m, cfg, p, body.ArtifactRequest, emit)
+	}
 	stop()
 	release()
 	a.publish(t)
 }
 
-func (s *Store) beginAction(ctx context.Context, t Thread, model, artifactID string) (Message, error) {
+func (s *Store) beginAction(ctx context.Context, t Thread, model, artifactID string, actionKind ...string) (Message, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Message{}, err
@@ -232,8 +252,15 @@ func (s *Store) beginAction(ctx context.Context, t Thread, model, artifactID str
 		return Message{}, err
 	}
 	// Only the already ownership-checked ID is stored before secrets are resolved.
+	kind := "artifact"
+	if len(actionKind) > 0 {
+		kind = actionKind[0]
+	}
 	pending := string(redactedJSON(tools.ArtifactRequest{ArtifactID: artifactID}, nil))
-	if _, err = tx.ExecContext(ctx, `INSERT INTO ai_chat_tool_runs(id,message_id,seq,tool,provider,args_json,created_at) VALUES(?,?,1,'artifact','AI Chat',?,?)`, uuid.NewString(), m.ID, pending, m.CreatedAt); err != nil {
+	if kind == "ticket" {
+		pending = string(redactedJSON(TicketCard{TicketRequest: tools.TicketRequest{ArtifactID: artifactID}}, nil))
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO ai_chat_tool_runs(id,message_id,seq,tool,provider,args_json,created_at) VALUES(?,?,1,?,'AI Chat',?,?)`, uuid.NewString(), m.ID, kind, pending, m.CreatedAt); err != nil {
 		return Message{}, err
 	}
 	return m, tx.Commit()
