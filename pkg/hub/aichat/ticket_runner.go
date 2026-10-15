@@ -356,6 +356,14 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		return fail("The ticket draft is invalid.")
 	}
 	card.Summary = ticketSummary(card.Body)
+	// Drafting may take minutes; a deletion during it must not leave a dead link.
+	if card.Artifact != nil {
+		if _, err := r.Store.ownedArtifact(ctx, t, card.ArtifactID); errors.Is(err, sql.ErrNoRows) {
+			card.ArtifactID, card.Artifact = "", nil
+		} else if err != nil {
+			return fail("Unable to load the ticket artifact.")
+		}
+	}
 	// Keep the original draft in the card; append server-owned material only once.
 	description := card.Body
 	if card.Artifact != nil {

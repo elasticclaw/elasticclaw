@@ -616,3 +616,53 @@ func TestTicketSuccessActionKeyResendReusesCreatedCard(t *testing.T) {
 		t.Fatal(rec.Code, rec.Body, writes)
 	}
 }
+
+func TestTicketDropsArtifactDeletedDuringDraft(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
+			var h http.Handler
+			var artifact Artifact
+			drafts, writes := 0, 0
+			p := fakeProvider{stream: func(context.Context, llm.Request, func(string) error) (llm.Response, error) {
+				drafts++
+				// Another tab deletes the artifact while the model drafts the ticket.
+				if rec := request(h, "DELETE", "/api/ai-chat/artifacts/"+artifact.Slug, "", "octocat", "on"); rec.Code != 204 {
+					t.Fatal(rec.Code, rec.Body)
+				}
+				return llm.Response{Text: `{"title":"Draft","body":"Evidence"}`}, nil
+			}}
+			var s *Store
+			h, s = ticketFixture(t, p, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, input map[string]any) {
+				writes++
+				if input["description"] != "Evidence\n\n---\nFrom AI Chat · octocat" {
+					t.Fatal("deleted artifact linked", input)
+				}
+				ticketSuccess(w, "Draft")
+			}))
+			thread := testThread(t, s)
+			artifact = addTicketArtifact(t, s, thread, "Prototype")
+			body := `{"kind":"ticket"}`
+			if explicit {
+				body = fmt.Sprintf(`{"kind":"ticket","artifactId":%q}`, artifact.ID)
+			}
+			rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", body, "octocat", "on")
+			if rec.Code != 200 || drafts != 1 || writes != 1 {
+				t.Fatal(rec.Code, rec.Body, drafts, writes)
+			}
+			m, block, card := latestTicket(t, s, thread)
+			if block.State != "created" || card.Artifact != nil || card.ArtifactID != "" || strings.Contains(m.Content, "artifact linked") {
+				t.Fatal(m, block, card)
+			}
+			var payload, args string
+			if err := s.DB.QueryRow(`SELECT payload_json FROM ai_chat_handoffs WHERE message_id=?`, m.ID).Scan(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DB.QueryRow(`SELECT args_json FROM ai_chat_tool_runs WHERE message_id=? AND tool='ticket'`, m.ID).Scan(&args); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(payload+args, artifact.Slug) || strings.Contains(args, artifact.ID) {
+				t.Fatal("deleted artifact persisted in ticket", payload, args)
+			}
+		})
+	}
+}
