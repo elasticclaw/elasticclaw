@@ -216,6 +216,9 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 				_, target, _ := a.deps.ticketCreator(t.Workspace, cfg)
 				name = target.Tracker
 			}
+			if name == "" {
+				name = "The tracker"
+			}
 			http.Error(w, name+" did not confirm the previous ticket. Check "+name+" first, then use the ticket card to confirm creating another ticket.", 409)
 			return
 		}

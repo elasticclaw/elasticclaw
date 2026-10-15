@@ -368,7 +368,7 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		var public *tracker.CreateError
 		if errors.As(err, &public) {
 			message = public.Message
-			if public.Validation {
+			if public.Validation || !sent {
 				failureHeadline = "Could not prepare the ticket"
 			} else {
 				failureHeadline = target.Tracker + " did not accept the ticket"
