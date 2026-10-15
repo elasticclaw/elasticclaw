@@ -30,6 +30,7 @@ fi
 EXPECTED_PATHS=(
   "analytics/index.html"
   "chat/index.html"
+  "artifacts/index.html"
   "settings/index.html"
   "settings/_workspace/index.html"
 )

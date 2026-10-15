@@ -43,8 +43,8 @@ func TestOfferedToolSchemasHaveObjectRoots(t *testing.T) {
 	}
 	runner := &Runner{Store: s, Reads: registry, AvailableActions: func(*config.Config) []string { return []string{"artifact", "ticket"} }}
 	p := fakeProvider{stream: func(_ context.Context, req llm.Request, _ func(string) error) (llm.Response, error) {
-		if len(req.Tools) != 15 {
-			t.Fatalf("expected 12 read and 3 reserved tools, got %d", len(req.Tools))
+		if len(req.Tools) != 16 {
+			t.Fatalf("expected 12 read and 4 reserved tools, got %d", len(req.Tools))
 		}
 		for _, tool := range req.Tools {
 			var schema map[string]json.RawMessage
@@ -329,7 +329,7 @@ func TestReservedLimitsAndAvailability(t *testing.T) {
 						t.Fatal(req.Tools)
 					}
 				}
-				if len(tc.available) > 0 && len(req.Tools) != 3 {
+				if len(tc.available) > 0 && len(req.Tools) != 4 {
 					t.Fatal(req.Tools)
 				}
 				if n == 1 {

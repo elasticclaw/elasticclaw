@@ -129,6 +129,15 @@ func historyContent(m Message) string {
 			text := ""
 			label := "Shown"
 			switch b.Type {
+			case "action":
+				var card ArtifactCard
+				if b.Kind == "artifact" && json.Unmarshal(b.Card, &card) == nil {
+					if b.State == "created" {
+						parts = append(parts, fmt.Sprintf("[Artifact %s v%d created: /artifacts/%s; artifactId: %s]", card.Title, card.Version, card.Slug, card.ArtifactID))
+					} else if b.State == "failed" {
+						parts = append(parts, "[Artifact failed: "+card.Error+"]")
+					}
+				}
 			case "stat_tiles":
 				var v tools.StatTiles
 				if json.Unmarshal(b.Data, &v) == nil {

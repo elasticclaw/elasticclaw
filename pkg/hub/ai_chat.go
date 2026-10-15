@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +17,16 @@ import (
 
 func (s *Server) aiChatDeps() aichat.Deps {
 	return aichat.Deps{
+		ArtifactsDir: filepath.Join(s.dataDir, "ai_chat", "artifacts"),
+		ArtifactKey:  s.webSessionSecret,
+		FeatureStage: func(ctx context.Context, key string) string {
+			flag, ok := findFeatureFlag(key)
+			if !ok {
+				return ""
+			}
+			return string(s.effectiveFeatureStage(ctx, flag))
+		},
+		PublicURL:   func() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.hubCfg.PublicURL },
 		DB:          s.db,
 		GitHubToken: s.tokenForRepo,
 		GitHubAPI:   s.githubBaseURL,

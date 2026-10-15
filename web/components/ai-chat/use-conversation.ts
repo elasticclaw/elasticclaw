@@ -2,14 +2,14 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { ApiError, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, type AIChatAnswers, type AIChatAnswersSummary, type AIChatStepAnswers, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
+import { ApiError, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, streamAIChatAction, type AIChatArtifactRequest, type AIChatAnswers, type AIChatAnswersSummary, type AIChatStepAnswers, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
 import type { ChatMode } from "./mode-cards"
 import { summarizeInterview, applyStreamEvent, type StreamTurn } from "./stream-turn"
 import { useChatSources } from "./use-chat-sources"
 
 // `rejected` marks a message the hub refused before starting a turn (an HTTP
 // error such as 429): it was never sent, so it must be resent, not retried.
-type TurnError = { answers?: AIChatAnswers; answersSummary?: AIChatAnswersSummary; message: string; text: string; retry: boolean; rejected?: boolean; afterMessageId?: string }
+type TurnError = { action?: AIChatArtifactRequest; answers?: AIChatAnswers; answersSummary?: AIChatAnswersSummary; message: string; text: string; retry: boolean; rejected?: boolean; afterMessageId?: string }
 
 const unfinishedStatuses = ["error", "cancelled", "limit"]
 
@@ -182,9 +182,11 @@ export function useConversation() {
       openCreatedThread(created)
       turn.threadId = created.id
     }
-    await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, (event, payload) => {
+    const onEvent = (event: string, payload: Record<string, unknown>) => {
       if (isCurrent()) applyStreamEvent(turn, event, payload, { setMessages, setDraft, setReading })
-    }, turn.answers)
+    }
+    if (turn.action) await streamAIChatAction(turn.threadId, turn.action, signal, onEvent)
+    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers)
   }
 
   const finishTurn = async (turn: StreamTurn, isCurrent: () => boolean) => {
@@ -198,20 +200,20 @@ export function useConversation() {
     active.current = null
   }
 
-  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary) => {
-    if (!data?.configured || !canStartTurn(answers ? "answers" : text, retry)) return
+  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatArtifactRequest) => {
+    if (!data?.configured || !canStartTurn(action ? "artifact" : answers ? "answers" : text, retry)) return
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
-    const turn: StreamTurn = { answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
+    const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
     const afterMessageId = messages[messages.length - 1]?.id
     try {
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
-      if (turn.error) setTurnError({ message: turn.error, text, retry: true, afterMessageId })
+      if (turn.error) setTurnError({ action, message: turn.error, text, retry: true, afterMessageId })
     } catch (error) {
       if (isCurrent() && !controller.signal.aborted) {
         const rejected = error instanceof ApiError && !turn.started
-        setTurnError({ message: errorMessage(error, "Unable to send message."), text, retry: turn.started || retry, rejected, afterMessageId, answers: turn.started ? undefined : answers, answersSummary: turn.started ? undefined : answersSummary })
+        setTurnError({ action, message: errorMessage(error, "Unable to send message."), text, retry: turn.started || retry, rejected, afterMessageId, answers: turn.started ? undefined : answers, answersSummary: turn.started ? undefined : answersSummary })
       }
     } finally {
       await finishTurn(turn, isCurrent)
@@ -225,7 +227,7 @@ export function useConversation() {
     return send("", false, answers, summarizeInterview(interview, answers))
   }
 
-  const retryTurn = () => send(turnError?.text ?? "", turnError?.retry ?? true, turnError?.answers, turnError?.answersSummary)
+  const retryTurn = () => send(turnError?.text ?? "", turnError?.retry ?? true, turnError?.answers, turnError?.answersSummary, turnError?.action)
 
   const cancel = async () => {
     const controller = active.current
@@ -242,10 +244,15 @@ export function useConversation() {
     }
   }
 
-  const canRetry = isUnfinishedReply(messages[messages.length - 1])
+  const startArtifact = (action: AIChatArtifactRequest = { kind: "artifact" }) => {
+    if (!threadRef.current || thread?.archivedAt) return
+    return send("", false, undefined, undefined, action)
+  }
+  const last = messages[messages.length - 1]
+  const canRetry = isUnfinishedReply(last) && !last?.blocks?.some((block) => block.type === "action")
 
   return {
     requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry,
-    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, retryTurn, cancel,
+    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, retryTurn, cancel,
   }
 }

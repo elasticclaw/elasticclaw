@@ -19,15 +19,16 @@ const MaxResultBytes = 32 * 1024
 // is capped separately at MaxResultBytes.
 const MaxStoredResultBytes = 256 * 1024
 const (
-	EmitBlock    = "emit_block"
-	AskInterview = "ask_interview"
-	OfferActions = "offer_actions"
-	SetPanel     = "set_panel"
+	EmitBlock     = "emit_block"
+	AskInterview  = "ask_interview"
+	OfferActions  = "offer_actions"
+	StartArtifact = "start_artifact"
+	SetPanel      = "set_panel"
 )
 
 func Reserved(name string) bool {
 	switch name {
-	case EmitBlock, AskInterview, OfferActions, SetPanel:
+	case EmitBlock, AskInterview, OfferActions, SetPanel, StartArtifact:
 		return true
 	}
 	return false

@@ -60,6 +60,7 @@ type Server struct {
 	identity  *HubIdentity
 	mux       *http.ServeMux
 	artifacts artifact.Store
+	dataDir   string
 
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
@@ -641,6 +642,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		hubCfg:                   hubCfg,
 		identity:                 id,
 		artifacts:                artifacts,
+		dataDir:                  identityDir,
 		claws:                    make(map[string]*clawConn),
 		users:                    make(map[string]*userConn),
 		gatewayRestartCounts:     make(map[string]int),
@@ -816,6 +818,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/logout", s.handleWebLogout)
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
 	mux.Handle("/api/ai-chat/", aichat.Routes(s.aiChatDeps()))
+	mux.Handle("GET /artifacts/{slug}/raw", aichat.RawArtifactRoutes(s.aiChatDeps()))
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
 	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)
@@ -1494,6 +1497,10 @@ func (s *Server) serveWebUI(mux *http.ServeMux, staticFS fs.FS) {
 				serveFile(w, r, workspacePath)
 				return
 			}
+		}
+		if artifactPath, ok := aichat.ArtifactStaticPath(p); ok {
+			serveFile(w, r, artifactPath)
+			return
 		}
 		// Unknown path — serve root index.html (SPA fallback)
 		serveFile(w, r, "index.html")

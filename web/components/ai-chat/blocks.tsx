@@ -1,4 +1,4 @@
-import { CircleCheck, FileCode2, Info, Ticket, TriangleAlert } from "lucide-react"
+import { CircleCheck, FileCode2, Info, TriangleAlert } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { AIChatAction, AIChatBlock, AIChatAnswersSummary } from "@/lib/api"
 
@@ -8,7 +8,7 @@ export function splitContent(content: string, blocks: AIChatBlock[] = []): (stri
   const parts: (string | AIChatBlock)[] = []
   let offset = 0
   for (const block of blocks) {
-    if (!["stat_tiles", "callout", "table", "actions"].includes(block.type)) continue
+    if (!["stat_tiles", "callout", "table", "actions", "action"].includes(block.type)) continue
     const at = Math.max(offset, Math.min(points.length, block.at))
     if (at > offset) parts.push(points.slice(offset, at).join(""))
     parts.push(block)
@@ -18,7 +18,7 @@ export function splitContent(content: string, blocks: AIChatBlock[] = []): (stri
   return parts
 }
 
-export function InlineBlock({ block, onAction, ticketCaption }: { block: AIChatBlock; onAction?: (action: AIChatAction) => void; ticketCaption?: string }) {
+export function InlineBlock({ block, onAction }: { block: AIChatBlock; onAction?: (action: AIChatAction) => void }) {
   switch (block.type) {
     case "stat_tiles": {
       const columns = ["", "sm:grid-cols-1", "sm:grid-cols-2", "sm:grid-cols-3", "sm:grid-cols-2 lg:grid-cols-4"][block.data.tiles.length]
@@ -45,11 +45,11 @@ export function InlineBlock({ block, onAction, ticketCaption }: { block: AIChatB
     case "actions":
       if (!onAction) return null
       return <div className="my-5 space-y-2.5"><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Wrap up</div>
-        <div className="grid gap-2.5 sm:grid-cols-2">{block.actions.map((action) => {
-          const Icon = action === "artifact" ? FileCode2 : Ticket
+        <div className="grid gap-2.5 sm:grid-cols-2">{block.actions.filter((action) => action === "artifact").map((action) => {
+          const Icon = FileCode2
           return <Button key={action} variant="outline" className="h-auto justify-start gap-3 rounded-xl p-3 text-left" onClick={() => onAction(action)}>
-            <Icon className="size-4 shrink-0" /><span><span className="block font-semibold">{action === "artifact" ? "Create HTML artifact" : "Open Linear ticket"}</span>
-              <span className="block text-xs font-normal text-muted-foreground">{action === "artifact" ? "A page served by the factory" : ticketCaption || "Linear"}</span></span>
+            <Icon className="size-4 shrink-0" /><span><span className="block font-semibold">Create HTML artifact</span>
+              <span className="block text-xs font-normal text-muted-foreground">A page served by the factory</span></span>
           </Button>
         })}</div>
       </div>

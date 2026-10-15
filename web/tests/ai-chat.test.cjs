@@ -651,9 +651,10 @@ test("wrap-up is absent without an action handler and dispatches only with a han
   assert.equal(blockHelpers.InlineBlock({ block }), null)
   const actions = []
   const tree = blockHelpers.InlineBlock({ block, onAction: (action) => actions.push(action) })
-  assert.match(elementText(tree), /Wrap up.*Create HTML artifact.*Open Linear ticket/)
+  assert.match(elementText(tree), /Wrap up.*Create HTML artifact/)
   findElements(tree, "Button").forEach((button) => button.props.onClick())
-  assert.deepEqual(actions, ["artifact", "ticket"])
+  assert.deepEqual(actions, ["artifact"])
+  assert.ok(!elementText(tree).includes("Open Linear ticket"))
 })
 
 test("stat tiles, callouts and tables render model data as plain text", () => {
@@ -842,3 +843,203 @@ for (const lostStart of [false, true]) {
     assert.deepEqual(attempts[1].answers, lostStart ? undefined : answersFixture())
   })
 }
+
+const artifactHelpers = loadComponent("lib/ai-chat-artifacts.ts", { "./hub-url": { getHubUrl: () => "" } })
+const artifactCardMocks = {
+  react: {},
+  "lucide-react": Object.fromEntries(["Check", "Copy", "ExternalLink", "FileCode2", "Loader2", "RotateCcw", "TriangleAlert", "X"].map((name) => [name, name])),
+  "@/components/ui/button": { Button: "Button" },
+  "@/lib/ai-chat-artifacts": { artifactShareURL: (slug, url) => url || `https://hub.test/artifacts/${slug}` },
+}
+
+test("artifact cards render working, created and failed states with the right actions", () => {
+  const { ArtifactActionCard } = loadComponent("components/ai-chat/artifact-card.tsx", artifactCardMocks)
+  const card = { title: "Meal swap", brief: "Phone prototype", artifactId: "id", slug: "meal-swap-abcdef", version: 2, bytes: 38 * 1024, lines: 412 }
+  let stopped = false
+  let tree = ArtifactActionCard({ block: { type: "action", kind: "artifact", state: "working", card }, onStop: () => { stopped = true } })
+  assert.match(elementText(tree), /Building “Meal swap”Writing HTML · 412 lines so farStop/)
+  findElement(tree, "Button").props.onClick()
+  assert.equal(stopped, true)
+  tree = ArtifactActionCard({ block: { type: "action", kind: "artifact", state: "created", card } })
+  assert.match(elementText(tree), /ARTIFACTv2 · 38 KBMeal swap/)
+  assert.match(elementText(tree), /Ask for changes and I will publish a new version at the same link/)
+  assert.equal(findElement(tree, "a").props.href, "https://hub.test/artifacts/meal-swap-abcdef")
+  assert.equal(findElement(tree, "a").props.target, "_blank")
+  assert.ok(elementText(tree).includes("hub.test/artifacts/meal-swap-abcdef") && !elementText(tree).includes("https://"))
+  assert.ok(!elementText(tree).includes("Linear"))
+  let retry
+  tree = ArtifactActionCard({ block: { type: "action", kind: "artifact", state: "failed", card: { ...card, error: "Stopped. Nothing was published." } }, onRetry: (action) => { retry = action } })
+  assert.match(elementText(tree), /Could not save the artifactStopped. Nothing was published.Try again/)
+  findElement(tree, "Button").props.onClick()
+  assert.deepEqual(retry, { kind: "artifact", artifactId: "id", title: "Meal swap", brief: "Phone prototype" })
+  assert.equal(findElement(ArtifactActionCard({ block: { type: "action", kind: "artifact", state: "failed", card } }), "Button"), undefined)
+  assert.equal(ArtifactActionCard({ block: { kind: "ticket", state: "working", card } }), null)
+})
+
+test("copy artifact link shows feedback", async () => {
+  const hooks = createHooks()
+  const { CopyArtifactLink } = loadComponent("components/ai-chat/artifact-card.tsx", { ...artifactCardMocks, react: hooks.react })
+  const descriptor = Object.getOwnPropertyDescriptor(global, "navigator")
+  let copied
+  Object.defineProperty(global, "navigator", { configurable: true, value: { clipboard: { writeText: async (value) => { copied = value } } } })
+  try {
+    let tree = hooks.render(() => CopyArtifactLink({ url: "https://hub.test/artifacts/meal-abcdef" }))
+    tree.props.onClick()
+    await flush()
+    tree = hooks.render(() => CopyArtifactLink({ url: "https://hub.test/artifacts/meal-abcdef" }))
+    assert.equal(elementText(tree), "Copied")
+    assert.equal(copied, "https://hub.test/artifacts/meal-abcdef")
+  } finally { if (descriptor) Object.defineProperty(global, "navigator", descriptor); else delete global.navigator }
+})
+
+test("action events update one card by kind without creating a user message or clearing the draft", () => {
+  const { applyStreamEvent } = loadComponent("components/ai-chat/stream-turn.ts", {})
+  let messages = []
+  let draft = "Keep this draft"
+  const turn = { threadId: "t", text: "", retry: false, action: { kind: "artifact" }, assistantId: "" }
+  const view = { setMessages: (fn) => { messages = fn(messages) }, setDraft: (fn) => { draft = fn(draft) }, setReading() {} }
+  applyStreamEvent(turn, "message_started", { messageId: "m" }, view)
+  for (const [state, lines] of [["working", 1], ["working", 50], ["created", 0]]) applyStreamEvent(turn, "action", { kind: "artifact", state, card: { title: "Meal", lines, slug: state === "created" ? "meal-abcdef" : undefined } }, view)
+  applyStreamEvent(turn, "action", { kind: "ticket", state: "created", card: { title: "Ignored" } }, view)
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].role, "assistant")
+  assert.equal(messages[0].blocks.length, 1)
+  assert.equal(messages[0].blocks[0].state, "created")
+  assert.equal(messages[0].blocks[0].id, "m-artifact")
+  assert.equal(draft, "Keep this draft")
+  assert.deepEqual(blockHelpers.splitContent("", messages[0].blocks), messages[0].blocks)
+})
+
+test("wrap-up is interactive only on the latest completed reply; failed cards retry only on the latest", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+    "./blocks": { ...blockHelpers, InlineBlock: "InlineBlock" }, "./artifact-card": { ArtifactActionCard: "ArtifactActionCard" },
+  })
+  const base = { id: "a", role: "assistant", content: "", createdAt: 0, status: "completed", blocks: [{ id: "wrap", type: "actions", at: 0, actions: ["artifact"] }] }
+  let action
+  const render = (messages, streaming = false) => hooks.render(() => MessageList({ messages, streaming, reading: "", onArtifact: (value) => { action = value ?? "new" } }))
+  findElement(render([base]), "InlineBlock").props.onAction("artifact")
+  assert.equal(action, "new")
+  for (const [messages, streaming] of [[[base], true], [[{ ...base, status: "streaming" }], false], [[base, { ...base, id: "next" }], false]]) {
+    assert.equal(findElement(render(messages, streaming), "InlineBlock").props.onAction, undefined)
+  }
+  const failed = { ...base, blocks: [{ id: "failed", type: "action", kind: "artifact", state: "failed", card: { title: "Meal" }, at: 0 }] }
+  assert.equal(typeof findElement(render([failed]), "ArtifactActionCard").props.onRetry, "function")
+  assert.equal(findElement(render([failed, base]), "ArtifactActionCard").props.onRetry, undefined)
+})
+
+test("artifact action uses the action stream and preserves the retry request after rejection", async () => {
+  const attempts = []
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => ({ thread: thread("t"), messages: [] }),
+    streamAIChatAction: async (id, action) => { attempts.push({ id, action }); throw new ApiError("Too many turns", 429) },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  const action = { kind: "artifact", title: "Meal", brief: "Prototype", artifactId: "existing" }
+  findElement(fixture.render(), "MessageList").props.onArtifact(action)
+  await flush()
+  const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  alert.props.children[1].props.onClick()
+  await flush()
+  assert.deepEqual(attempts, [{ id: "t", action }, { id: "t", action }])
+})
+
+test("artifact location, expiry and page errors handle pinned, missing and invalid pages", () => {
+  assert.deepEqual(artifactHelpers.artifactLocation("/artifacts/meal-swap-abcdef"), { slug: "meal-swap-abcdef", version: undefined })
+  assert.deepEqual(artifactHelpers.artifactLocation("/artifacts/meal-swap-abcdef/v/2/"), { slug: "meal-swap-abcdef", version: 2 })
+  for (const path of ["/artifacts/../file", "/artifacts/meal-abcdef/raw", "/artifacts/meal-abcdef/v/0", "/artifacts/meal-abcdef/v/99999999999999999"]) assert.equal(artifactHelpers.artifactLocation(path), null)
+  assert.equal(artifactHelpers.artifactURLExpired("/artifacts/meal-abcdef/raw?exp=100", 99000), false)
+  assert.equal(artifactHelpers.artifactURLExpired("/artifacts/meal-abcdef/raw?exp=100", 100000), true)
+  assert.equal(artifactHelpers.artifactPageError(404), "This artifact does not exist or was deleted.")
+  assert.equal(artifactHelpers.artifactPageError(500), "Unable to load this artifact. Try again.")
+})
+
+test("artifact page loads an isolated frame and shows pinned version metadata", async () => {
+  const hooks = createHooks()
+  const previousLocation = window.location
+  window.location = { pathname: "/artifacts/meal-abcdef/v/1", origin: "https://hub.test" }
+  const artifact = { slug: "meal-abcdef", title: "Meal", ownerLogin: "ana", version: 1, currentVersion: 3, createdAt: 100000, rawUrl: "/artifacts/meal-abcdef/raw?exp=1000", downloadUrl: "/artifacts/meal-abcdef/raw?download=1", shareUrl: "https://hub.test/artifacts/meal-abcdef" }
+  const { default: Page } = loadComponent("app/artifacts/page.tsx", {
+    react: hooks.react, "next/link": { default: "Link" }, "lucide-react": { Download: "Download", FileCode2: "FileCode2", Loader2: "Loader2" },
+    "@/lib/api": { ApiError, fetchAIChatArtifact: async (slug, version) => { assert.equal(slug, "meal-abcdef"); assert.equal(version, 1); return artifact } },
+    "@/lib/auth-storage": { requestAuthToken: async () => "token" }, "@/lib/hub-url": { getHubUrl: () => "" },
+    "@/lib/ai-chat-artifacts": artifactHelpers, "@/components/ui/button": { Button: "Button" }, "@/components/ai-chat/artifact-card": { CopyArtifactLink: "CopyArtifactLink", displayURL: (url) => url.replace(/^https?:\/\//, "") }, "@/hooks/use-branding": { useBranding: () => ({ appName: "Faster Factory" }) },
+  })
+  try {
+    assert.match(elementText(hooks.render(Page)), /Loading artifact/)
+    await flush()
+    const tree = hooks.render(Page)
+    assert.match(elementText(tree), /v1 of 3 · by ana · from AI Chat/)
+    const frame = findElement(tree, "iframe")
+    assert.equal(frame.props.sandbox, "allow-scripts")
+    assert.equal(frame.props.referrerPolicy, "no-referrer")
+    assert.equal(frame.props.src, artifact.rawUrl)
+    assert.ok(findElements(tree, "Button").some((button) => elementText(button).includes("Download .html")))
+  } finally { window.location = previousLocation }
+})
+
+
+const authRedirectHelpers = loadComponent("lib/auth-redirect.ts", {})
+
+test("login redirects preserve shared artifact versions and reject unsafe next paths", () => {
+  for (const path of ["/artifacts/meal-abcdef", "/artifacts/meal-abcdef/v/2/", "/ai-chat?thread=abc"]) {
+    assert.equal(authRedirectHelpers.safeNextPath(path), path)
+    const url = new URL(authRedirectHelpers.loginRedirectPath(path), "https://hub.test")
+    assert.equal(url.pathname, "/login")
+    assert.equal(url.searchParams.get("next"), path)
+  }
+  for (const path of [null, "", "https://outside.test", "//outside.test", "/\\outside.test", "/\t/outside.test", "/\n/outside.test", "relative"]) {
+    assert.equal(authRedirectHelpers.safeNextPath(path), null)
+    assert.equal(authRedirectHelpers.loginRedirectPath(path), "/login")
+  }
+})
+
+test("artifact download refreshes an expired URL without a focus event and preserves the displayed version", async () => {
+  const previousLocation = window.location
+  try {
+    for (const expired of [false, true]) {
+      const hooks = createHooks()
+      window.location = { pathname: "/artifacts/meal-abcdef", origin: "https://hub.test" }
+      const expiry = Math.floor(Date.now() / 1000) + (expired ? -1 : 900)
+      const artifact = { slug: "meal-abcdef", title: "Meal", ownerLogin: "ana", version: 2, currentVersion: 2, createdAt: 100000, rawUrl: `/raw?exp=${expiry}`, downloadUrl: `/raw?download=1&exp=${expiry}` }
+      const fresh = { ...artifact, currentVersion: 3, rawUrl: `/raw?exp=${expiry + 900}`, downloadUrl: `/raw?download=1&exp=${expiry + 900}` }
+      const requests = []
+      const { default: Page } = loadComponent("app/artifacts/page.tsx", {
+        react: hooks.react, "next/link": { default: "Link" }, "lucide-react": {},
+        "@/lib/api": { ApiError, fetchAIChatArtifact: async (slug, version) => { requests.push({ slug, version }); return requests.length === 1 ? artifact : fresh } },
+        "@/lib/auth-storage": { requestAuthToken: async () => "token" }, "@/lib/hub-url": { getHubUrl: () => "" },
+        "@/lib/ai-chat-artifacts": artifactHelpers, "@/components/ui/button": { Button: "Button" }, "@/components/ai-chat/artifact-card": { CopyArtifactLink: "CopyArtifactLink", displayURL: (url) => url.replace(/^https?:\/\//, "") }, "@/hooks/use-branding": { useBranding: () => ({ appName: "Faster Factory" }) },
+      })
+      hooks.render(Page)
+      await flush()
+      const button = findElements(hooks.render(Page), "Button").find((button) => elementText(button).includes("Download .html"))
+      button.props.onClick()
+      await flush()
+      assert.equal(window.location.href, expired ? fresh.downloadUrl : artifact.downloadUrl)
+      assert.deepEqual(requests, expired ? [{ slug: artifact.slug, version: undefined }, { slug: artifact.slug, version: 2 }] : [{ slug: artifact.slug, version: undefined }])
+    }
+  } finally { window.location = previousLocation }
+})
+
+test("artifact API 401 returns through login to the same pinned path", async () => {
+  const previousLocation = window.location
+  const previousFetch = global.fetch
+  window.location = { pathname: "/artifacts/meal-abcdef/v/2" }
+  global.fetch = async () => ({ status: 401 })
+  let cleared = false
+  try {
+    const { fetchAIChatArtifact } = loadComponent("lib/api.ts", {
+      "./hub-url": { getHubUrl: () => "" },
+      "./auth-storage": { getAuthToken: () => "expired-token", clearAuthTokens: () => { cleared = true } },
+      "./auth-redirect": authRedirectHelpers,
+    })
+    // Session expiry deliberately leaves this promise pending until navigation.
+    void fetchAIChatArtifact("meal-abcdef", 2)
+    await flush()
+    assert.equal(cleared, true)
+    assert.equal(window.location.href, "/login?next=%2Fartifacts%2Fmeal-abcdef%2Fv%2F2")
+  } finally { window.location = previousLocation; global.fetch = previousFetch }
+})
