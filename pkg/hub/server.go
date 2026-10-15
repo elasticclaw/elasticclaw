@@ -53,6 +53,8 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
+	workflowV2WorkTurns sync.Map // workflowV2WorkKey -> workflowV2WorkTurn
+
 	db        *sql.DB
 	addr      string
 	hubCfg    *types.HubConfig
@@ -380,6 +382,8 @@ type clawConn struct {
 	subagentsActiveAt      time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
 	subagentActiveCount    int             // subagent sessions with a run in flight per that heartbeat
 
+	onWorkInterval func(taskRunWorkInterval) // immutable after connection registration
+
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
 	pendingCheckpointReason string // coalesced checkpoint request to run after current turn
@@ -550,6 +554,16 @@ func (cc *clawConn) abortTurnLocked() {
 }
 
 func (cc *clawConn) resetTurnStateLocked() {
+	if !cc.streamingStartedAt.IsZero() && cc.onWorkInterval != nil {
+		interval := taskRunWorkInterval{cc.streamingStartedAt.UnixMilli(), now().UnixMilli()}
+		record := cc.onWorkInterval
+		// Wait for the caller to release the turn lock before any database work.
+		go func() {
+			cc.mu.Lock()
+			cc.mu.Unlock()
+			record(interval)
+		}()
+	}
 	cc.awaitingResponse = false
 	cc.sessionLossInterrupted = false
 	cc.turnInputMessageID = ""
@@ -2950,6 +2964,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		bridgeErrorPauseKind = ""
 	}
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
+	cc.onWorkInterval = func(interval taskRunWorkInterval) { s.persistTaskRunWorkInterval(clawID, interval) }
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -3041,6 +3056,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			cc.streamingBuf.Reset()
 			cc.streamingMsgID = ""
 		}
+		cc.resetTurnStateLocked()
 		cc.mu.Unlock()
 		current := s.claws[clawID] == cc
 		if current {
