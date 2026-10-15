@@ -147,7 +147,8 @@ func TestLinearCreateSafeErrors(t *testing.T) {
 				fmt.Fprint(w, tc.body)
 			}))
 			_, err := l.Create(context.Background(), Draft{Title: "Title", Body: "Body"})
-			if err == nil || err.Error() != tc.want || strings.Contains(err.Error(), secret) {
+			var failure *CreateError
+			if !errors.As(err, &failure) || err.Error() != tc.want || strings.Contains(err.Error(), secret) || failure.Unconfirmed != (tc.want == LinearUnconfirmed) {
 				t.Fatal(err)
 			}
 		})
@@ -276,8 +277,11 @@ func TestLinearCreatePartialResponses(t *testing.T) {
 					if err != nil || issue.Identifier != "PRO-1" || issue.URL != "https://linear.app/PRO-1" {
 						t.Fatal(issue, err)
 					}
-				} else if err == nil || err.Error() != want {
-					t.Fatal(issue, err, want)
+				} else {
+					var failure *CreateError
+					if !errors.As(err, &failure) || err.Error() != want || failure.Unconfirmed != (want == LinearUnconfirmed) {
+						t.Fatal(issue, err, want)
+					}
 				}
 			}
 		})
@@ -288,7 +292,55 @@ func TestLinearCreateQueryErrorsStillRejectPartialData(t *testing.T) {
 	l := NewLinear("Product", secret, fake(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team","name":"Product"}]}},"errors":[{"message":"nested failure"}]}`)
 	}))
-	if _, err := l.Target(context.Background()); err == nil || err.Error() != LinearRejected {
+	if _, err := l.Create(context.Background(), Draft{Title: "Draft", Body: "Evidence"}); err == nil || err.Error() != LinearRejected {
+		t.Fatal(err)
+	}
+}
+
+func TestLinearResolutionFailuresAreValidation(t *testing.T) {
+	for _, phase := range []string{createTeamQuery, createStatesQuery, createLabelsQuery} {
+		for _, status := range []int{200, 503} {
+			t.Run(fmt.Sprintf("%s/%d", phase, status), func(t *testing.T) {
+				l := NewLinear("Product", secret, fake(func(w http.ResponseWriter, r *http.Request) {
+					var req struct{ Query string }
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					if req.Query == createIssueMutation {
+						t.Fatal("mutation sent before resolution")
+					}
+					if req.Query == phase {
+						w.WriteHeader(status)
+						fmt.Fprint(w, `{"errors":[{"message":"provider detail"}]}`)
+					} else if req.Query == createTeamQuery {
+						fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team","name":"Product"}]}}}`)
+					} else {
+						fmt.Fprint(w, `{"data":{"workflowStates":{"nodes":[{"id":"state","name":"Backlog"}]}}}`)
+					}
+				}))
+				_, err := l.Create(context.Background(), Draft{Title: "Draft", Body: "Evidence", State: "Backlog", Labels: []string{"ai-chat"}, BeforeSend: func() error { t.Fatal("send marker before resolution"); return nil }})
+				var failure *CreateError
+				if !errors.As(err, &failure) || !failure.Validation || failure.Unconfirmed {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestLinearPostSendTransportFailureIsUnconfirmed(t *testing.T) {
+	sent := false
+	client := fake(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team","name":"Product"}]}}}`)
+	})
+	resolution := client.Transport
+	client.Transport = transport(func(r *http.Request) (*http.Response, error) {
+		if sent {
+			return nil, errors.New("lost response " + secret)
+		}
+		return resolution.RoundTrip(r)
+	})
+	_, err := NewLinear("Product", secret, client).Create(context.Background(), Draft{Title: "Draft", Body: "Evidence", BeforeSend: func() error { sent = true; return nil }})
+	var failure *CreateError
+	if !errors.As(err, &failure) || !failure.Unconfirmed || failure.Validation || strings.Contains(err.Error(), secret) {
 		t.Fatal(err)
 	}
 }

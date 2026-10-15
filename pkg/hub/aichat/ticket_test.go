@@ -486,6 +486,10 @@ func TestStartTicketInterruptedBeforeSendRecoversDraft(t *testing.T) {
 		}()
 		_ = r.createTicket(ctx, thread, &m, nil, input, "", creator, tracker.LinearTarget("Product", "", nil), []string{ticketSecret}, 1, false, "", func(event string, _ any) error {
 			if event == EventAction {
+				_, block, card := latestTicket(t, s, thread)
+				if block.State != "working" || card.Title != input.Title || card.Body != input.Body {
+					t.Fatal(block, card)
+				}
 				panic("restart")
 			}
 			return nil
@@ -580,7 +584,7 @@ func TestTicketUnknownOutcomeRequiresAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestTicketSuccessResendReusesCreatedCard(t *testing.T) {
+func TestTicketSuccessActionKeyResendReusesCreatedCard(t *testing.T) {
 	writes := 0
 	var deps Deps
 	h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, v map[string]any) {
@@ -590,13 +594,13 @@ func TestTicketSuccessResendReusesCreatedCard(t *testing.T) {
 	thread := testThread(t, s)
 	artifact := addTicketArtifact(t, s, thread, "Prototype")
 	path := "/api/ai-chat/threads/" + thread.ID + "/actions"
-	body := `{"kind":"ticket","title":"Swap","body":"31 requests"}`
+	body := `{"kind":"ticket","actionKey":"same-click","title":"Swap","body":"31 requests"}`
 	if rec := request(h, "POST", path, body, "octocat", "on"); rec.Code != 200 {
 		t.Fatal(rec.Code, rec.Body)
 	}
 	_, _, original := latestTicket(t, s, thread)
 	h = Routes(deps)
-	for _, retry := range []string{body, `{"kind":"ticket","title":"Swap","body":"31 requests","artifactId":"` + artifact.ID + `"}`} {
+	for _, retry := range []string{body, `{"kind":"ticket","actionKey":"same-click","title":"Swap","body":"31 requests","artifactId":"` + artifact.ID + `"}`} {
 		rec := request(h, "POST", path, retry, "octocat", "on")
 		_, block, card := latestTicket(t, s, thread)
 		if rec.Code != 200 || writes != 1 || block.State != "created" || !reflect.DeepEqual(original, card) {

@@ -61,6 +61,7 @@ func TestTicketActionKeyReplaysBeforeDrafting(t *testing.T) {
 		if json.Unmarshal([]byte(raw), &args) != nil || args.ActionKey != "click-123" {
 			t.Fatal(raw)
 		}
+		assertTicketReplay(t, s, latest.ID, original.AttemptID, "created", false)
 		if rec.Code != 200 || block.State != "created" || !reflect.DeepEqual(card, original) || drafts != 1 || writes != 1 {
 			t.Fatal(rec.Code, rec.Body, card, drafts, writes)
 		}
@@ -146,6 +147,20 @@ func TestTicketActionsIgnoreUnrelatedAndMalformedRows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	m, err := s.BeginTurn(ctx, thread, "Continue", "fake", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecordToolRun(ctx, ToolRun{ID: "stray-ticket", MessageID: m.ID, Seq: 1, Tool: "ticket", Args: `{}`, Result: `{"requestSent":true}`}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecoverInterrupted(ctx, thread.ID); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.Messages(ctx, thread.ID, 0)
+	if err != nil || hasTicketBlock(messages[len(messages)-1]) || messages[len(messages)-1].Status != "error" {
+		t.Fatal(messages, err)
+	}
 	actions, err := s.ticketActions(ctx, thread.ID, "")
 	if err != nil || len(actions) != 1 || actions[0].unknown {
 		t.Fatal(actions, err)
@@ -180,11 +195,21 @@ func TestTicketFailureHeadlinesByPhase(t *testing.T) {
 	for _, tc := range []struct{ phase, headline string }{
 		{"team", "Could not prepare the ticket"}, {"state", "Could not prepare the ticket"}, {"label", "Could not prepare the ticket"},
 		{"rejected", "Linear did not accept the ticket"}, {"unknown", "Linear did not confirm the ticket"},
+		{"state http", "Could not prepare the ticket"}, {"state graphql", "Could not prepare the ticket"},
+		{"label http", "Could not prepare the ticket"}, {"label graphql", "Could not prepare the ticket"},
 	} {
 		t.Run(tc.phase, func(t *testing.T) {
 			client := sourceClient(func(w http.ResponseWriter, r *http.Request) {
 				var req struct{ Query string }
 				_ = json.NewDecoder(r.Body).Decode(&req)
+				if strings.HasPrefix(tc.phase, "state ") && strings.Contains(req.Query, "workflowStates(") || strings.HasPrefix(tc.phase, "label ") && strings.Contains(req.Query, "issueLabels(") {
+					if strings.HasSuffix(tc.phase, "http") {
+						w.WriteHeader(503)
+					} else {
+						fmt.Fprint(w, `{"errors":[{"message":"resolution failed"}]}`)
+					}
+					return
+				}
 				switch {
 				case strings.Contains(req.Query, "teams("):
 					if tc.phase == "team" {
@@ -230,7 +255,7 @@ func TestTicketFailureHeadlinesByPhase(t *testing.T) {
 	m, _ := s.beginAction(ctx, thread, "fake", "", "ticket")
 	d := Deps{LinearToken: func(string) (string, bool) { return ticketSecret, true }}
 	cfg := &config.Config{IssueTracker: &config.IssueTracker{}}
-	creator, target, secrets := d.ticketCreator(thread.Workspace, cfg)
+	creator, target, secrets := d.ticketCreator(context.Background(), thread.Workspace, cfg)
 	r := &Runner{Store: s}
 	if err := r.createTicket(ctx, thread, &m, nil, tools.TicketRequest{Title: "Draft"}, "", creator, target, secrets, 1, false, "", func(string, any) error { return nil }); err != nil {
 		t.Fatal(err)
@@ -252,12 +277,12 @@ func TestAvailableTicketActionsUseCachedAuthHealth(t *testing.T) {
 		{nil, true}, {&readhttp.StatusError{Code: 401}, false}, {&readhttp.StatusError{Code: 403}, false}, {&readhttp.StatusError{Code: 503}, true},
 	} {
 		d.health.entries[key] = &healthEntry{result: healthResult{err: tc.err}, started: time.Now()}
-		if got := d.availableActions("workspace", cfg); slices.Contains(got, "ticket") != tc.available {
+		if got := d.availableActions(context.Background(), "workspace", cfg); slices.Contains(got, "ticket") != tc.available {
 			t.Fatal(got, tc.err)
 		}
 	}
 	delete(d.health.entries, key)
-	if !slices.Contains(d.availableActions("workspace", cfg), "ticket") {
+	if !slices.Contains(d.availableActions(context.Background(), "workspace", cfg), "ticket") {
 		t.Fatal("unknown health blocked ticket")
 	}
 }
@@ -274,7 +299,7 @@ func TestSourcesRejectedTokenOmitsTicketAction(t *testing.T) {
 		if json.Unmarshal(rec.Body.Bytes(), &response) != nil || rec.Code != 200 {
 			t.Fatal(rec.Code, rec.Body)
 		}
-		if slices.Contains(response.Actions, "ticket") || len(response.Sources) != 1 || response.Sources[0].Error != "The API key was rejected." {
+		if slices.Contains(response.Actions, "ticket") || len(response.Sources) != 1 || response.Ticket != nil || response.Sources[0].Access != "read" || response.Sources[0].Error != "The API key was rejected." {
 			t.Fatal(response)
 		}
 	}
@@ -335,7 +360,8 @@ func TestTicketConfirmationCannotAuthorizeAnotherUnknownAttempt(t *testing.T) {
 			if err = runner.RunTicket(ctx, thread, m, cfg, nil, first.TicketRequest, "click", first.AttemptID, func(string, any) error { return nil }); err != nil {
 				t.Fatal(err)
 			}
-			_, _, blocked := latestTicket(t, s, thread)
+			blockedMessage, _, blocked := latestTicket(t, s, thread)
+			assertTicketReplay(t, s, blockedMessage.ID, second.AttemptID, "failed", true)
 			if writes != 2 || !blocked.OutcomeUnknown || blocked.AttemptID != second.AttemptID || blocked.ConfirmedUnknown != "" {
 				t.Fatal(writes, blocked)
 			}
@@ -460,7 +486,7 @@ func TestDismissedTicketRejectsReplayAndStaleConfirmation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				creator, target, secrets := deps.ticketCreator(thread.Workspace, cfg)
+				creator, target, secrets := deps.ticketCreator(context.Background(), thread.Workspace, cfg)
 				if err := runner.createTicket(ctx, thread, &m, nil, original.TicketRequest, tc.key, creator, target, secrets, 1, false, tc.confirm, func(string, any) error { return nil }); err != nil {
 					t.Fatal(err)
 				}
@@ -469,6 +495,7 @@ func TestDismissedTicketRejectsReplayAndStaleConfirmation(t *testing.T) {
 					t.Fatal(err)
 				}
 				_, block, card := latestTicket(t, s, thread)
+				assertTicketReplay(t, s, m.ID, original.AttemptID, "failed", false)
 				if block.State != "failed" || card.Error != want || card.OutcomeUnknown || card.ConfirmedUnknown != "" || writes != 0 {
 					t.Fatal(tc, block, card, writes)
 				}

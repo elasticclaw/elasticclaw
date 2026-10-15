@@ -43,9 +43,9 @@ type flight struct {
 type Runner struct {
 	ArtifactsDir     string
 	PublicURL        func() string
-	AvailableActions func(string, *config.Config) []string
+	AvailableActions func(context.Context, string, *config.Config) []string
 	TicketSecrets    func(context.Context, string, *config.Config) []string
-	TicketCreator    func(string, *config.Config) (tracker.Creator, tracker.Target, []string)
+	TicketCreator    func(context.Context, string, *config.Config) (tracker.Creator, tracker.Target, []string)
 	Store            *Store
 	Reads            *tools.ReadRegistry
 	PrepareReads     func(context.Context, string, *config.Config) (*tools.ReadRegistry, *config.Config, []string)
@@ -136,6 +136,7 @@ func prompt(cfg *config.Config, mode string) string {
 // Run persists partial output and usage even on cancellation or a broken SSE
 // connection. The caller must hold Acquire's slot until Run returns.
 func (r *Runner) Run(ctx context.Context, t Thread, m Message, cfg *config.Config, provider llm.Provider, emit Emit) error {
+	ctx = withTicketToken(ctx)
 	runErr := r.loop(ctx, t, &m, cfg, provider, emit)
 	return r.finishRun(ctx, m, runErr, emit)
 }
@@ -192,12 +193,12 @@ func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Con
 	var target tracker.Target
 	if r.TicketCreator != nil {
 		var ticketSecrets []string
-		creator, target, ticketSecrets = r.TicketCreator(t.Workspace, cfg)
-		secrets = append(secrets, ticketSecrets...)
+		creator, target, ticketSecrets = r.TicketCreator(ctx, t.Workspace, cfg)
+		secrets = append(slices.Clone(secrets), ticketSecrets...)
 	}
 	available := []string{}
 	if r.AvailableActions != nil {
-		for _, action := range r.AvailableActions(t.Workspace, cfg) {
+		for _, action := range r.AvailableActions(ctx, t.Workspace, cfg) {
 			if action == "artifact" || action == "ticket" {
 				available = append(available, action)
 			}

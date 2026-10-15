@@ -93,11 +93,12 @@ func ticketSummary(body string) string {
 }
 
 func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config.Config, p llm.Provider, input tools.TicketRequest, actionKey, confirmUnknown string, emit Emit) error {
+	ctx = withTicketToken(ctx)
 	var creator tracker.Creator
 	var target tracker.Target
 	var secrets []string
 	if r.TicketCreator != nil {
-		creator, target, secrets = r.TicketCreator(t.Workspace, cfg)
+		creator, target, secrets = r.TicketCreator(ctx, t.Workspace, cfg)
 	}
 	if r.TicketSecrets != nil {
 		secrets = append(secrets, r.TicketSecrets(ctx, t.Workspace, cfg)...)
@@ -237,12 +238,24 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		setTicketBlock(m, "failed", TicketCard{ActionKey: actionKey, Target: target, TicketRequest: input, Error: "Unable to save the ticket draft.", FailureHeadline: "Could not prepare the ticket"})
 		return err
 	}
+	replay := func(state, attemptID string) error {
+		setTicketBlock(m, state, card)
+		run.Summary = "Replayed ticket attempt " + attemptID
+		run.Error = card.Error
+		run.Result = string(redactedJSON(map[string]any{"replayOf": attemptID, "state": state, "outcomeUnknown": card.OutcomeUnknown, "dismissed": card.Dismissed}, secrets))
+		if err := save(func(c context.Context) error {
+			_, err := r.Store.DB.ExecContext(c, `UPDATE ai_chat_tool_runs SET summary=?,error=?,result_json=?,duration_ms=? WHERE id=?`, run.Summary, run.Error, run.Result, time.Since(started).Milliseconds(), run.ID)
+			return err
+		}); err != nil {
+			return err
+		}
+		_ = action(state)
+		return nil
+	}
 	if created != nil {
 		card = created.card
 		_ = json.Unmarshal(redactedJSON(card, secrets), &card)
-		setTicketBlock(m, "created", card)
-		_ = action("created")
-		return nil
+		return replay("created", created.attemptID)
 	}
 	if dismissed != nil {
 		if dismissed.card.Tracker != "" {
@@ -253,21 +266,20 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		}
 		card.FailureHeadline = "Ticket already exists"
 		card.Error = "You confirmed the ticket already exists in " + card.Tracker + "."
-		setTicketBlock(m, "failed", card)
-		_ = action("failed")
-		return nil
+		return replay("failed", dismissed.attemptID)
 	}
 	if prior := unknown; prior != nil && card.ConfirmedUnknown == "" {
 		card.AttemptID = prior.attemptID
 		if prior.card.Tracker != "" {
 			card.Tracker = readhttp.Redact(prior.card.Tracker, secrets)
 		}
+		if card.Tracker == "" {
+			card.Tracker = "The tracker"
+		}
 		card.FailureHeadline = card.Tracker + " did not confirm the ticket"
 		card.OutcomeUnknown = true
 		card.Error = card.Tracker + " did not confirm the ticket. Check " + card.Tracker + " before trying again."
-		setTicketBlock(m, "failed", card)
-		_ = action("failed")
-		return nil
+		return replay("failed", prior.attemptID)
 	}
 	failureHeadline := "Could not prepare the ticket"
 	fail := func(message string) error {
@@ -279,19 +291,19 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 			card.FailureHeadline = "Ticket creation stopped"
 		}
 		card.Error = readhttp.Redact(message, secrets)
-		card.OutcomeUnknown = message == target.Tracker+" did not confirm the ticket. Check "+target.Tracker+" before trying again."
 		if card.OutcomeUnknown {
 			card.FailureHeadline = target.Tracker + " did not confirm the ticket"
 		}
 		setTicketBlock(m, "failed", card)
-		run.Error, run.DurationMS = card.Error, time.Since(started).Milliseconds()
+		run.Summary, run.Error, run.DurationMS = card.FailureHeadline, card.Error, time.Since(started).Milliseconds()
+		run.Result = string(redactedJSON(map[string]any{"state": "failed", "requestSent": sent, "outcomeUnknown": card.OutcomeUnknown}, secrets))
 		if e := save(func(c context.Context) error {
 			tx, e := r.Store.DB.BeginTx(c, nil)
 			if e != nil {
 				return e
 			}
 			defer tx.Rollback()
-			if _, e = tx.ExecContext(c, `UPDATE ai_chat_tool_runs SET args_json=?,error=?,duration_ms=? WHERE id=?`, string(redactedJSON(card, secrets)), run.Error, run.DurationMS, run.ID); e != nil {
+			if _, e = tx.ExecContext(c, `UPDATE ai_chat_tool_runs SET args_json=?,summary=?,error=?,result_json=?,duration_ms=? WHERE id=?`, string(redactedJSON(card, secrets)), run.Summary, run.Error, run.Result, run.DurationMS, run.ID); e != nil {
 				return e
 			}
 			if _, e = tx.ExecContext(c, `UPDATE ai_chat_messages SET blocks_json=? WHERE id=?`, string(m.Blocks), m.ID); e != nil {
@@ -320,6 +332,13 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		card.Artifact = &TicketArtifact{Slug: artifact.Slug, Title: artifact.Title, ShareURL: r.shareURL(artifact.Slug)}
 	}
 	_ = json.Unmarshal(redactedJSON(card, secrets), &card)
+	setTicketBlock(m, "working", card)
+	if err = save(func(c context.Context) error {
+		_, err := r.Store.DB.ExecContext(c, `UPDATE ai_chat_messages SET blocks_json=? WHERE id=?`, string(m.Blocks), m.ID)
+		return err
+	}); err != nil {
+		return fail("Unable to save the ticket draft.")
+	}
 	if err = action("working"); err != nil {
 		return fail("Stopped. Nothing was created.")
 	}
@@ -336,17 +355,6 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		return fail("The ticket draft is invalid.")
 	}
 	card.Summary = ticketSummary(card.Body)
-	for _, prior := range previous {
-		if prior.state == "created" && (prior.draft == card.TicketRequest || prior.card.TicketRequest == card.TicketRequest) {
-			confirmed := card.ConfirmedUnknown
-			card = prior.card
-			card.ConfirmedUnknown = confirmed
-			_ = json.Unmarshal(redactedJSON(card, secrets), &card)
-			setTicketBlock(m, "created", card)
-			_ = action("created")
-			return nil
-		}
-	}
 	// Keep the original draft in the card; append server-owned material only once.
 	description := card.Body
 	if card.Artifact != nil {
@@ -365,9 +373,20 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		setTicketBlock(m, "working", card)
 		if err := save(func(c context.Context) error {
-			_, e := r.Store.DB.ExecContext(c, `UPDATE ai_chat_tool_runs SET result_json='{"requestSent":true}' WHERE id=?`, run.ID)
-			return e
+			tx, err := r.Store.DB.BeginTx(c, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			if _, err = tx.ExecContext(c, `UPDATE ai_chat_tool_runs SET result_json='{"requestSent":true}' WHERE id=?`, run.ID); err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(c, `UPDATE ai_chat_messages SET blocks_json=? WHERE id=?`, string(m.Blocks), m.ID); err != nil {
+				return err
+			}
+			return tx.Commit()
 		}); err != nil {
 			return err
 		}
@@ -380,12 +399,14 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		var public *tracker.CreateError
 		if errors.As(err, &public) {
 			message = public.Message
+			card.OutcomeUnknown = public.Unconfirmed
 			if public.Validation || !sent {
 				failureHeadline = "Could not prepare the ticket"
 			} else {
 				failureHeadline = target.Tracker + " did not accept the ticket"
 			}
 		} else if sent {
+			card.OutcomeUnknown = true
 			message = target.Tracker + " did not confirm the ticket. Check " + target.Tracker + " before trying again."
 		}
 		return fail(message)
@@ -443,7 +464,7 @@ func (s *Store) finishTicket(ctx context.Context, t Thread, m Message, run ToolR
 	if _, err = tx.ExecContext(ctx, `INSERT INTO ai_chat_handoffs(id,thread_id,message_id,kind,provider,external_ref,url,payload_json,created_at) VALUES(?,?,?,'ticket',?,?,?,?,?)`, uuid.NewString(), t.ID, m.ID, provider, card.Identifier, card.URL, string(redactedJSON(payload, nil)), time.Now().UnixMilli()); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_tool_runs SET summary=?,result_json='null',duration_ms=? WHERE id=?`, run.Summary, run.DurationMS, run.ID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_tool_runs SET summary=?,result_json=?,duration_ms=? WHERE id=?`, run.Summary, string(redactedJSON(map[string]any{"state": "created", "identifier": card.Identifier}, nil)), run.DurationMS, run.ID); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_messages SET blocks_json=?,content=? WHERE id=?`, string(m.Blocks), m.Content, m.ID); err != nil {

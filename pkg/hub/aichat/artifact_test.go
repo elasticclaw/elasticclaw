@@ -423,7 +423,7 @@ func TestStartArtifactEndsBatchAndAvailability(t *testing.T) {
 			m, _ := s.BeginTurn(ctx, thread, "Create a prototype", "fake", false)
 			r := &Runner{Store: s, ArtifactsDir: t.TempDir()}
 			if available {
-				r.AvailableActions = func(string, *config.Config) []string { return []string{"artifact"} }
+				r.AvailableActions = func(context.Context, string, *config.Config) []string { return []string{"artifact"} }
 			}
 			calls := 0
 			p := fakeProvider{stream: func(callCtx context.Context, req llm.Request, token func(string) error) (llm.Response, error) {

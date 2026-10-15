@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"regexp"
+	"sync"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tools"
@@ -15,7 +16,6 @@ type savedTicketAction struct {
 	actionKey        string
 	attemptID        string
 	confirmedUnknown string
-	draft            tools.TicketRequest
 	card             TicketCard
 	state            string
 	unknown          bool
@@ -47,7 +47,6 @@ rowsLoop:
 		action.actionKey = argsCard.ActionKey
 		action.confirmedUnknown = argsCard.ConfirmedUnknown
 		action.card = argsCard
-		action.draft = argsCard.TicketRequest
 		var marker struct{ RequestSent, Dismissed bool }
 		if result.Valid && result.String != "" {
 			if err := json.Unmarshal([]byte(result.String), &marker); err != nil {
@@ -86,11 +85,37 @@ rowsLoop:
 	return actions, rows.Err()
 }
 
-func (d Deps) ticketCreator(workspace string, cfg *config.Config) (tracker.Creator, tracker.Target, []string) {
+// A turn uses one workspace token snapshot; the next request resolves it anew.
+type ticketTokenKey struct{}
+type ticketToken struct {
+	once  sync.Once
+	value string
+	ok    bool
+}
+
+func withTicketToken(ctx context.Context) context.Context {
+	if ctx.Value(ticketTokenKey{}) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ticketTokenKey{}, &ticketToken{})
+}
+
+func (d Deps) linearToken(ctx context.Context, workspace string) (string, bool) {
+	if d.LinearToken == nil {
+		return "", false
+	}
+	if token, ok := ctx.Value(ticketTokenKey{}).(*ticketToken); ok {
+		token.once.Do(func() { token.value, token.ok = d.LinearToken(workspace) })
+		return token.value, token.ok
+	}
+	return d.LinearToken(workspace)
+}
+
+func (d Deps) ticketCreator(ctx context.Context, workspace string, cfg *config.Config) (tracker.Creator, tracker.Target, []string) {
 	if cfg.IssueTracker == nil || d.LinearToken == nil {
 		return nil, tracker.Target{}, nil
 	}
-	token, ok := d.LinearToken(workspace)
+	token, ok := d.linearToken(ctx, workspace)
 	if !ok || token == "" {
 		return nil, tracker.Target{}, nil
 	}
@@ -98,9 +123,9 @@ func (d Deps) ticketCreator(workspace string, cfg *config.Config) (tracker.Creat
 	return tracker.NewLinear(fields.Team, token, d.HTTPClient), tracker.LinearTarget(fields.Team, fields.State, fields.Labels), []string{token}
 }
 
-func (d Deps) availableActions(workspace string, cfg *config.Config) []string {
+func (d Deps) availableActions(ctx context.Context, workspace string, cfg *config.Config) []string {
 	actions := []string{"artifact"}
-	if creator, _, _ := d.ticketCreator(workspace, cfg); creator != nil && !d.health.tokenRejected(sourceHealthKey(workspace, cfg, "issue_tracker")) {
+	if creator, _, _ := d.ticketCreator(ctx, workspace, cfg); creator != nil && !d.health.tokenRejected(sourceHealthKey(workspace, cfg, "issue_tracker")) {
 		actions = append(actions, "ticket")
 	}
 	return actions
@@ -164,7 +189,7 @@ func (d Deps) ticketSecrets(ctx context.Context, workspace string, cfg *config.C
 		if source.Status == "invalid" {
 			continue
 		}
-		candidate := cache.prepare(ctx, sourceHealthKey(workspace, cfg, source.Kind), func() sourceCandidate { return d.candidate(workspace, cfg, source) })
+		candidate := cache.prepare(ctx, sourceHealthKey(workspace, cfg, source.Kind), func() sourceCandidate { return d.candidate(ctx, workspace, cfg, source) })
 		secrets = append(secrets, candidate.secrets...)
 	}
 	return secrets

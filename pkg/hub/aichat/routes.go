@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -79,6 +80,7 @@ type SourcesResponse struct {
 }
 
 func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
+	ctx := withTicketToken(r.Context())
 	names, err := deps.Workspaces()
 	if err != nil {
 		http.Error(w, "unable to list workspaces", http.StatusInternalServerError)
@@ -105,9 +107,10 @@ func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
 		if cfg, err := config.Load(deps.ManagedDir(response.Workspace)); err == nil {
 			response.Configured = true
 			var secrets []string
-			response.Sources, _, secrets = deps.checkSources(r.Context(), response.Workspace, cfg, r.URL.Query().Get("refresh") == "1")
-			response.Actions = deps.availableActions(response.Workspace, cfg)
-			if creator, target, ticketSecrets := deps.ticketCreator(response.Workspace, cfg); creator != nil {
+			response.Sources, _, secrets = deps.checkSources(ctx, response.Workspace, cfg, r.URL.Query().Get("refresh") == "1")
+			response.Actions = deps.availableActions(ctx, response.Workspace, cfg)
+			if slices.Contains(response.Actions, "ticket") {
+				_, target, ticketSecrets := deps.ticketCreator(ctx, response.Workspace, cfg)
 				secrets = append(secrets, ticketSecrets...)
 				_ = json.Unmarshal(redactedJSON(target, secrets), &target)
 				response.Ticket = &target

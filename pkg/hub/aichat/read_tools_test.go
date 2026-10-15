@@ -84,7 +84,7 @@ func TestEveryReadToolKeepsSecretsOutOfRuns(t *testing.T) {
 			})
 			var reads []tools.Tool
 			for _, source := range cfg.Sources {
-				reads = append(reads, deps.candidate("ws", cfg, source).tools...)
+				reads = append(reads, deps.candidate(context.Background(), "ws", cfg, source).tools...)
 			}
 			if len(reads) != 12 {
 				t.Fatalf("tool coverage = %d", len(reads))
@@ -225,7 +225,7 @@ func TestConnectorValidationErrorsAreActionable(t *testing.T) {
 		"linear_search": `{"query":""}`, "linear_get": `{"id":"../"}`,
 	}
 	for _, kind := range []string{"knowledge_base", "repositories", "posthog", "datadog", "issue_tracker"} {
-		for _, tool := range deps.candidate("ws", cfg, config.Source{Kind: kind}).tools {
+		for _, tool := range deps.candidate(context.Background(), "ws", cfg, config.Source{Kind: kind}).tools {
 			name := tool.Definition().Name
 			for _, raw := range []string{args[name], `{"unknown":true}`} {
 				_, err := tool.Run(context.Background(), json.RawMessage(raw))

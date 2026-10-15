@@ -40,6 +40,9 @@ type namedPage struct {
 func (l *Linear) createError(message string) error {
 	return &CreateError{Message: readhttp.Redact(message, l.Client.Secrets)}
 }
+func (l *Linear) unconfirmedError() error {
+	return &CreateError{Message: readhttp.Redact(LinearUnconfirmed, l.Client.Secrets), Unconfirmed: true}
+}
 func (l *Linear) validationError(message string) error {
 	return &CreateError{Message: readhttp.Redact(message, l.Client.Secrets), Validation: true}
 }
@@ -47,7 +50,13 @@ func (l *Linear) permissionError(team string) error {
 	return l.createError(fmt.Sprintf("The workspace token cannot create issues in team %s.", team))
 }
 
-func (l *Linear) createRequest(ctx context.Context, query string, variables any, out any, team string, mutation bool) error {
+func (l *Linear) createRequest(ctx context.Context, query string, variables any, out any, team string, mutation bool) (err error) {
+	defer func() {
+		var failure *CreateError
+		if !mutation && errors.As(err, &failure) {
+			failure.Validation = true
+		}
+	}()
 	var response struct {
 		Data   json.RawMessage
 		Errors []struct {
@@ -58,7 +67,7 @@ func (l *Linear) createRequest(ctx context.Context, query string, variables any,
 			}
 		}
 	}
-	err := l.Client.Do(ctx, http.MethodPost, "/graphql", map[string]any{"query": query, "variables": variables}, &response)
+	err = l.Client.Do(ctx, http.MethodPost, "/graphql", map[string]any{"query": query, "variables": variables}, &response)
 	if err != nil {
 		var status *readhttp.StatusError
 		if errors.As(err, &status) {
@@ -66,12 +75,12 @@ func (l *Linear) createRequest(ctx context.Context, query string, variables any,
 				return l.permissionError(team)
 			}
 			if mutation && status.Code >= 500 {
-				return l.createError(LinearUnconfirmed)
+				return l.unconfirmedError()
 			}
 			return l.createError(LinearRejected)
 		}
 		if mutation {
-			return l.createError(LinearUnconfirmed)
+			return l.unconfirmedError()
 		}
 		return l.createError(LinearRejected)
 	}
@@ -79,7 +88,7 @@ func (l *Linear) createRequest(ctx context.Context, query string, variables any,
 		if mutation {
 			var result issueCreateResult
 			if len(response.Data) > 0 && json.Unmarshal(response.Data, &result) != nil {
-				return l.createError(LinearUnconfirmed)
+				return l.unconfirmedError()
 			}
 			if result.IssueCreate != nil {
 				v := result.IssueCreate.Issue
@@ -88,7 +97,7 @@ func (l *Linear) createRequest(ctx context.Context, query string, variables any,
 						return nil
 					}
 				}
-				return l.createError(LinearUnconfirmed)
+				return l.unconfirmedError()
 			}
 		}
 		for _, e := range response.Errors {
@@ -103,7 +112,7 @@ func (l *Linear) createRequest(ctx context.Context, query string, variables any,
 	}
 	if len(response.Data) == 0 || string(response.Data) == "null" || json.Unmarshal(response.Data, out) != nil {
 		if mutation {
-			return l.createError(LinearUnconfirmed)
+			return l.unconfirmedError()
 		}
 		return l.createError(LinearRejected)
 	}
@@ -119,11 +128,6 @@ func (l *Linear) resolveTeam(ctx context.Context, team string) (namedID, error) 
 		return namedID{}, l.validationError("The configured Linear team was not found or is ambiguous.")
 	}
 	return result.Teams.Nodes[0], nil
-}
-
-func (l *Linear) Target(ctx context.Context) (Target, error) {
-	team, err := l.resolveTeam(ctx, l.team)
-	return LinearTarget(team.Name, "", nil), err
 }
 
 func (l *Linear) names(ctx context.Context, query string, filter any, team string) ([]namedID, error) {
@@ -147,7 +151,7 @@ func (l *Linear) names(ctx context.Context, query string, filter any, team strin
 		}
 		after = items.PageInfo.EndCursor
 	}
-	return nil, l.createError(LinearRejected)
+	return nil, l.validationError(LinearRejected)
 }
 
 func (l *Linear) Create(ctx context.Context, draft Draft) (Issue, error) {
@@ -224,14 +228,14 @@ func (l *Linear) Create(ctx context.Context, draft Draft) (Issue, error) {
 		return Issue{}, err
 	}
 	if result.IssueCreate == nil {
-		return Issue{}, l.createError(LinearUnconfirmed)
+		return Issue{}, l.unconfirmedError()
 	}
 	if !result.IssueCreate.Success {
 		return Issue{}, l.createError(LinearRejected)
 	}
 	v := result.IssueCreate.Issue
 	if v == nil || v.Identifier == "" || v.URL == "" {
-		return Issue{}, l.createError(LinearUnconfirmed)
+		return Issue{}, l.unconfirmedError()
 	}
 	return Issue{Identifier: v.Identifier, URL: v.URL, Title: v.Title, State: v.State.Name, Team: team.Name, Labels: labels}, nil
 }

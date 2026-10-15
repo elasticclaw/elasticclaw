@@ -109,7 +109,7 @@ type sourceCandidate struct {
 	check   func(context.Context) healthResult
 }
 
-func (d Deps) candidate(workspace string, cfg *config.Config, source config.Source) sourceCandidate {
+func (d Deps) candidate(ctx context.Context, workspace string, cfg *config.Config, source config.Source) sourceCandidate {
 	c := sourceCandidate{}
 	secret := func(name string) string {
 		value, ok := "", false
@@ -191,7 +191,7 @@ func (d Deps) candidate(workspace string, cfg *config.Config, source config.Sour
 		c.detail = "Team " + v.DefaultFields.Team + " · reads issues to avoid duplicates"
 		token, ok := "", false
 		if d.LinearToken != nil {
-			token, ok = d.LinearToken(workspace)
+			token, ok = d.linearToken(ctx, workspace)
 		}
 		if !ok || token == "" {
 			c.err = errors.New("The Linear tracker token is not configured.")
@@ -242,7 +242,7 @@ func (d Deps) checkSources(ctx context.Context, workspace string, cfg *config.Co
 			}
 			key := sourceHealthKey(workspace, cfg, s.Kind)
 			source := *s
-			c := cache.prepare(ctx, key, func() sourceCandidate { return d.candidate(workspace, cfg, source) })
+			c := cache.prepare(ctx, key, func() sourceCandidate { return d.candidate(ctx, workspace, cfg, source) })
 			candidates[i] = c
 			s.Detail = c.detail
 			s.Status = "unreachable"

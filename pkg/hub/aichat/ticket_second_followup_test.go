@@ -88,6 +88,14 @@ func TestTicketSentMutationSurvivesCancellation(t *testing.T) {
 				t.Fatal("mutation did not start")
 			}
 			cancel()
+			workingMessage, workingBlock, workingCard := latestTicket(t, s, thread)
+			if workingMessage.Status != "streaming" || workingBlock.State != "working" || workingCard.Title != "Draft" || workingCard.Body != "Evidence" {
+				t.Fatal(workingMessage, workingBlock, workingCard)
+			}
+			var marker string
+			if err := s.DB.QueryRow(`SELECT result_json FROM ai_chat_tool_runs WHERE message_id=?`, m.ID).Scan(&marker); err != nil || !strings.Contains(marker, `"requestSent":true`) {
+				t.Fatal(marker, err)
+			}
 			release <- struct{}{}
 			select {
 			case err = <-done:

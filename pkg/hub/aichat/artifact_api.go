@@ -191,6 +191,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	ctx = withTicketToken(ctx)
 	if body.ArtifactID != "" {
 		if _, err = a.store.ownedArtifact(ctx, t, body.ArtifactID); err != nil {
 			http.NotFound(w, r)
@@ -213,7 +214,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		if prior := dismissedTicketAction(previous, body.ActionKey, body.ConfirmUnknown); existing == nil && prior != nil {
 			name := prior.card.Tracker
 			if name == "" {
-				_, target, _ := a.deps.ticketCreator(t.Workspace, cfg)
+				_, target, _ := a.deps.ticketCreator(ctx, t.Workspace, cfg)
 				name = target.Tracker
 			}
 			if name == "" {
@@ -225,7 +226,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		if prior := unknownTicketAction(previous); existing == nil && prior != nil && body.ConfirmUnknown != prior.attemptID {
 			name := prior.card.Tracker
 			if name == "" {
-				_, target, _ := a.deps.ticketCreator(t.Workspace, cfg)
+				_, target, _ := a.deps.ticketCreator(ctx, t.Workspace, cfg)
 				name = target.Tracker
 			}
 			if name == "" {
@@ -235,7 +236,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if existing == nil && (a.runner.AvailableActions == nil || !slices.Contains(a.runner.AvailableActions(t.Workspace, cfg), body.Kind)) {
+	if existing == nil && (a.runner.AvailableActions == nil || !slices.Contains(a.runner.AvailableActions(ctx, t.Workspace, cfg), body.Kind)) {
 		http.Error(w, "not available", 400)
 		return
 	}

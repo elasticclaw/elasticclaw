@@ -4,7 +4,6 @@ import "context"
 
 // Creator is separate from the read registry. Only a user-initiated action calls it.
 type Creator interface {
-	Target(context.Context) (Target, error)
 	Create(context.Context, Draft) (Issue, error)
 }
 
@@ -32,8 +31,9 @@ type Issue struct {
 
 // CreateError contains only safe, actionable text, never a provider response.
 type CreateError struct {
-	Message    string
-	Validation bool
+	Message     string
+	Unconfirmed bool
+	Validation  bool
 }
 
 func (e *CreateError) Error() string { return e.Message }
