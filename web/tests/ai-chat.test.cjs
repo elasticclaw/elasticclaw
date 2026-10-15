@@ -1069,8 +1069,8 @@ test("ticket cards show working, created and failed states, linked artifact and 
   for (const link of links) { assert.equal(link.props.target, "_blank"); assert.equal(link.props.rel, "noopener noreferrer") }
   assert.equal(findElement(tree, "CopyArtifactLink").props.url, created.url)
   let retry
-  tree = TicketActionCard({ block: { kind: "ticket", state: "failed", card: { ...ticketDraft, error: "The workspace token cannot create issues in team Product." } }, onRetry: (value) => { retry = value } })
-  assert.match(elementText(tree), /Linear did not accept the ticketThe workspace token cannot create issues in team Product.Try again/)
+  tree = TicketActionCard({ block: { kind: "ticket", state: "failed", card: { ...ticketDraft, failureHeadline: "Could not create the ticket in Linear", error: "The workspace token cannot create issues in team Product." } }, onRetry: (value) => { retry = value } })
+  assert.match(elementText(tree), /Could not create the ticket in LinearThe workspace token cannot create issues in team Product.Try again/)
   findElement(tree, "Button").props.onClick()
   assert.deepEqual(retry, { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: "artifact-id" })
   const copy = findAll(tree, (item) => typeof item.type === "function" && item.type.name === "CopyTicketText")[0]
@@ -1240,4 +1240,36 @@ test("a saved wrap-up stops offering tickets when the workspace loses access", (
   const props = findElement(tree, "InlineBlock").props
   assert.deepEqual(props.block.actions, [])
   assert.equal(blockHelpers.InlineBlock(props), null)
+})
+
+
+test("pre-provider ticket failures use the server headline and hide empty copy text", () => {
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  for (const error of ["Could not draft the ticket.", "This artifact does not exist in this conversation.", "Ticket creation is not available.", "Unable to save the ticket draft."]) {
+    const card = { ...ticketDraft, title: "", body: "", failureHeadline: "Could not prepare the ticket", error }
+    const tree = TicketActionCard({ block: { kind: "ticket", state: "failed", card } })
+    assert.match(elementText(tree), /Could not prepare the ticket/)
+    assert.doesNotMatch(elementText(tree), /did not accept/)
+    assert.equal(findAll(tree, (item) => typeof item.type === "function" && item.type.name === "CopyTicketText").length, 0)
+  }
+  // Older persisted cards have a neutral fallback, even without a failure phase.
+  const legacy = TicketActionCard({ block: { kind: "ticket", state: "failed", card: { ...ticketDraft, error: "Could not draft the ticket." } } })
+  assert.match(elementText(legacy), /Could not create the ticket/)
+  assert.doesNotMatch(elementText(legacy), /did not accept/)
+})
+
+test("unknown ticket outcome requires an explicitly labeled acknowledgement and preserves the draft", () => {
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  let retry
+  const tree = TicketActionCard({
+    block: { kind: "ticket", state: "failed", card: { ...ticketDraft, outcomeUnknown: true, error: "Check Linear before trying again." } },
+    onRetry: (action) => { retry = action },
+  })
+  assert.equal(retry, undefined)
+  assert.match(elementText(tree), /Check Linear before trying again/)
+  assert.doesNotMatch(elementText(tree), /Try again/)
+  const button = findElement(tree, "Button")
+  assert.equal(elementText(button), "I checked Linear — create anyway")
+  button.props.onClick()
+  assert.deepEqual(retry, { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: ticketDraft.artifactId, confirmUnknown: true })
 })
