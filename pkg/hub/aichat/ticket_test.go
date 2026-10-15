@@ -1,6 +1,7 @@
 package aichat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -664,5 +665,46 @@ func TestTicketDropsArtifactDeletedDuringDraft(t *testing.T) {
 				t.Fatal("deleted artifact persisted in ticket", payload, args)
 			}
 		})
+	}
+}
+
+func TestTicketRefusesArtifactDeletedDuringTrackerLookups(t *testing.T) {
+	var s *Store
+	var artifact Artifact
+	writes := 0
+	inner := ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, input map[string]any) {
+		writes++
+		ticketSuccess(w, "Draft")
+	})
+	client := &http.Client{Transport: sourceTransport(func(r *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		// Another tab deletes the artifact while the tracker resolves team, state and labels.
+		if strings.Contains(string(raw), "teams(") {
+			if _, err := s.DB.Exec(`UPDATE ai_chat_artifacts SET deleted_at=1 WHERE id=?`, artifact.ID); err != nil {
+				t.Error(err)
+			}
+		}
+		return inner.Transport.RoundTrip(r)
+	})}
+	var h http.Handler
+	h, s = ticketFixture(t, nil, client)
+	thread := testThread(t, s)
+	artifact = addTicketArtifact(t, s, thread, "Prototype")
+	body := fmt.Sprintf(`{"kind":"ticket","title":"Draft","body":"Evidence","artifactId":%q}`, artifact.ID)
+	if rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", body, "octocat", "on"); rec.Code != 200 || writes != 0 {
+		t.Fatal(rec.Code, rec.Body, writes)
+	}
+	_, block, card := latestTicket(t, s, thread)
+	if block.State != "failed" || card.OutcomeUnknown || !strings.Contains(card.Error, "artifact was deleted") || card.ArtifactID != "" || card.Artifact != nil {
+		t.Fatal(block, card)
+	}
+	// Try again resends the stored draft, which no longer links the artifact.
+	body = fmt.Sprintf(`{"kind":"ticket","title":%q,"body":%q,"artifactId":%q}`, card.Title, card.Body, card.ArtifactID)
+	if rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", body, "octocat", "on"); rec.Code != 200 || writes != 1 {
+		t.Fatal(rec.Code, rec.Body, writes)
+	}
+	if _, block, card = latestTicket(t, s, thread); block.State != "created" || card.Artifact != nil {
+		t.Fatal(block, card)
 	}
 }

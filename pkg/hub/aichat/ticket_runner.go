@@ -382,6 +382,16 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// The tracker lookups take a few requests; a deletion meanwhile must not send a dead link.
+		if card.Artifact != nil {
+			if _, err := r.Store.ownedArtifact(ctx, t, card.ArtifactID); errors.Is(err, sql.ErrNoRows) {
+				// Nothing was sent; dropping the link lets Try again resend the draft without it.
+				card.ArtifactID, card.Artifact = "", nil
+				return &tracker.CreateError{Message: "The linked artifact was deleted. Try again to create the ticket without it.", Validation: true}
+			} else if err != nil {
+				return err
+			}
+		}
 		setTicketBlock(m, "working", card)
 		if err := save(func(c context.Context) error {
 			tx, err := r.Store.DB.BeginTx(c, nil)
