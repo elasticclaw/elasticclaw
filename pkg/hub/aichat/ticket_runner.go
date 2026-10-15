@@ -238,11 +238,12 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		setTicketBlock(m, "failed", TicketCard{ActionKey: actionKey, Target: target, TicketRequest: input, Error: "Unable to save the ticket draft.", FailureHeadline: "Could not prepare the ticket"})
 		return err
 	}
+	// "dismissed" is the durable dismissal marker read by ticketActions, so a replay of a dismissed attempt records it under its own key.
 	replay := func(state, attemptID string) error {
 		setTicketBlock(m, state, card)
 		run.Summary = "Replayed ticket attempt " + attemptID
 		run.Error = card.Error
-		run.Result = string(redactedJSON(map[string]any{"replayOf": attemptID, "state": state, "outcomeUnknown": card.OutcomeUnknown, "dismissed": card.Dismissed}, secrets))
+		run.Result = string(redactedJSON(map[string]any{"replayOf": attemptID, "state": state, "outcomeUnknown": card.OutcomeUnknown, "dismissed": card.Dismissed, "replayOfDismissed": dismissed != nil && dismissed.attemptID == attemptID}, secrets))
 		if err := save(func(c context.Context) error {
 			_, err := r.Store.DB.ExecContext(c, `UPDATE ai_chat_tool_runs SET summary=?,error=?,result_json=?,duration_ms=? WHERE id=?`, run.Summary, run.Error, run.Result, time.Since(started).Milliseconds(), run.ID)
 			return err

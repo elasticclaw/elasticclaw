@@ -496,6 +496,10 @@ func TestDismissedTicketRejectsReplayAndStaleConfirmation(t *testing.T) {
 				}
 				_, block, card := latestTicket(t, s, thread)
 				assertTicketReplay(t, s, m.ID, original.AttemptID, "failed", false)
+				var dismissedRun bool
+				if err := s.DB.QueryRow(`SELECT json_extract(result_json,'$.replayOfDismissed') FROM ai_chat_tool_runs WHERE message_id=? AND tool='ticket' AND provider='AI Chat'`, m.ID).Scan(&dismissedRun); err != nil || !dismissedRun {
+					t.Fatal("replay row of a dismissed attempt must record which dismissed attempt it replays", err)
+				}
 				if block.State != "failed" || card.Error != want || card.OutcomeUnknown || card.ConfirmedUnknown != "" || writes != 0 {
 					t.Fatal(tc, block, card, writes)
 				}
