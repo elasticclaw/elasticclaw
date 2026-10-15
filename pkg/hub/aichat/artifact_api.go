@@ -154,6 +154,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		ActionKey      string `json:"actionKey,omitempty"`
 		Kind           string `json:"kind"`
 		Body           string `json:"body,omitempty"`
 		ConfirmUnknown bool   `json:"confirmUnknown,omitempty"`
@@ -175,6 +176,10 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if body.Kind == "ticket" && body.ActionKey != "" && !ticketActionKey.MatchString(body.ActionKey) {
+		http.Error(w, "invalid actionKey", 400)
+		return
+	}
 	if body.Kind == "ticket" && (utf8.RuneCountInString(body.Title) > 70 || (body.Title == "") != (body.Body == "") || body.Brief != "") {
 		http.Error(w, "invalid action", 400)
 		return
@@ -192,29 +197,36 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if body.Kind == "ticket" && !body.ConfirmUnknown {
-		previous, err := a.store.ticketActions(ctx, t.ID, "")
-		if err != nil {
-			http.Error(w, "Unable to check previous ticket actions.", 500)
-			return
-		}
-		if len(previous) > 0 && previous[0].unknown {
-			http.Error(w, "Linear did not confirm the previous ticket. Check Linear first, then use the ticket card to confirm creating another ticket.", 409)
-			return
-		}
-	}
 	cfg, err := a.loadConfig(t.Workspace)
 	if err != nil {
 		http.Error(w, "Not configured for this workspace", 400)
 		return
 	}
-	if a.runner.AvailableActions == nil || !slices.Contains(a.runner.AvailableActions(t.Workspace, cfg), body.Kind) {
+	var existing *savedTicketAction
+	if body.Kind == "ticket" {
+		previous, err := a.store.ticketActions(ctx, t.ID, "")
+		if err != nil {
+			http.Error(w, "Unable to check previous ticket actions.", 500)
+			return
+		}
+		existing = createdTicketAction(previous, body.ActionKey)
+		if prior := unknownTicketAction(previous, body.ActionKey); existing == nil && prior != nil && !body.ConfirmUnknown {
+			name := prior.card.Tracker
+			if name == "" {
+				_, target, _ := a.deps.ticketCreator(t.Workspace, cfg)
+				name = target.Tracker
+			}
+			http.Error(w, name+" did not confirm the previous ticket. Check "+name+" first, then use the ticket card to confirm creating another ticket.", 409)
+			return
+		}
+	}
+	if existing == nil && (a.runner.AvailableActions == nil || !slices.Contains(a.runner.AvailableActions(t.Workspace, cfg), body.Kind)) {
 		http.Error(w, "not available", 400)
 		return
 	}
 	var p llm.Provider
 	model := ""
-	if body.Kind == "artifact" || body.Title == "" {
+	if existing == nil && (body.Kind == "artifact" || body.Title == "") {
 		p, err = a.deps.LLM(cfg.LLM)
 		if err != nil {
 			http.Error(w, "No usable LLM key configured for this workspace", 503)
@@ -237,7 +249,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 	emit, stop := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Cancel(t) })
 	defer stop()
 	if body.Kind == "ticket" {
-		_ = a.runner.RunTicket(ctx, t, m, cfg, p, tools.TicketRequest{Title: body.Title, Body: body.Body, ArtifactID: body.ArtifactID}, body.ConfirmUnknown, emit)
+		_ = a.runner.RunTicket(ctx, t, m, cfg, p, tools.TicketRequest{Title: body.Title, Body: body.Body, ArtifactID: body.ArtifactID}, body.ActionKey, body.ConfirmUnknown, emit)
 	} else {
 		_ = a.runner.RunArtifact(ctx, t, m, cfg, p, body.ArtifactRequest, emit)
 	}
@@ -246,7 +258,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 	a.publish(t)
 }
 
-func (s *Store) beginAction(ctx context.Context, t Thread, model, artifactID string, actionKind ...string) (Message, error) {
+func (s *Store) beginAction(ctx context.Context, t Thread, model, artifactID, kind string) (Message, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Message{}, err
@@ -264,10 +276,6 @@ func (s *Store) beginAction(ctx context.Context, t Thread, model, artifactID str
 		return Message{}, err
 	}
 	// Only the already ownership-checked ID is stored before secrets are resolved.
-	kind := "artifact"
-	if len(actionKind) > 0 {
-		kind = actionKind[0]
-	}
 	pending := string(redactedJSON(tools.ArtifactRequest{ArtifactID: artifactID}, nil))
 	if kind == "ticket" {
 		pending = string(redactedJSON(TicketCard{TicketRequest: tools.TicketRequest{ArtifactID: artifactID}}, nil))

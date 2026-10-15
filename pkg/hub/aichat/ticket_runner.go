@@ -26,6 +26,7 @@ type TicketArtifact struct {
 	ShareURL string `json:"shareUrl"`
 }
 type TicketCard struct {
+	ActionKey       string `json:"actionKey"`
 	OutcomeUnknown  bool   `json:"outcomeUnknown,omitempty"`
 	FailureHeadline string `json:"failureHeadline,omitempty"`
 	tracker.Target
@@ -86,14 +87,16 @@ func ticketSummary(body string) string {
 	return string(text)
 }
 
-func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config.Config, p llm.Provider, input tools.TicketRequest, confirmUnknown bool, emit Emit) error {
+func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config.Config, p llm.Provider, input tools.TicketRequest, actionKey string, confirmUnknown bool, emit Emit) error {
 	var creator tracker.Creator
 	var target tracker.Target
 	var secrets []string
 	if r.TicketCreator != nil {
 		creator, target, secrets = r.TicketCreator(t.Workspace, cfg)
 	}
-	if r.PrepareReads != nil {
+	if r.TicketSecrets != nil {
+		secrets = append(secrets, r.TicketSecrets(ctx, t.Workspace, cfg)...)
+	} else if r.PrepareReads != nil {
 		_, _, other := r.PrepareReads(ctx, t.Workspace, cfg)
 		secrets = append(secrets, other...)
 	}
@@ -104,7 +107,7 @@ func (r *Runner) RunTicket(ctx context.Context, t Thread, m Message, cfg *config
 		cancel()
 		ctx = failedCtx
 	}
-	err := r.createTicket(ctx, t, &m, p, input, creator, target, secrets, 1, true, confirmUnknown, emit)
+	err := r.createTicket(ctx, t, &m, p, input, actionKey, creator, target, secrets, 1, true, confirmUnknown, emit)
 	return r.finishRun(ctx, m, err, emit)
 }
 
@@ -151,6 +154,11 @@ func (r *Runner) draftTicket(ctx context.Context, t Thread, m *Message, p llm.Pr
 		if raw == "" {
 			raw = response.Text
 		}
+		raw = strings.TrimSpace(raw)
+		if strings.HasPrefix(raw, "```") && strings.HasSuffix(raw, "```") && len(raw) >= 6 {
+			raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, "```"), "```"))
+			raw = strings.TrimSpace(strings.TrimPrefix(raw, "json"))
+		}
 		// The draft model cannot select an artifact or override server-owned fields.
 		var fields map[string]json.RawMessage
 		validFields := json.Unmarshal([]byte(raw), &fields) == nil && len(fields) == 2 && fields["title"] != nil && fields["body"] != nil
@@ -167,13 +175,17 @@ func (r *Runner) draftTicket(ctx context.Context, t Thread, m *Message, p llm.Pr
 	return tools.TicketRequest{}, fail
 }
 
-func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.Provider, input tools.TicketRequest, creator tracker.Creator, target tracker.Target, secrets []string, seq int, button, confirmUnknown bool, emit Emit) error {
+func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.Provider, input tools.TicketRequest, actionKey string, creator tracker.Creator, target tracker.Target, secrets []string, seq int, button, confirmUnknown bool, emit Emit) error {
 	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
 	defer cancel()
 	provider := target.Provider
 	_ = json.Unmarshal(redactedJSON(input, secrets), &input)
 	_ = json.Unmarshal(redactedJSON(target, secrets), &target)
-	card := TicketCard{Target: target, TicketRequest: input, Summary: ticketSummary(input.Body)}
+	if actionKey == "" {
+		actionKey = uuid.NewString()
+	}
+	actionKey = readhttp.Redact(actionKey, secrets)
+	card := TicketCard{ActionKey: actionKey, Target: target, TicketRequest: input, Summary: ticketSummary(input.Body)}
 	run := ToolRun{ID: uuid.NewString(), MessageID: m.ID, Seq: seq, Tool: "ticket", Provider: "AI Chat", Args: string(redactedJSON(card, secrets)), Result: "null"}
 	started := time.Now()
 	sent := false
@@ -197,16 +209,9 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		_ = action("failed")
 		return err
 	}
-	if len(previous) > 0 && previous[0].unknown && !confirmUnknown {
-		card.OutcomeUnknown = true
-		card.Error = target.Tracker + " did not confirm the ticket. Check " + target.Tracker + " before trying again."
-		setTicketBlock(m, "failed", card)
-		_ = action("failed")
-		return nil
-	}
 	// A pending row supports recovery even if the process stops before the card.
 	err = save(func(c context.Context) error {
-		e := r.Store.DB.QueryRowContext(c, `SELECT id FROM ai_chat_tool_runs WHERE message_id=? AND tool='ticket' LIMIT 1`, m.ID).Scan(&run.ID)
+		e := r.Store.DB.QueryRowContext(c, `SELECT id FROM ai_chat_tool_runs WHERE message_id=? AND tool='ticket' AND provider='AI Chat' LIMIT 1`, m.ID).Scan(&run.ID)
 		if errors.Is(e, sql.ErrNoRows) {
 			return r.Store.RecordToolRun(c, run)
 		}
@@ -217,8 +222,26 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		return e
 	})
 	if err != nil {
-		setTicketBlock(m, "failed", TicketCard{Target: target, TicketRequest: input, Error: "Unable to save the ticket draft.", FailureHeadline: "Could not prepare the ticket"})
+		setTicketBlock(m, "failed", TicketCard{ActionKey: actionKey, Target: target, TicketRequest: input, Error: "Unable to save the ticket draft.", FailureHeadline: "Could not prepare the ticket"})
 		return err
+	}
+	if prior := createdTicketAction(previous, actionKey); prior != nil {
+		card = prior.card
+		_ = json.Unmarshal(redactedJSON(card, secrets), &card)
+		setTicketBlock(m, "created", card)
+		_ = action("created")
+		return nil
+	}
+	if prior := unknownTicketAction(previous, actionKey); prior != nil && !confirmUnknown {
+		if prior.card.Tracker != "" {
+			card.Tracker = readhttp.Redact(prior.card.Tracker, secrets)
+		}
+		card.FailureHeadline = card.Tracker + " did not confirm the ticket"
+		card.OutcomeUnknown = true
+		card.Error = card.Tracker + " did not confirm the ticket. Check " + card.Tracker + " before trying again."
+		setTicketBlock(m, "failed", card)
+		_ = action("failed")
+		return nil
 	}
 	failureHeadline := "Could not prepare the ticket"
 	fail := func(message string) error {
@@ -234,6 +257,9 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		}
 		card.Error = readhttp.Redact(message, secrets)
 		card.OutcomeUnknown = message == target.Tracker+" did not confirm the ticket. Check "+target.Tracker+" before trying again."
+		if card.OutcomeUnknown {
+			card.FailureHeadline = target.Tracker + " did not confirm the ticket"
+		}
 		setTicketBlock(m, "failed", card)
 		run.Error, run.DurationMS = card.Error, time.Since(started).Milliseconds()
 		if e := save(func(c context.Context) error {
@@ -275,14 +301,16 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		return fail("Stopped. Nothing was created.")
 	}
 	if input.Title == "" && input.Body == "" {
+		failureHeadline = "Could not draft the ticket"
 		draft, err := r.draftTicket(ctx, t, m, p, secrets)
 		if err != nil {
 			return fail("Could not draft the ticket.")
 		}
 		card.Title, card.Body = draft.Title, draft.Body
 	}
+	failureHeadline = "Could not prepare the ticket"
 	if _, err = tools.ParseTicket(redactedJSON(card.TicketRequest, secrets)); err != nil {
-		return fail("Could not draft the ticket.")
+		return fail("The ticket draft is invalid.")
 	}
 	card.Summary = ticketSummary(card.Body)
 	for _, prior := range previous {
@@ -308,7 +336,6 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 	}); err != nil {
 		return fail("Unable to save the ticket draft.")
 	}
-	failureHeadline = "Could not create the ticket in " + target.Tracker
 	issue, err := creator.Create(ctx, tracker.Draft{Title: card.Title, Body: description, Team: target.Team, State: target.State, Labels: target.Labels, BeforeSend: func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -320,6 +347,7 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 			return err
 		}
 		sent = true
+		failureHeadline = target.Tracker + " did not accept the ticket"
 		return nil
 	}})
 	if err != nil {
@@ -327,6 +355,11 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		var public *tracker.CreateError
 		if errors.As(err, &public) {
 			message = public.Message
+			if public.Validation {
+				failureHeadline = "Could not prepare the ticket"
+			} else {
+				failureHeadline = target.Tracker + " did not accept the ticket"
+			}
 		}
 		return fail(message)
 	}

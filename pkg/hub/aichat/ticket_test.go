@@ -104,7 +104,7 @@ func latestTicket(t *testing.T, s *Store, thread Thread) (Message, tools.Block, 
 func addTicketArtifact(t *testing.T, s *Store, thread Thread, title string) Artifact {
 	t.Helper()
 	ctx := context.Background()
-	m, err := s.beginAction(ctx, thread, "fake", "")
+	m, err := s.beginAction(ctx, thread, "fake", "", "artifact")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestTicketActionDraftArtifactRecordsAndRedaction(t *testing.T) {
 	artifact := addTicketArtifact(t, s, thread, "Prototype")
 	// Revising A after creating B must still auto-link B.
 	ctx := context.Background()
-	revision, err := s.beginAction(ctx, thread, "fake", old.ID)
+	revision, err := s.beginAction(ctx, thread, "fake", old.ID, "artifact")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestTicketDraftFailureAndAvailability(t *testing.T) {
 			rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", `{"kind":"ticket"}`, "octocat", "on")
 			if mode == "invalid JSON" {
 				_, b, card := latestTicket(t, s, thread)
-				if calls != 2 || b.State != "failed" || card.Error != "Could not draft the ticket." || card.FailureHeadline != "Could not prepare the ticket" {
+				if calls != 2 || b.State != "failed" || card.Error != "Could not draft the ticket." || card.FailureHeadline != "Could not draft the ticket" {
 					t.Fatal(calls, b, card)
 				}
 			} else if rec.Code != 400 || !strings.Contains(rec.Body.String(), "not available") || calls != 0 {
@@ -346,7 +346,7 @@ func TestStartTicketEndsBatchAndAvailability(t *testing.T) {
 			}
 			if available {
 				m, b, card := latestTicket(t, s, thread)
-				if writes != 1 || modelCalls != 1 || b.State != "created" || m.Content != "I will open the ticket." || strings.Contains(card.Body, ticketSecret) {
+				if !ticketActionKey.MatchString(card.ActionKey) || writes != 1 || modelCalls != 1 || b.State != "created" || m.Content != "I will open the ticket." || strings.Contains(card.Body, ticketSecret) {
 					t.Fatal(writes, modelCalls, m, b, card)
 				}
 				if strings.Contains(string(m.Blocks), "stat_tiles") {
@@ -380,7 +380,7 @@ func TestTicketConcurrentSubmitAndCancellation(t *testing.T) {
 	request(h, "POST", path+"/cancel", "", "octocat", "on")
 	<-done
 	m, b, card := latestTicket(t, s, thread)
-	if writes.Load() != 0 || m.Status != "cancelled" || b.State != "failed" || card.Error != "Stopped. Nothing was created." {
+	if card.FailureHeadline != "Ticket creation stopped" || writes.Load() != 0 || m.Status != "cancelled" || b.State != "failed" || card.Error != "Stopped. Nothing was created." {
 		t.Fatal(m, b, card)
 	}
 }
@@ -426,11 +426,11 @@ func TestTicketUnknownOutcomeAndRecovery(t *testing.T) {
 	cfg := &config.Config{IssueTracker: &config.IssueTracker{}}
 	cfg.IssueTracker.DefaultFields.Team = "Product"
 	r := &Runner{Store: s, TicketCreator: d.ticketCreator}
-	if err := r.RunTicket(ctx, thread, m, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, false, func(string, any) error { return nil }); err != nil && !errors.Is(err, context.Canceled) {
+	if err := r.RunTicket(ctx, thread, m, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, "", false, func(string, any) error { return nil }); err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	_, _, card := latestTicket(t, s, thread)
-	if card.Error != tracker.LinearUnconfirmed {
+	if card.Error != tracker.LinearUnconfirmed || card.FailureHeadline != "Linear did not confirm the ticket" {
 		t.Fatal(card)
 	}
 }
@@ -484,7 +484,7 @@ func TestStartTicketInterruptedBeforeSendRecoversDraft(t *testing.T) {
 				t.Error("expected simulated restart")
 			}
 		}()
-		_ = r.createTicket(ctx, thread, &m, nil, input, creator, tracker.LinearTarget("Product", "", nil), []string{ticketSecret}, 1, false, false, func(event string, _ any) error {
+		_ = r.createTicket(ctx, thread, &m, nil, input, "", creator, tracker.LinearTarget("Product", "", nil), []string{ticketSecret}, 1, false, false, func(event string, _ any) error {
 			if event == EventAction {
 				panic("restart")
 			}
@@ -563,7 +563,7 @@ func TestTicketUnknownOutcomeRequiresAcknowledgement(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := &Runner{Store: s, TicketCreator: deps.ticketCreator}
-			if err = runner.RunTicket(ctx, thread, modelMessage, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, false, func(string, any) error { return nil }); err != nil {
+			if err = runner.RunTicket(ctx, thread, modelMessage, cfg, nil, tools.TicketRequest{Title: "Swap", Body: "31 requests"}, "", false, func(string, any) error { return nil }); err != nil {
 				t.Fatal(err)
 			}
 			_, _, blocked := latestTicket(t, s, thread)
