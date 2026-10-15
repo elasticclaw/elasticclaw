@@ -12,15 +12,17 @@ import (
 )
 
 type Thread struct {
-	ID         string `json:"id"`
-	TenantID   string `json:"-"`
-	Workspace  string `json:"workspace"`
-	OwnerLogin string `json:"-"`
-	Title      string `json:"title"`
-	Mode       string `json:"mode"`
-	CreatedAt  int64  `json:"createdAt"`
-	UpdatedAt  int64  `json:"updatedAt"`
-	ArchivedAt *int64 `json:"archivedAt"`
+	ArtifactCount int    `json:"artifactCount"`
+	Ticket        string `json:"ticket,omitempty"`
+	ID            string `json:"id"`
+	TenantID      string `json:"-"`
+	Workspace     string `json:"workspace"`
+	OwnerLogin    string `json:"-"`
+	Title         string `json:"title"`
+	Mode          string `json:"mode"`
+	CreatedAt     int64  `json:"createdAt"`
+	UpdatedAt     int64  `json:"updatedAt"`
+	ArchivedAt    *int64 `json:"archivedAt"`
 }
 type Message struct {
 	Blocks       json.RawMessage `json:"blocks,omitempty"`
@@ -70,14 +72,18 @@ func (s *Store) Thread(ctx context.Context, tenant, owner, id string) (Thread, e
 	return scanThread(s.DB.QueryRowContext(ctx, `SELECT `+threadColumns+` FROM ai_chat_threads WHERE id=? AND tenant_id=? AND owner_login=?`, id, tenant, OwnerLogin(owner)))
 }
 func (s *Store) Threads(ctx context.Context, tenant, owner string) ([]Thread, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT `+threadColumns+` FROM ai_chat_threads WHERE tenant_id=? AND owner_login=? AND archived_at IS NULL ORDER BY updated_at DESC,id DESC`, tenant, OwnerLogin(owner))
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+threadColumns+`,
+ (SELECT COUNT(*) FROM ai_chat_artifacts a WHERE a.thread_id=ai_chat_threads.id AND a.tenant_id=ai_chat_threads.tenant_id AND a.owner_login=ai_chat_threads.owner_login AND a.deleted_at IS NULL),
+ COALESCE((SELECT external_ref FROM ai_chat_handoffs h WHERE h.thread_id=ai_chat_threads.id AND h.kind='ticket' ORDER BY h.created_at DESC,h.rowid DESC LIMIT 1),'')
+ FROM ai_chat_threads WHERE tenant_id=? AND owner_login=? AND archived_at IS NULL ORDER BY updated_at DESC,id DESC LIMIT 100`, tenant, OwnerLogin(owner))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	threads := []Thread{}
 	for rows.Next() {
-		t, err := scanThread(rows)
+		var t Thread
+		err := rows.Scan(&t.ID, &t.TenantID, &t.Workspace, &t.OwnerLogin, &t.Title, &t.Mode, &t.CreatedAt, &t.UpdatedAt, &t.ArchivedAt, &t.ArtifactCount, &t.Ticket)
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +147,14 @@ func (s *Store) messages(ctx context.Context, threadID string, limit int, comple
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 		messages[i], messages[j] = messages[j], messages[i]
 	}
-	return messages, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := s.annotateDeletedArtifacts(ctx, threadID, messages); err != nil {
+		return nil, err
+	}
+	return messages, nil
 }
 
 var ErrRetry = errors.New("no failed turn to retry")

@@ -21,6 +21,14 @@ func (a *api) dismissTicketAttempt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	if errors.Is(err, ErrArchived) {
+		http.Error(w, ErrArchived.Error(), 409)
+		return
+	}
+	if err != nil && !errors.Is(err, ErrBusy) {
+		http.Error(w, "Unable to start turn.", 500)
+		return
+	}
 	if err != nil {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, ErrBusy.Error(), 429)

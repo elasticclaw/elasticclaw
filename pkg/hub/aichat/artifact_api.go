@@ -48,8 +48,8 @@ func (a *api) getArtifact(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	tenant, _ := a.identity(r)
-	v, err := a.store.Artifact(r.Context(), tenant, r.PathValue("slug"), version)
+	tenant, owner := a.identity(r)
+	v, err := a.store.artifact(r.Context(), tenant, owner, r.PathValue("slug"), version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
@@ -185,6 +185,14 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	if errors.Is(err, ErrArchived) {
+		http.Error(w, ErrArchived.Error(), 409)
+		return
+	}
+	if err != nil && !errors.Is(err, ErrBusy) {
+		http.Error(w, "Unable to start turn.", 500)
+		return
+	}
 	if err != nil {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, ErrBusy.Error(), 429)
