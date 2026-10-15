@@ -466,3 +466,8 @@ func TestRetentionSkipsUnavailableWorkspaceConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestRetentionSweepPanicDoesNotEscape(t *testing.T) {
+	d := Deps{FeatureStage: func(context.Context, string) string { panic("boom") }}
+	d.sweepSafely(context.Background(), time.Now())
+}

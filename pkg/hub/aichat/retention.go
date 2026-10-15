@@ -37,14 +37,24 @@ func StartRetention(parent context.Context, deps Deps) func() {
 			case <-ctx.Done():
 				return
 			case now := <-timer.C:
-				if _, err := deps.sweep(ctx, now); err != nil && ctx.Err() == nil {
-					log.Print("[ai-chat] retention sweep failed")
-				}
+				deps.sweepSafely(ctx, now)
 				timer.Reset(24 * time.Hour)
 			}
 		}
 	}()
 	return func() { cancel(); <-done }
+}
+
+// sweepSafely keeps a panicking sweep from taking down the hub; the next day retries.
+func (d Deps) sweepSafely(ctx context.Context, now time.Time) {
+	defer func() {
+		if v := recover(); v != nil {
+			log.Printf("[ai-chat] retention sweep panicked: %v", v)
+		}
+	}()
+	if _, err := d.sweep(ctx, now); err != nil && ctx.Err() == nil {
+		log.Print("[ai-chat] retention sweep failed")
+	}
 }
 
 func (d Deps) sweep(ctx context.Context, now time.Time) (SweepStats, error) {
