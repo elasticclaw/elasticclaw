@@ -1397,6 +1397,7 @@ test("only the latest unresolved unknown card offers dismissal, including after 
   const dismissed = { ...unknown, blocks: [{ ...unknown.blocks[0], card: { ...unknown.blocks[0].card, dismissed: true } }] }
   cards = findElements(render([dismissed, repeated]), "TicketActionCard")
   assert.ok(cards.every((card) => !card.props.onRetry && !card.props.onDismiss))
+  assert.equal(cards[1].props.block.card.dismissed, true)
 })
 
 for (const navigate of [false, true]) test(`ticket dismissal resyncs only the conversation it belongs to (navigate=${navigate})`, async () => {
