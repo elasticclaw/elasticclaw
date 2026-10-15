@@ -195,3 +195,49 @@ func TestLinearCreateCancellationBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestLinearCreateSkipsLabelGroups(t *testing.T) {
+	for _, child := range []bool{false, true} {
+		t.Run(fmt.Sprint(child), func(t *testing.T) {
+			writes := 0
+			l := NewLinear("Product", secret, fake(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					Query     string
+					Variables map[string]any
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				switch req.Query {
+				case createTeamQuery:
+					fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team","name":"Product"}]}}}`)
+				case createLabelsQuery:
+					if !strings.Contains(req.Query, "isGroup") {
+						t.Fatal("label group metadata not requested")
+					}
+					nodes := []map[string]any{{"id": "group", "name": "Priority", "isGroup": true}}
+					if child {
+						nodes = append(nodes, map[string]any{"id": "label", "name": "Priority", "isGroup": false})
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issueLabels": map[string]any{"nodes": nodes}}})
+				case createIssueMutation:
+					writes++
+					input := req.Variables["input"].(map[string]any)
+					if !reflect.DeepEqual(input["labelIds"], []any{"label"}) {
+						t.Fatal(input)
+					}
+					fmt.Fprint(w, `{"data":{"issueCreate":{"success":true,"issue":{"identifier":"PRO-1","url":"https://linear.app/PRO-1","title":"Draft"}}}}`)
+				}
+			}))
+			_, err := l.Create(context.Background(), Draft{Title: "Draft", Body: "Evidence", Labels: []string{"priority"}})
+			if child {
+				if err != nil || writes != 1 {
+					t.Fatal(err, writes)
+				}
+			} else {
+				var failure *CreateError
+				if !errors.As(err, &failure) || !failure.Validation || failure.Message != `Label "priority" does not exist in Linear team Product.` || writes != 0 {
+					t.Fatal(err, writes)
+				}
+			}
+		})
+	}
+}

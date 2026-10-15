@@ -14,10 +14,13 @@ import (
 
 const createTeamQuery = `query TicketTeam($filter: TeamFilter!) { teams(first: 2, filter: $filter) { nodes { id name } } }`
 const createStatesQuery = `query TicketStates($filter: WorkflowStateFilter!, $after: String) { workflowStates(first: 100, filter: $filter, after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } }`
-const createLabelsQuery = `query TicketLabels($filter: IssueLabelFilter!, $after: String) { issueLabels(first: 100, filter: $filter, after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } }`
+const createLabelsQuery = `query TicketLabels($filter: IssueLabelFilter!, $after: String) { issueLabels(first: 100, filter: $filter, after: $after) { nodes { id name isGroup } pageInfo { hasNextPage endCursor } } }`
 const createIssueMutation = `mutation CreateChatTicket($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { identifier url title state { name } } } }`
 
-type namedID struct{ ID, Name string }
+type namedID struct {
+	ID, Name string
+	IsGroup  bool
+}
 type namedPage struct {
 	Nodes    []namedID
 	PageInfo struct {
@@ -28,6 +31,9 @@ type namedPage struct {
 
 func (l *Linear) createError(message string) error {
 	return &CreateError{Message: readhttp.Redact(message, l.Client.Secrets)}
+}
+func (l *Linear) validationError(message string) error {
+	return &CreateError{Message: readhttp.Redact(message, l.Client.Secrets), Validation: true}
 }
 func (l *Linear) permissionError(team string) error {
 	return l.createError(fmt.Sprintf("The workspace token cannot create issues in team %s.", team))
@@ -87,7 +93,7 @@ func (l *Linear) resolveTeam(ctx context.Context, team string) (namedID, error) 
 		return namedID{}, err
 	}
 	if len(result.Teams.Nodes) != 1 || result.Teams.Nodes[0].ID == "" {
-		return namedID{}, l.createError("The configured Linear team was not found or is ambiguous.")
+		return namedID{}, l.validationError("The configured Linear team was not found or is ambiguous.")
 	}
 	return result.Teams.Nodes[0], nil
 }
@@ -123,7 +129,7 @@ func (l *Linear) names(ctx context.Context, query string, filter any, team strin
 
 func (l *Linear) Create(ctx context.Context, draft Draft) (Issue, error) {
 	if strings.TrimSpace(draft.Title) == "" || utf8.RuneCountInString(draft.Title) > 70 || strings.TrimSpace(draft.Body) == "" {
-		return Issue{}, l.createError(LinearRejected)
+		return Issue{}, l.validationError("The ticket draft is invalid.")
 	}
 	if err := ctx.Err(); err != nil {
 		return Issue{}, err
@@ -149,7 +155,7 @@ func (l *Linear) Create(ctx context.Context, draft Draft) (Issue, error) {
 			}
 		}
 		if input["stateId"] == nil {
-			return Issue{}, l.createError(fmt.Sprintf("State %q does not exist in Linear team %s.", draft.State, team.Name))
+			return Issue{}, l.validationError(fmt.Sprintf("State %q does not exist in Linear team %s.", draft.State, team.Name))
 		}
 	}
 	labels := []string{}
@@ -164,7 +170,7 @@ func (l *Linear) Create(ctx context.Context, draft Draft) (Issue, error) {
 		for _, name := range draft.Labels {
 			found := false
 			for _, label := range available {
-				if strings.EqualFold(label.Name, name) {
+				if !label.IsGroup && strings.EqualFold(label.Name, name) {
 					if !seen[label.ID] {
 						ids = append(ids, label.ID)
 						labels = append(labels, label.Name)
@@ -175,7 +181,7 @@ func (l *Linear) Create(ctx context.Context, draft Draft) (Issue, error) {
 				}
 			}
 			if !found {
-				return Issue{}, l.createError(fmt.Sprintf("Label %q does not exist in Linear team %s.", name, team.Name))
+				return Issue{}, l.validationError(fmt.Sprintf("Label %q does not exist in Linear team %s.", name, team.Name))
 			}
 		}
 		input["labelIds"] = ids

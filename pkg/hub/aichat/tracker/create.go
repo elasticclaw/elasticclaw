@@ -31,7 +31,10 @@ type Issue struct {
 }
 
 // CreateError contains only safe, actionable text, never a provider response.
-type CreateError struct{ Message string }
+type CreateError struct {
+	Message    string
+	Validation bool
+}
 
 func (e *CreateError) Error() string { return e.Message }
 
