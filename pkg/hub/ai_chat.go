@@ -121,3 +121,7 @@ func (s *Server) aiChatProvider(name string) (llm.Provider, error) {
 	client.Endpoint = strings.TrimRight(choice.Provider.BaseURL, "/") + "/chat/completions"
 	return &llm.OpenAI{Client: client}, nil
 }
+
+func (s *Server) startAIChatRetention(ctx context.Context) func() {
+	return aichat.StartRetention(ctx, s.aiChatDeps())
+}
