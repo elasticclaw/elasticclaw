@@ -334,9 +334,9 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 	card.Team, card.State, card.Labels = issue.Team, issue.State, issue.Labels
 	_ = json.Unmarshal(redactedJSON(card, secrets), &card)
 	if button {
-		text := "Done. The ticket is in " + card.Team
+		text := "Done. The ticket is in the " + card.Team + " team"
 		if card.State != "" {
-			text += " " + strings.ToLower(card.State)
+			text = "Done. The ticket is in the " + card.Team + " " + strings.ToLower(card.State)
 		}
 		if card.Artifact != nil {
 			text += " with the artifact linked"
