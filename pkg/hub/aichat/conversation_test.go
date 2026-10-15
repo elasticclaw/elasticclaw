@@ -324,7 +324,7 @@ func TestPromptAndHistory(t *testing.T) {
 	}
 }
 
-func apiFixture(t *testing.T, p llm.Provider) (http.Handler, *Store, *[]Thread) {
+func apiFixture(t *testing.T, p llm.Provider, configure ...func(*Deps)) (http.Handler, *Store, *[]Thread) {
 	t.Helper()
 	s := testStore(t)
 	dir := t.TempDir()
@@ -350,6 +350,9 @@ func apiFixture(t *testing.T, p llm.Provider) (http.Handler, *Store, *[]Thread) 
 			next(w, r)
 		}
 	}, CallerLogin: func(r *http.Request) string { return r.Header.Get("Login") }, TenantID: func(*http.Request) string { return "tenant" }, Workspaces: func() ([]string, error) { return []string{"workspace"}, nil }, ManagedDir: func(string) string { return dir }, LLM: func(string) (llm.Provider, error) { return p, nil }, Publish: func(thread Thread) { mu.Lock(); defer mu.Unlock(); *published = append(*published, thread) }}
+	for _, configure := range configure {
+		configure(&deps)
+	}
 	return Routes(deps), s, published
 }
 func request(handler http.Handler, method, path, body, login, flag string) *httptest.ResponseRecorder {

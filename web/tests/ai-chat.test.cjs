@@ -1043,3 +1043,201 @@ test("artifact API 401 returns through login to the same pinned path", async () 
     assert.equal(window.location.href, "/login?next=%2Fartifacts%2Fmeal-abcdef%2Fv%2F2")
   } finally { window.location = previousLocation; global.fetch = previousFetch }
 })
+
+const ticketTarget = { tracker: "Linear", verb: "Open Linear ticket", team: "Product", state: "Backlog", labels: ["ai-chat"] }
+const ticketDraft = { ...ticketTarget, title: "Swap from the shopping list", body: "Clients ask 31 times a week.\n\nEvidence: 12% found swap.", summary: "Clients ask 31 times a week.", artifactId: "artifact-id" }
+const ticketMocks = {
+  ...artifactCardMocks,
+  "lucide-react": Object.fromEntries(["Check", "Copy", "ExternalLink", "FileCode2", "Loader2", "RotateCcw", "Ticket", "TriangleAlert"].map((name) => [name, name])),
+  "./artifact-card": { CopyArtifactLink: "CopyArtifactLink", displayURL: (url) => url.replace(/^https?:\/\//, "") },
+}
+
+test("ticket cards show working, created and failed states, linked artifact and retry draft", () => {
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  let tree = TicketActionCard({ block: { kind: "ticket", state: "working", card: ticketDraft } })
+  assert.match(elementText(tree), /Opening ticket in LinearProduct · Backlog/)
+  assert.equal(tree.props.role, "status")
+  const created = { ...ticketDraft, identifier: "PRO-1423", url: "https://linear.app/PRO-1423", artifact: { slug: "meal-abcdef", title: "Meal prototype", shareUrl: "https://hub.test/artifacts/meal-abcdef" } }
+  tree = TicketActionCard({ block: { kind: "ticket", state: "created", card: created } })
+  const text = elementText(tree)
+  assert.match(text, /Linear ticketBacklogPRO-1423Swap from the shopping listClients ask 31 times a week.Team Productai-chatMeal prototype/)
+  assert.match(text, /Open in Linear.*It is a plain ticket for a person to triage. Nothing else was started./)
+  const links = findAll(tree, (item) => item.type === "a")
+  assert.equal(links.length, 2)
+  assert.equal(links[0].props.href, created.artifact.shareUrl)
+  assert.equal(links[1].props.href, created.url)
+  for (const link of links) { assert.equal(link.props.target, "_blank"); assert.equal(link.props.rel, "noopener noreferrer") }
+  assert.equal(findElement(tree, "CopyArtifactLink").props.url, created.url)
+  let retry
+  tree = TicketActionCard({ block: { kind: "ticket", state: "failed", card: { ...ticketDraft, error: "The workspace token cannot create issues in team Product." } }, onRetry: (value) => { retry = value } })
+  assert.match(elementText(tree), /Linear did not accept the ticketThe workspace token cannot create issues in team Product.Try again/)
+  findElement(tree, "Button").props.onClick()
+  assert.deepEqual(retry, { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: "artifact-id" })
+  const copy = findAll(tree, (item) => typeof item.type === "function" && item.type.name === "CopyTicketText")[0]
+  assert.equal(copy.props.title, ticketDraft.title)
+  assert.equal(copy.props.body, ticketDraft.body)
+  tree = TicketActionCard({ block: { kind: "ticket", state: "failed", card: ticketDraft } })
+  assert.equal(findElement(tree, "Button"), undefined)
+  // Display names come from the server, including for a future tracker sibling.
+  tree = TicketActionCard({ block: { kind: "ticket", state: "created", card: { ...created, tracker: "Example" } } })
+  assert.match(elementText(tree), /Example ticket/)
+  assert.match(elementText(tree), /Open in Example/)
+  assert.doesNotMatch(elementText(tree), /Linear/)
+})
+
+function findAll(tree, predicate) {
+  if (!tree || typeof tree !== "object") return []
+  return [...(predicate(tree) ? [tree] : []), ...(Array.isArray(tree) ? tree : [tree.props?.children]).flatMap((child) => findAll(child, predicate))]
+}
+
+test("copy ticket as text preserves the draft and shows success or failure feedback", async () => {
+  for (const failure of [false, true]) {
+    const hooks = createHooks()
+    const { CopyTicketText } = loadComponent("components/ai-chat/ticket-card.tsx", { ...ticketMocks, react: hooks.react })
+    const previous = Object.getOwnPropertyDescriptor(global, "navigator")
+    let copied
+    Object.defineProperty(global, "navigator", { configurable: true, value: { clipboard: { writeText: async (text) => { if (failure) throw new Error("denied"); copied = text } } } })
+    try {
+      let tree = hooks.render(() => CopyTicketText(ticketDraft))
+      assert.match(elementText(tree), /Copy as text/)
+      tree.props.onClick()
+      await flush()
+      tree = hooks.render(() => CopyTicketText(ticketDraft))
+      assert.match(elementText(tree), failure ? /Could not copy/ : /Copied/)
+      if (!failure) assert.equal(copied, `${ticketDraft.title}\n\n${ticketDraft.body}`)
+    } finally { if (previous) Object.defineProperty(global, "navigator", previous); else delete global.navigator }
+  }
+})
+
+test("ticket wrap-up uses server verb and configured target subtitle", () => {
+  const actions = []
+  const block = { id: "wrap", type: "actions", actions: ["artifact", "ticket"], ticket: ticketTarget }
+  const tree = blockHelpers.InlineBlock({ block, onAction: (value) => actions.push(value) })
+  assert.match(elementText(tree), /Open Linear ticketProduct · Backlog/)
+  findAll(tree, (item) => item.type === "Button")[1].props.onClick()
+  assert.deepEqual(actions, ["ticket"])
+  const withoutState = blockHelpers.InlineBlock({ block: { ...block, ticket: { ...ticketTarget, state: "", verb: "Create Example issue" } }, onAction() {} })
+  assert.match(elementText(withoutState), /Create Example issueProduct/)
+  assert.doesNotMatch(elementText(withoutState), /Backlog|Product ·/)
+})
+
+test("created artifact offers a ticket only with availability and a latest-message handler", () => {
+  const { ArtifactActionCard } = loadComponent("components/ai-chat/artifact-card.tsx", ticketMocks)
+  const block = { kind: "artifact", state: "created", card: { title: "Meal", slug: "meal-abcdef", artifactId: "a", version: 1 } }
+  let action
+  const onTicket = (value) => { action = value }
+  let tree = ArtifactActionCard({ block, ticket: ticketTarget, onTicket })
+  assert.match(elementText(tree), /Open Linear ticket with this artifact/)
+  findAll(tree, (item) => item.type === "Button" && item.props.variant === "link")[0].props.onClick()
+  assert.deepEqual(action, { kind: "ticket", artifactId: "a" })
+  for (const props of [{ block, onTicket }, { block, ticket: ticketTarget }, { block: { ...block, state: "working" }, ticket: ticketTarget, onTicket }, { block: { ...block, state: "failed" }, ticket: ticketTarget, onTicket }]) {
+    tree = ArtifactActionCard(props)
+    assert.doesNotMatch(elementText(tree), /with this artifact/)
+  }
+})
+
+test("ticket SSE replaces a single card without overwriting an artifact card", () => {
+  const { applyStreamEvent } = loadComponent("components/ai-chat/stream-turn.ts", {})
+  let messages = []
+  const turn = { threadId: "t", text: "", retry: false, action: { kind: "ticket" }, assistantId: "" }
+  const view = { setMessages: (fn) => { messages = fn(messages) }, setDraft() { throw new Error("cleared draft") }, setReading() {} }
+  applyStreamEvent(turn, "message_started", { messageId: "m" }, view)
+  applyStreamEvent(turn, "action", { kind: "artifact", state: "created", card: { title: "Meal", slug: "meal-abcdef" } }, view)
+  for (const state of ["working", "working", "failed"]) applyStreamEvent(turn, "action", { kind: "ticket", state, card: { ...ticketDraft, error: state === "failed" ? "Failed" : undefined } }, view)
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].blocks.length, 2)
+  assert.equal(messages[0].blocks[0].kind, "artifact")
+  assert.equal(messages[0].blocks[1].id, "m-ticket")
+  assert.equal(messages[0].blocks[1].state, "failed")
+  assert.equal(messages[0].blocks[1].card.body, ticketDraft.body)
+})
+
+test("ticket retry and artifact ticket links are restricted to the latest available message", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+    "./blocks": { ...blockHelpers, InlineBlock: "InlineBlock" }, "./artifact-card": { ArtifactActionCard: "ArtifactActionCard" }, "./ticket-card": { TicketActionCard: "TicketActionCard" },
+  })
+  const base = { id: "m", role: "assistant", content: "", createdAt: 0, status: "completed" }
+  const ticket = { ...base, blocks: [{ id: "t", type: "action", kind: "ticket", state: "failed", at: 0, card: ticketDraft }] }
+  const artifact = { ...base, blocks: [{ id: "a", type: "action", kind: "artifact", state: "created", at: 0, card: { title: "Meal", artifactId: "a" } }] }
+  const onTicket = () => {}
+  const render = (messages, props = {}) => hooks.render(() => MessageList({ messages, reading: "", onTicket, ticket: ticketTarget, ...props }))
+  assert.equal(findElement(render([ticket]), "TicketActionCard").props.onRetry, onTicket)
+  assert.equal(findElement(render([artifact]), "ArtifactActionCard").props.onTicket, onTicket)
+  for (const props of [{ streaming: true }, { interviewDisabled: true }, { ticket: undefined }]) {
+    assert.equal(findElement(render([ticket], props), "TicketActionCard").props.onRetry, undefined)
+    assert.equal(findElement(render([artifact], props), "ArtifactActionCard").props.onTicket, undefined)
+  }
+  assert.equal(findElement(render([ticket, { ...base, id: "new" }]), "TicketActionCard").props.onRetry, undefined)
+  assert.equal(findElement(render([artifact, { ...base, id: "new" }]), "ArtifactActionCard").props.onTicket, undefined)
+})
+
+test("ticket action reaches the action stream with the retry draft unchanged", async () => {
+  const attempts = []
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => ({ thread: thread("t"), messages: [] }),
+    streamAIChatAction: async (id, action) => { attempts.push({ id, action }); throw new ApiError("Busy", 429) },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve({ ...sources("A", ["A"]), actions: ["artifact", "ticket"], ticket: ticketTarget })
+  await flush()
+  const action = { kind: "ticket", title: ticketDraft.title, body: ticketDraft.body, artifactId: "a" }
+  const list = findElement(fixture.render(), "MessageList")
+  assert.deepEqual(list.props.ticket, ticketTarget)
+  list.props.onTicket(action)
+  await flush()
+  const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  alert.props.children[1].props.onClick()
+  await flush()
+  assert.deepEqual(attempts, [{ id: "t", action }, { id: "t", action }])
+})
+
+test("tracker source badge reflects create-ticket access from the API", () => {
+  const { ChatHeader } = loadComponent("components/ai-chat/header.tsx", {
+    "lucide-react": {}, "@/components/ui/button": { Button: "Button" }, "@/components/ui/popover": { Popover: "Popover", PopoverContent: "PopoverContent", PopoverTrigger: "PopoverTrigger" },
+    "./mode-cards": { chatModes: [] }, "./sources": loadComponent("components/ai-chat/sources.ts", {}),
+  })
+  for (const available of [false, true]) {
+    const tree = ChatHeader({ mode: null, data: { workspace: "A", ticket: available ? ticketTarget : undefined, sources: [{ kind: "issue_tracker", name: "Linear", status: "connected", access: available ? "read_create_ticket" : "read" }] } })
+    if (available) assert.match(elementText(tree), /Read \+ create ticket/)
+    else assert.doesNotMatch(elementText(tree), /Read \+ create ticket/)
+  }
+})
+
+test("unknown ticket outcomes do not claim rejection, and cancellation does not claim a write", () => {
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  const unknown = TicketActionCard({ block: { kind: "ticket", state: "failed", card: { ...ticketDraft, outcomeUnknown: true, error: "Linear did not confirm the ticket. Check Linear before trying again." } } })
+  assert.match(elementText(unknown), /Linear did not confirm the ticket/)
+  assert.doesNotMatch(elementText(unknown), /did not accept/)
+  const stopped = TicketActionCard({ block: { kind: "ticket", state: "failed", card: { ...ticketDraft, error: "Stopped. Nothing was created." } } })
+  assert.match(elementText(stopped), /Ticket creation stopped/)
+})
+
+test("created ticket follows its completion sentence during streaming as well as reload", () => {
+  const { applyStreamEvent } = loadComponent("components/ai-chat/stream-turn.ts", {})
+  let messages = []
+  const turn = { threadId: "t", action: { kind: "ticket" }, text: "", assistantId: "" }
+  const view = { setMessages: (fn) => { messages = fn(messages) }, setDraft() {}, setReading() {} }
+  applyStreamEvent(turn, "message_started", { messageId: "m" }, view)
+  applyStreamEvent(turn, "action", { kind: "ticket", state: "working", card: ticketDraft }, view)
+  const text = "Done. The ticket is in Product backlog."
+  applyStreamEvent(turn, "token", { text }, view)
+  applyStreamEvent(turn, "action", { kind: "ticket", state: "created", card: { ...ticketDraft, identifier: "PRO-1423", url: "https://linear.app/PRO-1423" } }, view)
+  const [sentence, block] = blockHelpers.splitContent(messages[0].content, messages[0].blocks)
+  assert.equal(sentence, text)
+  assert.equal(block.kind, "ticket")
+  assert.equal(block.at, Array.from(text).length)
+})
+
+test("a saved wrap-up stops offering tickets when the workspace loses access", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {}, "./blocks": { ...blockHelpers, InlineBlock: "InlineBlock" },
+  })
+  const message = { id: "m", role: "assistant", content: "", createdAt: 0, status: "completed", blocks: [{ id: "wrap", at: 0, type: "actions", actions: ["ticket"], ticket: ticketTarget }] }
+  const tree = hooks.render(() => MessageList({ messages: [message], reading: "", onArtifact() {}, onTicket() {} }))
+  const props = findElement(tree, "InlineBlock").props
+  assert.deepEqual(props.block.actions, [])
+  assert.equal(blockHelpers.InlineBlock(props), null)
+})
