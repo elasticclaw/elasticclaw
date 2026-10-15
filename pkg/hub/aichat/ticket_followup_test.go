@@ -505,6 +505,17 @@ func TestDismissTicketAttemptRejectsBusyThread(t *testing.T) {
 		t.Fatal(previous, err)
 	}
 	release()
+	archived := true
+	if err := s.UpdateThread(context.Background(), thread, nil, &archived); err != nil {
+		t.Fatal(err)
+	}
+	if rec := request(mux, "POST", dismissPath, "", "octocat", "on"); rec.Code != 409 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	archived = false
+	if err := s.UpdateThread(context.Background(), thread, nil, &archived); err != nil {
+		t.Fatal(err)
+	}
 	if rec := request(mux, "POST", dismissPath, "", "octocat", "on"); rec.Code != 204 {
 		t.Fatal(rec.Code, rec.Body)
 	}

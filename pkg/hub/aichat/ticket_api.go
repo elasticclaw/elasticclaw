@@ -16,6 +16,10 @@ func (a *api) dismissTicketAttempt(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if t.ArchivedAt != nil {
+		http.Error(w, "thread is archived", 409)
+		return
+	}
 	ctx, release, err := a.runner.Acquire(r.Context(), t)
 	if err != nil {
 		w.Header().Set("Retry-After", "1")
