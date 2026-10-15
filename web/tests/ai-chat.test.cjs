@@ -1284,6 +1284,27 @@ test("unknown ticket outcome requires an explicitly labeled acknowledgement and 
   assert.equal(original.confirmUnknown, ticketDraft.attemptId)
 })
 
+test("creating anyway resolves an unknown card without claiming the user found the ticket", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+    "./blocks": blockHelpers, "./ticket-card": { TicketActionCard: "TicketActionCard" },
+  })
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  const error = "Linear did not confirm the ticket. Check Linear before trying again."
+  const unknown = { id: "a", role: "assistant", content: "", createdAt: 0, status: "completed", blocks: [{ id: "a-ticket", type: "action", kind: "ticket", state: "failed", at: 0, card: { ...ticketDraft, attemptId: "a", outcomeUnknown: true, error } }] }
+  const created = { ...unknown, id: "b", blocks: [{ ...unknown.blocks[0], id: "b-ticket", state: "created", card: { ...ticketDraft, attemptId: "b", confirmedUnknown: "a", identifier: "PRO-7", url: "https://linear.app/PRO-7" } }] }
+  const tree = hooks.render(() => MessageList({ messages: [unknown, created], reading: "", ticket: ticketTarget, onTicket() {}, onDismissTicket() {} }))
+  const cards = findElements(tree, "TicketActionCard")
+  assert.equal(cards[0].props.onRetry, undefined)
+  assert.equal(cards[0].props.onDismiss, undefined)
+  assert.ok(!cards[0].props.block.card.dismissed)
+  const originalText = elementText(TicketActionCard(cards[0].props))
+  assert.ok(originalText.includes(error))
+  assert.doesNotMatch(originalText, /You confirmed the ticket exists|create anyway|It's already in/)
+  assert.match(elementText(TicketActionCard(cards[1].props)), /PRO-7/)
+})
+
 test("unknown confirmation remains reachable after chatting and created replays", () => {
   const hooks = createHooks()
   const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
