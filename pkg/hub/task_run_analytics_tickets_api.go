@@ -719,6 +719,16 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	if ticket.LastActivity == 0 {
 		ticket.LastActivity = runs[len(runs)-1].StartedAt
 	}
+	// The pr_opened event is stamped at detection; GitHub's created_at on the
+	// PR row is authoritative when it is earlier.
+	for _, pr := range ticket.PRs {
+		if pr.OpenedAt > 0 && (openedAt == 0 || pr.OpenedAt < openedAt) {
+			openedAt = pr.OpenedAt
+		}
+	}
+	// A replacement PR still open keeps the clock running even when an earlier
+	// closed PR already labels the ticket delivered.
+	waitingOnOpenPR := mergedAt == 0 && ticket.OpenPRCount > 0
 	// Queue time is separate: the lead window starts at the first run.
 	var intervals []taskRunWorkInterval
 	for _, run := range runs {
@@ -727,7 +737,7 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	leadEnd := ticket.LastActivity
 	if mergedAt > 0 {
 		leadEnd = mergedAt
-	} else if ticket.Status == "pr_open" {
+	} else if waitingOnOpenPR {
 		leadEnd = requestNow
 	} else {
 		// An undelivered ticket keeps running while the agent works, even
@@ -736,7 +746,7 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 			leadEnd = max(leadEnd, interval.End)
 		}
 	}
-	if firstStart > 0 && (len(events) > 0 || ticket.Status == "pr_open" || leadEnd > ticket.LastActivity) {
+	if firstStart > 0 && (len(events) > 0 || waitingOnOpenPR || leadEnd > ticket.LastActivity) {
 		ticket.LeadTime = max(int64(0), leadEnd-firstStart)
 	}
 	ticket.FactoryTime, ticket.AwaitingMergeTime, ticket.WorkTimeTracked = computeTicketWorkTimes(intervals, firstStart, firstStart+ticket.LeadTime, openedAt, mergedAt, requestNow)
