@@ -230,7 +230,7 @@ func TestArtifactSignedServing(t *testing.T) {
 	for _, tenant := range []string{"tenant", "other"} {
 		req := httptest.NewRequest("GET", "/api/ai-chat/artifacts/"+v.Slug, nil)
 		req.Header.Set("Tenant", tenant)
-		req.Header.Set("Login", "octocat")
+		req.Header.Set("Login", "teammate")
 		rec := httptest.NewRecorder()
 		Routes(deps).ServeHTTP(rec, req)
 		want := 200
@@ -259,7 +259,7 @@ func TestArtifactSignedServing(t *testing.T) {
 	}
 	req := httptest.NewRequest("GET", "/api/ai-chat/artifacts/"+v.Slug, nil)
 	req.Header.Set("Tenant", "tenant")
-	req.Header.Set("Login", "octocat")
+	req.Header.Set("Login", "teammate")
 	rec = httptest.NewRecorder()
 	Routes(deps).ServeHTTP(rec, req)
 	if rec.Code != 404 {

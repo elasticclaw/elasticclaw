@@ -68,7 +68,7 @@ func (s *Store) Artifact(ctx context.Context, tenant, slug string, version int) 
 	return s.artifact(ctx, tenant, "", slug, version)
 }
 
-// Empty owner is reserved for signed raw capabilities; web metadata requires it.
+// Empty owner allows shared reads within the tenant; mutations require an owner.
 func (s *Store) artifact(ctx context.Context, tenant, owner, slug string, version int) (Artifact, error) {
 	var a Artifact
 	query := `SELECT a.id,a.slug,a.tenant_id,a.owner_login,a.thread_id,a.title,a.current_version,v.version,v.bytes,v.created_at,v.path,v.sha256 FROM ai_chat_artifacts a JOIN ai_chat_artifact_versions v ON v.artifact_id=a.id AND v.version=CASE WHEN ?=0 THEN a.current_version ELSE ? END WHERE a.tenant_id=? AND a.slug=? AND a.deleted_at IS NULL`

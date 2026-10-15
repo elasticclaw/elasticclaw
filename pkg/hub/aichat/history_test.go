@@ -69,7 +69,11 @@ func TestHistoryListsAndDeletion(t *testing.T) {
 	}
 	path := "/api/ai-chat/artifacts/" + a.Slug
 	for _, method := range []string{"GET", "DELETE"} {
-		if rec := request(h, method, path, "", "other", "on"); rec.Code != 404 {
+		want := 404
+		if method == "GET" {
+			want = 200
+		}
+		if rec := request(h, method, path, "", "other", "on"); rec.Code != want {
 			t.Fatal(method, rec.Code)
 		}
 		req := httptest.NewRequest(method, path, nil)
@@ -101,8 +105,10 @@ func TestHistoryListsAndDeletion(t *testing.T) {
 		t.Fatal(*published)
 	}
 	for _, suffix := range []string{"", "?v=1"} {
-		if rec := request(h, "GET", path+suffix, "", "octocat", "on"); rec.Code != 404 {
-			t.Fatal(rec.Code)
+		for _, login := range []string{"octocat", "other"} {
+			if rec := request(h, "GET", path+suffix, "", login, "on"); rec.Code != 404 {
+				t.Fatal(login, rec.Code)
+			}
 		}
 	}
 	rec := httptest.NewRecorder()

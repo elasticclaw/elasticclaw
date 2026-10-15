@@ -48,8 +48,8 @@ func (a *api) getArtifact(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	tenant, owner := a.identity(r)
-	v, err := a.store.artifact(r.Context(), tenant, owner, r.PathValue("slug"), version)
+	tenant, _ := a.identity(r)
+	v, err := a.store.Artifact(r.Context(), tenant, r.PathValue("slug"), version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
