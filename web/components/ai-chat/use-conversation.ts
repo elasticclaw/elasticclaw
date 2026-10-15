@@ -13,6 +13,12 @@ type TurnError = { action?: AIChatActionRequest; answers?: AIChatAnswers; answer
 
 const unfinishedStatuses = ["error", "cancelled", "limit"]
 
+// randomUUID needs a secure context; a hub served over plain http still needs a key.
+export function newActionKey() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID()
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
 function isUnfinishedReply(message: AIChatMessage | undefined) {
   return message?.role === "assistant" && unfinishedStatuses.includes(message.status)
 }
@@ -205,7 +211,7 @@ export function useConversation() {
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
-    if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: crypto.randomUUID() }
+    if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: newActionKey() }
     const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
     const afterMessageId = messages[messages.length - 1]?.id
     try {
