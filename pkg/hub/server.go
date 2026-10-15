@@ -53,8 +53,6 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
-	workflowV2WorkTurns sync.Map // workflowV2WorkKey -> workflowV2WorkTurn
-
 	db        *sql.DB
 	addr      string
 	hubCfg    *types.HubConfig
@@ -382,7 +380,8 @@ type clawConn struct {
 	subagentsActiveAt      time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
 	subagentActiveCount    int             // subagent sessions with a run in flight per that heartbeat
 
-	onWorkInterval func(taskRunWorkInterval) // immutable after connection registration
+	onWorkTurn func(taskRunWorkTurn) // immutable after connection registration
+	workTurnID string                // persisted id of the current turn once checkpointed ("" = not yet written)
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -550,20 +549,38 @@ func (cc *clawConn) finishTurnLocked() {
 // stuck state that alert exists for. It would also fake a "recent turn" for
 // the auto-resume window.
 func (cc *clawConn) abortTurnLocked() {
+	// The reservation never reached the bridge: no work ran, so end the turn
+	// with zero length (a tombstone if a checkpoint already persisted it).
+	if !cc.streamingStartedAt.IsZero() {
+		cc.endWorkTurnLocked(cc.streamingStartedAt)
+	}
 	cc.resetTurnStateLocked()
 }
 
-func (cc *clawConn) resetTurnStateLocked() {
-	if !cc.streamingStartedAt.IsZero() && cc.onWorkInterval != nil {
-		interval := taskRunWorkInterval{cc.streamingStartedAt.UnixMilli(), now().UnixMilli()}
-		record := cc.onWorkInterval
-		// Wait for the caller to release the turn lock before any database work.
-		go func() {
-			cc.mu.Lock()
-			cc.mu.Unlock()
-			record(interval)
-		}()
+// endWorkTurnLocked persists the current turn as closed at endedAt. The write
+// waits for the caller to release the turn lock before any database work.
+func (cc *clawConn) endWorkTurnLocked(endedAt time.Time) {
+	id := cc.workTurnID
+	cc.workTurnID = ""
+	start := cc.streamingStartedAt
+	cc.streamingStartedAt = time.Time{}
+	if start.IsZero() || cc.onWorkTurn == nil || (id == "" && !endedAt.After(start)) {
+		return
 	}
+	if id == "" {
+		id = uuid.NewString()
+	}
+	turn := taskRunWorkTurn{ID: id, Start: start.UnixMilli(), End: endedAt.UnixMilli()}
+	record := cc.onWorkTurn
+	go func() {
+		cc.mu.Lock()
+		cc.mu.Unlock()
+		record(turn)
+	}()
+}
+
+func (cc *clawConn) resetTurnStateLocked() {
+	cc.endWorkTurnLocked(now())
 	cc.awaitingResponse = false
 	cc.sessionLossInterrupted = false
 	cc.turnInputMessageID = ""
@@ -751,6 +768,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 	go s.runWorkflowV2Worker(ctx)
 	go s.runWorkflowV2GitHubReconciler(ctx)
+	go s.runTaskRunWorkCheckpointer(ctx)
 	noWebUI := len(opts) > 0 && opts[0].NoWebUI
 	mux := http.NewServeMux()
 	s.mux = mux
@@ -2964,7 +2982,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		bridgeErrorPauseKind = ""
 	}
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
-	cc.onWorkInterval = func(interval taskRunWorkInterval) { s.persistTaskRunWorkInterval(clawID, interval) }
+	cc.onWorkTurn = func(turn taskRunWorkTurn) { s.persistTaskRunWorkTurn(clawID, turn) }
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {

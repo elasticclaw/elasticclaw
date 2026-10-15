@@ -344,12 +344,23 @@ func migrate(db *sql.DB) error {
 		tenant_id TEXT NOT NULL,
 		run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
 		claw_id TEXT NOT NULL DEFAULT '',
+		v2_task_id TEXT NOT NULL DEFAULT '',
+		open INTEGER NOT NULL DEFAULT 0,
 		started_at INTEGER NOT NULL,
 		ended_at INTEGER NOT NULL,
 		created_at INTEGER NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_task_run_work_intervals_run_start
 		ON task_run_work_intervals(tenant_id, run_id, started_at);`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "task_run_work_intervals", "v2_task_id", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "task_run_work_intervals", "open", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_run_work_intervals_open ON task_run_work_intervals(open) WHERE open=1`); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ticket_metadata (
@@ -852,6 +863,8 @@ func migrate(db *sql.DB) error {
 		tenant_id TEXT NOT NULL,
 		run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
 		claw_id TEXT NOT NULL DEFAULT '',
+		v2_task_id TEXT NOT NULL DEFAULT '',
+		open INTEGER NOT NULL DEFAULT 0,
 		started_at INTEGER NOT NULL,
 		ended_at INTEGER NOT NULL,
 		created_at INTEGER NOT NULL

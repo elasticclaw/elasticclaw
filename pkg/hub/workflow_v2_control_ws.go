@@ -13,7 +13,6 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
-	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -77,10 +76,6 @@ func (s *Server) handleWorkflowV2ControlWS(w http.ResponseWriter, r *http.Reques
 		_ = conn.Close(websocket.StatusPolicyViolation, "workflow attempt is not authorized")
 		return
 	}
-	connectionID := uuid.NewString()
-	s.resumeWorkflowV2WorkTurns(registration.RunID, registration.AttemptID, connectionID)
-	defer s.closeWorkflowV2WorkTurns(registration.RunID, registration.AttemptID, connectionID)
-
 	snapshot, err := store.Snapshot(ctx, registration.RunID, registration.AttemptID)
 	if err != nil {
 		_ = conn.Close(websocket.StatusInternalError, "workflow snapshot unavailable")
@@ -123,7 +118,7 @@ func (s *Server) handleWorkflowV2ControlWS(w http.ResponseWriter, r *http.Reques
 				_ = conn.Close(websocket.StatusPolicyViolation, "control envelope identity mismatch")
 				return
 			}
-			receipt, applyErr := s.applyWorkflowV2ClawControl(ctx, store, envelope, connectionID)
+			receipt, applyErr := s.applyWorkflowV2ClawControl(ctx, store, envelope)
 			// The claw control may have moved the v2 run to a terminal state. If so,
 			// finish the parent v1 task run and disconnect the claw.
 			go s.maybeFinishWorkflowV2Parent(context.Background(), envelope.RunID)
@@ -157,7 +152,7 @@ func (s *Server) handleWorkflowV2ControlWS(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) applyWorkflowV2ClawControl(ctx context.Context, store *workflowv2.Store,
-	envelope typesv2.ControlEnvelope, connectionID string) (typesv2.ControlReceipt, error) {
+	envelope typesv2.ControlEnvelope) (typesv2.ControlReceipt, error) {
 	if envelope.Kind == typesv2.MessageDeliverySubmitted || envelope.Kind == typesv2.MessagePullRequestClaimed {
 		return store.ApplyDeliveryControl(ctx, envelope, s.workflowV2PullRequestVerifier())
 	}
@@ -167,9 +162,9 @@ func (s *Server) applyWorkflowV2ClawControl(ctx context.Context, store *workflow
 		return store.ApplyCommandReceipt(ctx, envelope)
 	}
 	receipt, err := store.ApplyAgentControl(ctx, envelope)
-	if err == nil && receipt.Disposition == typesv2.DispositionAccepted {
-		s.trackWorkflowV2WorkTurn(envelope, connectionID)
-	}
+	// The caller already bound the envelope to this socket's run and attempt,
+	// so a terminal event ends the turn even when the store rejects it.
+	s.trackWorkflowV2WorkTurn(envelope, receipt.Disposition, err == nil)
 	return receipt, err
 }
 
@@ -260,70 +255,43 @@ func (s *Server) workflowV2ClawDispatchReady(ctx context.Context, clawID string)
 }
 
 // V2 agent turns use typed control events, not legacy conversation streaming.
-type workflowV2WorkKey struct{ RunID, AttemptID, TaskID string }
-type workflowV2WorkTurn struct {
-	ClawID       string
-	ConnectionID string
-	StartedAt    int64
+// The turn row is keyed by attempt and task, so it survives reconnects and hub
+// restarts; only the agent's own terminal event (or a hub-side terminal task
+// state, see checkpointWorkflowV2WorkTurns) closes it.
+func workflowV2WorkTurnID(attemptID, taskID string) string {
+	return "v2:" + attemptID + ":" + taskID
 }
 
-func (s *Server) trackWorkflowV2WorkTurn(envelope typesv2.ControlEnvelope, connectionID string) {
-	key := workflowV2WorkKey{envelope.RunID, envelope.AttemptID, envelope.TaskID}
+func (s *Server) trackWorkflowV2WorkTurn(envelope typesv2.ControlEnvelope, disposition typesv2.ControlDisposition, applied bool) {
+	id := workflowV2WorkTurnID(envelope.AttemptID, envelope.TaskID)
 	switch envelope.Kind {
 	case typesv2.MessageAgentTaskStarted:
+		if !applied || disposition != typesv2.DispositionAccepted {
+			return
+		}
 		var clawID string
 		if err := s.db.QueryRow(`SELECT claw_id FROM workflow_v2_attempts WHERE id=? AND run_id=?`, envelope.AttemptID, envelope.RunID).Scan(&clawID); err != nil {
 			log.Printf("[task-run-analytics] resolve v2 work attempt %s: %v", envelope.AttemptID, err)
 			return
 		}
 		// SentAt records the actual bridge turn boundary, even after outbox delay.
-		s.workflowV2WorkTurns.LoadOrStore(key, workflowV2WorkTurn{ClawID: clawID, ConnectionID: connectionID, StartedAt: envelope.SentAt.UnixMilli()})
+		start := workflowV2BoundaryMillis(envelope.SentAt)
+		s.persistTaskRunWorkTurn(clawID, taskRunWorkTurn{ID: id, V2TaskID: envelope.TaskID, Start: start, End: start, Open: true})
 	case typesv2.MessageAgentTaskCompleted, typesv2.MessageAgentTaskFailed:
-		if value, ok := s.workflowV2WorkTurns.Load(key); ok {
-			turn := value.(workflowV2WorkTurn)
-			if turn.ConnectionID != connectionID || !s.workflowV2WorkTurns.CompareAndDelete(key, value) {
-				return
-			}
-			if turn.StartedAt == 0 {
-				return
-			}
-			s.persistTaskRunWorkInterval(turn.ClawID, taskRunWorkInterval{turn.StartedAt, envelope.SentAt.UnixMilli()})
+		// The agent stopped working even when the hub already ended the task
+		// (timed out, superseded, cancelled) and rejects the envelope.
+		if disposition == typesv2.DispositionUnauthorized {
+			return
 		}
+		s.closeTaskRunWorkTurn(id, workflowV2BoundaryMillis(envelope.SentAt))
 	}
 }
 
-// Connection ownership prevents an old socket's cleanup from closing a turn
-// already transferred to a replacement socket. Only explicitly observed starts
-// are resumed; historical task state is never used as a work-time proxy.
-func (s *Server) resumeWorkflowV2WorkTurns(runID, attemptID, connectionID string) {
-	startedAt := now().UnixMilli()
-	s.workflowV2WorkTurns.Range(func(key, value any) bool {
-		identity := key.(workflowV2WorkKey)
-		if identity.RunID != runID || identity.AttemptID != attemptID {
-			return true
-		}
-		turn := value.(workflowV2WorkTurn)
-		turn.ConnectionID = connectionID
-		if turn.StartedAt == 0 {
-			turn.StartedAt = startedAt
-		}
-		s.workflowV2WorkTurns.CompareAndSwap(key, value, turn)
-		return true
-	})
-}
-
-func (s *Server) closeWorkflowV2WorkTurns(runID, attemptID, connectionID string) {
-	endedAt := now().UnixMilli()
-	s.workflowV2WorkTurns.Range(func(key, value any) bool {
-		identity := key.(workflowV2WorkKey)
-		turn := value.(workflowV2WorkTurn)
-		if identity.RunID == runID && identity.AttemptID == attemptID && turn.ConnectionID == connectionID && turn.StartedAt != 0 {
-			paused := turn
-			paused.StartedAt = 0
-			if s.workflowV2WorkTurns.CompareAndSwap(key, value, paused) {
-				s.persistTaskRunWorkInterval(turn.ClawID, taskRunWorkInterval{turn.StartedAt, endedAt})
-			}
-		}
-		return true
-	})
+// workflowV2BoundaryMillis trusts the bridge clock only when it is plausible.
+func workflowV2BoundaryMillis(sentAt time.Time) int64 {
+	current := now()
+	if sentAt.IsZero() || sentAt.After(current) || sentAt.Before(current.Add(-24*time.Hour)) {
+		return current.UnixMilli()
+	}
+	return sentAt.UnixMilli()
 }

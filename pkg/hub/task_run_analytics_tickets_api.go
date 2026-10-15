@@ -208,12 +208,12 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	intervalsByRun, err := s.readTaskRunWorkIntervals(filters.TenantID, runIDs)
+	requestNow := now().UnixMilli()
+	intervalsByRun, err := s.readTaskRunWorkIntervals(filters.TenantID, runIDs, requestNow)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	requestNow := now().UnixMilli()
 	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
 	for _, group := range groups {
 		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, actorsByClaw, metadataByIssue[group.key], false, intervalsByRun, requestNow)
@@ -439,11 +439,12 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 	if err != nil {
 		return nil, err
 	}
-	intervalsByRun, err := s.readTaskRunWorkIntervals(filters.TenantID, runIDs)
+	requestNow := now().UnixMilli()
+	intervalsByRun, err := s.readTaskRunWorkIntervals(filters.TenantID, runIDs, requestNow)
 	if err != nil {
 		return nil, err
 	}
-	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, actorsByClaw, metadata[key], true, intervalsByRun, now().UnixMilli())
+	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, actorsByClaw, metadata[key], true, intervalsByRun, requestNow)
 	if err != nil {
 		return nil, err
 	}
