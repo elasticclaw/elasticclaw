@@ -19,6 +19,7 @@ type SweepStats struct {
 	DeletedVersions    int
 	RemovedFiles       int
 	SkippedFiles       int
+	Errors             int
 	archived           []Thread
 }
 
@@ -65,14 +66,24 @@ func (d Deps) sweep(ctx context.Context, now time.Time) (SweepStats, error) {
 		if info, err := os.Stat(filepath.Join(dir, "ai_chat.yaml")); err == nil && info.Mode().IsRegular() {
 			configured = true
 		}
-		if cfg, err := config.Load(dir); err == nil {
+		cfg, err := config.Load(dir)
+		switch {
+		case err == nil:
 			retention[name] = cfg.Retention
+		case os.IsNotExist(err):
+			retention[name] = config.Retention{}
+		default:
+			// Do not log configuration contents, paths or parser errors.
+			log.Print("[ai-chat] retention skipped a workspace: configuration unavailable")
 		}
 	}
 	if !configured {
 		return SweepStats{}, nil
 	}
-	stats, err := (&Store{DB: d.DB}).Sweep(ctx, now, func(workspace string) config.Retention { return retention[workspace] }, d.ArtifactsDir)
+	stats, err := (&Store{DB: d.DB}).Sweep(ctx, now, func(workspace string) (config.Retention, bool) {
+		r, ok := retention[workspace]
+		return r, ok
+	}, d.ArtifactsDir)
 	for _, t := range stats.archived {
 		if ctx.Err() != nil {
 			break
@@ -81,7 +92,7 @@ func (d Deps) sweep(ctx context.Context, now time.Time) (SweepStats, error) {
 			d.Publish(t)
 		}
 	}
-	log.Printf("[ai-chat] retention archived=%d tool_results=%d versions=%d files=%d skipped=%d", stats.ArchivedThreads, stats.ClearedToolResults, stats.DeletedVersions, stats.RemovedFiles, stats.SkippedFiles)
+	log.Printf("[ai-chat] retention archived=%d tool_results=%d versions=%d files=%d skipped=%d errors=%d", stats.ArchivedThreads, stats.ClearedToolResults, stats.DeletedVersions, stats.RemovedFiles, stats.SkippedFiles, stats.Errors)
 	return stats, err
 }
 
@@ -100,7 +111,8 @@ func retentionDefaults(r config.Retention) config.Retention {
 
 // Sweep uses separate short transactions for archival, tool results and each
 // version. Ticket results are durable action state, not expiring source data.
-func (s *Store) Sweep(ctx context.Context, now time.Time, retentionFor func(string) config.Retention, artifactsDir string) (SweepStats, error) {
+// retentionFor returns false when a workspace's retention cannot be loaded.
+func (s *Store) Sweep(ctx context.Context, now time.Time, retentionFor func(string) (config.Retention, bool), artifactsDir string) (SweepStats, error) {
 	var stats SweepStats
 	rows, err := s.DB.QueryContext(ctx, `SELECT DISTINCT tenant_id,owner_login,workspace FROM ai_chat_threads`)
 	if err != nil {
@@ -122,7 +134,14 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, retentionFor func(stri
 		return stats, err
 	}
 	for _, v := range scopes {
-		retention := retentionDefaults(retentionFor(v.workspace))
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		retention, ok := retentionFor(v.workspace)
+		if !ok {
+			continue
+		}
+		retention = retentionDefaults(retention)
 		cutoff := func(days int) int64 { return now.AddDate(0, 0, -days).UnixMilli() }
 		archived, err := s.archiveExpired(ctx, v.tenant, v.owner, v.workspace, cutoff(retention.ChatsDays), now.UnixMilli())
 		if err != nil {
@@ -172,7 +191,11 @@ func (s *Store) Sweep(ctx context.Context, now time.Time, retentionFor func(stri
 		}
 		for _, item := range versions {
 			if err = s.sweepVersion(ctx, artifactsDir, v.tenant, v.owner, item.id, item.number, cutoff(retention.ArtifactVersionsDays), &stats); err != nil {
-				return stats, err
+				if ctx.Err() != nil {
+					return stats, ctx.Err()
+				}
+				stats.Errors++
+				log.Print("[ai-chat] retention failed to sweep an artifact version")
 			}
 		}
 	}

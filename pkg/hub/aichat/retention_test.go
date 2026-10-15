@@ -51,11 +51,11 @@ func TestRetentionArchivesByWorkspaceAndExcludesActiveTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	stats, err := s.Sweep(ctx, now, func(ws string) config.Retention {
+	stats, err := s.Sweep(ctx, now, func(ws string) (config.Retention, bool) {
 		if ws == "long" {
-			return config.Retention{ChatsDays: 90}
+			return config.Retention{ChatsDays: 90}, true
 		}
-		return config.Retention{ChatsDays: 30}
+		return config.Retention{ChatsDays: 30}, true
 	}, t.TempDir())
 	if err != nil || stats.ArchivedThreads != 2 {
 		t.Fatal(stats, err)
@@ -72,7 +72,7 @@ func TestRetentionArchivesByWorkspaceAndExcludesActiveTurns(t *testing.T) {
 	if _, _, err := runner.Acquire(ctx, expired); !errors.Is(err, ErrArchived) {
 		t.Fatal("stale handler started archived thread", err)
 	}
-	stats, err = s.Sweep(ctx, now, func(string) config.Retention { return config.Retention{ChatsDays: 30} }, t.TempDir())
+	stats, err = s.Sweep(ctx, now, func(string) (config.Retention, bool) { return config.Retention{ChatsDays: 30}, true }, t.TempDir())
 	if err != nil || stats.ArchivedThreads != 1 {
 		t.Fatal(stats, err)
 	} // The long workspace now has the shorter window.
@@ -130,7 +130,7 @@ func TestRetentionFilesAndToolResults(t *testing.T) {
 		}
 	}
 	execRetention(t, s, `UPDATE ai_chat_tool_runs SET created_at=? WHERE id='old-read'`, old)
-	stats, err := s.Sweep(ctx, now, func(string) config.Retention { return config.Retention{} }, dir)
+	stats, err := s.Sweep(ctx, now, func(string) (config.Retention, bool) { return config.Retention{}, true }, dir)
 	if err != nil || stats.DeletedVersions != 1 || stats.RemovedFiles != 3 || stats.ClearedToolResults != 1 || stats.SkippedFiles != 1 {
 		t.Fatal(stats, err)
 	}
@@ -156,7 +156,7 @@ func TestRetentionFilesAndToolResults(t *testing.T) {
 	if err := s.DB.QueryRow(`SELECT result_json FROM ai_chat_tool_runs WHERE id='new-read'`).Scan(&result); err != nil || !result.Valid {
 		t.Fatal(result, err)
 	}
-	stats, err = s.Sweep(ctx, now, func(string) config.Retention { return config.Retention{} }, dir)
+	stats, err = s.Sweep(ctx, now, func(string) (config.Retention, bool) { return config.Retention{}, true }, dir)
 	if err != nil || stats.ArchivedThreads != 0 || stats.RemovedFiles != 0 || stats.DeletedVersions != 0 || stats.ClearedToolResults != 0 {
 		t.Fatal(stats, err)
 	}
@@ -187,7 +187,7 @@ func TestRetentionPreservesUnknownAndDismissedTicketAttempts(t *testing.T) {
 				t.Fatal(err)
 			}
 			execRetention(t, s, `UPDATE ai_chat_tool_runs SET created_at=?`, time.Now().AddDate(0, 0, -100).UnixMilli())
-			if _, err = s.Sweep(ctx, time.Now(), func(string) config.Retention { return config.Retention{} }, t.TempDir()); err != nil {
+			if _, err = s.Sweep(ctx, time.Now(), func(string) (config.Retention, bool) { return config.Retention{}, true }, t.TempDir()); err != nil {
 				t.Fatal(err)
 			}
 			after, err := s.ticketActions(ctx, thread.ID, "")
@@ -230,6 +230,12 @@ func TestRetentionConfigurationAndLifecycle(t *testing.T) {
 		t.Fatal(stats, err)
 	}
 	stage = "on"
+	if stats, err := deps.sweep(ctx, now); err != nil || stats.ArchivedThreads != 0 || published != 0 {
+		t.Fatal(stats, published, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ai_chat.yaml"), []byte("about: Test"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if stats, err := deps.sweep(ctx, now); err != nil || stats.ArchivedThreads != 1 || published != 1 {
 		t.Fatal(stats, published, err)
 	}
@@ -313,5 +319,150 @@ func TestRetentionLoadsWorkspaceConfigAndDefaultsForMissingFile(t *testing.T) {
 	var result sql.NullString
 	if err = s.DB.QueryRow(`SELECT result_json FROM ai_chat_tool_runs WHERE id=?`, missing.ID).Scan(&result); err != nil || !result.Valid {
 		t.Fatal(result, err)
+	}
+}
+
+func retentionArtifact(t *testing.T, s *Store, thread Thread, dir, id string) Artifact {
+	t.Helper()
+	ctx := context.Background()
+	m, err := s.beginAction(ctx, thread, "fake", id, "artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.publishArtifact(ctx, dir, thread, &m, tools.ArtifactRequest{ArtifactID: id, Title: "Prototype"}, testHTML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Status = "completed"
+	if err := s.FinishMessage(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func TestRetentionContinuesAfterVersionFailure(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	dir := t.TempDir()
+	now := time.Now()
+	var blocked, expired, current []Artifact
+	for _, workspace := range []string{"first", "second"} {
+		thread, err := s.CreateThread(ctx, "tenant", "octocat", workspace, "explore_idea")
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := retentionArtifact(t, s, thread, dir, "")
+		blocked = append(blocked, a)
+		expired = append(expired, retentionArtifact(t, s, thread, dir, a.ID))
+		current = append(current, retentionArtifact(t, s, thread, dir, a.ID))
+		if err := os.Remove(a.Path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(a.Path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(a.Path, "keep"), []byte("keep"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execRetention(t, s, `UPDATE ai_chat_artifact_versions SET created_at=?`, now.AddDate(0, 0, -40).UnixMilli())
+	stats, err := s.Sweep(ctx, now, func(string) (config.Retention, bool) { return config.Retention{}, true }, dir)
+	if err != nil || stats.Errors != 2 || stats.DeletedVersions != 2 || stats.RemovedFiles != 2 {
+		t.Fatal(stats, err)
+	}
+	for _, a := range expired {
+		if _, err := os.Stat(a.Path); !os.IsNotExist(err) {
+			t.Fatal("later version was not swept", err)
+		}
+		if _, err := s.Artifact(ctx, a.Tenant, a.Slug, a.Version); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatal("expired version row remains", err)
+		}
+	}
+	for _, a := range append(blocked, current...) {
+		if _, err := os.Stat(a.Path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Artifact(ctx, a.Tenant, a.Slug, a.Version); err != nil {
+			t.Fatal("failed or current version row lost", err)
+		}
+	}
+}
+
+func TestRetentionSkipsUnavailableWorkspaceConfig(t *testing.T) {
+	for _, invalid := range []string{"malformed", "unreadable"} {
+		t.Run(invalid, func(t *testing.T) {
+			ctx := context.Background()
+			s := testStore(t)
+			dir, files := t.TempDir(), t.TempDir()
+			now := time.Now()
+			threads := map[string]Thread{}
+			versions := map[string]Artifact{}
+			for _, workspace := range []string{"invalid", "valid", "missing"} {
+				thread, err := s.CreateThread(ctx, "tenant", "octocat", workspace, "explore_idea")
+				if err != nil {
+					t.Fatal(err)
+				}
+				threads[workspace] = thread
+				a := retentionArtifact(t, s, thread, files, "")
+				versions[workspace] = a
+				retentionArtifact(t, s, thread, files, a.ID)
+				messages, err := s.Messages(ctx, thread.ID, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := s.RecordToolRun(ctx, ToolRun{ID: workspace, MessageID: messages[0].ID, Tool: "read", Args: `{}`, Result: `{}`}); err != nil {
+					t.Fatal(err)
+				}
+				managed := filepath.Join(dir, workspace)
+				if err := os.Mkdir(managed, 0700); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(managed, "ai_chat.yaml")
+				switch {
+				case workspace == "valid":
+					err = os.WriteFile(path, []byte("about: Test"), 0600)
+				case workspace == "invalid" && invalid == "malformed":
+					err = os.WriteFile(path, []byte("retention: ["), 0600)
+				case workspace == "invalid":
+					// A directory is unreadable as YAML, even when tests run as root.
+					err = os.Mkdir(path, 0700)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			old := now.AddDate(0, 0, -100).UnixMilli()
+			execRetention(t, s, `UPDATE ai_chat_threads SET updated_at=?`, old)
+			execRetention(t, s, `UPDATE ai_chat_tool_runs SET created_at=? WHERE tool='read'`, old)
+			execRetention(t, s, `UPDATE ai_chat_artifact_versions SET created_at=?`, old)
+			d := Deps{DB: s.DB, ArtifactsDir: files,
+				FeatureStage: func(context.Context, string) string { return "on" },
+				Workspaces:   func() ([]string, error) { return []string{"invalid", "valid", "missing"}, nil },
+				ManagedDir:   func(ws string) string { return filepath.Join(dir, ws) },
+			}
+			stats, err := d.sweep(ctx, now)
+			if err != nil || stats.ArchivedThreads != 2 || stats.ClearedToolResults != 2 || stats.DeletedVersions != 2 || stats.RemovedFiles != 2 {
+				t.Fatal(stats, err)
+			}
+			for workspace, thread := range threads {
+				kept := workspace == "invalid"
+				saved, err := s.Thread(ctx, thread.TenantID, thread.OwnerLogin, thread.ID)
+				if err != nil || (saved.ArchivedAt == nil) != kept {
+					t.Fatal(workspace, saved, err)
+				}
+				var result sql.NullString
+				if err := s.DB.QueryRow(`SELECT result_json FROM ai_chat_tool_runs WHERE id=?`, workspace).Scan(&result); err != nil || result.Valid != kept {
+					t.Fatal(workspace, result, err)
+				}
+				a := versions[workspace]
+				if _, err := os.Stat(a.Path); (err == nil) != kept || (err != nil && !os.IsNotExist(err)) {
+					t.Fatal(workspace, err)
+				}
+				_, err = s.Artifact(ctx, a.Tenant, a.Slug, 1)
+				if (err == nil) != kept || (err != nil && !errors.Is(err, sql.ErrNoRows)) {
+					t.Fatal(workspace, err)
+				}
+			}
+		})
 	}
 }
