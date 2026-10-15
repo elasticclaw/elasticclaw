@@ -15,7 +15,7 @@ export function historyTime(timestamp: number, now: number) {
   const today = new Date(now)
   today.setHours(0, 0, 0, 0)
   const week = new Date(today)
-  week.setDate(week.getDate() - 7)
+  week.setDate(week.getDate() - 6)
   if (timestamp >= today.getTime()) return { group: "Today", label: date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) }
   if (timestamp >= week.getTime()) return { group: "Last 7 days", label: date.toLocaleDateString("en-US", { weekday: "short" }) }
   return { group: "Older", label: date.toLocaleDateString("en-US", { month: "short", day: "numeric", ...(date.getFullYear() !== today.getFullYear() ? { year: "numeric" as const } : {}) }) }

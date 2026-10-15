@@ -1598,6 +1598,9 @@ test("history groups rows by calendar time, highlights current chat and shows ba
   assert.deepEqual(fixture.historyTime(now, now), { group: "Today", label: "12:00" })
   assert.equal(fixture.historyTime(rows[1].updatedAt, now).group, "Last 7 days")
   assert.match(fixture.historyTime(rows[2].updatedAt, now).label, /2025/)
+  // A row from the same weekday a week ago would repeat today's weekday label.
+  assert.equal(fixture.historyTime(new Date(2026, 9, 9, 12).getTime(), now).group, "Last 7 days")
+  assert.equal(fixture.historyTime(new Date(2026, 9, 8, 12).getTime(), now).group, "Older")
   const clock = Date.now
   Date.now = () => now
   try { fixture.open() } finally { Date.now = clock }
