@@ -402,3 +402,110 @@ func TestTicketCreatedReplayDoesNotHideUnknownAttempt(t *testing.T) {
 		t.Fatal(rec.Code, rec.Body, writes)
 	}
 }
+
+func TestDismissedTicketRejectsReplayAndStaleConfirmation(t *testing.T) {
+	for _, name := range []string{"Example", ""} {
+		t.Run(name, func(t *testing.T) {
+			writes := 0
+			var deps Deps
+			h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+				writes++
+				w.WriteHeader(502)
+			}), func(d *Deps) { deps = *d })
+			thread := testThread(t, s)
+			path := "/api/ai-chat/threads/" + thread.ID
+			body := `{"kind":"ticket","actionKey":"original","title":"Draft","body":"Evidence"}`
+			if rec := request(h, "POST", path+"/actions", body, "octocat", "on"); rec.Code != 200 || writes != 1 {
+				t.Fatal(rec.Code, rec.Body, writes)
+			}
+			m, _, original := latestTicket(t, s, thread)
+			original.Tracker = name
+			setTicketBlock(&m, "failed", original)
+			ctx := context.Background()
+			if err := s.FinishMessage(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+			if rec := request(h, "POST", path+"/ticket-attempts/"+original.AttemptID+"/dismiss", "", "octocat", "on"); rec.Code != 204 {
+				t.Fatal(rec.Code, rec.Body)
+			}
+			// Both guards must use the durable dismissal after a restart.
+			h = Routes(deps)
+			writes = 0
+			cfg, err := config.Load(deps.ManagedDir(thread.Workspace))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &Runner{Store: s, TicketCreator: deps.ticketCreator}
+			expectedTracker := name
+			if expectedTracker == "" {
+				expectedTracker = "Linear"
+			}
+			want := "You confirmed the ticket already exists in " + expectedTracker + "."
+			for _, tc := range []struct{ key, confirm string }{
+				{"original", ""},
+				{"original", original.AttemptID},
+				{"new-click", original.AttemptID},
+				{"", original.AttemptID},
+			} {
+				fields := map[string]string{"kind": "ticket", "actionKey": tc.key, "title": "Draft", "body": "Evidence"}
+				if tc.confirm != "" {
+					fields["confirmUnknown"] = tc.confirm
+				}
+				payload := string(redactedJSON(fields, nil))
+				if rec := request(h, "POST", path+"/actions", payload, "octocat", "on"); rec.Code != 409 || strings.TrimSpace(rec.Body.String()) != want || writes != 0 {
+					t.Fatal(tc, rec.Code, rec.Body, writes)
+				}
+				// The model path cannot bypass the HTTP guard.
+				m, err := s.beginAction(ctx, thread, "", "", "ticket")
+				if err != nil {
+					t.Fatal(err)
+				}
+				creator, target, secrets := deps.ticketCreator(thread.Workspace, cfg)
+				if err := runner.createTicket(ctx, thread, &m, nil, original.TicketRequest, tc.key, creator, target, secrets, 1, false, tc.confirm, func(string, any) error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+				m.Status = "completed"
+				if err := s.FinishMessage(ctx, m); err != nil {
+					t.Fatal(err)
+				}
+				_, block, card := latestTicket(t, s, thread)
+				if block.State != "failed" || card.Error != want || card.OutcomeUnknown || card.ConfirmedUnknown != "" || writes != 0 {
+					t.Fatal(tc, block, card, writes)
+				}
+			}
+		})
+	}
+}
+
+func TestDismissTicketAttemptRejectsBusyThread(t *testing.T) {
+	var deps Deps
+	h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		w.WriteHeader(502)
+	}), func(d *Deps) { deps = *d })
+	thread := testThread(t, s)
+	path := "/api/ai-chat/threads/" + thread.ID
+	if rec := request(h, "POST", path+"/actions", `{"kind":"ticket","title":"Draft","body":"Evidence"}`, "octocat", "on"); rec.Code != 200 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	_, _, original := latestTicket(t, s, thread)
+	a := &api{deps: deps, store: s, runner: &Runner{Store: s}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/ai-chat/threads/{id}/ticket-attempts/{attemptId}/dismiss", a.dismissTicketAttempt)
+	_, release, err := a.runner.Acquire(context.Background(), thread)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	dismissPath := path + "/ticket-attempts/" + original.AttemptID + "/dismiss"
+	if rec := request(mux, "POST", dismissPath, "", "octocat", "on"); rec.Code != 429 || rec.Header().Get("Retry-After") != "1" {
+		t.Fatal(rec.Code, rec.Header(), rec.Body)
+	}
+	previous, err := s.ticketActions(context.Background(), thread.ID, "")
+	if err != nil || unknownTicketAction(previous) == nil || dismissedTicketAction(previous, original.ActionKey, "") != nil {
+		t.Fatal(previous, err)
+	}
+	release()
+	if rec := request(mux, "POST", dismissPath, "", "octocat", "on"); rec.Code != 204 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+}

@@ -215,8 +215,9 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		return err
 	}
 	created := createdTicketAction(previous, actionKey)
+	dismissed := dismissedTicketAction(previous, actionKey, confirmUnknown)
 	unknown := unknownTicketAction(previous)
-	if created == nil && unknown != nil && confirmUnknown == unknown.attemptID {
+	if created == nil && dismissed == nil && unknown != nil && confirmUnknown == unknown.attemptID {
 		card.ConfirmedUnknown = unknown.attemptID
 	}
 	run.Args = string(redactedJSON(card, secrets))
@@ -241,6 +242,19 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		_ = json.Unmarshal(redactedJSON(card, secrets), &card)
 		setTicketBlock(m, "created", card)
 		_ = action("created")
+		return nil
+	}
+	if dismissed != nil {
+		if dismissed.card.Tracker != "" {
+			card.Tracker = readhttp.Redact(dismissed.card.Tracker, secrets)
+		}
+		if card.Tracker == "" {
+			card.Tracker = "The tracker"
+		}
+		card.FailureHeadline = "Ticket already exists"
+		card.Error = "You confirmed the ticket already exists in " + card.Tracker + "."
+		setTicketBlock(m, "failed", card)
+		_ = action("failed")
 		return nil
 	}
 	if prior := unknown; prior != nil && card.ConfirmedUnknown == "" {

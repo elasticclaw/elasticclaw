@@ -120,6 +120,16 @@ func createdTicketAction(previous []savedTicketAction, key string) *savedTicketA
 	return nil
 }
 
+// Dismissal resolves the original action and invalidates confirmations from stale cards.
+func dismissedTicketAction(previous []savedTicketAction, key, confirmUnknown string) *savedTicketAction {
+	for i := range previous {
+		if previous[i].card.Dismissed && (key != "" && previous[i].actionKey == key || confirmUnknown != "" && previous[i].attemptID == confirmUnknown) {
+			return &previous[i]
+		}
+	}
+	return nil
+}
+
 // Replayed cards do not resolve unknown attempts. Only an explicit confirmation
 // or dismissal of that attempt does; a later unknown attempt needs its own check.
 func unknownTicketAction(previous []savedTicketAction) *savedTicketAction {

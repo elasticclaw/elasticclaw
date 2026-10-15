@@ -210,6 +210,18 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		existing = createdTicketAction(previous, body.ActionKey)
+		if prior := dismissedTicketAction(previous, body.ActionKey, body.ConfirmUnknown); existing == nil && prior != nil {
+			name := prior.card.Tracker
+			if name == "" {
+				_, target, _ := a.deps.ticketCreator(t.Workspace, cfg)
+				name = target.Tracker
+			}
+			if name == "" {
+				name = "The tracker"
+			}
+			http.Error(w, "You confirmed the ticket already exists in "+name+".", 409)
+			return
+		}
 		if prior := unknownTicketAction(previous); existing == nil && prior != nil && body.ConfirmUnknown != prior.attemptID {
 			name := prior.card.Tracker
 			if name == "" {

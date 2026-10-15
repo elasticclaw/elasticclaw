@@ -16,11 +16,19 @@ func (a *api) dismissTicketAttempt(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := a.runner.RecoverInterrupted(r.Context(), t); err != nil {
+	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, ErrBusy.Error(), 429)
+		return
+	}
+	defer release()
+	// Holding the slot excludes active creation while recovering an interrupted attempt.
+	if err := a.store.RecoverInterrupted(ctx, t.ID); err != nil {
 		http.Error(w, "unable to recover interrupted turn", 500)
 		return
 	}
-	err := a.store.dismissTicketAttempt(r.Context(), t.ID, r.PathValue("attemptId"))
+	err = a.store.dismissTicketAttempt(ctx, t.ID, r.PathValue("attemptId"))
 	if errors.Is(err, sql.ErrNoRows) {
 		http.NotFound(w, r)
 		return
