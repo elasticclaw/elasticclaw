@@ -31,6 +31,7 @@ type TicketCard struct {
 	AttemptID        string `json:"attemptId"`
 	ConfirmedUnknown string `json:"confirmedUnknown,omitempty"`
 	ActionKey        string `json:"actionKey"`
+	Dismissed        bool   `json:"dismissed,omitempty"`
 	OutcomeUnknown   bool   `json:"outcomeUnknown,omitempty"`
 	FailureHeadline  string `json:"failureHeadline,omitempty"`
 	tracker.Target
@@ -259,9 +260,6 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		if ctx.Err() != nil && !sent {
 			message = "Stopped. Nothing was created."
 		}
-		if sent && ctx.Err() != nil {
-			message = target.Tracker + " did not confirm the ticket. Check " + target.Tracker + " before trying again."
-		}
 		card.FailureHeadline = failureHeadline
 		if message == "Stopped. Nothing was created." {
 			card.FailureHeadline = "Ticket creation stopped"
@@ -373,6 +371,8 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 			} else {
 				failureHeadline = target.Tracker + " did not accept the ticket"
 			}
+		} else if sent {
+			message = target.Tracker + " did not confirm the ticket. Check " + target.Tracker + " before trying again."
 		}
 		return fail(message)
 	}

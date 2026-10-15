@@ -48,7 +48,7 @@ rowsLoop:
 		action.confirmedUnknown = argsCard.ConfirmedUnknown
 		action.card = argsCard
 		action.draft = argsCard.TicketRequest
-		var marker struct{ RequestSent bool }
+		var marker struct{ RequestSent, Dismissed bool }
 		if result.Valid && result.String != "" {
 			if err := json.Unmarshal([]byte(result.String), &marker); err != nil {
 				continue rowsLoop
@@ -73,6 +73,10 @@ rowsLoop:
 				action.unknown = action.card.OutcomeUnknown
 			}
 		}
+		if marker.Dismissed {
+			action.card.Dismissed = true
+		}
+		action.unknown = action.unknown && !action.card.Dismissed
 		action.attemptID = action.card.AttemptID
 		if action.attemptID == "" {
 			action.attemptID = messageID
@@ -117,10 +121,13 @@ func createdTicketAction(previous []savedTicketAction, key string) *savedTicketA
 }
 
 // Replayed cards do not resolve unknown attempts. Only an explicit confirmation
-// of that attempt does; a later unknown attempt needs its own confirmation.
+// or dismissal of that attempt does; a later unknown attempt needs its own check.
 func unknownTicketAction(previous []savedTicketAction) *savedTicketAction {
 	confirmed := map[string]bool{}
 	for _, action := range previous {
+		if action.card.Dismissed {
+			confirmed[action.attemptID] = true
+		}
 		if action.confirmedUnknown != "" {
 			confirmed[action.confirmedUnknown] = true
 		}

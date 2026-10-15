@@ -57,6 +57,7 @@ func Routes(deps Deps) http.Handler {
 	api.runner = &Runner{Store: api.store, PrepareReads: deps.prepareReads, ArtifactsDir: deps.ArtifactsDir, PublicURL: deps.PublicURL, AvailableActions: deps.availableActions, TicketCreator: deps.ticketCreator, TicketSecrets: deps.ticketSecrets}
 	mux.HandleFunc("GET /api/ai-chat/artifacts/{slug}", api.getArtifact)
 	mux.HandleFunc("POST /api/ai-chat/threads/{id}/actions", api.runAction)
+	mux.HandleFunc("POST /api/ai-chat/threads/{id}/ticket-attempts/{attemptId}/dismiss", api.dismissTicketAttempt)
 	mux.HandleFunc("GET /api/ai-chat/threads", api.listThreads)
 	mux.HandleFunc("POST /api/ai-chat/threads", api.createThread)
 	mux.HandleFunc("GET /api/ai-chat/threads/{id}", api.getThread)
