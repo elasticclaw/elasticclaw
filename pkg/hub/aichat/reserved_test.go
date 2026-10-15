@@ -28,7 +28,7 @@ func TestOfferedToolSchemasHaveObjectRoots(t *testing.T) {
 	deps := Deps{GitHubToken: func(string) string { return "test-token" }, Secret: func(string, string) (string, bool) { return "test-token", true }, LinearToken: func(string) (string, bool) { return "test-token", true }}
 	var reads []tools.Tool
 	for _, kind := range []string{"knowledge_base", "repositories", "posthog", "datadog", "issue_tracker"} {
-		reads = append(reads, deps.candidate("workspace", cfg, config.Source{Kind: kind}).tools...)
+		reads = append(reads, deps.candidate(context.Background(), "workspace", cfg, config.Source{Kind: kind}).tools...)
 	}
 	registry, err := tools.NewReadRegistry(reads...)
 	if err != nil {
@@ -41,10 +41,10 @@ func TestOfferedToolSchemasHaveObjectRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := &Runner{Store: s, Reads: registry, AvailableActions: func(*config.Config) []string { return []string{"artifact", "ticket"} }}
+	runner := &Runner{Store: s, Reads: registry, AvailableActions: func(context.Context, string, *config.Config) []string { return []string{"artifact", "ticket"} }}
 	p := fakeProvider{stream: func(_ context.Context, req llm.Request, _ func(string) error) (llm.Response, error) {
-		if len(req.Tools) != 16 {
-			t.Fatalf("expected 12 read and 4 reserved tools, got %d", len(req.Tools))
+		if len(req.Tools) != 17 {
+			t.Fatalf("expected 12 read and 5 reserved tools, got %d", len(req.Tools))
 		}
 		for _, tool := range req.Tools {
 			var schema map[string]json.RawMessage
@@ -320,7 +320,7 @@ func TestReservedLimitsAndAvailability(t *testing.T) {
 			thread := testThread(t, s)
 			ctx := context.Background()
 			m, _ := s.BeginTurn(ctx, thread, "question", "fake", false)
-			r := &Runner{Store: s, AvailableActions: func(*config.Config) []string { return tc.available }}
+			r := &Runner{Store: s, AvailableActions: func(context.Context, string, *config.Config) []string { return tc.available }}
 			n := 0
 			p := fakeProvider{stream: func(_ context.Context, req llm.Request, _ func(string) error) (llm.Response, error) {
 				n++

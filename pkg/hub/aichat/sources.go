@@ -109,7 +109,7 @@ type sourceCandidate struct {
 	check   func(context.Context) healthResult
 }
 
-func (d Deps) candidate(workspace string, cfg *config.Config, source config.Source) sourceCandidate {
+func (d Deps) candidate(ctx context.Context, workspace string, cfg *config.Config, source config.Source) sourceCandidate {
 	c := sourceCandidate{}
 	secret := func(name string) string {
 		value, ok := "", false
@@ -191,7 +191,7 @@ func (d Deps) candidate(workspace string, cfg *config.Config, source config.Sour
 		c.detail = "Team " + v.DefaultFields.Team + " · reads issues to avoid duplicates"
 		token, ok := "", false
 		if d.LinearToken != nil {
-			token, ok = d.LinearToken(workspace)
+			token, ok = d.linearToken(ctx, workspace)
 		}
 		if !ok || token == "" {
 			c.err = errors.New("The Linear tracker token is not configured.")
@@ -240,10 +240,9 @@ func (d Deps) checkSources(ctx context.Context, workspace string, cfg *config.Co
 			if s.Status == "invalid" {
 				return
 			}
-			raw, _ := json.Marshal(sourceConfiguration(cfg, s.Kind))
-			key := fmt.Sprintf("%s\x00%s\x00%x", workspace, s.Kind, sha256.Sum256(raw))
+			key := sourceHealthKey(workspace, cfg, s.Kind)
 			source := *s
-			c := cache.prepare(ctx, key, func() sourceCandidate { return d.candidate(workspace, cfg, source) })
+			c := cache.prepare(ctx, key, func() sourceCandidate { return d.candidate(ctx, workspace, cfg, source) })
 			candidates[i] = c
 			s.Detail = c.detail
 			s.Status = "unreachable"
@@ -351,4 +350,19 @@ func (h *sourceHealth) prepare(ctx context.Context, key string, build func() sou
 	case <-pending.done:
 		return pending.result
 	}
+}
+
+func sourceHealthKey(workspace string, cfg *config.Config, kind string) string {
+	raw, _ := json.Marshal(sourceConfiguration(cfg, kind))
+	return fmt.Sprintf("%s\x00%s\x00%x", workspace, kind, sha256.Sum256(raw))
+}
+
+func (h *sourceHealth) tokenRejected(key string) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entry := h.entries[key]
+	return entry != nil && entry.done == nil && entry.result.err != nil && healthError(entry.result.err) == "The API key was rejected."
 }

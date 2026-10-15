@@ -1,0 +1,107 @@
+package aichat
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tools"
+)
+
+func (a *api) dismissTicketAttempt(w http.ResponseWriter, r *http.Request) {
+	t, ok := a.owned(w, r)
+	if !ok {
+		return
+	}
+	if t.ArchivedAt != nil {
+		http.Error(w, "thread is archived", 409)
+		return
+	}
+	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	if err != nil {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, ErrBusy.Error(), 429)
+		return
+	}
+	defer release()
+	// Holding the slot excludes active creation while recovering an interrupted attempt.
+	if err := a.store.RecoverInterrupted(ctx, t.ID); err != nil {
+		http.Error(w, "unable to recover interrupted turn", 500)
+		return
+	}
+	err = a.store.dismissTicketAttempt(ctx, t.ID, r.PathValue("attemptId"))
+	if errors.Is(err, sql.ErrNoRows) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "unable to dismiss ticket attempt", 500)
+		return
+	}
+	a.publish(t)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Store) dismissTicketAttempt(ctx context.Context, threadID, attemptID string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var runID, result, rawBlocks string
+	err = tx.QueryRowContext(ctx, `SELECT r.id,r.result_json,COALESCE(m.blocks_json,'[]')
+		FROM ai_chat_tool_runs r JOIN ai_chat_messages m ON m.id=r.message_id
+		WHERE m.thread_id=? AND m.id=? AND m.status<>'streaming'
+		AND r.tool='ticket' AND r.provider='AI Chat' AND json_extract(NULLIF(r.result_json,''),'$.requestSent')=1`, threadID, attemptID).Scan(&runID, &result, &rawBlocks)
+	if err != nil {
+		return err
+	}
+	var marker struct{ Dismissed bool }
+	var blocks []tools.Block
+	if json.Unmarshal([]byte(result), &marker) != nil || json.Unmarshal([]byte(rawBlocks), &blocks) != nil {
+		return sql.ErrNoRows
+	}
+	found := false
+	for i := range blocks {
+		block := &blocks[i]
+		if block.Type != "action" || block.Kind != "ticket" {
+			continue
+		}
+		var card TicketCard
+		if block.State != "failed" || json.Unmarshal(block.Card, &card) != nil || !card.OutcomeUnknown {
+			return sql.ErrNoRows
+		}
+		card.Dismissed = true
+		block.Card = redactedJSON(card, nil)
+		found = true
+	}
+	if !found {
+		return sql.ErrNoRows
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_tool_runs SET result_json=json_set(result_json,'$.dismissed',json('true')) WHERE id=?`, runID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_messages SET blocks_json=? WHERE id=?`, string(redactedJSON(blocks, nil)), attemptID); err != nil {
+		return err
+	}
+	// Refusals can repeat the same attempt on later messages. Persist their dismissal too.
+	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_messages SET blocks_json=(
+		SELECT json_group_array(json(CASE
+			WHEN json_extract(value,'$.type')='action' AND json_extract(value,'$.kind')='ticket'
+			AND json_extract(value,'$.card.attemptId')=?
+			THEN json_set(value,'$.card.dismissed',json('true')) ELSE value END))
+		FROM json_each(ai_chat_messages.blocks_json))
+		WHERE thread_id=? AND id<>? AND EXISTS(
+			SELECT 1 FROM json_each(ai_chat_messages.blocks_json)
+			WHERE json_extract(value,'$.type')='action' AND json_extract(value,'$.kind')='ticket'
+			AND json_extract(value,'$.card.attemptId')=?)`, attemptID, threadID, attemptID, attemptID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at=? WHERE id=?`, time.Now().UnixMilli(), threadID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

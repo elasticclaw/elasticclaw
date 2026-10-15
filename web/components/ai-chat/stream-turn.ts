@@ -1,8 +1,8 @@
-import type { AIChatMessage, AIChatAnswers, AIChatAnswersSummary, AIChatInterview, AIChatBlock, AIChatArtifactRequest, AIChatArtifactCard } from "@/lib/api"
+import type { AIChatMessage, AIChatAnswers, AIChatAnswersSummary, AIChatInterview, AIChatBlock, AIChatActionRequest, AIChatArtifactCard, AIChatTicketCard } from "@/lib/api"
 
 // Progress of one streamed turn, updated in place as SSE events arrive.
 export type StreamTurn = {
-  action?: AIChatArtifactRequest
+  action?: AIChatActionRequest
   answers?: AIChatAnswers
   answersSummary?: AIChatAnswersSummary
   threadId: string
@@ -46,11 +46,13 @@ export function applyStreamEvent(turn: StreamTurn, event: string, payload: Recor
       }
       break
     case "action":
-      if (payload.kind === "artifact" && ["working", "created", "failed"].includes(String(payload.state)) && payload.card && typeof payload.card === "object" && typeof (payload.card as AIChatArtifactCard).title === "string") {
+      if ((payload.kind === "artifact" || payload.kind === "ticket" && typeof (payload.card as AIChatTicketCard)?.tracker === "string" && typeof (payload.card as AIChatTicketCard)?.body === "string") && ["working", "created", "failed"].includes(String(payload.state)) && payload.card && typeof payload.card === "object" && typeof (payload.card as AIChatArtifactCard).title === "string") {
         updateAssistant(turn, view, (message) => {
           const blocks = message.blocks ?? []
-          const previous = blocks.find((block) => block.type === "action" && block.kind === "artifact")
-          const block: AIChatBlock = { id: previous?.id ?? `${message.id}-artifact`, at: previous?.at ?? Array.from(message.content).length, type: "action", kind: "artifact", state: payload.state as "working" | "created" | "failed", card: payload.card as AIChatArtifactCard }
+          const previous = blocks.find((block) => block.type === "action" && block.kind === payload.kind)
+          // The button path emits its completion sentence after the working card.
+          const at = payload.kind === "ticket" && payload.state !== "working" ? Array.from(message.content).length : previous?.at ?? Array.from(message.content).length
+          const block = { id: previous?.id ?? `${message.id}-${payload.kind}`, at, type: "action", kind: payload.kind, state: payload.state as "working" | "created" | "failed", card: payload.card } as AIChatBlock
           return { ...message, blocks: previous ? blocks.map((item) => item === previous ? block : item) : [...blocks, block] }
         })
       }

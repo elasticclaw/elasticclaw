@@ -2,16 +2,22 @@
 
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { ApiError, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, streamAIChatAction, type AIChatArtifactRequest, type AIChatAnswers, type AIChatAnswersSummary, type AIChatStepAnswers, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
+import { ApiError, dismissAIChatTicketAttempt, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, streamAIChatAction, type AIChatArtifactRequest, type AIChatActionRequest, type AIChatTicketRequest, type AIChatAnswers, type AIChatAnswersSummary, type AIChatStepAnswers, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
 import type { ChatMode } from "./mode-cards"
 import { summarizeInterview, applyStreamEvent, type StreamTurn } from "./stream-turn"
 import { useChatSources } from "./use-chat-sources"
 
 // `rejected` marks a message the hub refused before starting a turn (an HTTP
 // error such as 429): it was never sent, so it must be resent, not retried.
-type TurnError = { action?: AIChatArtifactRequest; answers?: AIChatAnswers; answersSummary?: AIChatAnswersSummary; message: string; text: string; retry: boolean; rejected?: boolean; afterMessageId?: string }
+type TurnError = { action?: AIChatActionRequest; answers?: AIChatAnswers; answersSummary?: AIChatAnswersSummary; message: string; text: string; retry: boolean; rejected?: boolean; afterMessageId?: string }
 
 const unfinishedStatuses = ["error", "cancelled", "limit"]
+
+// randomUUID needs a secure context; a hub served over plain http still needs a key.
+export function newActionKey() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID()
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("")
+}
 
 function isUnfinishedReply(message: AIChatMessage | undefined) {
   return message?.role === "assistant" && unfinishedStatuses.includes(message.status)
@@ -20,7 +26,7 @@ function isUnfinishedReply(message: AIChatMessage | undefined) {
 function reconcileError(error: TurnError | null, messages: AIChatMessage[]): TurnError | null {
   const last = messages[messages.length - 1]
   if (!error || error.rejected || last?.role !== "assistant" || last.id === error.afterMessageId) return error
-  if (last.status === "completed") return null
+  if (last.status === "completed" || last.blocks?.some((block) => block.type === "action" && block.kind === "ticket" && block.state !== "working")) return null
   return isUnfinishedReply(last) ? { ...error, retry: true, answers: undefined, answersSummary: undefined } : error
 }
 
@@ -89,6 +95,7 @@ export function useConversation() {
     shownSync.current = revision
     showThread(saved)
     setTurnError((error) => reconcileError(error, saved.messages))
+    return saved
   }
 
   // Whichever of the initial load or a cross-tab sync lands first completes
@@ -200,14 +207,16 @@ export function useConversation() {
     active.current = null
   }
 
-  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatArtifactRequest) => {
-    if (!data?.configured || !canStartTurn(action ? "artifact" : answers ? "answers" : text, retry)) return
+  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatActionRequest) => {
+    if (!data?.configured || !canStartTurn(action ? "action" : answers ? "answers" : text, retry)) return
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
     const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
     const afterMessageId = messages[messages.length - 1]?.id
     try {
+      if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: newActionKey() }
+      turn.action = action
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
       if (turn.error) setTurnError({ action, message: turn.error, text, retry: true, afterMessageId })
     } catch (error) {
@@ -248,11 +257,41 @@ export function useConversation() {
     if (!threadRef.current || thread?.archivedAt) return
     return send("", false, undefined, undefined, action)
   }
+  const startTicket = (action: AIChatTicketRequest = { kind: "ticket" }) => {
+    if (!threadRef.current || thread?.archivedAt || !data?.actions?.includes("ticket")) return
+    return send("", false, undefined, undefined, action)
+  }
+  const dismissTicket = async (attemptId: string) => {
+    const id = threadRef.current
+    const version = generation.current
+    if (!id || sending.current) throw new Error("Wait for the current response to finish.")
+    await dismissAIChatTicketAttempt(id, attemptId)
+    if (isSameConversation(version)) await syncThread(id)
+  }
   const last = messages[messages.length - 1]
+  const resyncPending = useEffectEvent(() => syncThread(threadRef.current))
+  useEffect(() => {
+    if (streaming || last?.status !== "streaming") return
+    let stopped = false
+    let attempts = 0
+    let timer: ReturnType<typeof setTimeout>
+    // A sent ticket mutation may finish after Stop closes the SSE connection.
+    const poll = async () => {
+      if (stopped || sending.current) return
+      attempts++
+      try {
+        const saved = await resyncPending()
+        if (saved && saved.messages.at(-1)?.status !== "streaming") return
+      } catch { /* A temporary disconnect should not prevent the next resync. */ }
+      if (!stopped && attempts < 20) timer = setTimeout(poll, 2000)
+    }
+    timer = setTimeout(poll, 2000)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [streaming, last?.id, last?.status])
   const canRetry = isUnfinishedReply(last) && !last?.blocks?.some((block) => block.type === "action")
 
   return {
     requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry,
-    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, retryTurn, cancel,
+    mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, startTicket, dismissTicket, retryTurn, cancel,
   }
 }

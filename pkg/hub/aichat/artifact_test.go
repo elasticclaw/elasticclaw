@@ -82,7 +82,7 @@ func TestArtifactStorageAndConcurrentVersions(t *testing.T) {
 	s := testStore(t)
 	thread := testThread(t, s)
 	dir := t.TempDir()
-	m, _ := s.beginAction(ctx, thread, "fake", "")
+	m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
 	a, err := s.publishArtifact(ctx, dir, thread, &m, tools.ArtifactRequest{Title: "Meal swap / prototype"}, testHTML)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestArtifactSignedServing(t *testing.T) {
 	s := testStore(t)
 	thread := testThread(t, s)
 	dir := t.TempDir()
-	m, _ := s.beginAction(ctx, thread, "fake", "")
+	m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
 	v, err := s.publishArtifact(ctx, dir, thread, &m, tools.ArtifactRequest{Title: "Meal swap"}, testHTML)
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +295,7 @@ func TestArtifactGeneration(t *testing.T) {
 			ctx := context.Background()
 			s := testStore(t)
 			thread := testThread(t, s)
-			m, _ := s.beginAction(ctx, thread, "fake", "")
+			m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
 			r := &Runner{Store: s, ArtifactsDir: t.TempDir()}
 			calls := 0
 			p := fakeProvider{stream: func(_ context.Context, req llm.Request, token func(string) error) (llm.Response, error) {
@@ -356,7 +356,7 @@ func TestArtifactCancelRecoveryAndSecrets(t *testing.T) {
 	s := testStore(t)
 	thread := testThread(t, s)
 	ctx := context.Background()
-	m, _ := s.beginAction(ctx, thread, "fake", "")
+	m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
 	r := &Runner{Store: s, ArtifactsDir: t.TempDir(), PrepareReads: func(_ context.Context, _ string, c *config.Config) (*tools.ReadRegistry, *config.Config, []string) {
 		return nil, c, []string{"SECRET-SENTINEL"}
 	}}
@@ -382,7 +382,7 @@ func TestArtifactCancelRecoveryAndSecrets(t *testing.T) {
 	if strings.Contains(events.String()+string(body)+run, "SECRET-SENTINEL") {
 		t.Fatal("secret leaked")
 	}
-	m, _ = s.beginAction(ctx, thread, "fake", "")
+	m, _ = s.beginAction(ctx, thread, "fake", "", "artifact")
 	turn, cancel := context.WithCancel(ctx)
 	p.stream = func(ctx context.Context, _ llm.Request, token func(string) error) (llm.Response, error) {
 		token("<!doctype html>")
@@ -401,7 +401,7 @@ func TestArtifactCancelRecoveryAndSecrets(t *testing.T) {
 	if count != 1 {
 		t.Fatal(count)
 	}
-	m, _ = s.beginAction(ctx, thread, "fake", "")
+	m, _ = s.beginAction(ctx, thread, "fake", "", "artifact")
 	s.DB.Exec(`UPDATE ai_chat_tool_runs SET args_json=? WHERE message_id=?`, `{"title":"Interrupted","brief":"Try again"}`, m.ID)
 	if err := s.RecoverInterrupted(ctx, thread.ID); err != nil {
 		t.Fatal(err)
@@ -423,7 +423,7 @@ func TestStartArtifactEndsBatchAndAvailability(t *testing.T) {
 			m, _ := s.BeginTurn(ctx, thread, "Create a prototype", "fake", false)
 			r := &Runner{Store: s, ArtifactsDir: t.TempDir()}
 			if available {
-				r.AvailableActions = func(*config.Config) []string { return []string{"artifact"} }
+				r.AvailableActions = func(context.Context, string, *config.Config) []string { return []string{"artifact"} }
 			}
 			calls := 0
 			p := fakeProvider{stream: func(callCtx context.Context, req llm.Request, token func(string) error) (llm.Response, error) {
@@ -564,7 +564,7 @@ func TestArtifactCancelDuringPreparation(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	thread := testThread(t, s)
-	m, _ := s.beginAction(ctx, thread, "fake", "")
+	m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
 	turn, cancel := context.WithCancel(ctx)
 	r := &Runner{Store: s, ArtifactsDir: t.TempDir(), PrepareReads: func(_ context.Context, _ string, cfg *config.Config) (*tools.ReadRegistry, *config.Config, []string) {
 		cancel()
@@ -582,7 +582,7 @@ func TestArtifactCancelDuringPreparation(t *testing.T) {
 		t.Fatal(messages)
 	}
 	// An action interrupted before preparation also gets a card on reload.
-	m, _ = s.beginAction(ctx, thread, "fake", "")
+	m, _ = s.beginAction(ctx, thread, "fake", "", "artifact")
 	if err := r.RecoverInterrupted(ctx, thread); err != nil {
 		t.Fatal(err)
 	}
@@ -668,7 +668,7 @@ func TestInterruptedArtifactRevisionKeepsTarget(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	thread := testThread(t, s)
-	m, _ := s.beginAction(ctx, thread, "fake", "")
+	m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
 	a, err := s.publishArtifact(ctx, t.TempDir(), thread, &m, tools.ArtifactRequest{Title: "Meal"}, testHTML)
 	if err != nil {
 		t.Fatal(err)
@@ -677,7 +677,7 @@ func TestInterruptedArtifactRevisionKeepsTarget(t *testing.T) {
 	if err = s.FinishMessage(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	m, err = s.beginAction(ctx, thread, "fake", a.ID)
+	m, err = s.beginAction(ctx, thread, "fake", a.ID, "artifact")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,7 +696,7 @@ func TestArtifactRootPermissionsAndSymlinks(t *testing.T) {
 			s := testStore(t)
 			thread := testThread(t, s)
 			ctx := context.Background()
-			m, _ := s.beginAction(ctx, thread, "fake", "")
+			m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
 			root := t.TempDir()
 			if err := os.Chmod(root, 0750); err != nil {
 				t.Fatal(err)
@@ -749,7 +749,7 @@ func TestArtifactDeadline(t *testing.T) {
 		t.Run(fmt.Sprint(beforeGeneration), func(t *testing.T) {
 			s := testStore(t)
 			thread := testThread(t, s)
-			m, _ := s.beginAction(context.Background(), thread, "fake", "")
+			m, _ := s.beginAction(context.Background(), thread, "fake", "", "artifact")
 			// Exercise both the early fallback and the generation failure card.
 			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 			defer cancel()
@@ -794,7 +794,7 @@ func TestArtifactOutputBudgetRetry(t *testing.T) {
 			s := testStore(t)
 			thread := testThread(t, s)
 			ctx := context.Background()
-			m, _ := s.beginAction(ctx, thread, "fake", "")
+			m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
 			calls := 0
 			p := fakeProvider{stream: func(_ context.Context, req llm.Request, emit func(string) error) (llm.Response, error) {
 				calls++

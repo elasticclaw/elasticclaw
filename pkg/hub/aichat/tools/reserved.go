@@ -16,6 +16,7 @@ type Block struct {
 	ID      string          `json:"id"`
 	Type    string          `json:"type"`
 	Data    json.RawMessage `json:"data,omitempty"`
+	Ticket  json.RawMessage `json:"ticket,omitempty"`
 	Actions []string        `json:"actions,omitempty"`
 	Kind    string          `json:"kind,omitempty"`
 	State   string          `json:"state,omitempty"`
@@ -99,6 +100,7 @@ func ReservedDefinitions() []llm.Tool {
 	actions := arraySchema(enumSchema("artifact", "ticket"), 1, 2)
 	actions["uniqueItems"] = true
 	return []llm.Tool{
+		Define(StartTicket, "Create a plain ticket only when the user asks for a ticket or issue. Ends the turn. Include a summary, evidence with numbers and decisions in body. Optionally link an artifact from THIS thread.", map[string]any{"title": stringSchema(70), "body": stringSchema(8000), "artifactId": stringSchema(80)}, "title", "body"),
 		Define(StartArtifact, "Build an HTML artifact only when the user asks for a page, prototype, document or a revision. Ends the turn. Include the decisions and numbers from the conversation in brief. Only revise an artifact from this thread, using its artifactId.", map[string]any{"title": stringSchema(80), "brief": stringSchema(4000), "artifactId": stringSchema(80)}, "title", "brief"),
 		{Name: EmitBlock, Description: "Show plain-text inline stat tiles, a callout or a table. Use 1–4 key numbers only when backed by a read tool result, never invent them. Stat data is {tiles:[{label,value,caption?}]}. Table rows must match the columns. No HTML or Markdown.", InputSchema: blockSchema},
 		Define(AskInterview, "End this turn with a short interview at the start of exploration, only if the answers change your advice and sources cannot answer them. Ask at most once. Do not include Other or Skip: the runner adds these. IDs, if supplied, must be unique.", map[string]any{"title": stringSchema(60), "steps": arraySchema(step, 1, 3)}, "title", "steps"),
@@ -386,4 +388,21 @@ func canonicalFields(raw json.RawMessage, typ reflect.Type) error {
 		}
 	}
 	return nil
+}
+
+type TicketRequest struct {
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+	ArtifactID string `json:"artifactId,omitempty"`
+}
+
+func ParseTicket(raw json.RawMessage) (TicketRequest, error) {
+	var args TicketRequest
+	if err := decodeReserved(raw, &args); err != nil {
+		return args, err
+	}
+	if !validText(args.Title, 70) || !validText(args.Body, 8000) || !optionalText(args.ArtifactID, 80) {
+		return args, ArgError("ticket requires title (1–70 chars), body (1–8000 chars), and optional artifactId")
+	}
+	return args, nil
 }

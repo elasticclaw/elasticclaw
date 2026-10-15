@@ -1,4 +1,4 @@
-import { CircleCheck, FileCode2, Info, TriangleAlert } from "lucide-react"
+import { CircleCheck, FileCode2, Info, Ticket, TriangleAlert } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { AIChatAction, AIChatBlock, AIChatAnswersSummary } from "@/lib/api"
 
@@ -42,17 +42,19 @@ export function InlineBlock({ block, onAction }: { block: AIChatBlock; onAction?
         <tbody>{block.data.rows.map((row, index) => <tr key={index} className="border-b last:border-0">{row.map((cell, col) => <td key={col} className="px-3 py-2 align-top">{cell}</td>)}</tr>)}</tbody>
       </table>
     </div>
-    case "actions":
-      if (!onAction) return null
+    case "actions": {
+      const actions = block.actions.filter((action) => action === "artifact" || action === "ticket" && block.ticket)
+      if (!onAction || actions.length === 0) return null
       return <div className="my-5 space-y-2.5"><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Wrap up</div>
-        <div className="grid gap-2.5 sm:grid-cols-2">{block.actions.filter((action) => action === "artifact").map((action) => {
-          const Icon = FileCode2
+        <div className="grid gap-2.5 sm:grid-cols-2">{actions.map((action) => {
+          const Icon = action === "ticket" ? Ticket : FileCode2
           return <Button key={action} variant="outline" className="h-auto justify-start gap-3 rounded-xl p-3 text-left" onClick={() => onAction(action)}>
-            <Icon className="size-4 shrink-0" /><span><span className="block font-semibold">Create HTML artifact</span>
-              <span className="block text-xs font-normal text-muted-foreground">A page served by the factory</span></span>
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/40"><Icon className="size-4" /></span><span><span className="block font-semibold">{action === "ticket" ? block.ticket?.verb : "Create HTML artifact"}</span>
+              <span className="block text-xs font-normal text-muted-foreground">{action === "ticket" ? [block.ticket?.team, block.ticket?.state].filter(Boolean).join(" · ") : "A page served by the factory"}</span></span>
           </Button>
         })}</div>
       </div>
+    }
     default: return null
   }
 }
