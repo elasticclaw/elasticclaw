@@ -661,6 +661,7 @@ export interface AIChatTicketCard extends AIChatTicketTarget {
   identifier?: string
   url?: string
   artifact?: { slug: string; title: string; shareUrl: string }
+  artifactDeleted?: boolean
   error?: string
 }
 export interface AIChatArtifactRequest { kind: "artifact"; artifactId?: string; title?: string; brief?: string }

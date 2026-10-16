@@ -708,3 +708,30 @@ func TestTicketRefusesArtifactDeletedDuringTrackerLookups(t *testing.T) {
 		t.Fatal(block, card)
 	}
 }
+
+func TestThreadMarksTicketArtifactDeleted(t *testing.T) {
+	h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, _ map[string]any) { ticketSuccess(w, "Draft") }))
+	thread := testThread(t, s)
+	artifact := addTicketArtifact(t, s, thread, "Prototype")
+	path := "/api/ai-chat/threads/" + thread.ID
+	body := fmt.Sprintf(`{"kind":"ticket","title":"Draft","body":"Evidence","artifactId":%q}`, artifact.ID)
+	if rec := request(h, "POST", path+"/actions", body, "octocat", "on"); rec.Code != 200 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	if rec := request(h, "DELETE", "/api/ai-chat/artifacts/"+artifact.Slug, "", "octocat", "on"); rec.Code != 204 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	rec := request(h, "GET", path, "", "octocat", "on")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"artifactDeleted":true`) {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	// The ticket itself stays valid; only its artifact link is gone, and history is not rewritten.
+	m, block, card := latestTicket(t, s, thread)
+	if block.State != "created" || card.Artifact == nil {
+		t.Fatal(block, card)
+	}
+	var stored string
+	if err := s.DB.QueryRow(`SELECT blocks_json FROM ai_chat_messages WHERE id=?`, m.ID).Scan(&stored); err != nil || strings.Contains(stored, "artifactDeleted") {
+		t.Fatal("persisted ticket card rewritten", stored, err)
+	}
+}

@@ -124,7 +124,8 @@ func (s *Store) annotateDeletedArtifacts(ctx context.Context, threadID string, m
 		}
 		changed := false
 		for _, block := range blocks {
-			if string(block["type"]) != `"action"` || string(block["kind"]) != `"artifact"` {
+			kind := string(block["kind"])
+			if string(block["type"]) != `"action"` || (kind != `"artifact"` && kind != `"ticket"`) {
 				continue
 			}
 			var card map[string]json.RawMessage
@@ -135,7 +136,12 @@ func (s *Store) annotateDeletedArtifacts(ctx context.Context, threadID string, m
 			if json.Unmarshal(card["artifactId"], &id) != nil || !deleted[id] {
 				continue
 			}
-			card["deleted"] = json.RawMessage(`true`)
+			// A ticket stays valid; only its artifact link is gone.
+			if kind == `"ticket"` {
+				card["artifactDeleted"] = json.RawMessage(`true`)
+			} else {
+				card["deleted"] = json.RawMessage(`true`)
+			}
 			block["card"], _ = json.Marshal(card)
 			changed = true
 		}
