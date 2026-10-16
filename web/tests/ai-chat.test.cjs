@@ -1098,6 +1098,18 @@ test("ticket cards show working, created and failed states, linked artifact and 
   assert.doesNotMatch(elementText(tree), /Linear/)
 })
 
+test("ticket cards drop the link of a deleted artifact and retry without it", () => {
+  const { TicketActionCard } = loadComponent("components/ai-chat/ticket-card.tsx", ticketMocks)
+  const created = { ...ticketDraft, identifier: "PRO-1423", url: "https://linear.app/PRO-1423", artifact: { slug: "meal-abcdef", title: "Meal prototype", shareUrl: "https://hub.test/artifacts/meal-abcdef" }, artifactDeleted: true }
+  let tree = TicketActionCard({ block: { kind: "ticket", state: "created", card: created } })
+  assert.match(elementText(tree), /Meal prototypeThis artifact was deleted\./)
+  assert.deepEqual(findAll(tree, (item) => item.type === "a").map((link) => link.props.href), [created.url])
+  let retry
+  tree = TicketActionCard({ block: { kind: "ticket", state: "failed", card: { ...ticketDraft, artifactDeleted: true, error: "Could not create the ticket." } }, onRetry: (value) => { retry = value } })
+  findElement(tree, "Button").props.onClick()
+  assert.equal(retry.artifactId, undefined)
+})
+
 function findAll(tree, predicate) {
   if (!tree || typeof tree !== "object") return []
   return [...(predicate(tree) ? [tree] : []), ...(Array.isArray(tree) ? tree : [tree.props?.children]).flatMap((child) => findAll(child, predicate))]
@@ -1645,7 +1657,8 @@ test("history artifact deletion confirms, removes the row and opens its chat", a
     findElement(fixture.render(), "Tabs").props.onValueChange("artifacts")
     let tree = fixture.render()
     assert.match(elementText(tree), /v3/)
-    assert.match(elementText(tree), /Only you can see your artifacts/)
+    // The list is private; artifact links open for anyone signed in to the hub.
+    assert.match(elementText(tree), /Only you see this list\. Anyone signed in to the hub can open an artifact link\./)
     const link = findElement(tree, "a")
     assert.equal(link.props.href, "https://hub.test/artifacts/prototype-abcdef")
     assert.equal(link.props.target, "_blank")

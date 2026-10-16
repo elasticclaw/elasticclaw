@@ -141,7 +141,7 @@ export function HistoryPopover({ threadId }: { threadId?: string }) {
           })}
         </TabsContent>
       </Tabs>
-      <p className="mt-2 flex items-center gap-1.5 border-t px-2.5 pt-3 pb-1 text-[11px] text-muted-foreground"><Eye className="size-3" />Only you can see your {tab === "chats" ? "chats" : "artifacts"}.</p>
+      <p className="mt-2 flex items-center gap-1.5 border-t px-2.5 pt-3 pb-1 text-[11px] text-muted-foreground"><Eye className="size-3" />{tab === "chats" ? "Only you can see your chats." : "Only you see this list. Anyone signed in to the hub can open an artifact link."}</p>
     </PopoverContent>
   </Popover>
 }
