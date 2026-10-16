@@ -210,6 +210,11 @@ func computeTicketWorkTimes(intervals []taskRunWorkInterval, leadStart, leadEnd,
 			union = append(union, interval)
 		}
 	}
+	if !tracked {
+		// Without work data the split is unknown; reporting the raw PR window
+		// as awaiting merge would be a proxy, not a measurement.
+		return 0, 0, false
+	}
 	sort.Slice(union, func(i, j int) bool { return union[i].Start < union[j].Start })
 	merged := union[:0]
 	for _, interval := range union {

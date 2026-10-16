@@ -18,10 +18,10 @@ func TestComputeTicketWorkTimes(t *testing.T) {
 		{"open PR uses now", []taskRunWorkInterval{{10, 30}}, 40, 0, 100, 20, 60, true},
 		{"no PR", []taskRunWorkInterval{{20, 50}}, 0, 0, 100, 30, 0, true},
 		{"review rework is factory", []taskRunWorkInterval{{10, 30}, {60, 80}, {70, 90}}, 40, 100, 100, 50, 30, true},
-		{"historical", nil, 40, 100, 100, 0, 60, false},
+		{"historical reports nothing", nil, 40, 100, 100, 0, 0, false},
 		{"invalid turns", []taskRunWorkInterval{{20, 20}, {40, 30}}, 0, 0, 100, 0, 0, false},
 		{"merge clips work", []taskRunWorkInterval{{70, 120}}, 40, 80, 80, 10, 30, true},
-		{"waiting clipped to lead", nil, 1, 200, 100, 0, 90, false},
+		{"waiting clipped to lead", []taskRunWorkInterval{{150, 200}}, 1, 200, 100, 0, 90, true},
 		{"outside window still tracked", []taskRunWorkInterval{{150, 200}}, 0, 0, 100, 0, 0, true},
 	}
 	for _, tt := range tests {
