@@ -65,8 +65,19 @@ func newArtifactSlug(title string) (string, error) {
 }
 
 func (s *Store) Artifact(ctx context.Context, tenant, slug string, version int) (Artifact, error) {
+	return s.artifact(ctx, tenant, "", slug, version)
+}
+
+// Empty owner allows shared reads within the tenant; mutations require an owner.
+func (s *Store) artifact(ctx context.Context, tenant, owner, slug string, version int) (Artifact, error) {
 	var a Artifact
-	err := s.DB.QueryRowContext(ctx, `SELECT a.id,a.slug,a.tenant_id,a.owner_login,a.thread_id,a.title,a.current_version,v.version,v.bytes,v.created_at,v.path,v.sha256 FROM ai_chat_artifacts a JOIN ai_chat_artifact_versions v ON v.artifact_id=a.id AND v.version=CASE WHEN ?=0 THEN a.current_version ELSE ? END WHERE a.tenant_id=? AND a.slug=? AND a.deleted_at IS NULL`, version, version, tenant, slug).Scan(&a.ID, &a.Slug, &a.Tenant, &a.OwnerLogin, &a.ThreadID, &a.Title, &a.CurrentVersion, &a.Version, &a.Bytes, &a.CreatedAt, &a.Path, &a.SHA256)
+	query := `SELECT a.id,a.slug,a.tenant_id,a.owner_login,a.thread_id,a.title,a.current_version,v.version,v.bytes,v.created_at,v.path,v.sha256 FROM ai_chat_artifacts a JOIN ai_chat_artifact_versions v ON v.artifact_id=a.id AND v.version=CASE WHEN ?=0 THEN a.current_version ELSE ? END WHERE a.tenant_id=? AND a.slug=? AND a.deleted_at IS NULL`
+	args := []any{version, version, tenant, slug}
+	if owner != "" {
+		query += ` AND a.owner_login=?`
+		args = append(args, OwnerLogin(owner))
+	}
+	err := s.DB.QueryRowContext(ctx, query, args...).Scan(&a.ID, &a.Slug, &a.Tenant, &a.OwnerLogin, &a.ThreadID, &a.Title, &a.CurrentVersion, &a.Version, &a.Bytes, &a.CreatedAt, &a.Path, &a.SHA256)
 	return a, err
 }
 func (s *Store) ownedArtifact(ctx context.Context, t Thread, id string) (Artifact, error) {
@@ -74,7 +85,7 @@ func (s *Store) ownedArtifact(ctx context.Context, t Thread, id string) (Artifac
 	if err := s.DB.QueryRowContext(ctx, `SELECT slug FROM ai_chat_artifacts WHERE id=? AND tenant_id=? AND owner_login=? AND thread_id=? AND deleted_at IS NULL`, id, t.TenantID, t.OwnerLogin, t.ID).Scan(&slug); err != nil {
 		return Artifact{}, err
 	}
-	return s.Artifact(ctx, t.TenantID, slug, 0)
+	return s.artifact(ctx, t.TenantID, t.OwnerLogin, slug, 0)
 }
 
 func artifactPath(dir, tenant, slug string, version int) (string, error) {

@@ -145,6 +145,10 @@ func historyContent(m Message) string {
 				}
 				var card ArtifactCard
 				if b.Kind == "artifact" && json.Unmarshal(b.Card, &card) == nil {
+					if card.Deleted {
+						parts = append(parts, "[Artifact "+card.Title+" deleted]")
+						continue
+					}
 					if b.State == "created" {
 						parts = append(parts, fmt.Sprintf("[Artifact %s v%d created: /artifacts/%s; artifactId: %s]", card.Title, card.Version, card.Slug, card.ArtifactID))
 					} else if b.State == "failed" {

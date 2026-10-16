@@ -16,8 +16,13 @@ import (
 )
 
 func (s *Server) aiChatDeps() aichat.Deps {
+	// Stored version paths must be absolute for the retention sweep to remove them.
+	artifactsDir, err := filepath.Abs(filepath.Join(s.dataDir, "ai_chat", "artifacts"))
+	if err != nil {
+		artifactsDir = filepath.Join(s.dataDir, "ai_chat", "artifacts")
+	}
 	return aichat.Deps{
-		ArtifactsDir: filepath.Join(s.dataDir, "ai_chat", "artifacts"),
+		ArtifactsDir: artifactsDir,
 		ArtifactKey:  s.webSessionSecret,
 		FeatureStage: func(ctx context.Context, key string) string {
 			flag, ok := findFeatureFlag(key)
@@ -120,4 +125,8 @@ func (s *Server) aiChatProvider(name string) (llm.Provider, error) {
 	}
 	client.Endpoint = strings.TrimRight(choice.Provider.BaseURL, "/") + "/chat/completions"
 	return &llm.OpenAI{Client: client}, nil
+}
+
+func (s *Server) startAIChatRetention(ctx context.Context) func() {
+	return aichat.StartRetention(ctx, s.aiChatDeps())
 }

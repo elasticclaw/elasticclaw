@@ -25,6 +25,7 @@ const artifactTimeoutMessage = "The generation timed out before the page finishe
 const artifactMaxTokens = 16000
 
 type ArtifactCard struct {
+	Deleted bool `json:"deleted,omitempty"`
 	tools.ArtifactRequest
 	Slug     string `json:"slug,omitempty"`
 	Version  int    `json:"version,omitempty"`

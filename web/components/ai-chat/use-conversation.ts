@@ -144,9 +144,15 @@ export function useConversation() {
   useEffect(() => () => { generation.current++; active.current?.abort() }, [])
 
   useEffect(() => {
-    const listener = (event: Event) => onThreadUpdated((event as CustomEvent<{ threadId: string }>).detail.threadId)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const listener = (event: Event) => {
+      const id = (event as CustomEvent<{ threadId: string }>).detail.threadId
+      if (id !== threadRef.current || sending.current) return
+      clearTimeout(timer)
+      timer = setTimeout(() => onThreadUpdated(id), 300)
+    }
     window.addEventListener("ai-chat-thread-updated", listener)
-    return () => window.removeEventListener("ai-chat-thread-updated", listener)
+    return () => { clearTimeout(timer); window.removeEventListener("ai-chat-thread-updated", listener) }
   }, [])
 
   const newChat = () => {
