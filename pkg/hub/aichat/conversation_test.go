@@ -701,3 +701,43 @@ func TestRunnerCompletesTruncatedResponse(t *testing.T) {
 		t.Fatalf("messages=%+v err=%v", messages, err)
 	}
 }
+
+func TestAcquireWritesOutsideRunnerLock(t *testing.T) {
+	s := testStore(t)
+	a, b := testThread(t, s), testThread(t, s)
+	r := &Runner{Store: s}
+	ctx := context.Background()
+	// Hold the only connection so Acquire's refresh waits on the database.
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	acquired := make(chan error, 1)
+	go func() {
+		_, release, err := r.Acquire(ctx, a)
+		if release != nil {
+			release()
+		}
+		acquired <- err
+	}()
+	// Give Acquire time to reserve the slot and reach the database.
+	time.Sleep(100 * time.Millisecond)
+	// Other threads' bookkeeping must not wait for that write.
+	done := make(chan struct{})
+	go func() { r.Cancel(b); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Cancel blocked behind a database write in Acquire")
+	}
+	if _, _, err := r.Acquire(ctx, a); !errors.Is(err, ErrBusy) {
+		t.Fatal("slot not reserved during the refresh", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-acquired; err != nil {
+		t.Fatal(err)
+	}
+}

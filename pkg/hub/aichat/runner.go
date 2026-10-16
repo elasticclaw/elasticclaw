@@ -67,33 +67,19 @@ func (r *Runner) RecoverInterrupted(ctx context.Context, t Thread) error {
 
 func (r *Runner) Acquire(ctx context.Context, t Thread) (context.Context, func(), error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.flights == nil {
 		r.flights = map[string]flight{}
 		r.users = map[string]int{}
 	}
 	owner := t.TenantID + "\x00" + t.OwnerLogin
 	if _, busy := r.flights[t.ID]; busy || r.users[owner] >= 3 {
+		r.mu.Unlock()
 		return nil, nil, ErrBusy
-	}
-	// Refresh before preparation, which may take minutes, and reject a thread
-	// archived since the handler read it. The sweep and this write serialize in SQLite.
-	if r.Store != nil {
-		result, err := r.Store.DB.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at=? WHERE id=? AND tenant_id=? AND owner_login=? AND archived_at IS NULL`, time.Now().UnixMilli(), t.ID, t.TenantID, t.OwnerLogin)
-		if err != nil {
-			return nil, nil, err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return nil, nil, err
-		}
-		if n == 0 {
-			return nil, nil, ErrArchived
-		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, ArtifactTimeout)
 	r.flights[t.ID] = flight{owner, cancel}
 	r.users[owner]++
+	r.mu.Unlock()
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
@@ -106,6 +92,24 @@ func (r *Runner) Acquire(ctx context.Context, t Thread) (context.Context, func()
 				delete(r.users, owner)
 			}
 		})
+	}
+	// Refresh before preparation, which may take minutes, and reject a thread
+	// archived since the handler read it. The sweep and this write serialize in SQLite.
+	// The slot is already held, so the write runs outside r.mu and a busy DB stalls only this thread.
+	if r.Store != nil {
+		result, err := r.Store.DB.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at=? WHERE id=? AND tenant_id=? AND owner_login=? AND archived_at IS NULL`, time.Now().UnixMilli(), t.ID, t.TenantID, t.OwnerLogin)
+		var n int64
+		if err == nil {
+			n, err = result.RowsAffected()
+		}
+		if err != nil {
+			release()
+			return nil, nil, err
+		}
+		if n == 0 {
+			release()
+			return nil, nil, ErrArchived
+		}
 	}
 	return ctx, release, nil
 }
