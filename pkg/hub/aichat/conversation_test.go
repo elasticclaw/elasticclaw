@@ -721,8 +721,16 @@ func TestAcquireWritesOutsideRunnerLock(t *testing.T) {
 		}
 		acquired <- err
 	}()
-	// Give Acquire time to reserve the slot and reach the database.
-	time.Sleep(100 * time.Millisecond)
+	// Wait until Acquire holds the slot. TryLock keeps an old Acquire that holds r.mu during the write from hanging the test.
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if r.mu.TryLock() {
+			_, reserved := r.flights[a.ID]
+			r.mu.Unlock()
+			if reserved {
+				break
+			}
+		}
+	}
 	// Other threads' bookkeeping must not wait for that write.
 	done := make(chan struct{})
 	go func() { r.Cancel(b); close(done) }()

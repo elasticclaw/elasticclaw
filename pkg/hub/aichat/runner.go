@@ -2,6 +2,7 @@ package aichat
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,6 +67,12 @@ func (r *Runner) RecoverInterrupted(ctx context.Context, t Thread) error {
 }
 
 func (r *Runner) Acquire(ctx context.Context, t Thread) (context.Context, func(), error) {
+	return r.acquire(ctx, t, true)
+}
+
+// acquire reserves the thread's slot; refresh marks the thread active, which
+// turns and actions need but settling an existing card does not.
+func (r *Runner) acquire(ctx context.Context, t Thread, refresh bool) (context.Context, func(), error) {
 	r.mu.Lock()
 	if r.flights == nil {
 		r.flights = map[string]flight{}
@@ -97,10 +104,16 @@ func (r *Runner) Acquire(ctx context.Context, t Thread) (context.Context, func()
 	// archived since the handler read it. The sweep and this write serialize in SQLite.
 	// The slot is already held, so the write runs outside r.mu and a busy DB stalls only this thread.
 	if r.Store != nil {
-		result, err := r.Store.DB.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at=? WHERE id=? AND tenant_id=? AND owner_login=? AND archived_at IS NULL`, time.Now().UnixMilli(), t.ID, t.TenantID, t.OwnerLogin)
 		var n int64
-		if err == nil {
-			n, err = result.RowsAffected()
+		var err error
+		if refresh {
+			var result sql.Result
+			result, err = r.Store.DB.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at=? WHERE id=? AND tenant_id=? AND owner_login=? AND archived_at IS NULL`, time.Now().UnixMilli(), t.ID, t.TenantID, t.OwnerLogin)
+			if err == nil {
+				n, err = result.RowsAffected()
+			}
+		} else {
+			err = r.Store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM ai_chat_threads WHERE id=? AND tenant_id=? AND owner_login=? AND archived_at IS NULL`, t.ID, t.TenantID, t.OwnerLogin).Scan(&n)
 		}
 		if err != nil {
 			release()

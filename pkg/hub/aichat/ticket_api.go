@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tools"
 )
@@ -20,7 +19,7 @@ func (a *api) dismissTicketAttempt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "thread is archived", 409)
 		return
 	}
-	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	ctx, release, err := a.runner.acquire(r.Context(), t, false)
 	if errors.Is(err, ErrArchived) {
 		http.Error(w, ErrArchived.Error(), 409)
 		return
@@ -108,8 +107,6 @@ func (s *Store) dismissTicketAttempt(ctx context.Context, threadID, attemptID st
 			AND json_extract(value,'$.card.attemptId')=?)`, attemptID, threadID, attemptID, attemptID); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at=? WHERE id=?`, time.Now().UnixMilli(), threadID); err != nil {
-		return err
-	}
+	// Settling an old card is not new activity, so the chat keeps its place in history.
 	return tx.Commit()
 }
