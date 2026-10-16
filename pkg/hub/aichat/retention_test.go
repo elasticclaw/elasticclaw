@@ -139,6 +139,12 @@ func TestRetentionFilesAndToolResults(t *testing.T) {
 			t.Fatal("file remains", path, err)
 		}
 	}
+	if _, err := os.Stat(filepath.Dir(deleted.Path)); !os.IsNotExist(err) {
+		t.Fatal("deleted artifact directory remains", err)
+	}
+	if _, err := os.Stat(filepath.Dir(current.Path)); err != nil {
+		t.Fatal("live artifact directory removed", err)
+	}
 	for _, path := range []string{second.Path, current.Path, outside} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatal("file removed", path, err)
@@ -276,7 +282,7 @@ func TestRetentionPathConfinement(t *testing.T) {
 	}
 }
 
-func TestRetentionLoadsWorkspaceConfigAndDefaultsForMissingFile(t *testing.T) {
+func TestRetentionLoadsWorkspaceConfigAndSkipsMissingFile(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	dir := t.TempDir()
@@ -445,11 +451,12 @@ func TestRetentionSkipsUnavailableWorkspaceConfig(t *testing.T) {
 				ManagedDir:   func(ws string) string { return filepath.Join(dir, ws) },
 			}
 			stats, err := d.sweep(ctx, now)
-			if err != nil || stats.ArchivedThreads != 2 || stats.ClearedToolResults != 2 || stats.DeletedVersions != 2 || stats.RemovedFiles != 2 {
+			// Only the valid workspace is swept; a missing file means AI Chat is off there.
+			if err != nil || stats.ArchivedThreads != 1 || stats.ClearedToolResults != 1 || stats.DeletedVersions != 1 || stats.RemovedFiles != 1 {
 				t.Fatal(stats, err)
 			}
 			for workspace, thread := range threads {
-				kept := workspace == "invalid"
+				kept := workspace != "valid"
 				saved, err := s.Thread(ctx, thread.TenantID, thread.OwnerLogin, thread.ID)
 				if err != nil || (saved.ArchivedAt == nil) != kept {
 					t.Fatal(workspace, saved, err)
@@ -474,4 +481,27 @@ func TestRetentionSkipsUnavailableWorkspaceConfig(t *testing.T) {
 func TestRetentionSweepPanicDoesNotEscape(t *testing.T) {
 	d := Deps{FeatureStage: func(context.Context, string) string { panic("boom") }}
 	d.sweepSafely(context.Background(), time.Now())
+}
+
+func TestRetentionKeepsVersionRowsWhenArtifactsRootIsMissing(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	thread := testThread(t, s)
+	dir := t.TempDir()
+	first := retentionArtifact(t, s, thread, dir, "")
+	retentionArtifact(t, s, thread, dir, first.ID)
+	execRetention(t, s, `UPDATE ai_chat_artifact_versions SET created_at=?`, time.Now().AddDate(0, 0, -40).UnixMilli())
+	// An unmounted volume looks like a missing root; rows must survive so its files are swept later.
+	unmounted := filepath.Join(t.TempDir(), "unmounted")
+	if _, err := s.Sweep(ctx, time.Now(), func(string) (config.Retention, bool) { return config.Retention{}, true }, unmounted); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM ai_chat_artifact_versions WHERE artifact_id=?`, first.ID).Scan(&count); err != nil || count != 2 {
+		t.Fatal("version rows dropped without their files", count, err)
+	}
+	stats, err := s.Sweep(ctx, time.Now(), func(string) (config.Retention, bool) { return config.Retention{}, true }, dir)
+	if err != nil || stats.DeletedVersions != 1 || stats.RemovedFiles != 1 {
+		t.Fatal(stats, err)
+	}
 }

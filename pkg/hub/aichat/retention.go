@@ -81,7 +81,7 @@ func (d Deps) sweep(ctx context.Context, now time.Time) (SweepStats, error) {
 		case err == nil:
 			retention[name] = cfg.Retention
 		case os.IsNotExist(err):
-			retention[name] = config.Retention{}
+			// Removing the file turns AI Chat off for the workspace; its data keeps until it is configured again.
 		default:
 			// Do not log configuration contents, paths or parser errors.
 			log.Print("[ai-chat] retention skipped a workspace: configuration unavailable")
@@ -296,10 +296,8 @@ func removeArtifactFile(dir, path string) (removed, unsafe bool, err error) {
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return false, true, nil
 	}
+	// A missing root (e.g. an unmounted volume) must fail so the version row survives for the next sweep.
 	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if os.IsNotExist(err) {
-		return false, false, nil
-	}
 	if err != nil {
 		return false, false, err
 	}
@@ -323,6 +321,12 @@ func removeArtifactFile(dir, path string) (removed, unsafe bool, err error) {
 	err = confined.Remove(rel)
 	if os.IsNotExist(err) {
 		return false, false, nil
+	}
+	if err == nil {
+		// Drop the artifact's directory once its last file is gone; a non-empty directory stays.
+		if parent := filepath.Dir(rel); parent != "." {
+			_ = confined.Remove(parent)
+		}
 	}
 	return err == nil, false, err
 }
