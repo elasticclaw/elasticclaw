@@ -1618,10 +1618,13 @@ test("history groups rows by calendar time, highlights current chat and shows ba
   assert.equal(fixture.historyTime(new Date(2026, 9, 8, 12).getTime(), now).group, "Older")
   const clock = Date.now
   Date.now = () => now
-  try { fixture.open() } finally { Date.now = clock }
-  assert.match(elementText(fixture.render()), /Loading history/)
-  await flush()
-  const tree = fixture.render()
+  let tree
+  try {
+    fixture.open()
+    assert.match(elementText(fixture.render()), /Loading history/)
+    await flush()
+    tree = fixture.render()
+  } finally { Date.now = clock }
   assert.match(elementText(tree), /Today.*Prototype.*Explore idea.*12:00.*2.*PRO-1423.*Last 7 days.*Recent.*Older.*Earlier/s)
   assert.match(elementText(tree), /Only you can see your chats/)
   const current = findElements(tree, "button").find((row) => row.props["aria-current"] === "page")
@@ -1722,6 +1725,24 @@ test("history refreshes open lists on debounced updates and reloads on reopen", 
     fixture.open(); await flush()
     assert.equal(loads, 3)
   } finally { events.restore() }
+})
+
+test("history regroups rows when an update arrives after midnight", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const events = captureWindowListeners()
+  const clock = Date.now
+  const evening = new Date(2026, 9, 15, 23, 50).getTime()
+  try {
+    Date.now = () => evening
+    const fixture = historyFixture({ fetchAIChatThreads: async () => [{ id: "a", title: "Late chat", mode: "explore_idea", updatedAt: evening }] })
+    fixture.open(); fixture.render(); await flush()
+    assert.match(elementText(fixture.render()), /Today.*Late chat/s)
+    Date.now = () => new Date(2026, 9, 16, 0, 10).getTime()
+    events.emit("ai-chat-thread-updated", { threadId: "any" }); t.mock.timers.tick(300); await flush()
+    const text = elementText(fixture.render())
+    assert.match(text, /Last 7 days.*Late chat/s)
+    assert.doesNotMatch(text, /Today/)
+  } finally { Date.now = clock; events.restore() }
 })
 
 test("WS bursts resync only the open conversation and never replace a local stream", async (t) => {

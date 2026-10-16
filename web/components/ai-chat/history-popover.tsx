@@ -47,6 +47,8 @@ export function HistoryPopover({ threadId }: { threadId?: string }) {
     try {
       const [threads, items] = await Promise.all([fetchAIChatThreads(controller.signal), fetchAIChatArtifacts(controller.signal)])
       if (controller.signal.aborted) return
+      // Regroup against the time of this load, so a refresh after midnight moves rows out of "Today".
+      setNow(Date.now())
       setChats(threads)
       setArtifacts(items)
     } catch {
