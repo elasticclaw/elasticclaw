@@ -872,3 +872,20 @@ func TestTaskRunAnalyticsTicketAwaitingMergeUsesPROpenedAt(t *testing.T) {
 		t.Fatalf("opened_at metrics=%#v", ticket)
 	}
 }
+
+func TestTaskRunAnalyticsTicketMergeWithoutEventStopsClock(t *testing.T) {
+	s := &Server{}
+	runs := []taskRunAnalyticsRunView{{RunID: "first", StartedAt: 1000}, {RunID: "retry", StartedAt: 3000}}
+	// The reconciler recorded the merge on the PR row only; another PR is still open.
+	prs := map[string][]taskRunAnalyticsPRView{"first": {{State: "closed", Merged: true, OpenedAt: 2000, MergedAt: 6000}}, "retry": {{State: "open", OpenedAt: 4000}}}
+	events := map[string][]taskRunAnalyticsEventView{"first": {{EventType: "pr_opened", EventTime: 2000}}}
+	intervals := map[string][]taskRunWorkInterval{"first": {{1000, 2000}}, "retry": {{3000, 4000}}}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, false, intervals, 20000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.LeadTime != 5000 || ticket.FactoryTime != 2000 || ticket.AwaitingMergeTime != 3000 {
+		t.Fatalf("row-only merge metrics=%#v", ticket)
+	}
+}

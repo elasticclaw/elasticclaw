@@ -720,15 +720,19 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		ticket.LastActivity = runs[len(runs)-1].StartedAt
 	}
 	// The pr_opened event is stamped at detection; GitHub's created_at on the
-	// PR row is authoritative when it is earlier.
+	// PR row is authoritative when it is earlier. Merges recorded only on the
+	// PR row (dead-claw webhook, reconciler) emit no pr_merged event.
 	for _, pr := range ticket.PRs {
 		if pr.OpenedAt > 0 && (openedAt == 0 || pr.OpenedAt < openedAt) {
 			openedAt = pr.OpenedAt
 		}
+		if pr.Merged && pr.MergedAt > 0 && (mergedAt == 0 || pr.MergedAt < mergedAt) {
+			mergedAt = pr.MergedAt
+		}
 	}
 	// A replacement PR still open keeps the clock running even when an earlier
 	// closed PR already labels the ticket delivered.
-	waitingOnOpenPR := mergedAt == 0 && ticket.OpenPRCount > 0
+	waitingOnOpenPR := mergedAt == 0 && ticket.MergedPRCount == 0 && ticket.OpenPRCount > 0
 	// Queue time is separate: the lead window starts at the first run.
 	var intervals []taskRunWorkInterval
 	for _, run := range runs {
