@@ -145,8 +145,12 @@ func TestRetentionFilesAndToolResults(t *testing.T) {
 		}
 	}
 	var count int
-	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM ai_chat_artifact_versions WHERE artifact_id=?`, deleted.ID).Scan(&count); err != nil || count != 2 {
-		t.Fatal("deleted artifact rows lost", count, err)
+	// Version rows of a deleted artifact go with their files, so the next sweep has nothing to reselect.
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM ai_chat_artifact_versions WHERE artifact_id=?`, deleted.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatal("deleted artifact version rows kept", count, err)
+	}
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM ai_chat_artifacts WHERE id=? AND deleted_at IS NOT NULL`, deleted.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatal("deleted artifact row lost", count, err)
 	}
 	var result sql.NullString
 	var summary, errorText string

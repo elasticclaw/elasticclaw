@@ -271,10 +271,9 @@ func (s *Store) sweepVersion(ctx context.Context, dir, tenant, owner, id string,
 	if removed {
 		stats.RemovedFiles++
 	}
-	if !deleted {
-		if _, err = tx.ExecContext(ctx, `DELETE FROM ai_chat_artifact_versions WHERE artifact_id=? AND version=?`, id, version); err != nil {
-			return err
-		}
+	// Rows of deleted artifacts go too, so later sweeps stop selecting them; the artifact row stays.
+	if _, err = tx.ExecContext(ctx, `DELETE FROM ai_chat_artifact_versions WHERE artifact_id=? AND version=?`, id, version); err != nil {
+		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
