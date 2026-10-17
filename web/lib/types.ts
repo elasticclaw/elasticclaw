@@ -411,6 +411,8 @@ export interface AnalyticsTicket {
   leadTime: number
   factoryTime: number
   awaitingMergeTime: number
+  prOpenedAt: number
+  clockRunning: boolean
   lastActivity: number
   story: AnalyticsTicketStoryEntry[]
 }

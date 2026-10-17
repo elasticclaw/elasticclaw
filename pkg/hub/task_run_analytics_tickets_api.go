@@ -100,6 +100,8 @@ type taskRunAnalyticsTicketView struct {
 	TimeToFirstRun    int64                              `json:"timeToFirstRun"`
 	FactoryTime       int64                              `json:"factoryTime"`
 	AwaitingMergeTime int64                              `json:"awaitingMergeTime"`
+	PROpenedAt        int64                              `json:"prOpenedAt"`
+	ClockRunning      bool                               `json:"clockRunning"`
 	LeadTime          int64                              `json:"leadTime"`
 	LastActivity      int64                              `json:"lastActivity"`
 	Story             []taskRunAnalyticsTicketStoryEntry `json:"story"`
@@ -723,15 +725,15 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	// A replacement PR still open keeps the clock running even when an earlier
 	// closed PR already labels the ticket delivered.
 	waitingOnOpenPR := mergedAt == 0 && ticket.MergedPRCount == 0 && ticket.OpenPRCount > 0
-	// A run still in flight before any PR keeps the factory clock running
-	// through silent stalls; failed tickets stop at their last activity.
-	factoryRunning := false
-	if ticket.Status == "in_progress" && openedAt == 0 {
-		for _, run := range runs {
-			factoryRunning = factoryRunning || run.Status == "running"
-		}
+	// A run still in flight keeps the clock running through silent stalls,
+	// also when a retry follows a closed PR; failed tickets stop at their
+	// last activity. The reaper closes runs whose claws were deleted.
+	runInFlight := false
+	for _, run := range runs {
+		runInFlight = runInFlight || run.Status == taskRunStatusRunning
 	}
-	clockRunning := waitingOnOpenPR || factoryRunning
+	clockRunning := mergedAt == 0 && (waitingOnOpenPR || runInFlight)
+	ticket.ClockRunning, ticket.PROpenedAt = clockRunning, openedAt
 	// Queue time is separate: the lead window starts at the first run.
 	leadEnd := ticket.LastActivity
 	if mergedAt > 0 {

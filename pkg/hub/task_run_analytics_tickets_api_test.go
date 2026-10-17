@@ -382,7 +382,7 @@ func TestTaskRunAnalyticsTicketLeadTimeStartsAtFirstRun(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "lead-time-run", AttemptID: "attempt-lead-time", ClawID: "claw-lead-time", TenantID: "test-tenant-id",
-		Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerWorkflow,
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
 		Workspace: "eng", Workflow: "tickets", Integration: "external", Repo: "elastic/claw",
 		StartedAt: 2_000, IssueCreatedAt: 1_000, IssueTitle: "Queued ticket",
 	})
@@ -846,6 +846,22 @@ func TestTaskRunAnalyticsTicketReplacementPRKeepsClockRunning(t *testing.T) {
 	}
 	if ticket.Status != "delivered" || ticket.LeadTime != 9000 || ticket.FactoryTime != 1000 || ticket.AwaitingMergeTime != 8000 {
 		t.Fatalf("replacement PR metrics=%#v", ticket)
+	}
+}
+
+func TestTaskRunAnalyticsTicketRetryAfterClosedPRKeepsClockRunning(t *testing.T) {
+	s := &Server{}
+	// The first PR closed unmerged; the retry is still working without a new PR.
+	runs := []taskRunAnalyticsRunView{{RunID: "first", Status: taskRunStatusClean, StartedAt: 1000}, {RunID: "retry", Status: taskRunStatusRunning, StartedAt: 3000}}
+	prs := map[string][]taskRunAnalyticsPRView{"first": {{State: "closed", OpenedAt: 2000}}}
+	events := map[string][]taskRunAnalyticsEventView{"retry": {{EventType: "agent_started", EventTime: 3000}}}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, false, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ticket.ClockRunning || ticket.PROpenedAt != 2000 || ticket.LeadTime != 9000 || ticket.FactoryTime != 1000 || ticket.AwaitingMergeTime != 8000 {
+		t.Fatalf("retry metrics=%#v", ticket)
 	}
 }
 
