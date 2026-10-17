@@ -100,7 +100,8 @@ type taskRunAnalyticsTicketView struct {
 	TimeToFirstRun    int64                              `json:"timeToFirstRun"`
 	FactoryTime       int64                              `json:"factoryTime"`
 	AwaitingMergeTime int64                              `json:"awaitingMergeTime"`
-	WorkTimeTracked   bool                               `json:"workTimeTracked"`
+	PROpenedAt        int64                              `json:"prOpenedAt"`
+	ClockRunning      bool                               `json:"clockRunning"`
 	LeadTime          int64                              `json:"leadTime"`
 	LastActivity      int64                              `json:"lastActivity"`
 	Story             []taskRunAnalyticsTicketStoryEntry `json:"story"`
@@ -209,14 +210,9 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		return
 	}
 	requestNow := now().UnixMilli()
-	intervalsByRun, err := s.readTaskRunWorkIntervals(filters.TenantID, runIDs, requestNow)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "db error")
-		return
-	}
 	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
 	for _, group := range groups {
-		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, actorsByClaw, metadataByIssue[group.key], false, intervalsByRun, requestNow)
+		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, actorsByClaw, metadataByIssue[group.key], false, requestNow)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
@@ -440,11 +436,7 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 		return nil, err
 	}
 	requestNow := now().UnixMilli()
-	intervalsByRun, err := s.readTaskRunWorkIntervals(filters.TenantID, runIDs, requestNow)
-	if err != nil {
-		return nil, err
-	}
-	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, actorsByClaw, metadata[key], true, intervalsByRun, requestNow)
+	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, actorsByClaw, metadata[key], true, requestNow)
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +635,7 @@ func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
 	return 1
 }
 
-func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, actorsByClaw map[string]triggerActor, metadata taskRunAnalyticsTicketMetadata, includeStory bool, intervalsByRun map[string][]taskRunWorkInterval, requestNow int64) (taskRunAnalyticsTicketView, error) {
+func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, actorsByClaw map[string]triggerActor, metadata taskRunAnalyticsTicketMetadata, includeStory bool, requestNow int64) (taskRunAnalyticsTicketView, error) {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
 	ticket := taskRunAnalyticsTicketView{TicketKey: taskRunAnalyticsTicketKey(runs[0].Integration, runs[0].IntegrationWorkspace, issueID), IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
 	events := []taskRunAnalyticsTicketStoryEntry{}
@@ -733,27 +725,32 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	// A replacement PR still open keeps the clock running even when an earlier
 	// closed PR already labels the ticket delivered.
 	waitingOnOpenPR := mergedAt == 0 && ticket.MergedPRCount == 0 && ticket.OpenPRCount > 0
-	// Queue time is separate: the lead window starts at the first run.
-	var intervals []taskRunWorkInterval
+	// A run still in flight keeps the clock running through silent stalls,
+	// also when a retry follows a closed PR; failed tickets stop at their
+	// last activity. The reaper closes runs whose claws were deleted.
+	runInFlight := false
 	for _, run := range runs {
-		intervals = append(intervals, intervalsByRun[run.RunID]...)
+		runInFlight = runInFlight || run.Status == taskRunStatusRunning
 	}
+	clockRunning := mergedAt == 0 && (waitingOnOpenPR || runInFlight)
+	ticket.ClockRunning, ticket.PROpenedAt = clockRunning, openedAt
+	// Queue time is separate: the lead window starts at the first run.
 	leadEnd := ticket.LastActivity
 	if mergedAt > 0 {
 		leadEnd = mergedAt
-	} else if waitingOnOpenPR {
-		leadEnd = requestNow
-	} else {
-		// An undelivered ticket keeps running while the agent works, even
-		// when the work has not produced a new event yet.
-		for _, interval := range intervals {
-			leadEnd = max(leadEnd, interval.End)
-		}
+	} else if clockRunning {
+		leadEnd = max(ticket.LastActivity, requestNow)
 	}
-	if firstStart > 0 && (len(events) > 0 || waitingOnOpenPR || leadEnd > ticket.LastActivity) {
+	if firstStart > 0 && (len(events) > 0 || clockRunning) {
 		ticket.LeadTime = max(int64(0), leadEnd-firstStart)
 	}
-	ticket.FactoryTime, ticket.AwaitingMergeTime, ticket.WorkTimeTracked = computeTicketWorkTimes(intervals, firstStart, firstStart+ticket.LeadTime, openedAt, mergedAt, requestNow)
+	// The factory owns the ticket from the first run until its first PR opens,
+	// stalls and retries included; from then on the ticket awaits merge.
+	ticket.FactoryTime = ticket.LeadTime
+	if openedAt > 0 {
+		ticket.FactoryTime = min(max(int64(0), openedAt-firstStart), ticket.LeadTime)
+	}
+	ticket.AwaitingMergeTime = ticket.LeadTime - ticket.FactoryTime
 
 	if ticket.ReportedAt > 0 {
 		ticket.TimeToFirstRun = firstStart - ticket.ReportedAt

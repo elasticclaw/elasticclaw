@@ -271,7 +271,7 @@ func TestTaskRunAnalyticsApproximateTicketsAndDrivers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ticket, err := s.buildTaskRunAnalyticsTicket("test-tenant-id", "ticket", runs, nil, nil, nil, nil, taskRunAnalyticsTicketMetadata{}, false, nil, now().UnixMilli())
+	ticket, err := s.buildTaskRunAnalyticsTicket("test-tenant-id", "ticket", runs, nil, nil, nil, nil, taskRunAnalyticsTicketMetadata{}, false, now().UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}

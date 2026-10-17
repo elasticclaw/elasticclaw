@@ -1764,3 +1764,29 @@ func maxInt64(a, b int64) int64 {
 	}
 	return b
 }
+
+// closeOrphanedTaskRunSummaries fails summaries still marked running after
+// every claw serving the run was deleted without a terminal analytics event
+// (reaper, webhook and pipeline teardowns), so their ticket clock stops
+// instead of running forever. Runs waiting on an open PR stay open.
+func (s *Server) closeOrphanedTaskRunSummaries() {
+	nowMS := epochMillis(now())
+	res, err := s.db.Exec(`
+		UPDATE task_run_summaries
+		   SET status=?, phase=?, failure_type=?,
+		       finished_at=CASE WHEN last_event_at > 0 THEN last_event_at ELSE ? END, updated_at=?
+		 WHERE status=? AND phase<>?
+		   AND EXISTS (SELECT 1 FROM task_runs tr JOIN claws c ON c.id=tr.claw_id
+		                WHERE tr.id=task_run_summaries.run_id AND c.status='deleted')
+		   AND NOT EXISTS (SELECT 1 FROM claws c WHERE c.task_run_id=task_run_summaries.run_id AND c.status<>'deleted')
+		   AND NOT EXISTS (SELECT 1 FROM task_run_prs p WHERE p.run_id=task_run_summaries.run_id AND p.state=?)`,
+		taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureAgentStopped, nowMS, nowMS,
+		taskRunStatusRunning, taskRunPhaseWaitingForMerge, taskRunPRStateOpen)
+	if err != nil {
+		log.Printf("[task-run-analytics] close orphaned running summaries: %v", err)
+		return
+	}
+	if count, _ := res.RowsAffected(); count > 0 {
+		log.Printf("[task-run-analytics] closed %d running summaries whose claws were deleted", count)
+	}
+}
