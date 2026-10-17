@@ -723,14 +723,23 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	// A replacement PR still open keeps the clock running even when an earlier
 	// closed PR already labels the ticket delivered.
 	waitingOnOpenPR := mergedAt == 0 && ticket.MergedPRCount == 0 && ticket.OpenPRCount > 0
+	// A run still in flight before any PR keeps the factory clock running
+	// through silent stalls; failed tickets stop at their last activity.
+	factoryRunning := false
+	if ticket.Status == "in_progress" && openedAt == 0 {
+		for _, run := range runs {
+			factoryRunning = factoryRunning || run.Status == "running"
+		}
+	}
+	clockRunning := waitingOnOpenPR || factoryRunning
 	// Queue time is separate: the lead window starts at the first run.
 	leadEnd := ticket.LastActivity
 	if mergedAt > 0 {
 		leadEnd = mergedAt
-	} else if waitingOnOpenPR {
-		leadEnd = requestNow
+	} else if clockRunning {
+		leadEnd = max(ticket.LastActivity, requestNow)
 	}
-	if firstStart > 0 && (len(events) > 0 || waitingOnOpenPR) {
+	if firstStart > 0 && (len(events) > 0 || clockRunning) {
 		ticket.LeadTime = max(int64(0), leadEnd-firstStart)
 	}
 	// The factory owns the ticket from the first run until its first PR opens,

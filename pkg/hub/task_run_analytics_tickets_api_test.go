@@ -365,13 +365,15 @@ func TestTaskRunAnalyticsTicketLeadTimeWithoutEvents(t *testing.T) {
 		}
 	}
 
+	before := now().UnixMilli()
 	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("tickets status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 	var response taskRunAnalyticsTicketsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
-	if len(response.Tickets) != 1 || response.Tickets[0].LeadTime != 0 {
+	// A running ticket stays on the factory clock even before it emits events.
+	if len(response.Tickets) != 1 || response.Tickets[0].LeadTime < before-2_000 || response.Tickets[0].FactoryTime != response.Tickets[0].LeadTime {
 		t.Fatalf("eventless ticket lead time mismatch: %#v", response.Tickets)
 	}
 }
@@ -813,16 +815,21 @@ func TestTaskRunAnalyticsTicketWorkTimesAcrossRuns(t *testing.T) {
 
 func TestTaskRunAnalyticsTicketWithoutPRIsAllFactoryTime(t *testing.T) {
 	s := &Server{}
-	runs := []taskRunAnalyticsRunView{{RunID: "run", StartedAt: 1000}}
 	// Stalls count: the factory owns the ticket until a PR opens.
 	events := map[string][]taskRunAnalyticsEventView{"run": {{EventType: "agent_started", EventTime: 1000}, {EventType: "stage_entered", EventTime: 7000}}}
 	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
-	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, nil, events, nil, metadata, false, 9000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ticket.LeadTime != 6000 || ticket.FactoryTime != 6000 || ticket.AwaitingMergeTime != 0 {
-		t.Fatalf("no-PR metrics=%#v", ticket)
+	for _, tc := range []struct {
+		status string
+		lead   int64
+	}{{"running", 8000}, {"failed", 6000}} {
+		runs := []taskRunAnalyticsRunView{{RunID: "run", Status: tc.status, StartedAt: 1000}}
+		ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, nil, events, nil, metadata, false, 9000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ticket.LeadTime != tc.lead || ticket.FactoryTime != tc.lead || ticket.AwaitingMergeTime != 0 {
+			t.Fatalf("%s no-PR metrics=%#v", tc.status, ticket)
+		}
 	}
 }
 
