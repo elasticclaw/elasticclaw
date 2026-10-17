@@ -49,7 +49,8 @@ export function TicketDetailPanel({ ticket, filters, canViewCosts, onClose, onOp
       .then((response) => setDetail(response.ticket))
       .catch(() => { if (!controller.signal.aborted) setError("Failed to load ticket details.") })
     return () => controller.abort()
-  }, [ticket?.ticketKey, filtersQuery, retry])
+  // Refetch when the list refreshes this ticket, so a running clock does not freeze here.
+  }, [ticket?.ticketKey, ticket?.leadTime, ticket?.lastActivity, filtersQuery, retry])
   useEscapeToClose(onClose, Boolean(ticket))
   const panelRef = useRef<HTMLElement>(null)
   useFocusTrap(panelRef, Boolean(ticket), Boolean(detail))
