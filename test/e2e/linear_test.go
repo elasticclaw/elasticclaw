@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -502,12 +503,16 @@ func (c linearClient) graphqlNoFatal(ctx context.Context, query string, variable
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
+	rateLimits := linearRateLimitSummary(resp.Header)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("linear API %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("linear API %s: %s [%s]", resp.Status, strings.TrimSpace(string(respBody)), rateLimits)
 	}
 	var envelope struct {
 		Errors []struct {
-			Message string `json:"message"`
+			Message    string `json:"message"`
+			Extensions struct {
+				Code string `json:"code"`
+			} `json:"extensions"`
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
@@ -516,9 +521,13 @@ func (c linearClient) graphqlNoFatal(ctx context.Context, query string, variable
 	if len(envelope.Errors) > 0 {
 		var messages []string
 		for _, graphErr := range envelope.Errors {
-			messages = append(messages, graphErr.Message)
+			msg := graphErr.Message
+			if graphErr.Extensions.Code != "" {
+				msg += " (code: " + graphErr.Extensions.Code + ")"
+			}
+			messages = append(messages, msg)
 		}
-		return fmt.Errorf("linear GraphQL errors: %s", strings.Join(messages, "; "))
+		return fmt.Errorf("linear GraphQL errors: %s [%s]", strings.Join(messages, "; "), rateLimits)
 	}
 	if out != nil {
 		if err := json.Unmarshal(respBody, out); err != nil {
@@ -526,4 +535,46 @@ func (c linearClient) graphqlNoFatal(ctx context.Context, query string, variable
 		}
 	}
 	return nil
+}
+
+// linearRateLimitSummary formats Linear's rate-limit response headers so quota
+// failures in CI output show which bucket (requests, complexity, or a
+// per-endpoint limit) was exhausted and when it resets.
+func linearRateLimitSummary(h http.Header) string {
+	buckets := []struct {
+		label     string
+		limit     string
+		remaining string
+		reset     string
+	}{
+		{"requests", "X-RateLimit-Requests-Limit", "X-RateLimit-Requests-Remaining", "X-RateLimit-Requests-Reset"},
+		{"complexity", "X-RateLimit-Complexity-Limit", "X-RateLimit-Complexity-Remaining", "X-RateLimit-Complexity-Reset"},
+		{"endpoint", "X-RateLimit-Endpoint-Requests-Limit", "X-RateLimit-Endpoint-Requests-Remaining", "X-RateLimit-Endpoint-Requests-Reset"},
+	}
+	var parts []string
+	if v := h.Get("X-Complexity"); v != "" {
+		parts = append(parts, "query-complexity="+v)
+	}
+	for _, b := range buckets {
+		limit := h.Get(b.limit)
+		if limit == "" {
+			continue
+		}
+		part := b.label + "=" + h.Get(b.remaining) + "/" + limit
+		if reset := h.Get(b.reset); reset != "" {
+			if ms, err := strconv.ParseInt(reset, 10, 64); err == nil {
+				part += " reset=" + time.UnixMilli(ms).UTC().Format(time.RFC3339)
+			}
+		}
+		if b.label == "endpoint" {
+			if name := h.Get("X-RateLimit-Endpoint-Name"); name != "" {
+				part += " name=" + name
+			}
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return "no rate-limit headers"
+	}
+	return strings.Join(parts, " ")
 }

@@ -299,6 +299,10 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 		base = "https://api.linear.app"
 	}
 
+	// Cap the labels connection explicitly: without `first`, Linear's complexity
+	// scoring assumes the default page size of 50 per issue, which multiplies the
+	// query cost ~10x against the hourly complexity quota. Issues with more than
+	// 10 labels only have their first 10 considered for trigger matching.
 	query := fmt.Sprintf(`query($after: String) {
 		issues(filter: { updatedAt: { gt: "%s" } }, first: 100, after: $after) {
 			nodes {
@@ -312,7 +316,7 @@ func (s *Server) queryLinearIssues(token, since string) ([]linearPollIssue, erro
 				state { name }
 				team { key name }
 				project { id name }
-				labels { nodes { name } }
+				labels(first: 10) { nodes { name } }
 				assignee { name }
 			}
 			pageInfo { hasNextPage endCursor }
