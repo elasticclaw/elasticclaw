@@ -880,3 +880,40 @@ func TestTaskRunAnalyticsTicketMergeWithoutEventStopsClock(t *testing.T) {
 		t.Fatalf("row-only merge metrics=%#v", ticket)
 	}
 }
+func TestCloseOrphanedTaskRunSummaries(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	runs := []struct {
+		id, clawStatus, phase string
+		openPRs               int
+		liveRetry             bool
+		want                  string
+	}{
+		{id: "orphan", clawStatus: "deleted", phase: taskRunPhaseAgentRunning, want: taskRunStatusFailed},
+		{id: "live", clawStatus: "connected", phase: taskRunPhaseAgentRunning, want: taskRunStatusRunning},
+		{id: "retried", clawStatus: "deleted", phase: taskRunPhaseAgentRunning, liveRetry: true, want: taskRunStatusRunning},
+		{id: "awaiting", clawStatus: "deleted", phase: taskRunPhaseWaitingForMerge, openPRs: 1, want: taskRunStatusRunning},
+	}
+	insertClaw := func(id, status, runID string) {
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,task_run_id,created_at) VALUES(?,?,?,?,?,datetime('now'))`, id, "test-tenant-id", id, status, runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, run := range runs {
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{OwnerType: taskRunOwnerWorkflow, RunID: run.id, AttemptID: run.id + "-attempt", ClawID: run.id + "-claw", TenantID: "test-tenant-id", Integration: "external", Status: taskRunStatusRunning, Phase: run.phase, StartedAt: 1000, PRCount: run.openPRs, OpenPRCount: run.openPRs})
+		insertClaw(run.id+"-claw", run.clawStatus, run.id)
+		if run.liveRetry {
+			insertClaw(run.id+"-retry", "connected", run.id)
+		}
+	}
+	s.closeOrphanedTaskRunSummaries()
+	for _, run := range runs {
+		var status, failureType string
+		var finishedAt int64
+		if err := db.QueryRow(`SELECT status, failure_type, finished_at FROM task_run_summaries WHERE run_id=?`, run.id).Scan(&status, &failureType, &finishedAt); err != nil {
+			t.Fatal(err)
+		}
+		if status != run.want || (run.want == taskRunStatusFailed && (failureType != taskRunFailureAgentStopped || finishedAt == 0)) {
+			t.Errorf("%s: status=%s failure=%s finished=%d, want %s", run.id, status, failureType, finishedAt, run.want)
+		}
+	}
+}

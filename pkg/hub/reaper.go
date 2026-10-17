@@ -177,6 +177,7 @@ func (s *Server) reconcileOnBoot() {
 	} else if count, _ := res.RowsAffected(); count > 0 {
 		log.Printf("[reaper] boot failed %d creating checkpoints", count)
 	}
+	s.closeOrphanedTaskRunSummaries()
 	s.promotePendingClaws()
 }
 
@@ -198,6 +199,7 @@ func (s *Server) runReaper() {
 						}
 					}()
 					s.reapOnce()
+					s.closeOrphanedTaskRunSummaries()
 				}()
 			}
 		}()
