@@ -29,7 +29,7 @@ Instead of manually launching agents one at a time, you define **workspaces** an
 - **Workflows** define the automation: trigger rules, stages, issue movement, lifecycle policy, and cleanup.
 - **Scoped GitHub App credentials** give each agent temporary repo access instead of broad personal tokens.
 - **Issue tracker integrations** turn Linear, GitHub Issues, Shortcut, and webhook events into structured work.
-- **Sandbox providers** run each agent in an isolated workspace using Daytona, Replicated CMX, or exe.dev.
+- **Sandbox providers** run each agent in an isolated workspace using Daytona, Replicated CMX, exe.dev, local Docker, or AWS Lambda MicroVMs (alpha).
 - **Single-binary ElasticClaw Server** gives you the API, web UI, state, settings, and workflow automation in one self-hosted Go service.
 
 Each running agent runs [OpenClaw](https://github.com/openclaw/openclaw), connects back to ElasticClaw Server through the connector, clones the allowed repos, receives the issue context, and works inside an ephemeral VM.
@@ -85,7 +85,7 @@ elasticclaw install \
 
 Then configure the pieces your first workflow needs:
 
-1. A sandbox provider such as Daytona, Replicated CMX, or exe.dev.
+1. A sandbox provider such as Daytona, Replicated CMX, exe.dev, local Docker, or AWS Lambda MicroVMs.
 2. A GitHub App so ElasticClaw can mint scoped installation tokens.
 3. A workspace that defines repos, instructions, tools, and model defaults.
 4. An issue source such as Linear, GitHub Issues, Shortcut, or a webhook.

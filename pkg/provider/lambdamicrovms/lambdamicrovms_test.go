@@ -84,8 +84,8 @@ func TestWriteRunHookPayloadFileKeepsPayloadOutOfArgs(t *testing.T) {
 	}
 }
 
-func TestBuildRunHookPayloadEncodesTemplateFiles(t *testing.T) {
-	payload, err := buildRunHookPayload(types.CreateRequest{
+func TestBuildInitializationPayloadEncodesTemplateFiles(t *testing.T) {
+	payload, err := buildInitializationPayload(types.CreateRequest{
 		Name: "ec-test",
 		Env:  map[string]string{"ELASTICCLAW_CLAW_ID": "claw-1"},
 		TemplateFiles: map[string][]byte{
@@ -104,14 +104,54 @@ func TestBuildRunHookPayloadEncodesTemplateFiles(t *testing.T) {
 	}
 }
 
-func TestBuildRunHookPayloadRejectsOversizedPayload(t *testing.T) {
-	_, err := buildRunHookPayload(types.CreateRequest{
+func TestBuildInitializationPayloadRejectsOversizedPayload(t *testing.T) {
+	_, err := buildInitializationPayload(types.CreateRequest{
 		Name: "ec-test",
 		TemplateFiles: map[string][]byte{
-			"large.txt": []byte(strings.Repeat("x", 17*1024)),
+			"large.txt": []byte(strings.Repeat("x", 17*1024*1024)),
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "exceeds 16KiB") {
+	if err == nil || !strings.Contains(err.Error(), "exceeds 16MiB") {
 		t.Fatalf("err = %v, want payload size error", err)
+	}
+}
+
+func TestParseListMicroVMsUsesAWSItemsField(t *testing.T) {
+	instances, err := parseListMicroVMs([]byte(`{"items":[{"microvmId":"mvm-1","state":"RUNNING"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 || instances[0].ID != "mvm-1" || instances[0].Status != types.StatusRunning {
+		t.Fatalf("instances = %#v", instances)
+	}
+}
+
+func TestEndpointURLAcceptsHostOrURL(t *testing.T) {
+	for _, test := range []struct{ endpoint, path, want string }{
+		{"mvm.example.aws", "/healthz", "https://mvm.example.aws/healthz"},
+		{"https://mvm.example.aws/", "elasticclaw/v1/init", "https://mvm.example.aws/elasticclaw/v1/init"},
+	} {
+		if got := endpointURL(test.endpoint, test.path); got != test.want {
+			t.Errorf("endpointURL(%q, %q) = %q, want %q", test.endpoint, test.path, got, test.want)
+		}
+	}
+}
+
+func TestNewValidatesAWSLimits(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"bridge port", Config{ImageIdentifier: "image", BridgePort: 70000}, "bridge_port"},
+		{"token expiration", Config{ImageIdentifier: "image", TokenExpirationMinutes: 61}, "auth_token_expiration_minutes"},
+		{"maximum duration", Config{ImageIdentifier: "image", MaximumDurationSeconds: 28801}, "maximum_duration_seconds"},
+		{"partial idle policy", Config{ImageIdentifier: "image", IdleMaxDurationSeconds: 900}, "idle policy"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := New(test.cfg); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("New() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }

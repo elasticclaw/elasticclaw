@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
+.PHONY: build build-bridge build-bridge-linux build-bridge-linux-arm64 build-lambda-microvm-artifact publish-lambda-microvm-image setup-lambda-microvm setup-lambda-microvm-apply test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -39,6 +39,27 @@ build-bridge:
 build-bridge-linux:
 	mkdir -p bin
 	GONOSUMDB=* CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)" -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
+
+build-bridge-linux-arm64:
+	mkdir -p bin
+	GONOSUMDB=* CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)" -o bin/claw-bridge-linux-arm64 ./cmd/claw-bridge/
+
+build-lambda-microvm-artifact: build-bridge-linux-arm64
+	@command -v zip >/dev/null 2>&1 || (echo "zip is required" && exit 1)
+	mkdir -p bin/lambda-microvm-artifact
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/lambda-microvm-artifact/lambda-microvm-bridge ./cmd/lambda-microvm-bridge/
+	cp bin/claw-bridge-linux-arm64 bin/lambda-microvm-artifact/claw-bridge
+	cp aws/lambda-microvm/Dockerfile bin/lambda-microvm-artifact/Dockerfile
+	cd bin/lambda-microvm-artifact && zip -q -FS ../elasticclaw-lambda-microvm.zip Dockerfile claw-bridge lambda-microvm-bridge
+
+publish-lambda-microvm-image: build-lambda-microvm-artifact
+	bash scripts/publish-lambda-microvm-image.sh
+
+setup-lambda-microvm: build-lambda-microvm-artifact
+	bash scripts/setup-lambda-microvm.sh
+
+setup-lambda-microvm-apply: build-lambda-microvm-artifact
+	bash scripts/setup-lambda-microvm.sh --apply
 
 
 install:
