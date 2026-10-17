@@ -161,11 +161,7 @@ func (s *Server) applyWorkflowV2ClawControl(ctx context.Context, store *workflow
 		typesv2.MessageDependencyUpdateCompleted, typesv2.MessageDependencyUpdateFailed:
 		return store.ApplyCommandReceipt(ctx, envelope)
 	}
-	receipt, err := store.ApplyAgentControl(ctx, envelope)
-	// The caller already bound the envelope to this socket's run and attempt,
-	// so a terminal event ends the turn even when the store rejects it.
-	s.trackWorkflowV2WorkTurn(envelope, receipt.Disposition, err == nil)
-	return receipt, err
+	return store.ApplyAgentControl(ctx, envelope)
 }
 
 func (s *Server) sendWorkflowV2ControlOutbox(ctx context.Context, store *workflowv2.Store,
@@ -252,46 +248,4 @@ func (s *Server) workflowV2ClawDispatchReady(ctx context.Context, clawID string)
 		return false, err
 	}
 	return allowWakeBeforeBootstrap(provider, bootstrapOK), nil
-}
-
-// V2 agent turns use typed control events, not legacy conversation streaming.
-// The turn row is keyed by attempt and task, so it survives reconnects and hub
-// restarts; only the agent's own terminal event (or a hub-side terminal task
-// state, see checkpointWorkflowV2WorkTurns) closes it.
-func workflowV2WorkTurnID(attemptID, taskID string) string {
-	return "v2:" + attemptID + ":" + taskID
-}
-
-func (s *Server) trackWorkflowV2WorkTurn(envelope typesv2.ControlEnvelope, disposition typesv2.ControlDisposition, applied bool) {
-	id := workflowV2WorkTurnID(envelope.AttemptID, envelope.TaskID)
-	switch envelope.Kind {
-	case typesv2.MessageAgentTaskStarted:
-		if !applied || disposition != typesv2.DispositionAccepted {
-			return
-		}
-		var clawID string
-		if err := s.db.QueryRow(`SELECT claw_id FROM workflow_v2_attempts WHERE id=? AND run_id=?`, envelope.AttemptID, envelope.RunID).Scan(&clawID); err != nil {
-			log.Printf("[task-run-analytics] resolve v2 work attempt %s: %v", envelope.AttemptID, err)
-			return
-		}
-		// SentAt records the actual bridge turn boundary, even after outbox delay.
-		start := workflowV2BoundaryMillis(envelope.SentAt)
-		s.persistTaskRunWorkTurn(clawID, taskRunWorkTurn{ID: id, V2TaskID: envelope.TaskID, Start: start, End: start, Open: true})
-	case typesv2.MessageAgentTaskCompleted, typesv2.MessageAgentTaskFailed:
-		// The agent stopped working even when the hub already ended the task
-		// (timed out, superseded, cancelled) and rejects the envelope.
-		if disposition == typesv2.DispositionUnauthorized {
-			return
-		}
-		s.closeTaskRunWorkTurn(id, workflowV2BoundaryMillis(envelope.SentAt))
-	}
-}
-
-// workflowV2BoundaryMillis trusts the bridge clock only when it is plausible.
-func workflowV2BoundaryMillis(sentAt time.Time) int64 {
-	current := now()
-	if sentAt.IsZero() || sentAt.After(current) || sentAt.Before(current.Add(-24*time.Hour)) {
-		return current.UnixMilli()
-	}
-	return sentAt.UnixMilli()
 }
