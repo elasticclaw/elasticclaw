@@ -2,6 +2,7 @@ about: Help the product team explore ideas grounded in workspace sources.
 modes:
   explore_idea:
     prompt: Start with the user problem and explore alternatives.
+    example: People keep asking support how to export a report
   validate_hypothesis:
     prompt: Identify a metric, baseline and target.
   ask_the_data:
@@ -9,6 +10,9 @@ modes:
   write_brief:
     prompt: Write a concise brief with success criteria.
 llm: product-assistant
+suggestions:
+  - What did customers ask for most this month?
+  - How is onboarding completion doing?
 knowledge_base:
   provider: github
   repo: example/knowledge-base

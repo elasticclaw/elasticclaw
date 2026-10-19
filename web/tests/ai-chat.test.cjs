@@ -156,6 +156,34 @@ for (const remaining of [["A"], []]) {
   })
 }
 
+test("new chat shows only the examples and suggestions the workspace configures", async () => {
+  for (const extra of [{}, { examples: { ask_the_data: "How many runs failed this week?" }, suggestions: ["Why do agents stall?"] }]) {
+    const { requests, render } = chatFixture()
+    render()
+    requests[0].resolve(sources("A", ["A"], extra))
+    await Promise.resolve()
+    const tree = render()
+    const text = elementText(tree)
+    const cards = findCards(tree)
+    assert.deepEqual(cards.props.examples, extra.examples ?? {})
+    if (extra.suggestions) assert.match(text, /Suggested.*Why do agents stall\?/)
+    else assert.doesNotMatch(text, /Suggested/)
+  }
+  const { ModeCards } = loadComponent("components/ai-chat/mode-cards.tsx", { "lucide-react": {}, "@/lib/utils": { cn: (...c) => c.filter(Boolean).join(" ") } })
+  const cardsText = elementText(ModeCards({ mode: null, examples: { ask_the_data: "How many runs failed this week?" }, onSelect() {} }))
+  assert.match(cardsText, /“How many runs failed this week\?”/)
+  assert.equal(cardsText.match(/“/g).length, 1)
+})
+
+function findCards(tree) {
+  if (!tree || typeof tree !== "object") return undefined
+  if (tree.props?.examples !== undefined) return tree
+  for (const child of [tree.props?.children].flat(Infinity)) {
+    const found = findCards(child)
+    if (found) return found
+  }
+}
+
 test("invalid configuration renders the server error and keeps the workspace selected", async () => {
   const { requests, render } = chatFixture()
   render()

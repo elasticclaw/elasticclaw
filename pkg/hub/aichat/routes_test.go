@@ -24,6 +24,8 @@ func TestSources(t *testing.T) {
 		}
 	}
 	write("configured", `
+modes: {explore_idea: {example: Export a report}}
+suggestions: ['What changed this week?']
 knowledge_base: {provider: github, repo: org/docs, entry: README.md}
 repositories: [org/one, org/two, org/three]
 posthog: {host: invalid}
@@ -71,6 +73,13 @@ issue_tracker: {provider: linear, default_fields: {team: PRODUCT}}
 			}
 			if response.Error != tc.message {
 				t.Fatalf("error = %q, want %q", response.Error, tc.message)
+			}
+			wantExamples, wantSuggestions := map[string]string{}, []string{}
+			if tc.configured {
+				wantExamples, wantSuggestions = map[string]string{"explore_idea": "Export a report"}, []string{"What changed this week?"}
+			}
+			if !reflect.DeepEqual(response.Examples, wantExamples) || !reflect.DeepEqual(response.Suggestions, wantSuggestions) {
+				t.Fatalf("examples = %#v, suggestions = %#v", response.Examples, response.Suggestions)
 			}
 			if tc.configured && (response.Sources[1].Name != "Repositories" || response.Sources[1].Status != "unreachable" || response.Sources[2].Status != "invalid" || response.Sources[2].Error == "") {
 				t.Fatalf("sources = %#v", response.Sources)

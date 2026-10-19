@@ -614,6 +614,10 @@ export interface AIChatSources {
   workspaces: string[]
   workspace: string
   sources: AIChatSource[]
+  /** Card samples per mode, from ai_chat.yaml. */
+  examples?: Partial<Record<"explore_idea" | "validate_hypothesis" | "ask_the_data" | "write_brief", string>>
+  /** Starter prompts for a new chat, from ai_chat.yaml. */
+  suggestions?: string[]
 }
 
 export function fetchAIChatSources(workspace = "", refresh = false): Promise<AIChatSources> {
