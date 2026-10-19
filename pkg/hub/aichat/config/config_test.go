@@ -165,6 +165,30 @@ func TestLoadSampleAndReload(t *testing.T) {
 	}
 }
 
+func TestLoadKeepsOnlyDisplayableExamplesAndSuggestions(t *testing.T) {
+	long := strings.Repeat("x", MaxDisplayLength+1)
+	body := "modes:\n  explore_idea: {example: '  Export a report  '}\n  write_brief: {example: " + long + "}\n" +
+		"suggestions: [' one ', '', " + long + ", two, three, four, five, six, seven]\n"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ai_chat.yaml"), []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Modes["explore_idea"].Example != "Export a report" || cfg.Modes["write_brief"].Example != "" {
+		t.Fatalf("modes = %#v", cfg.Modes)
+	}
+	if want := []string{"one", "two", "three", "four", "five", "six"}; !reflect.DeepEqual(cfg.Suggestions, want) {
+		t.Fatalf("suggestions = %#v, want %#v", cfg.Suggestions, want)
+	}
+	sample, err := Load("testdata")
+	if err != nil || sample.Modes["explore_idea"].Example == "" || len(sample.Suggestions) != 2 {
+		t.Fatalf("sample = %#v, %v", sample, err)
+	}
+}
+
 func TestSourceErrorsDoNotExposeValues(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "ai_chat.yaml"), []byte("posthog: {api_key: {value: super-secret}}"), 0600); err != nil {

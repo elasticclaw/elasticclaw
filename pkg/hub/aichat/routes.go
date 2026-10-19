@@ -76,7 +76,11 @@ type SourcesResponse struct {
 	Workspaces []string        `json:"workspaces"`
 	Workspace  string          `json:"workspace"`
 	Sources    []config.Source `json:"sources"`
-	Error      string          `json:"error,omitempty"`
+	// Examples maps a mode to the sample shown on its card; Suggestions are
+	// starter prompts. Both come from ai_chat.yaml and are empty when unset.
+	Examples    map[string]string `json:"examples"`
+	Suggestions []string          `json:"suggestions"`
+	Error       string            `json:"error,omitempty"`
 }
 
 func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
@@ -87,7 +91,7 @@ func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
 		return
 	}
 	sort.Strings(names)
-	response := SourcesResponse{Workspaces: []string{}, Workspace: r.URL.Query().Get("workspace"), Sources: []config.Source{}}
+	response := SourcesResponse{Workspaces: []string{}, Workspace: r.URL.Query().Get("workspace"), Sources: []config.Source{}, Examples: map[string]string{}, Suggestions: []string{}}
 	known := false
 	for _, name := range names {
 		if name == response.Workspace {
@@ -106,6 +110,12 @@ func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
 	if known {
 		if cfg, err := config.Load(deps.ManagedDir(response.Workspace)); err == nil {
 			response.Configured = true
+			response.Suggestions = cfg.Suggestions
+			for name, mode := range cfg.Modes {
+				if mode.Example != "" {
+					response.Examples[name] = mode.Example
+				}
+			}
 			var secrets []string
 			response.Sources, _, secrets = deps.checkSources(ctx, response.Workspace, cfg, r.URL.Query().Get("refresh") == "1")
 			response.Actions = deps.availableActions(ctx, response.Workspace, cfg)

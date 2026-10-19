@@ -10,13 +10,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config describes <workspace managed directory>/ai_chat.yaml. About and each
 // modes.{explore_idea,validate_hypothesis,ask_the_data,write_brief}.prompt are
-// optional text. LLM optionally names an entry in hub.yaml's llm_keys.
+// optional text, and each mode's example is the optional sample shown on its
+// card. Suggestions are optional starter prompts for a new chat; blank or
+// overlong examples and suggestions are dropped and at most MaxSuggestions are
+// kept, since they are display text. LLM optionally names an entry in hub.yaml's llm_keys.
 // Repositories is a list of GitHub owner/repo names. KnowledgeBase describes a
 // GitHub repo, optional branch, and entry file. PostHog and Datadog credentials
 // are secret names (never literal values), resolved later from workspace then
@@ -35,12 +39,20 @@ type Config struct {
 	Datadog       *Datadog        `yaml:"-"`
 	IssueTracker  *IssueTracker   `yaml:"-"`
 	Retention     Retention       `yaml:"retention"`
+	Suggestions   []string        `yaml:"suggestions"`
 	Sources       []Source        `yaml:"-"`
 }
 
 type Mode struct {
-	Prompt string `yaml:"prompt"`
+	Prompt  string `yaml:"prompt"`
+	Example string `yaml:"example"`
 }
+
+const (
+	MaxSuggestions   = 6
+	MaxDisplayLength = 160
+)
+
 type KnowledgeBase struct {
 	Provider string `yaml:"provider"`
 	Repo     string `yaml:"repo"`
@@ -112,13 +124,22 @@ func Load(managedDir string) (*Config, error) {
 	if cfg.Retention.ChatsDays <= 0 || cfg.Retention.ToolResultsDays <= 0 || cfg.Retention.ArtifactVersionsDays <= 0 {
 		return nil, fmt.Errorf("retention days must be positive")
 	}
-	for mode := range cfg.Modes {
-		switch mode {
+	for name, mode := range cfg.Modes {
+		switch name {
 		case "explore_idea", "validate_hypothesis", "ask_the_data", "write_brief":
 		default:
 			return nil, fmt.Errorf("unsupported mode")
 		}
+		mode.Example = displayText(mode.Example)
+		cfg.Modes[name] = mode
 	}
+	suggestions := []string{}
+	for _, suggestion := range cfg.Suggestions {
+		if suggestion = displayText(suggestion); suggestion != "" && len(suggestions) < MaxSuggestions {
+			suggestions = append(suggestions, suggestion)
+		}
+	}
+	cfg.Suggestions = suggestions
 	if cfg.LLM != "" && strings.TrimSpace(cfg.LLM) == "" {
 		return nil, fmt.Errorf("llm must name an llm_keys entry")
 	}
@@ -186,6 +207,15 @@ func Load(managedDir string) (*Config, error) {
 		return true
 	}, "Expected provider linear and default_fields.team.")
 	return cfg, nil
+}
+
+// displayText trims s and drops it when it is too long to show on a card.
+func displayText(s string) string {
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) > MaxDisplayLength {
+		return ""
+	}
+	return s
 }
 
 func (c *Config) decodeSource(nodes map[string]yaml.Node, kind, name string, decode func(yaml.Node) bool, message string) {
