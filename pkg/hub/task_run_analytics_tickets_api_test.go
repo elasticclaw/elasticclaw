@@ -293,7 +293,7 @@ func TestBuildTaskRunAnalyticsTicketUsesFirstTriggerActor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read trigger actors: %v", err)
 		}
-		ticket, err := s.buildTaskRunAnalyticsTicket("test-tenant-id", "ENG-1", runs, nil, nil, nil, actorsByClaw, metadata, false)
+		ticket, err := s.buildTaskRunAnalyticsTicket("test-tenant-id", "ENG-1", runs, nil, nil, nil, actorsByClaw, metadata, false, now().UnixMilli())
 		if err != nil {
 			t.Fatalf("build ticket: %v", err)
 		}
@@ -365,13 +365,15 @@ func TestTaskRunAnalyticsTicketLeadTimeWithoutEvents(t *testing.T) {
 		}
 	}
 
+	before := now().UnixMilli()
 	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("tickets status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 	var response taskRunAnalyticsTicketsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
-	if len(response.Tickets) != 1 || response.Tickets[0].LeadTime != 0 {
+	// A running ticket stays on the factory clock even before it emits events.
+	if len(response.Tickets) != 1 || response.Tickets[0].LeadTime < before-2_000 || response.Tickets[0].FactoryTime != response.Tickets[0].LeadTime {
 		t.Fatalf("eventless ticket lead time mismatch: %#v", response.Tickets)
 	}
 }
@@ -380,7 +382,7 @@ func TestTaskRunAnalyticsTicketLeadTimeStartsAtFirstRun(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "lead-time-run", AttemptID: "attempt-lead-time", ClawID: "claw-lead-time", TenantID: "test-tenant-id",
-		Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerWorkflow,
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
 		Workspace: "eng", Workflow: "tickets", Integration: "external", Repo: "elastic/claw",
 		StartedAt: 2_000, IssueCreatedAt: 1_000, IssueTitle: "Queued ticket",
 	})
@@ -726,4 +728,208 @@ func newCountingTaskRunAnalyticsAPITestServer(t *testing.T) (*Server, *sql.DB, *
 	s.db = db
 	t.Cleanup(func() { db.Close() })
 	return s, db, count
+}
+
+func TestTaskRunAnalyticsTicketWorkTimesAPI(t *testing.T) {
+	for _, merged := range []bool{false, true} {
+		t.Run(fmt.Sprint("merged=", merged), func(t *testing.T) {
+			s, db := newTaskRunAnalyticsAPITestServer(t)
+			mergedCount, openCount := 0, 1
+			if merged {
+				mergedCount, openCount = 1, 0
+			}
+			insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{OwnerType: taskRunOwnerWorkflow, RunID: "split-run", AttemptID: "split-attempt", ClawID: "split-claw", TenantID: "test-tenant-id", Integration: "external", StartedAt: 1000, PRCount: 1, OpenPRCount: openCount, MergedPRCount: mergedCount})
+			if _, err := db.Exec(`INSERT INTO task_run_events(id,tenant_id,run_id,event_key,source,event_type,event_time,observed_at,created_at) VALUES('work-open','test-tenant-id','split-run','work-open','github','pr_opened',3000,3000,3000)`); err != nil {
+				t.Fatal(err)
+			}
+			if merged {
+				if _, err := db.Exec(`INSERT INTO task_run_events(id,tenant_id,run_id,event_key,source,event_type,event_time,observed_at,created_at) VALUES('work-merge','test-tenant-id','split-run','work-merge','github','pr_merged',6000,6000,6000)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The fixture PR row says GitHub opened it at 1200, before the 3000 detection event.
+			before := now().UnixMilli()
+			rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+			}
+			for _, field := range []string{`"factoryTime":`, `"awaitingMergeTime":`} {
+				if !strings.Contains(rr.Body.String(), field) {
+					t.Fatalf("missing %s: %s", field, rr.Body.String())
+				}
+			}
+			var response taskRunAnalyticsTicketsResponse
+			decodeTaskRunAnalyticsAPI(t, rr, &response)
+			if len(response.Tickets) != 1 {
+				t.Fatalf("tickets=%#v", response.Tickets)
+			}
+			ticket := response.Tickets[0]
+			if ticket.FactoryTime != 200 {
+				t.Fatalf("work fields=%#v", ticket)
+			}
+			if merged {
+				if ticket.LeadTime != 5000 || ticket.AwaitingMergeTime != 4800 {
+					t.Fatalf("merged timing=%#v", ticket)
+				}
+			} else {
+				if ticket.LeadTime < before-1000 || ticket.LeadTime > now().UnixMilli()-1000 || ticket.AwaitingMergeTime != ticket.LeadTime-200 {
+					t.Fatalf("open timing=%#v", ticket)
+				}
+			}
+			detail, err := s.readTaskRunAnalyticsTicketByKey(context.Background(), taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, ticket.TicketKey)
+			if err != nil || detail == nil || detail.FactoryTime != 200 {
+				t.Fatalf("detail=%#v error=%v", detail, err)
+			}
+		})
+	}
+}
+
+func TestTaskRunAnalyticsTicketWorkTimesAcrossRuns(t *testing.T) {
+	s := &Server{}
+	runs := []taskRunAnalyticsRunView{{RunID: "first", StartedAt: 1000}, {RunID: "retry", StartedAt: 2000}}
+	prs := map[string][]taskRunAnalyticsPRView{"retry": {{State: "open"}}}
+	events := map[string][]taskRunAnalyticsEventView{
+		"first": {{EventType: "pr_opened", EventTime: 3000}},
+		"retry": {{EventType: "pr_opened", EventTime: 4000}},
+	}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	for _, requestNow := range []int64{6000, 6500} {
+		ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, false, requestNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ticket.LeadTime != requestNow-1000 || ticket.FactoryTime != 2000 || ticket.AwaitingMergeTime != requestNow-3000 {
+			t.Fatalf("open metrics=%#v", ticket)
+		}
+	}
+	events["first"] = append(events["first"], taskRunAnalyticsEventView{EventType: "pr_merged", EventTime: 5000})
+	events["retry"] = append(events["retry"], taskRunAnalyticsEventView{EventType: "pr_merged", EventTime: 6000})
+	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, true, 9000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.LeadTime != 4000 || ticket.FactoryTime != 2000 || ticket.AwaitingMergeTime != 2000 {
+		t.Fatalf("first merge metrics=%#v", ticket)
+	}
+}
+
+func TestTaskRunAnalyticsTicketWithoutPRIsAllFactoryTime(t *testing.T) {
+	s := &Server{}
+	// Stalls count: the factory owns the ticket until a PR opens.
+	events := map[string][]taskRunAnalyticsEventView{"run": {{EventType: "agent_started", EventTime: 1000}, {EventType: "stage_entered", EventTime: 7000}}}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	for _, tc := range []struct {
+		status string
+		lead   int64
+	}{{"running", 8000}, {"failed", 6000}} {
+		runs := []taskRunAnalyticsRunView{{RunID: "run", Status: tc.status, StartedAt: 1000}}
+		ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, nil, events, nil, metadata, false, 9000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ticket.LeadTime != tc.lead || ticket.FactoryTime != tc.lead || ticket.AwaitingMergeTime != 0 {
+			t.Fatalf("%s no-PR metrics=%#v", tc.status, ticket)
+		}
+	}
+}
+
+func TestTaskRunAnalyticsTicketReplacementPRKeepsClockRunning(t *testing.T) {
+	s := &Server{}
+	runs := []taskRunAnalyticsRunView{{RunID: "first", StartedAt: 1000}, {RunID: "retry", StartedAt: 3000}}
+	// The first PR closed unmerged (labels the ticket delivered); the retry's PR is still open.
+	prs := map[string][]taskRunAnalyticsPRView{"first": {{State: "closed", OpenedAt: 2000}}, "retry": {{State: "open", OpenedAt: 4000}}}
+	events := map[string][]taskRunAnalyticsEventView{"retry": {{EventType: "agent_started", EventTime: 3000}}}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, false, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.Status != "delivered" || ticket.LeadTime != 9000 || ticket.FactoryTime != 1000 || ticket.AwaitingMergeTime != 8000 {
+		t.Fatalf("replacement PR metrics=%#v", ticket)
+	}
+}
+
+func TestTaskRunAnalyticsTicketRetryAfterClosedPRKeepsClockRunning(t *testing.T) {
+	s := &Server{}
+	// The first PR closed unmerged; the retry is still working without a new PR.
+	runs := []taskRunAnalyticsRunView{{RunID: "first", Status: taskRunStatusClean, StartedAt: 1000}, {RunID: "retry", Status: taskRunStatusRunning, StartedAt: 3000}}
+	prs := map[string][]taskRunAnalyticsPRView{"first": {{State: "closed", OpenedAt: 2000}}}
+	events := map[string][]taskRunAnalyticsEventView{"retry": {{EventType: "agent_started", EventTime: 3000}}}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, false, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ticket.ClockRunning || ticket.PROpenedAt != 2000 || ticket.LeadTime != 9000 || ticket.FactoryTime != 1000 || ticket.AwaitingMergeTime != 8000 {
+		t.Fatalf("retry metrics=%#v", ticket)
+	}
+}
+
+func TestTaskRunAnalyticsTicketAwaitingMergeUsesPROpenedAt(t *testing.T) {
+	s := &Server{}
+	runs := []taskRunAnalyticsRunView{{RunID: "run", StartedAt: 1000}}
+	// GitHub says the PR opened at 2000; the hub only detected it at 5000.
+	prs := map[string][]taskRunAnalyticsPRView{"run": {{State: "closed", Merged: true, OpenedAt: 2000}}}
+	events := map[string][]taskRunAnalyticsEventView{"run": {{EventType: "pr_opened", EventTime: 5000}, {EventType: "pr_merged", EventTime: 8000}}}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, false, 9000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.LeadTime != 7000 || ticket.FactoryTime != 1000 || ticket.AwaitingMergeTime != 6000 {
+		t.Fatalf("opened_at metrics=%#v", ticket)
+	}
+}
+
+func TestTaskRunAnalyticsTicketMergeWithoutEventStopsClock(t *testing.T) {
+	s := &Server{}
+	runs := []taskRunAnalyticsRunView{{RunID: "first", StartedAt: 1000}, {RunID: "retry", StartedAt: 3000}}
+	// The reconciler recorded the merge on the PR row only; another PR is still open.
+	prs := map[string][]taskRunAnalyticsPRView{"first": {{State: "closed", Merged: true, OpenedAt: 2000, MergedAt: 6000}}, "retry": {{State: "open", OpenedAt: 4000}}}
+	events := map[string][]taskRunAnalyticsEventView{"first": {{EventType: "pr_opened", EventTime: 2000}}}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+	ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, false, 20000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.LeadTime != 5000 || ticket.FactoryTime != 1000 || ticket.AwaitingMergeTime != 4000 {
+		t.Fatalf("row-only merge metrics=%#v", ticket)
+	}
+}
+func TestCloseOrphanedTaskRunSummaries(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	runs := []struct {
+		id, clawStatus, phase string
+		openPRs               int
+		liveRetry             bool
+		want                  string
+	}{
+		{id: "orphan", clawStatus: "deleted", phase: taskRunPhaseAgentRunning, want: taskRunStatusFailed},
+		{id: "live", clawStatus: "connected", phase: taskRunPhaseAgentRunning, want: taskRunStatusRunning},
+		{id: "retried", clawStatus: "deleted", phase: taskRunPhaseAgentRunning, liveRetry: true, want: taskRunStatusRunning},
+		{id: "awaiting", clawStatus: "deleted", phase: taskRunPhaseWaitingForMerge, openPRs: 1, want: taskRunStatusRunning},
+	}
+	insertClaw := func(id, status, runID string) {
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,task_run_id,created_at) VALUES(?,?,?,?,?,datetime('now'))`, id, "test-tenant-id", id, status, runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, run := range runs {
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{OwnerType: taskRunOwnerWorkflow, RunID: run.id, AttemptID: run.id + "-attempt", ClawID: run.id + "-claw", TenantID: "test-tenant-id", Integration: "external", Status: taskRunStatusRunning, Phase: run.phase, StartedAt: 1000, PRCount: run.openPRs, OpenPRCount: run.openPRs})
+		insertClaw(run.id+"-claw", run.clawStatus, run.id)
+		if run.liveRetry {
+			insertClaw(run.id+"-retry", "connected", run.id)
+		}
+	}
+	s.closeOrphanedTaskRunSummaries()
+	for _, run := range runs {
+		var status, failureType string
+		var finishedAt int64
+		if err := db.QueryRow(`SELECT status, failure_type, finished_at FROM task_run_summaries WHERE run_id=?`, run.id).Scan(&status, &failureType, &finishedAt); err != nil {
+			t.Fatal(err)
+		}
+		if status != run.want || (run.want == taskRunStatusFailed && (failureType != taskRunFailureAgentStopped || finishedAt == 0)) {
+			t.Errorf("%s: status=%s failure=%s finished=%d, want %s", run.id, status, failureType, finishedAt, run.want)
+		}
+	}
 }

@@ -47,8 +47,8 @@ const bridgeErrorPauseThreshold = 2
 // heartbeats report the gateway healthy AND ready continuously for
 // bridgeErrorRecoveryHealthyFor, counted from after the pause, at most
 // bridgeErrorAutoResumeMax times per unit of work. NEXT-1294's narrower
-// provider_transient kind reuses the same counter and reset rules with a cap of
-// bridgeErrorProviderAutoResumeMax; sharing the counter is conservative when
+// provider_transient kind and model_transport recovery reuse the same counter
+// and reset rules with their own caps; sharing the counter is conservative when
 // error kinds alternate and never refunds the gateway cap. The counter resets
 // only on a stage transition (claimPipelineStageTransition) and a sandbox
 // replacement (resetClawForRetry). It deliberately survives a session loss,
@@ -56,10 +56,13 @@ const bridgeErrorPauseThreshold = 2
 // so resetting there would refund the budget on every flap. The caps preserve
 // the NEXT-725 guarantee: a sandbox that keeps failing still stops and then
 // waits for a human. Every other error (ENOSPC, other "Agent run failed"
-// causes, credential or handshake rejections) is never auto-lifted, and neither
-// is a gateway pause carried across a sandbox replacement
-// (resetClawForRetry clears the kind).
+// causes, credential or handshake rejections) is never auto-lifted. A tagged
+// pause is not carried across a sandbox replacement either: resetClawForRetry
+// lifts it outright and the re-brief is the only message (NEXT-1407). Model
+// timeouts and interrupted network requests use 1m/3m/10m healthy windows and
+// additionally require an idle agent with no recent active subagents.
 const (
+	bridgeErrorPauseKindModelTransport    = "model_transport"
 	bridgeErrorPauseKindGateway           = "gateway"
 	bridgeErrorPauseKindProviderTransient = "provider_transient"
 	bridgeErrorRecoveryHealthyFor         = 3 * time.Minute
@@ -75,6 +78,23 @@ const (
 // under the NEXT-725 guarantee.
 func bridgeErrorIsProviderTransient(errText string) bool {
 	return strings.Contains(strings.ToLower(errText), "malformed json arguments")
+}
+
+// Model transport failures may leave completed tools in the workspace. Resume
+// only after a healthy window while idle, and inspect existing tool results.
+// These attempts share the durable per-stage budget with other bridge recovery
+// kinds. Reconnects restart the health window without refunding that budget.
+var bridgeErrorModelRetryDelays = [...]time.Duration{time.Minute, 3 * time.Minute, 10 * time.Minute}
+
+func bridgeErrorIsModelTransport(errText string) bool {
+	lower := strings.ToLower(errText)
+	for _, marker := range []string{"unauthorized", "forbidden", "auth", "credential", "usage limit", "credit", "billing", "schema", "no space left", "enospc"} {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	return strings.Contains(lower, "llm request failed: network connection was interrupted") ||
+		strings.Contains(lower, "the model did not produce a response before the model idle timeout")
 }
 
 // bridgeErrorIsGatewayConnectivity matches the claw-bridge strings that mean
@@ -121,6 +141,14 @@ func (cc *clawConn) bridgeErrorLiftKindDue() string {
 		return ""
 	}
 	switch cc.bridgeErrorPauseKind {
+	case bridgeErrorPauseKindModelTransport:
+		if cc.isBusyLocked() || !cc.llmLimitedUntil.IsZero() ||
+			(!cc.subagentsActiveAt.IsZero() && time.Since(cc.subagentsActiveAt) < subagentsActiveFreshFor) {
+			return ""
+		}
+		if !cc.gatewayHealthySince.IsZero() && now().Sub(cc.gatewayHealthySince) >= bridgeErrorModelRetryDelays[0] {
+			return bridgeErrorPauseKindModelTransport
+		}
 	case bridgeErrorPauseKindProviderTransient:
 		return bridgeErrorPauseKindProviderTransient
 	case bridgeErrorPauseKindGateway:
@@ -132,6 +160,9 @@ func (cc *clawConn) bridgeErrorLiftKindDue() string {
 }
 
 func bridgeErrorAutoResumeLimit(kind string) int {
+	if kind == bridgeErrorPauseKindModelTransport {
+		return len(bridgeErrorModelRetryDelays)
+	}
 	if kind == bridgeErrorPauseKindProviderTransient {
 		return bridgeErrorProviderAutoResumeMax
 	}
@@ -170,6 +201,22 @@ func (s *Server) maybeLiftBridgeErrorPause(clawID string) bool {
 		s.noProgressMu.Unlock()
 		return false
 	}
+	if kind == bridgeErrorPauseKindModelTransport {
+		var retries int
+		if err := s.db.QueryRow(`SELECT bridge_error_auto_resumes FROM claws WHERE id=?`, clawID).Scan(&retries); err != nil {
+			s.noProgressMu.Unlock()
+			return false
+		}
+		if retries < len(bridgeErrorModelRetryDelays) {
+			cc.mu.RLock()
+			elapsed := now().Sub(cc.gatewayHealthySince)
+			cc.mu.RUnlock()
+			if elapsed < bridgeErrorModelRetryDelays[retries] {
+				s.noProgressMu.Unlock()
+				return false
+			}
+		}
+	}
 	limit := bridgeErrorAutoResumeLimit(kind)
 	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0, bridge_error_pause_kind='', bridge_error_auto_resumes=bridge_error_auto_resumes+1
 		WHERE id=? AND no_progress_paused!=0 AND bridge_error_pause_kind=? AND bridge_error_auto_resumes<?`,
@@ -180,12 +227,10 @@ func (s *Server) maybeLiftBridgeErrorPause(clawID string) bool {
 		return false
 	}
 	if changed, _ := res.RowsAffected(); changed == 0 {
-		if kind == bridgeErrorPauseKindProviderTransient {
-			// The NEXT-1294 budget is spent (or the row is no longer this
-			// pause). Unlike the gateway kind, the pre-check has no health window
-			// to gate on, so forget the kind in memory or every heartbeat would
-			// take noProgressMu and run this 0-row UPDATE until a human resumes.
-			// The row keeps it; only a human lifts the pause now.
+		if kind == bridgeErrorPauseKindProviderTransient || kind == bridgeErrorPauseKindModelTransport {
+			// The budget is spent (or the row is no longer this pause).
+			// Forget the kind in memory to avoid a zero-row UPDATE on every
+			// heartbeat. The row retains the reason for operator inspection.
 			cc.mu.Lock()
 			cc.bridgeErrorPauseKind = ""
 			cc.mu.Unlock()
@@ -202,6 +247,11 @@ func (s *Server) maybeLiftBridgeErrorPause(clawID string) bool {
 	_ = s.db.QueryRow(`SELECT bridge_error_auto_resumes FROM claws WHERE id=?`, clawID).Scan(&n)
 	s.noProgressMu.Unlock()
 
+	if kind == bridgeErrorPauseKindModelTransport {
+		log.Printf("[bridge-error] claw %s: model transport recovered, resuming automatically (%d/%d)", shortID(clawID), n, limit)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] A transient model timeout or network interruption stopped the last turn. The gateway is healthy and no agent turn or subagent is active. Inspect git status, recent commits, and existing process/test/build results before continuing the current stage. Tools may have completed despite the interruption; do not repeat work that already succeeded. Recovery attempt %d of %d for this unit of work.", n, limit))
+		return true
+	}
 	if kind == bridgeErrorPauseKindProviderTransient {
 		log.Printf("[bridge-error] claw %s: transient malformed tool-call JSON pause, resuming automatically (%d/%d)",
 			shortID(clawID), n, limit)
@@ -264,12 +314,23 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 		return false
 	}
 	kind := ""
-	if bridgeErrorIsProviderTransient(errText) {
+	if bridgeErrorIsModelTransport(errText) {
+		kind = bridgeErrorPauseKindModelTransport
+	} else if bridgeErrorIsProviderTransient(errText) {
 		kind = bridgeErrorPauseKindProviderTransient
 	} else if bridgeErrorIsGatewayConnectivity(errText) {
 		kind = bridgeErrorPauseKindGateway
 	}
 	notice := fmt.Sprintf("[hub] Automatic continuation paused: the last %d turns never reached the agent — claw-bridge returned a transport error instead. Last error: %s. This is the sandbox or the gateway failing, not the agent's output; fix it and send a message to resume.", streak, short)
+	if kind == bridgeErrorPauseKindModelTransport {
+		var retries int
+		err := s.db.QueryRow(`SELECT bridge_error_auto_resumes FROM claws WHERE id=?`, clawID).Scan(&retries)
+		if err == nil && retries >= len(bridgeErrorModelRetryDelays) {
+			notice = fmt.Sprintf("[hub] Automatic continuation paused: model transport recovery budget exhausted (%d prior automatic recoveries for this unit of work). Last error: %s. Human intervention is required; inspect the gateway/provider and send a message to resume.", retries, short)
+		} else {
+			notice = fmt.Sprintf("[hub] Automatic continuation paused after %d model transport failures. Last error: %s. The hub will retry after healthy gateway windows of 1, 3, and 10 minutes, once the agent is idle and while the per-work-unit retry budget remains.", streak, short)
+		}
+	}
 	if kind == bridgeErrorPauseKindProviderTransient {
 		notice = fmt.Sprintf("[hub] Automatic continuation paused after %d provider-side malformed tool-call JSON failures. The tool calls did not run and the session is intact. Last error: %s. The hub will resume automatically while the per-work-unit retry budget remains.", streak, short)
 	}

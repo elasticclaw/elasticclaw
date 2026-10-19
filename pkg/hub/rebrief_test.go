@@ -302,3 +302,59 @@ stages:
 		t.Fatal(prompt)
 	}
 }
+
+func TestRenderStageInjectPrependsPushRuleForWritableRepos(t *testing.T) {
+	const clawID = "claw-rebrief-push-rule"
+	s, db := newRebriefTestServer(t, clawID, "connected", "implement")
+	ctx := pipelineContext{Factory: rebriefTestFactory(), IssueID: "AMA-200"}
+	stage := *parsePipelineForContext(ctx).StageByID("implement")
+
+	if got := s.renderStageInject(clawID, stage, ctx); strings.Contains(got, pushBranchEachStageRule) {
+		t.Fatalf("push rule appended for a claw without repos:\n%s", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET github_repos=? WHERE id=?`, `[{"repo":"acme/widgets","permissions":"read"}]`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.renderStageInject(clawID, stage, ctx); strings.Contains(got, pushBranchEachStageRule) {
+		t.Fatalf("push rule appended for a read-only repo:\n%s", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET github_repos=? WHERE id=?`, `[{"repo":"acme/*","permissions":"write"}]`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.renderStageInject(clawID, stage, ctx); strings.Contains(got, pushBranchEachStageRule) {
+		t.Fatalf("push rule added for a repo pattern that is never cloned:\n%s", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET github_repos=? WHERE id=?`, `[{"repo":"acme/widgets","permissions":"write"}]`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.renderStageInject(clawID, stage, ctx); got != pushBranchEachStageRule+"\n\nImplement AMA-200" {
+		t.Fatalf("renderStageInject=%q, want the push rule before the inject", got)
+	}
+
+	stage.Terminal = true
+	if got := s.renderStageInject(clawID, stage, ctx); got != "Implement AMA-200" {
+		t.Fatalf("terminal stage renderStageInject=%q, want no push rule", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.resetClawForRetry("test-tenant-id", clawID, "", "retrying (attempt 2/3)", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !s.rebriefAfterRestoreIfNeeded(nil, clawID) {
+		t.Fatal("rebriefAfterRestoreIfNeeded returned false")
+	}
+	var brief string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub' AND content LIKE '%sandbox was replaced%'`, clawID).Scan(&brief); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"check it out from origin", pushBranchEachStageRule} {
+		if !strings.Contains(brief, want) {
+			t.Fatalf("re-brief missing %q:\n%s", want, brief)
+		}
+	}
+}
