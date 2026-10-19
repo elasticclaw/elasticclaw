@@ -309,12 +309,14 @@ func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Con
 			if call.Name == tools.StartArtifact && slices.Contains(available, "artifact") {
 				input, parseErr := tools.ParseArtifact(json.RawMessage(call.Arguments))
 				if parseErr == nil {
+					input.ArtifactID = r.knownArtifactID(actionCtx, t, input.ArtifactID)
 					return r.generateArtifact(actionCtx, t, m, provider, input, secrets, count, emit)
 				}
 				result = llm.Message{Role: "tool", ToolCallID: readhttp.Redact(call.ID, secrets), Content: readhttp.Redact(parseErr.Error(), secrets), IsError: true}
 			} else if call.Name == tools.StartTicket && slices.Contains(available, "ticket") {
 				input, parseErr := tools.ParseTicket(json.RawMessage(call.Arguments))
 				if parseErr == nil {
+					input.ArtifactID = r.knownArtifactID(actionCtx, t, input.ArtifactID)
 					return r.createTicket(actionCtx, t, m, provider, input, "", creator, target, secrets, count, false, "", emit)
 				}
 				result = llm.Message{Role: "tool", ToolCallID: readhttp.Redact(call.ID, secrets), Content: readhttp.Redact(parseErr.Error(), secrets), IsError: true}
@@ -396,4 +398,17 @@ func (r *Runner) runToolReads(ctx context.Context, messageID string, seq int, ca
 		content = result.Summary + "\n" + result.Data
 	}
 	return llm.Message{Role: "tool", ToolCallID: readhttp.Redact(call.ID, secrets), Content: tools.CapResult(content), IsError: toolErr != nil}, nil
+}
+
+// knownArtifactID drops an artifactId the model made up. Only an artifact of
+// this thread can be revised or linked, so an unknown ID means a new artifact
+// (or, for a ticket, the thread's latest one) instead of a failed card.
+func (r *Runner) knownArtifactID(ctx context.Context, t Thread, id string) string {
+	if id == "" {
+		return ""
+	}
+	if _, err := r.Store.ownedArtifact(ctx, t, id); errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	return id
 }
