@@ -1,6 +1,7 @@
 package aichat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -614,5 +615,123 @@ func TestTicketSuccessActionKeyResendReusesCreatedCard(t *testing.T) {
 	// A genuinely different draft is a new ticket action.
 	if rec := request(h, "POST", path, `{"kind":"ticket","title":"Swap","body":"Different evidence"}`, "octocat", "on"); rec.Code != 200 || writes != 2 {
 		t.Fatal(rec.Code, rec.Body, writes)
+	}
+}
+
+func TestTicketDropsArtifactDeletedDuringDraft(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
+			var h http.Handler
+			var artifact Artifact
+			drafts, writes := 0, 0
+			p := fakeProvider{stream: func(context.Context, llm.Request, func(string) error) (llm.Response, error) {
+				drafts++
+				// Another tab deletes the artifact while the model drafts the ticket.
+				if rec := request(h, "DELETE", "/api/ai-chat/artifacts/"+artifact.Slug, "", "octocat", "on"); rec.Code != 204 {
+					t.Fatal(rec.Code, rec.Body)
+				}
+				return llm.Response{Text: `{"title":"Draft","body":"Evidence"}`}, nil
+			}}
+			var s *Store
+			h, s = ticketFixture(t, p, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, input map[string]any) {
+				writes++
+				if input["description"] != "Evidence\n\n---\nFrom AI Chat · octocat" {
+					t.Fatal("deleted artifact linked", input)
+				}
+				ticketSuccess(w, "Draft")
+			}))
+			thread := testThread(t, s)
+			artifact = addTicketArtifact(t, s, thread, "Prototype")
+			body := `{"kind":"ticket"}`
+			if explicit {
+				body = fmt.Sprintf(`{"kind":"ticket","artifactId":%q}`, artifact.ID)
+			}
+			rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", body, "octocat", "on")
+			if rec.Code != 200 || drafts != 1 || writes != 1 {
+				t.Fatal(rec.Code, rec.Body, drafts, writes)
+			}
+			m, block, card := latestTicket(t, s, thread)
+			if block.State != "created" || card.Artifact != nil || card.ArtifactID != "" || strings.Contains(m.Content, "artifact linked") {
+				t.Fatal(m, block, card)
+			}
+			var payload, args string
+			if err := s.DB.QueryRow(`SELECT payload_json FROM ai_chat_handoffs WHERE message_id=?`, m.ID).Scan(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DB.QueryRow(`SELECT args_json FROM ai_chat_tool_runs WHERE message_id=? AND tool='ticket'`, m.ID).Scan(&args); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(payload+args, artifact.Slug) || strings.Contains(args, artifact.ID) {
+				t.Fatal("deleted artifact persisted in ticket", payload, args)
+			}
+		})
+	}
+}
+
+func TestTicketRefusesArtifactDeletedDuringTrackerLookups(t *testing.T) {
+	var s *Store
+	var artifact Artifact
+	writes := 0
+	inner := ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, input map[string]any) {
+		writes++
+		ticketSuccess(w, "Draft")
+	})
+	client := &http.Client{Transport: sourceTransport(func(r *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		// Another tab deletes the artifact while the tracker resolves team, state and labels.
+		if strings.Contains(string(raw), "teams(") {
+			if _, err := s.DB.Exec(`UPDATE ai_chat_artifacts SET deleted_at=1 WHERE id=?`, artifact.ID); err != nil {
+				t.Error(err)
+			}
+		}
+		return inner.Transport.RoundTrip(r)
+	})}
+	var h http.Handler
+	h, s = ticketFixture(t, nil, client)
+	thread := testThread(t, s)
+	artifact = addTicketArtifact(t, s, thread, "Prototype")
+	body := fmt.Sprintf(`{"kind":"ticket","title":"Draft","body":"Evidence","artifactId":%q}`, artifact.ID)
+	if rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", body, "octocat", "on"); rec.Code != 200 || writes != 0 {
+		t.Fatal(rec.Code, rec.Body, writes)
+	}
+	_, block, card := latestTicket(t, s, thread)
+	if block.State != "failed" || card.OutcomeUnknown || !strings.Contains(card.Error, "artifact was deleted") || card.ArtifactID != "" || card.Artifact != nil {
+		t.Fatal(block, card)
+	}
+	// Try again resends the stored draft, which no longer links the artifact.
+	body = fmt.Sprintf(`{"kind":"ticket","title":%q,"body":%q,"artifactId":%q}`, card.Title, card.Body, card.ArtifactID)
+	if rec := request(h, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", body, "octocat", "on"); rec.Code != 200 || writes != 1 {
+		t.Fatal(rec.Code, rec.Body, writes)
+	}
+	if _, block, card = latestTicket(t, s, thread); block.State != "created" || card.Artifact != nil {
+		t.Fatal(block, card)
+	}
+}
+
+func TestThreadMarksTicketArtifactDeleted(t *testing.T) {
+	h, s := ticketFixture(t, nil, ticketHTTP(t, func(w http.ResponseWriter, _ *http.Request, _ map[string]any) { ticketSuccess(w, "Draft") }))
+	thread := testThread(t, s)
+	artifact := addTicketArtifact(t, s, thread, "Prototype")
+	path := "/api/ai-chat/threads/" + thread.ID
+	body := fmt.Sprintf(`{"kind":"ticket","title":"Draft","body":"Evidence","artifactId":%q}`, artifact.ID)
+	if rec := request(h, "POST", path+"/actions", body, "octocat", "on"); rec.Code != 200 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	if rec := request(h, "DELETE", "/api/ai-chat/artifacts/"+artifact.Slug, "", "octocat", "on"); rec.Code != 204 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	rec := request(h, "GET", path, "", "octocat", "on")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"artifactDeleted":true`) {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	// The ticket itself stays valid; only its artifact link is gone, and history is not rewritten.
+	m, block, card := latestTicket(t, s, thread)
+	if block.State != "created" || card.Artifact == nil {
+		t.Fatal(block, card)
+	}
+	var stored string
+	if err := s.DB.QueryRow(`SELECT blocks_json FROM ai_chat_messages WHERE id=?`, m.ID).Scan(&stored); err != nil || strings.Contains(stored, "artifactDeleted") {
+		t.Fatal("persisted ticket card rewritten", stored, err)
 	}
 }

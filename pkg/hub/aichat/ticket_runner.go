@@ -356,6 +356,14 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 		return fail("The ticket draft is invalid.")
 	}
 	card.Summary = ticketSummary(card.Body)
+	// Drafting may take minutes; a deletion during it must not leave a dead link.
+	if card.Artifact != nil {
+		if _, err := r.Store.ownedArtifact(ctx, t, card.ArtifactID); errors.Is(err, sql.ErrNoRows) {
+			card.ArtifactID, card.Artifact = "", nil
+		} else if err != nil {
+			return fail("Unable to load the ticket artifact.")
+		}
+	}
 	// Keep the original draft in the card; append server-owned material only once.
 	description := card.Body
 	if card.Artifact != nil {
@@ -373,6 +381,16 @@ func (r *Runner) createTicket(ctx context.Context, t Thread, m *Message, p llm.P
 	issue, err := creator.Create(ctx, tracker.Draft{Title: card.Title, Body: description, Team: target.Team, State: target.State, Labels: target.Labels, BeforeSend: func() error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// The tracker lookups take a few requests; a deletion meanwhile must not send a dead link.
+		if card.Artifact != nil {
+			if _, err := r.Store.ownedArtifact(ctx, t, card.ArtifactID); errors.Is(err, sql.ErrNoRows) {
+				// Nothing was sent; dropping the link lets Try again resend the draft without it.
+				card.ArtifactID, card.Artifact = "", nil
+				return &tracker.CreateError{Message: "The linked artifact was deleted. Try again to create the ticket without it.", Validation: true}
+			} else if err != nil {
+				return err
+			}
 		}
 		setTicketBlock(m, "working", card)
 		if err := save(func(c context.Context) error {

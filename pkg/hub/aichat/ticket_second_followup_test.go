@@ -182,6 +182,10 @@ func TestDismissUnknownTicketAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	dismissPath := path + "/ticket-attempts/" + card.AttemptID + "/dismiss"
+	// Settling an old card must not move the chat up the history list.
+	if _, err := s.DB.Exec(`UPDATE ai_chat_threads SET updated_at=7 WHERE id=?`, thread.ID); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		login, flag string
 		status      int
@@ -191,6 +195,10 @@ func TestDismissUnknownTicketAttempt(t *testing.T) {
 		if rec := request(h, "POST", dismissPath, "", tc.login, tc.flag); rec.Code != tc.status {
 			t.Fatal(rec.Code, rec.Body, tc)
 		}
+	}
+	var updated int64
+	if err := s.DB.QueryRow(`SELECT updated_at FROM ai_chat_threads WHERE id=?`, thread.ID).Scan(&updated); err != nil || updated != 7 {
+		t.Fatal("dismissal reordered history", updated, err)
 	}
 	var result string
 	if err := s.DB.QueryRow(`SELECT result_json FROM ai_chat_tool_runs WHERE message_id=?`, card.AttemptID).Scan(&result); err != nil || !strings.Contains(result, `"dismissed":true`) || !strings.Contains(result, `"requestSent":true`) {

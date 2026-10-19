@@ -737,6 +737,8 @@ func (s *Server) Run(opts ...RunOptions) error {
 }
 
 func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
+	stopAIChatRetention := s.startAIChatRetention(ctx)
+	defer stopAIChatRetention()
 	go s.runWorkflowV2Worker(ctx)
 	go s.runWorkflowV2GitHubReconciler(ctx)
 	noWebUI := len(opts) > 0 && opts[0].NoWebUI
@@ -779,6 +781,7 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
+		stopAIChatRetention()
 		// Stop the notifier loops, cron schedulers, and dependency watcher
 		// before the DB closes: a tick in flight could otherwise complete an
 		// external send and then fail the delivery-row insert (or scheduled
