@@ -59,12 +59,6 @@ function Conversation() {
   )
 }
 
-const suggestions = [
-  "What did clients complain about most this month?",
-  "How is quiz completion doing this month?",
-  "Prototype a simpler check-in screen",
-]
-
 type BodyState = {
   streaming: boolean
   onArtifact: (action?: AIChatArtifactRequest) => void
@@ -133,18 +127,18 @@ function renderNewChat({ data, mode, setMode, setDraft, composer }: Pick<BodySta
           {data.sources.map((source, index) => <span key={`${source.kind}-${index}`} className="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs text-muted-foreground"><span className={`size-1.5 rounded-full ${sourceStatus(source.status).dotClass}`} />{source.name}</span>)}
         </div>
       </div>
-      <ModeCards mode={mode} onSelect={setMode} />
+      <ModeCards mode={mode} examples={data.examples ?? {}} onSelect={setMode} />
       {composer}
-      <div className="space-y-2">
+      {!!data.suggestions?.length && <div className="space-y-2">
         <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Suggested</p>
         <div className="flex flex-wrap gap-2">
-          {suggestions.map((suggestion) => (
+          {data.suggestions.map((suggestion) => (
             <Button key={suggestion} variant="outline" onClick={() => setDraft(suggestion)} className="rounded-full px-3.5">
               <Sparkles className="size-3.5" />{suggestion}
             </Button>
           ))}
         </div>
-      </div>
+      </div>}
     </>
   )
 }
