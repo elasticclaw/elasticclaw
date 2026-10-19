@@ -990,6 +990,8 @@ test("artifact action uses the action stream and preserves the retry request aft
 test("artifact location, expiry and page errors handle pinned, missing and invalid pages", () => {
   assert.deepEqual(artifactHelpers.artifactLocation("/artifacts/meal-swap-abcdef"), { slug: "meal-swap-abcdef", version: undefined })
   assert.deepEqual(artifactHelpers.artifactLocation("/artifacts/meal-swap-abcdef/v/2/"), { slug: "meal-swap-abcdef", version: 2 })
+  assert.deepEqual(artifactHelpers.artifactLocation("/artifacts/01jabcdefghjkmnpqrstvwxyz0/v/3"), { slug: "01jabcdefghjkmnpqrstvwxyz0", version: 3 })
+  for (const slug of ["01JABCDEFGHJKMNPQRSTVWXYZ0", "01jabcdefghjkmnpqrstvwxyzi", "01jabcdefghjkmnpqrstvwxyz"]) assert.equal(artifactHelpers.artifactLocation(`/artifacts/${slug}`), null)
   for (const path of ["/artifacts/../file", "/artifacts/meal-abcdef/raw", "/artifacts/meal-abcdef/v/0", "/artifacts/meal-abcdef/v/99999999999999999"]) assert.equal(artifactHelpers.artifactLocation(path), null)
   assert.equal(artifactHelpers.artifactURLExpired("/artifacts/meal-abcdef/raw?exp=100", 99000), false)
   assert.equal(artifactHelpers.artifactURLExpired("/artifacts/meal-abcdef/raw?exp=100", 100000), true)

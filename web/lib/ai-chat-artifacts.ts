@@ -7,7 +7,8 @@ export function artifactShareURL(slug: string, shareUrl?: string): string {
 }
 
 export function artifactLocation(path: string): { slug: string; version?: number } | null {
-  const match = /^\/artifacts\/([a-z0-9][a-z0-9-]{0,39}-[a-z2-7]{6})(?:\/v\/([1-9][0-9]*))?\/?$/.exec(path)
+  // Slugs are lowercase ULIDs; title-based slugs from before stay valid.
+  const match = /^\/artifacts\/([0-9a-hjkmnp-tv-z]{26}|[a-z0-9][a-z0-9-]{0,39}-[a-z2-7]{6})(?:\/v\/([1-9][0-9]*))?\/?$/.exec(path)
   if (!match) return null
   const version = match[2] ? Number(match[2]) : undefined
   if (version !== undefined && !Number.isSafeInteger(version)) return null

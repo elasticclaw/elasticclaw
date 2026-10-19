@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base32"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,7 +16,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tools"
-	"github.com/google/uuid"
+	"github.com/oklog/ulid/v2"
 )
 
 type Artifact struct {
@@ -39,29 +38,19 @@ type Artifact struct {
 // taking SQLite's write lock before choosing the next immutable version number.
 var artifactWriteMu sync.Mutex
 var artifactComponent = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-var artifactSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}-[a-z2-7]{6}$`)
 
-func newArtifactSlug(title string) (string, error) {
-	var prefix strings.Builder
-	for _, c := range strings.ToLower(title) {
-		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
-			prefix.WriteRune(c)
-		} else if prefix.Len() > 0 && !strings.HasSuffix(prefix.String(), "-") {
-			prefix.WriteByte('-')
-		}
-		if prefix.Len() >= 40 {
-			break
-		}
-	}
-	p := strings.Trim(prefix.String(), "-")
-	if p == "" {
-		p = "artifact"
-	}
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
+// Slugs are lowercase ULIDs; title-based slugs from before stay valid.
+var artifactSlug = regexp.MustCompile(`^(?:[0-9a-hjkmnp-tv-z]{26}|[a-z0-9][a-z0-9-]{0,39}-[a-z2-7]{6})$`)
+
+// newArtifactID returns a lowercase ULID used as both the artifact ID and its
+// URL slug. Nothing in it comes from the title or the model, so neither can
+// guess or imitate one.
+func newArtifactID() (string, error) {
+	id, err := ulid.New(ulid.Now(), rand.Reader)
+	if err != nil {
 		return "", err
 	}
-	return p + "-" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:])[:6]), nil
+	return strings.ToLower(id.String()), nil
 }
 
 func (s *Store) Artifact(ctx context.Context, tenant, slug string, version int) (Artifact, error) {
@@ -126,12 +115,12 @@ func (s *Store) publishArtifact(ctx context.Context, dir string, t Thread, m *Me
 		}
 		a.Version++
 	} else {
-		a.ID = uuid.NewString()
 		for attempt := 0; attempt < 8; attempt++ {
-			a.Slug, err = newArtifactSlug(a.Title)
+			a.ID, err = newArtifactID()
 			if err != nil {
 				return Artifact{}, err
 			}
+			a.Slug = a.ID
 			var result sql.Result
 			result, err = tx.ExecContext(ctx, `INSERT INTO ai_chat_artifacts(id,slug,tenant_id,workspace,owner_login,thread_id,title,current_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?) ON CONFLICT(slug) DO NOTHING`, a.ID, a.Slug, t.TenantID, t.Workspace, t.OwnerLogin, t.ID, a.Title, now, now)
 			if err != nil {

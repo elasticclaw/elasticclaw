@@ -19,6 +19,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/llm"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/aichat/tools"
+	"github.com/oklog/ulid/v2"
 )
 
 const testHTML = "<!doctype html><html><head><title>Meal swap</title></head><body>Prototype</body></html>"
@@ -87,8 +88,13 @@ func TestArtifactStorageAndConcurrentVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !artifactSlug.MatchString(a.Slug) || !strings.HasPrefix(a.Slug, "meal-swap-prototype-") {
-		t.Fatal(a.Slug)
+	// The ID and slug are one lowercase ULID, never derived from the title.
+	if parsed, err := ulid.ParseStrict(strings.ToUpper(a.Slug)); err != nil || a.ID != a.Slug || a.Slug != strings.ToLower(parsed.String()) || !artifactSlug.MatchString(a.Slug) {
+		t.Fatal(a.ID, a.Slug, err)
+	}
+	// Title-based slugs from before ULIDs stay valid.
+	if !artifactSlug.MatchString("meal-swap-prototype-abcdef") || artifactSlug.MatchString("01M5AR3PGE23ZW52PNQ61WQ4Z3") {
+		t.Fatal("slug pattern")
 	}
 	info, err := os.Stat(a.Path)
 	if err != nil || info.Mode().Perm() != 0600 {
