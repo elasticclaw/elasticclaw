@@ -202,7 +202,8 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 	ctx = withTicketToken(ctx)
 	if body.ArtifactID != "" {
 		if _, err = a.store.ownedArtifact(ctx, t, body.ArtifactID); err != nil {
-			http.NotFound(w, r)
+			// The chat shows this text, so it must read as a sentence, not "404 page not found".
+			http.Error(w, "This artifact does not exist in this conversation.", http.StatusNotFound)
 			return
 		}
 	}

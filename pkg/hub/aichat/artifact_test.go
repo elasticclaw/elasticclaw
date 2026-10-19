@@ -495,6 +495,45 @@ func TestArtifactActionsAPI(t *testing.T) {
 	}
 }
 
+func TestModelInventedArtifactIDCreatesNewArtifact(t *testing.T) {
+	// Models sometimes name a new artifact through artifactId; that must not fail the card.
+	ctx, cancel := context.WithTimeout(context.Background(), ArtifactTimeout)
+	defer cancel()
+	s := testStore(t)
+	thread := testThread(t, s)
+	m, _ := s.BeginTurn(ctx, thread, "Create a feature map", "fake", false)
+	r := &Runner{Store: s, ArtifactsDir: t.TempDir(), AvailableActions: func(context.Context, string, *config.Config) []string { return []string{"artifact"} }}
+	calls := 0
+	p := fakeProvider{stream: func(_ context.Context, req llm.Request, token func(string) error) (llm.Response, error) {
+		calls++
+		if calls == 1 {
+			return llm.Response{ToolCalls: []llm.ToolCall{{ID: "artifact", Name: tools.StartArtifact, Arguments: `{"artifactId":"feature-map","title":"Feature map","brief":"Build it"}`}}}, nil
+		}
+		if strings.Contains(req.Messages[len(req.Messages)-1].Content, "Current HTML") {
+			t.Fatal("treated the made-up ID as a revision")
+		}
+		return llm.Response{}, token(testHTML)
+	}}
+	if err := r.Run(ctx, thread, m, &config.Config{}, p, func(string, any) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	var title string
+	s.DB.QueryRow(`SELECT count(*), COALESCE(MAX(title),'') FROM ai_chat_artifacts`).Scan(&count, &title)
+	if count != 1 || title != "Feature map" {
+		t.Fatal(count, title)
+	}
+}
+
+func TestArtifactActionRejectsUnknownArtifactWithReadableError(t *testing.T) {
+	handler, s, _ := apiFixture(t, fakeProvider{})
+	thread := testThread(t, s)
+	rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/actions", `{"kind":"artifact","artifactId":"feature-map"}`, "octocat", "on")
+	if rec.Code != 404 || strings.TrimSpace(rec.Body.String()) != "This artifact does not exist in this conversation." {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
 func TestArtifactSignedExpiry(t *testing.T) {
 	// Even a correctly signed expired URL is hidden, not an authentication oracle.
 	s := testStore(t)
