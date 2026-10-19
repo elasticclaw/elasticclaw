@@ -241,3 +241,45 @@ func TestTaskRunAnalyticsCostDriversInvalidRange(t *testing.T) {
 		t.Fatalf("invalid range status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestTaskRunAnalyticsApproximateTicketsAndDrivers(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	started := time.Now().UTC().UnixMilli()
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("approx-ticket-%d", i)
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: id, AttemptID: id + "-attempt", TenantID: "test-tenant-id", OwnerType: "manual", UsageUpdatedAt: 1, StartedAt: started + int64(i), EstimatedCostUsd: 5, Model: "gpt-5"})
+		if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id='ticket', cost_approximate=? WHERE run_id=?`, i, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
+	out, err := s.readTaskRunAnalyticsEffectiveness(filters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.TopTicketsByCost) != 1 || !out.TopTicketsByCost[0].Approximate || out.TopTicketsByCost[0].CostUsd != 10 {
+		t.Fatalf("top tickets = %+v", out.TopTicketsByCost)
+	}
+	drivers, err := s.readTaskRunAnalyticsCostDrivers(filters, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drivers) != 1 || !drivers[0].Approximate || drivers[0].CostUsd != 10 {
+		t.Fatalf("drivers = %+v", drivers)
+	}
+	runs, _, err := s.readTaskRunAnalyticsRuns(filters, 10, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := s.buildTaskRunAnalyticsTicket("test-tenant-id", "ticket", runs, nil, nil, nil, nil, taskRunAnalyticsTicketMetadata{}, false, now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ticket.Approximate || ticket.Cost != 10 || len(ticket.Runs) != 2 || !ticket.Runs[1].Approximate {
+		t.Fatalf("ticket = %+v", ticket)
+	}
+	redactTaskRunAnalyticsTicketCost(&ticket)
+	if ticket.Approximate || ticket.Runs[1].Approximate {
+		t.Fatalf("redacted ticket = %+v", ticket)
+	}
+}

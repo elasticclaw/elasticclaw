@@ -622,10 +622,9 @@ func TestWatchdogActionTrustsHeartbeatOverStaleStatusChannel(t *testing.T) {
 	}
 }
 
-// A gateway transport-error pause that survives into a replacement sandbox is
-// human-only again: the kind is cleared (so the gateway auto-lift cannot tell
-// a checkpoint-restored session "nothing was lost") while the pause stays.
-func TestResetClawForRetryKeepsTransportPauseHumanOnly(t *testing.T) {
+// A bridge transport-error pause blamed the sandbox being replaced, so the
+// replacement lifts it and the re-brief is not left pending (NEXT-1407).
+func TestResetClawForRetryLiftsTransportPause(t *testing.T) {
 	s, db, _ := newClawRetryTestServer(t, "error")
 	if _, err := db.Exec(`UPDATE claws SET no_progress_paused=1, bridge_error_pause_kind='gateway', bridge_error_auto_resumes=1 WHERE id=?`, "retry-claw"); err != nil {
 		t.Fatal(err)
@@ -633,12 +632,30 @@ func TestResetClawForRetryKeepsTransportPauseHumanOnly(t *testing.T) {
 	if reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", ""); err != nil || !reset {
 		t.Fatalf("reset: reset=%v err=%v", reset, err)
 	}
-	var paused, resumes int
+	var paused, resumes, rebrief int
 	var kind string
-	if err := db.QueryRow(`SELECT no_progress_paused, bridge_error_pause_kind, bridge_error_auto_resumes FROM claws WHERE id=?`, "retry-claw").Scan(&paused, &kind, &resumes); err != nil {
+	if err := db.QueryRow(`SELECT no_progress_paused, bridge_error_pause_kind, bridge_error_auto_resumes, rebrief_pending FROM claws WHERE id=?`, "retry-claw").Scan(&paused, &kind, &resumes, &rebrief); err != nil {
 		t.Fatal(err)
 	}
-	if paused == 0 || kind != "" || resumes != 0 {
-		t.Fatalf("after replacement paused=%d kind=%q resumes=%d, want paused, '' and 0", paused, kind, resumes)
+	if paused != 0 || kind != "" || resumes != 0 || rebrief != 1 {
+		t.Fatalf("after replacement paused=%d kind=%q resumes=%d rebrief=%d, want 0, '', 0, 1", paused, kind, resumes, rebrief)
+	}
+}
+
+// A pause that is not a bridge-error pause stays latched across replacement.
+func TestResetClawForRetryKeepsNonTransportPause(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "error")
+	if _, err := db.Exec(`UPDATE claws SET no_progress_paused=1, bridge_error_pause_kind='' WHERE id=?`, "retry-claw"); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", ""); err != nil || !reset {
+		t.Fatalf("reset: reset=%v err=%v", reset, err)
+	}
+	var paused int
+	if err := db.QueryRow(`SELECT no_progress_paused FROM claws WHERE id=?`, "retry-claw").Scan(&paused); err != nil {
+		t.Fatal(err)
+	}
+	if paused == 0 {
+		t.Fatal("non-transport pause was lifted by replacement")
 	}
 }

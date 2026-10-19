@@ -119,7 +119,8 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
 	// bridge_error_pause_kind records WHY a bridge-error pause latched ('gateway' =
 	// auto-liftable after sustained health, 'provider_transient' = immediately
-	// auto-liftable malformed tool-call JSON, '' = needs a human) and
+	// auto-liftable malformed tool-call JSON, 'model_transport' = bounded backoff
+	// for interrupted model requests, '' = needs a human) and
 	// bridge_error_auto_resumes counts those auto-lifts per unit of work. Both are
 	// referenced by the pause, resume and retry UPDATEs, so a missing column must
 	// abort startup rather than break those paths at runtime.
@@ -386,6 +387,28 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_total_tokens INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN usage_day TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cost_note TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cache_read_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cache_write_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_input_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_output_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cache_read_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cache_write_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN est_cache_read_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN est_cache_write_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN est_cache_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN est_cache_read_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN est_cache_write_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_input_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_output_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_cache_read_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_cache_write_tokens INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_cache_read_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_cache_write_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_cache_estimated INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cost_approximate INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE usage_daily ADD COLUMN approx_cost_usd REAL NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN cost_approximate INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN last_agent_head_sha TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
@@ -760,12 +783,39 @@ func migrate(db *sql.DB) error {
 		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
 		committed_input_tokens INTEGER NOT NULL DEFAULT 0, committed_output_tokens INTEGER NOT NULL DEFAULT 0, committed_total_tokens INTEGER NOT NULL DEFAULT 0, committed_cost_usd REAL NOT NULL DEFAULT 0,
 		cache_read_tokens INTEGER, cache_write_tokens INTEGER, estimated_cost_usd REAL, cost_source TEXT NOT NULL DEFAULT 'gateway' CHECK(cost_source IN ('gateway','hub_pricing')),
-		usage_day TEXT NOT NULL DEFAULT '',
+		usage_day TEXT NOT NULL DEFAULT '', cost_note TEXT NOT NULL DEFAULT '',
+		committed_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+		committed_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+		committed_input_cost_usd REAL NOT NULL DEFAULT 0,
+		committed_output_cost_usd REAL NOT NULL DEFAULT 0,
+		committed_cache_read_cost_usd REAL NOT NULL DEFAULT 0,
+		committed_cache_write_cost_usd REAL NOT NULL DEFAULT 0,
+		est_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+		est_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+		est_cache_cost_usd REAL NOT NULL DEFAULT 0,
+		est_cache_read_cost_usd REAL NOT NULL DEFAULT 0,
+		est_cache_write_cost_usd REAL NOT NULL DEFAULT 0,
+		run_input_cost_usd REAL NOT NULL DEFAULT 0,
+		run_output_cost_usd REAL NOT NULL DEFAULT 0,
+		run_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+		run_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+		run_cache_read_cost_usd REAL NOT NULL DEFAULT 0,
+		run_cache_write_cost_usd REAL NOT NULL DEFAULT 0,
+		run_cache_estimated INTEGER NOT NULL DEFAULT 0,
+		cost_approximate INTEGER NOT NULL DEFAULT 0,
 		first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tenant_id, run_id, session_key)
+	);
+	CREATE TABLE IF NOT EXISTS task_run_usage_estimates (
+		tenant_id TEXT NOT NULL, run_id TEXT NOT NULL, session_key TEXT NOT NULL, day TEXT NOT NULL, model TEXT NOT NULL,
+		input_cost_usd REAL NOT NULL DEFAULT 0, output_cost_usd REAL NOT NULL DEFAULT 0,
+		cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+		cache_read_cost_usd REAL NOT NULL DEFAULT 0, cache_write_cost_usd REAL NOT NULL DEFAULT 0,
+		PRIMARY KEY(tenant_id,run_id,session_key,day,model),
+		FOREIGN KEY(tenant_id,run_id,session_key) REFERENCES task_run_usage(tenant_id,run_id,session_key) ON DELETE CASCADE
 	);
 	CREATE TABLE IF NOT EXISTS usage_daily (
 		tenant_id TEXT NOT NULL, day TEXT NOT NULL, workspace_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
-		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+		input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0, approx_cost_usd REAL NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
 		PRIMARY KEY(tenant_id, day, workspace_name, factory_name, workflow_name, model)
 	);
 	CREATE TABLE IF NOT EXISTS model_prices (model TEXT PRIMARY KEY, input_cost_per_token REAL NOT NULL, output_cost_per_token REAL NOT NULL, cache_read_cost_per_token REAL NOT NULL, cache_write_cost_per_token REAL NOT NULL, source TEXT NOT NULL, updated_at INTEGER NOT NULL);
@@ -902,6 +952,7 @@ func migrate(db *sql.DB) error {
 		output_tokens           INTEGER NOT NULL DEFAULT 0,
 		total_tokens            INTEGER NOT NULL DEFAULT 0,
 		estimated_cost_usd      REAL NOT NULL DEFAULT 0,
+		cost_approximate        INTEGER NOT NULL DEFAULT 0,
 		usage_updated_at        INTEGER NOT NULL DEFAULT 0,
 		llm_key                 TEXT NOT NULL DEFAULT '',
 		repo                    TEXT NOT NULL DEFAULT '',
@@ -1215,7 +1266,7 @@ func migrate(db *sql.DB) error {
 		in, out, cacheRead, cacheWrite float64
 	}{
 		{"claude-fable-5", 10, 50, 1, 12.5}, {"claude-opus-4-8", 5, 25, .5, 6.25}, {"claude-opus-4-7", 5, 25, .5, 6.25}, {"claude-opus-4-6", 5, 25, .5, 6.25},
-		{"claude-sonnet-5", 3, 15, .3, 3.75}, {"claude-sonnet-4-6", 3, 15, .3, 3.75}, {"claude-haiku-4-5", 1, 5, .1, 1.25},
+		{"claude-sonnet-5-5", 2, 10, .2, 2.5}, {"claude-sonnet-5", 2, 10, .2, 2.5}, {"claude-sonnet-4-6", 3, 15, .3, 3.75}, {"claude-haiku-4-5", 1, 5, .1, 1.25},
 		{"gpt-5", 1.25, 10, .125, 0}, {"gpt-5-mini", .25, 2, .025, 0}, {"gpt-5-nano", .05, .40, .005, 0},
 		{"gpt-5.1", 1.25, 10, .125, 0}, {"gpt-5.6", 1.25, 10, .125, 0},
 		{"kimi-k2p7-code", 0.95, 4, .19, 0},
@@ -1230,7 +1281,17 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	// Runs after the price seed so the backfill can price newly seeded models.
+	if err := backfillZeroGatewayUsageCostV1(db); err != nil {
+		return err
+	}
+	if err := backfillSonnet55CacheEstimateV1(db); err != nil {
+		return err
+	}
+	if err := recalibrateSonnet55CacheEstimateV2(db); err != nil {
+		return err
+	}
+	return backfillFallbackCostBreakdownV1(db)
 }
 
 func migrateTicketMetadataKey(db *sql.DB) error {
@@ -1411,11 +1472,11 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		initial_attempt_id TEXT NOT NULL DEFAULT '', current_attempt_id TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed')),
 		phase TEXT NOT NULL CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
-		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
+		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, cost_approximate INTEGER NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
 	)`); err != nil {
 		return fmt.Errorf("create task run summaries v3: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO task_run_summaries_new SELECT id, tenant_id, run_id, initial_attempt_id, current_attempt_id, CASE status WHEN 'clean_success' THEN 'clean' WHEN 'warning_success' THEN 'warning' ELSE status END, phase, attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, llm_key, repo, primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason FROM task_run_summaries`); err != nil {
+	if _, err := tx.Exec(`INSERT INTO task_run_summaries_new SELECT id, tenant_id, run_id, initial_attempt_id, current_attempt_id, CASE status WHEN 'clean_success' THEN 'clean' WHEN 'warning_success' THEN 'warning' ELSE status END, phase, attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, 0, usage_updated_at, llm_key, repo, primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason FROM task_run_summaries`); err != nil {
 		return fmt.Errorf("copy task run summaries v3: %w", err)
 	}
 	if _, err := tx.Exec(`DROP TABLE task_run_summaries; ALTER TABLE task_run_summaries_new RENAME TO task_run_summaries;

@@ -12,6 +12,7 @@ import (
 var errTaskRunAnalyticsInvalidCostRange = fmt.Errorf("invalid time range")
 
 type taskRunAnalyticsCostsResponse struct {
+	ApproximateCostUsd float64                           `json:"approximateCostUsd,omitempty"`
 	Today              taskRunAnalyticsCostPeriod        `json:"today"`
 	Week               taskRunAnalyticsCostAmount        `json:"week"`
 	Month              taskRunAnalyticsCostAmount        `json:"month"`
@@ -23,13 +24,15 @@ type taskRunAnalyticsCostsResponse struct {
 }
 
 type taskRunAnalyticsCostPeriod struct {
+	ApproximateCostUsd  float64  `json:"approximateCostUsd,omitempty"`
 	CostUsd             float64  `json:"costUsd"`
 	TotalTokens         int64    `json:"totalTokens"`
 	DeltaPctVsYesterday *float64 `json:"deltaPctVsYesterday"`
 }
 
 type taskRunAnalyticsCostAmount struct {
-	CostUsd float64 `json:"costUsd"`
+	ApproximateCostUsd float64 `json:"approximateCostUsd,omitempty"`
+	CostUsd            float64 `json:"costUsd"`
 }
 type taskRunAnalyticsPriorCost struct {
 	PeriodCostUsd float64 `json:"periodCostUsd"`
@@ -42,10 +45,11 @@ type taskRunAnalyticsProjection struct {
 }
 
 type taskRunAnalyticsDailyCost struct {
-	Date        string  `json:"date"`
-	CostUsd     float64 `json:"costUsd"`
-	TotalTokens int64   `json:"totalTokens"`
-	RunCount    int     `json:"runCount"`
+	ApproximateCostUsd float64 `json:"approximateCostUsd,omitempty"`
+	Date               string  `json:"date"`
+	CostUsd            float64 `json:"costUsd"`
+	TotalTokens        int64   `json:"totalTokens"`
+	RunCount           int     `json:"runCount"`
 }
 
 type taskRunAnalyticsModelCostSeries struct {
@@ -54,8 +58,9 @@ type taskRunAnalyticsModelCostSeries struct {
 }
 
 type taskRunAnalyticsDailyCostTotals struct {
-	costUsd     float64
-	totalTokens int64
+	costUsd            float64
+	approximateCostUsd float64
+	totalTokens        int64
 }
 
 func clampTaskRunAnalyticsUsageDay(day string, start, end time.Time) string {
@@ -132,7 +137,8 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 	for day := seriesStart; !day.After(seriesEnd); day = day.AddDate(0, 0, 1) {
 		key := day.Format("2006-01-02")
 		totals := byDay[key]
-		response.DailySeries = append(response.DailySeries, taskRunAnalyticsDailyCost{Date: key, CostUsd: totals.costUsd, TotalTokens: totals.totalTokens})
+		response.ApproximateCostUsd += totals.approximateCostUsd
+		response.DailySeries = append(response.DailySeries, taskRunAnalyticsDailyCost{Date: key, CostUsd: totals.costUsd, ApproximateCostUsd: totals.approximateCostUsd, TotalTokens: totals.totalTokens})
 	}
 	if err := s.addTaskRunAnalyticsDailyRunCounts(filters, seriesStart, seriesEnd, response.DailySeries, scope); err != nil {
 		return response, err
@@ -140,6 +146,7 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 	todayTotals := byDay[today.Format("2006-01-02")]
 	yesterdayTotals := byDay[today.AddDate(0, 0, -1).Format("2006-01-02")]
 	response.Today.CostUsd = todayTotals.costUsd
+	response.Today.ApproximateCostUsd = todayTotals.approximateCostUsd
 	response.Today.TotalTokens = todayTotals.totalTokens
 	if yesterdayTotals.costUsd != 0 {
 		delta := (todayTotals.costUsd - yesterdayTotals.costUsd) / yesterdayTotals.costUsd * 100
@@ -151,10 +158,12 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 	for day := monthStart; !day.After(today); day = day.AddDate(0, 0, 1) {
 		totals, exists := byDay[day.Format("2006-01-02")]
 		response.Month.CostUsd += totals.costUsd
+		response.Month.ApproximateCostUsd += totals.approximateCostUsd
 		hasProjectionData = hasProjectionData || exists
 	}
 	for day := today.AddDate(0, 0, -6); !day.After(today); day = day.AddDate(0, 0, 1) {
 		response.Week.CostUsd += byDay[day.Format("2006-01-02")].costUsd
+		response.Week.ApproximateCostUsd += byDay[day.Format("2006-01-02")].approximateCostUsd
 	}
 	for day := today.AddDate(0, 0, -7); day.Before(today); day = day.AddDate(0, 0, 1) {
 		totals, exists := byDay[day.Format("2006-01-02")]
@@ -229,7 +238,7 @@ func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, 
 	var args []any
 	if scope != "ledger" {
 		where, summaryArgs := taskRunAnalyticsSummaryWhere(f)
-		query = `SELECT u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
+		query = `SELECT u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0), COALESCE(SUM(CASE WHEN u.cost_approximate=1 THEN u.committed_cost_usd ELSE 0 END),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
 		query += ` GROUP BY u.usage_day`
 		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
 	} else {
@@ -238,7 +247,7 @@ func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, 
 		where, a := taskRunAnalyticsUsageDimensionsWhere(f, "usage_daily")
 		where = append(where, "day>=?", "day<=?")
 		args = append(a, start.Format("2006-01-02"), end.Format("2006-01-02"))
-		query = `SELECT day, COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0) FROM usage_daily WHERE ` + strings.Join(where, " AND ") + ` GROUP BY day`
+		query = `SELECT day, COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(approx_cost_usd),0) FROM usage_daily WHERE ` + strings.Join(where, " AND ") + ` GROUP BY day`
 	}
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -249,13 +258,14 @@ func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, 
 	for rows.Next() {
 		var day string
 		var totals taskRunAnalyticsDailyCostTotals
-		if err = rows.Scan(&day, &totals.costUsd, &totals.totalTokens); err != nil {
+		if err = rows.Scan(&day, &totals.costUsd, &totals.totalTokens, &totals.approximateCostUsd); err != nil {
 			return nil, err
 		}
 		if scope != "ledger" {
 			day = clampTaskRunAnalyticsUsageDay(day, start, end)
 			current := byDay[day]
 			current.costUsd += totals.costUsd
+			current.approximateCostUsd += totals.approximateCostUsd
 			current.totalTokens += totals.totalTokens
 			byDay[day] = current
 		} else {
@@ -348,13 +358,13 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 	var args []any
 	if scope != "ledger" {
 		where, summaryArgs := taskRunAnalyticsSummaryWhere(f)
-		query = `SELECT u.model, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
+		query = `SELECT u.model, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0), COALESCE(SUM(CASE WHEN u.cost_approximate=1 THEN u.committed_cost_usd ELSE 0 END),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
 		query += ` GROUP BY u.model,u.usage_day`
 		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
 	} else {
 		where, a := taskRunAnalyticsUsageDimensionsWhere(f, "usage_daily")
 		where = append(where, "day>=?", "day<=?")
-		query = `SELECT model, day, COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0) FROM usage_daily WHERE ` + strings.Join(where, " AND ") + ` GROUP BY model,day`
+		query = `SELECT model, day, COALESCE(SUM(cost_usd),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(approx_cost_usd),0) FROM usage_daily WHERE ` + strings.Join(where, " AND ") + ` GROUP BY model,day`
 		args = append(a, start.Format("2006-01-02"), end.Format("2006-01-02"))
 	}
 	rows, err := s.db.Query(query, args...)
@@ -364,6 +374,7 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 	defer rows.Close()
 	type v struct {
 		c float64
+		a float64
 		t int64
 	}
 	data := map[string]map[string]v{}
@@ -371,7 +382,7 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 	for rows.Next() {
 		var m, d string
 		var x v
-		if err = rows.Scan(&m, &d, &x.c, &x.t); err != nil {
+		if err = rows.Scan(&m, &d, &x.c, &x.t, &x.a); err != nil {
 			return nil, err
 		}
 		if data[m] == nil {
@@ -381,6 +392,7 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 			d = clampTaskRunAnalyticsUsageDay(d, start, end)
 			current := data[m][d]
 			current.c += x.c
+			current.a += x.a
 			current.t += x.t
 			data[m][d] = current
 		} else {
@@ -405,6 +417,7 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 			for d, x := range data[m] {
 				y := other[d]
 				y.c += x.c
+				y.a += x.a
 				y.t += x.t
 				other[d] = y
 			}
@@ -417,7 +430,7 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 	for i := range out {
 		for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
 			x := data[out[i].Model][d.Format("2006-01-02")]
-			out[i].DailySeries = append(out[i].DailySeries, taskRunAnalyticsDailyCost{Date: d.Format("2006-01-02"), CostUsd: x.c, TotalTokens: x.t})
+			out[i].DailySeries = append(out[i].DailySeries, taskRunAnalyticsDailyCost{Date: d.Format("2006-01-02"), CostUsd: x.c, ApproximateCostUsd: x.a, TotalTokens: x.t})
 		}
 	}
 	return out, nil

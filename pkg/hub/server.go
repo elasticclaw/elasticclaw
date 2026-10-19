@@ -189,6 +189,7 @@ type Server struct {
 	// a hub restart rather than treating an uncertain outage as an agent failure.
 	reaperMu            sync.Mutex
 	reaperFirstSeen     map[string]time.Time
+	usageCostRatios     sync.Map
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
 
@@ -370,7 +371,7 @@ type clawConn struct {
 	contextWarningSent     bool            // true once the context-nearly-full warning has been injected this turn
 	awaitingResponse       bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused       bool            // automatic delivery is paused after repeated turns with unchanged progress
-	bridgeErrorPauseKind   string          // persisted bridge-error pause reason; gateway and provider_transient are auto-liftable
+	bridgeErrorPauseKind   string          // persisted bridge-error pause reason; recognized transient kinds are auto-liftable
 	gatewayHealthySince    time.Time       // start of the current unbroken gateway healthy+ready heartbeat run; zero = not healthy
 	bridgeErrorStreak      int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
 	llmLimitedUntil        time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
@@ -2559,6 +2560,7 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	before := r.URL.Query().Get("before")
+	beforeID := strings.TrimSpace(r.URL.Query().Get("before_id"))
 	limit := parsePositiveLimit(r, 200, 500)
 	order := strings.ToLower(r.URL.Query().Get("order"))
 	if order != "desc" {
@@ -2586,17 +2588,27 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 		}
 	}
 	if before != "" {
-		query += ` AND created_at < ?`
+		var beforeVal interface{}
 		if parsed := parseTimeCursor(before); parsed != nil {
-			args = append(args, *parsed)
+			beforeVal = *parsed
 		} else {
-			args = append(args, before)
+			beforeVal = before
+		}
+		if beforeID != "" {
+			// Compound cursor: (created_at, id) is a total order, so a page
+			// boundary inside a same-timestamp group does not skip the
+			// group's remaining rows on the next page.
+			query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+			args = append(args, beforeVal, beforeVal, beforeID)
+		} else {
+			query += ` AND created_at < ?`
+			args = append(args, beforeVal)
 		}
 	}
 	if order == "desc" {
-		query += ` ORDER BY created_at DESC LIMIT ?`
+		query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	} else {
-		query += ` ORDER BY created_at ASC LIMIT ?`
+		query += ` ORDER BY created_at ASC, id ASC LIMIT ?`
 	}
 	args = append(args, limit)
 
@@ -3138,6 +3150,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				EstimatedCostUSD  *float64 `json:"estimated_cost_usd"`
 				Model             string   `json:"model"`
 				ModelProvider     string   `json:"model_provider"`
+				CacheReadTokens   *int     `json:"cache_read_tokens"`
+				CacheWriteTokens  *int     `json:"cache_write_tokens"`
 				// Pointers on purpose: an old bridge omits both, which must
 				// stay distinguishable from a bridge reporting "no subagents"
 				// (see applySubagentHeartbeatLocked).
@@ -3310,7 +3324,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				s.maybeLiftBridgeErrorPause(clawID)
-				if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider}); err != nil {
+				if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider, CacheReadTokens: hb.CacheReadTokens, CacheWriteTokens: hb.CacheWriteTokens}); err != nil {
 					log.Printf("[usage] heartbeat for %s: %v", clawID, err)
 				}
 				if res, err := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='offline'`, clawID); err == nil {

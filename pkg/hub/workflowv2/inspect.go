@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
@@ -43,17 +44,21 @@ type EventRecord struct {
 	ExpectedStateVersion *uint64                    `json:"expected_state_version,omitempty"`
 	ObservedStateVersion uint64                     `json:"observed_state_version"`
 	Reason               string                     `json:"reason,omitempty"`
+	Payload              json.RawMessage            `json:"payload,omitempty"`
+	Facts                json.RawMessage            `json:"facts,omitempty"`
 	ReceivedAt           time.Time                  `json:"received_at"`
 }
 
 type EffectSummary struct {
-	ID             string    `json:"id"`
-	Kind           string    `json:"kind"`
-	Status         string    `json:"status"`
-	DefinitionPath string    `json:"definition_path"`
-	AttemptCount   int       `json:"attempt_count"`
-	LastError      string    `json:"last_error,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             string                 `json:"id"`
+	Kind           string                 `json:"kind"`
+	Status         string                 `json:"status"`
+	DefinitionPath string                 `json:"definition_path"`
+	AttemptCount   int                    `json:"attempt_count"`
+	Payload        map[string]interface{} `json:"payload,omitempty"`
+	Receipt        map[string]interface{} `json:"receipt,omitempty"`
+	LastError      string                 `json:"last_error,omitempty"`
+	UpdatedAt      time.Time              `json:"updated_at"`
 }
 
 type AgentTaskSummary struct {
@@ -62,6 +67,7 @@ type AgentTaskSummary struct {
 	State             string    `json:"state"`
 	StateVersion      uint64    `json:"state_version"`
 	AttemptID         string    `json:"attempt_id,omitempty"`
+	Instructions      string    `json:"instructions,omitempty"`
 	HeartbeatDeadline time.Time `json:"heartbeat_deadline"`
 	Deadline          time.Time `json:"deadline"`
 	TerminalReason    string    `json:"terminal_reason,omitempty"`
@@ -194,7 +200,7 @@ func (s *Store) inspectFacts(ctx context.Context, runID string, target map[strin
 }
 
 func (s *Store) inspectEvents(ctx context.Context, runID string) ([]EventRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,kind,producer,disposition,expected_state_version,observed_state_version,reason,received_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,kind,producer,disposition,expected_state_version,observed_state_version,reason,payload_json,facts_json,received_at
 		FROM workflow_v2_events WHERE run_id=? ORDER BY received_at DESC,id DESC LIMIT 50`, runID)
 	if err != nil {
 		return nil, err
@@ -205,9 +211,10 @@ func (s *Store) inspectEvents(ctx context.Context, runID string) ([]EventRecord,
 		var item EventRecord
 		var disposition string
 		var expected sql.NullInt64
+		var payload, facts string
 		var received int64
 		if err := rows.Scan(&item.ID, &item.Kind, &item.Producer, &disposition, &expected,
-			&item.ObservedStateVersion, &item.Reason, &received); err != nil {
+			&item.ObservedStateVersion, &item.Reason, &payload, &facts, &received); err != nil {
 			return nil, err
 		}
 		item.Disposition = typesv2.ControlDisposition(disposition)
@@ -215,6 +222,8 @@ func (s *Store) inspectEvents(ctx context.Context, runID string) ([]EventRecord,
 			value := uint64(expected.Int64)
 			item.ExpectedStateVersion = &value
 		}
+		item.Payload = rawJSONObject(payload)
+		item.Facts = rawJSONObject(facts)
 		item.ReceivedAt = time.UnixMilli(received).UTC()
 		result = append(result, item)
 	}
@@ -243,7 +252,7 @@ func (s *Store) inspectTransitions(ctx context.Context, runID string) ([]Transit
 }
 
 func (s *Store) inspectEffects(ctx context.Context, runID string) ([]EffectSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,kind,status,definition_path,attempt_count,last_error,updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,kind,status,definition_path,attempt_count,payload_json,receipt_json,last_error,updated_at
 		FROM workflow_v2_effects WHERE run_id=? ORDER BY created_at DESC,id DESC LIMIT 50`, runID)
 	if err != nil {
 		return nil, err
@@ -252,10 +261,14 @@ func (s *Store) inspectEffects(ctx context.Context, runID string) ([]EffectSumma
 	var result []EffectSummary
 	for rows.Next() {
 		var item EffectSummary
+		var payload, receipt string
 		var updated int64
-		if err := rows.Scan(&item.ID, &item.Kind, &item.Status, &item.DefinitionPath, &item.AttemptCount, &item.LastError, &updated); err != nil {
+		if err := rows.Scan(&item.ID, &item.Kind, &item.Status, &item.DefinitionPath, &item.AttemptCount,
+			&payload, &receipt, &item.LastError, &updated); err != nil {
 			return nil, err
 		}
+		item.Payload = decodedJSONObject(payload)
+		item.Receipt = decodedJSONObject(receipt)
 		item.UpdatedAt = time.UnixMilli(updated).UTC()
 		result = append(result, item)
 	}
@@ -263,7 +276,7 @@ func (s *Store) inspectEffects(ctx context.Context, runID string) ([]EffectSumma
 }
 
 func (s *Store) inspectAgentTasks(ctx context.Context, runID string) ([]AgentTaskSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,status,state,state_version,attempt_id,heartbeat_deadline,deadline,terminal_reason
+	rows, err := s.db.QueryContext(ctx, `SELECT id,status,state,state_version,attempt_id,instructions,heartbeat_deadline,deadline,terminal_reason
 		FROM workflow_v2_agent_tasks WHERE run_id=? ORDER BY created_at DESC,id DESC LIMIT 50`, runID)
 	if err != nil {
 		return nil, err
@@ -274,7 +287,7 @@ func (s *Store) inspectAgentTasks(ctx context.Context, runID string) ([]AgentTas
 		var item AgentTaskSummary
 		var heartbeat, deadline int64
 		if err := rows.Scan(&item.ID, &item.Status, &item.State, &item.StateVersion, &item.AttemptID,
-			&heartbeat, &deadline, &item.TerminalReason); err != nil {
+			&item.Instructions, &heartbeat, &deadline, &item.TerminalReason); err != nil {
 			return nil, err
 		}
 		item.HeartbeatDeadline = time.UnixMilli(heartbeat).UTC()
@@ -282,4 +295,28 @@ func (s *Store) inspectAgentTasks(ctx context.Context, runID string) ([]AgentTas
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+// rawJSONObject normalizes a stored JSON object column to a RawMessage, hiding
+// empty objects so omitempty drops them from inspection responses.
+func rawJSONObject(value string) json.RawMessage {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "{}" {
+		return nil
+	}
+	return json.RawMessage(trimmed)
+}
+
+// decodedJSONObject parses a stored JSON object column into a map, returning
+// nil for empty objects so omitempty drops them from inspection responses.
+func decodedJSONObject(value string) map[string]interface{} {
+	raw := rawJSONObject(value)
+	if raw == nil {
+		return nil
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil
+	}
+	return result
 }

@@ -965,3 +965,125 @@ func TestRegistrationSeedsGatewayPauseKind(t *testing.T) {
 		t.Fatalf("registration seeded paused=%v kind=%q, want paused gateway", cc.noProgressPaused, cc.bridgeErrorPauseKind)
 	}
 }
+
+const modelNetworkInterruptedErr = "LLM request failed: network connection was interrupted."
+const modelIdleTimeoutErr = "The model did not produce a response before the model idle timeout. Please try again, or increase `models.providers.<id>.timeoutSeconds`."
+
+func TestModelTransportClassification(t *testing.T) {
+	for _, errText := range []string{modelNetworkInterruptedErr, modelIdleTimeoutErr, strings.ToUpper(modelNetworkInterruptedErr)} {
+		if !bridgeErrorIsModelTransport(errText) {
+			t.Fatalf("transient error not recognized: %s", errText)
+		}
+	}
+	for _, cause := range []string{"unauthorized", "authentication failed", "credentials missing", "usage limit", "credit balance too low", "billing", "schema rejected", "no space left on device", "ENOSPC"} {
+		if bridgeErrorIsModelTransport(modelNetworkInterruptedErr + "; " + cause) {
+			t.Fatalf("unsafe cause classified as transient: %s", cause)
+		}
+	}
+	if bridgeErrorIsModelTransport("unknown provider failure") {
+		t.Fatal("unknown error classified as transient")
+	}
+}
+
+func TestModelTransportRecoveryBackoffAndCap(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-model-transport"
+	cc := bridgeErrorClaw(t, s, id)
+	// Keep recovery messages queued without a real bridge socket in this fixture.
+	cc.deliveryInFlight = true
+	for attempt, delay := range bridgeErrorModelRetryDelays {
+		// Reproduce NEXT-1500's two different consecutive failures.
+		s.observeBridgeErrorTurn(cc, id, modelIdleTimeoutErr, true)
+		s.observeBridgeErrorTurn(cc, id, modelNetworkInterruptedErr, true)
+		if kind, n := bridgeErrorRow(t, s, id); kind != bridgeErrorPauseKindModelTransport || n != attempt {
+			t.Fatalf("before attempt %d: kind=%q count=%d", attempt+1, kind, n)
+		}
+		if s.maybeLiftBridgeErrorPause(id) {
+			t.Fatal("resumed with no healthy heartbeat")
+		}
+		healthyFor(cc, delay-time.Second)
+		if s.maybeLiftBridgeErrorPause(id) {
+			t.Fatalf("attempt %d resumed too early", attempt+1)
+		}
+		healthyFor(cc, delay+time.Second)
+		if !s.maybeLiftBridgeErrorPause(id) {
+			t.Fatalf("attempt %d did not resume", attempt+1)
+		}
+		if clawPaused(t, s, id) {
+			t.Fatal("still paused after recovery")
+		}
+		if kind, n := bridgeErrorRow(t, s, id); kind != "" || n != attempt+1 {
+			t.Fatalf("after attempt %d: kind=%q count=%d", attempt+1, kind, n)
+		}
+	}
+	s.observeBridgeErrorTurn(cc, id, modelIdleTimeoutErr, true)
+	s.observeBridgeErrorTurn(cc, id, modelNetworkInterruptedErr, true)
+	healthyFor(cc, time.Hour)
+	if s.maybeLiftBridgeErrorPause(id) || !clawPaused(t, s, id) {
+		t.Fatal("retry cap did not stop recovery")
+	}
+	notices := pauseNotices(t, s, id)
+	if len(notices) == 0 || !strings.Contains(notices[len(notices)-1], "budget exhausted (3 prior automatic recoveries") {
+		t.Fatalf("missing actionable exhaustion notice: %v", notices)
+	}
+	var messages int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE '%Tools may have completed despite the interruption%'`, id).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if messages != len(bridgeErrorModelRetryDelays) {
+		t.Fatalf("recovery messages=%d", messages)
+	}
+	// The persisted pause remains explainable after the in-memory kind is cleared.
+	if kind, n := bridgeErrorRow(t, s, id); kind != bridgeErrorPauseKindModelTransport || n != 3 {
+		t.Fatalf("capped state: kind=%q count=%d", kind, n)
+	}
+}
+
+func TestModelTransportRecoveryWaitsForIdleAndHealthyGateway(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const id = "claw-model-transport-busy"
+	cc := gatewayPauseClaw(t, s, id, modelNetworkInterruptedErr)
+	healthyFor(cc, time.Hour)
+	if s.maybeLiftBridgeErrorPause(id) {
+		t.Fatal("resumed while awaiting response")
+	}
+	cc.mu.Lock()
+	cc.awaitingResponse = false
+	cc.streamingStartedAt = now()
+	cc.mu.Unlock()
+	if s.maybeLiftBridgeErrorPause(id) {
+		t.Fatal("resumed while streaming")
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.subagentsActiveAt = now()
+	cc.mu.Unlock()
+	if s.maybeLiftBridgeErrorPause(id) {
+		t.Fatal("resumed with active subagents")
+	}
+	cc.mu.Lock()
+	cc.subagentsActiveAt = time.Time{}
+	cc.llmLimitedUntil = now().Add(time.Hour)
+	cc.mu.Unlock()
+	if s.maybeLiftBridgeErrorPause(id) {
+		t.Fatal("resumed with provider allowance exhausted")
+	}
+	cc.mu.Lock()
+	cc.llmLimitedUntil = time.Time{}
+	cc.observeGatewayHealthLocked(false)
+	cc.mu.Unlock()
+	if s.maybeLiftBridgeErrorPause(id) {
+		t.Fatal("resumed with unhealthy gateway")
+	}
+	healthyFor(cc, 30*time.Second)
+	if s.maybeLiftBridgeErrorPause(id) {
+		t.Fatal("unhealthy heartbeat did not restart recovery window")
+	}
+	cc.mu.Lock()
+	cc.deliveryInFlight = true
+	cc.mu.Unlock()
+	healthyFor(cc, time.Minute+time.Second)
+	if !s.maybeLiftBridgeErrorPause(id) {
+		t.Fatal("did not recover when healthy and idle")
+	}
+}
