@@ -36,7 +36,8 @@ func TestNodeGitInstallScriptRechecksNode(t *testing.T) {
 				"npm":  "#!/bin/sh\n",
 				"git":  "#!/bin/sh\necho git-fake\n",
 				"curl": "#!/bin/sh\n",
-				"sudo": "#!/bin/sh\necho \"$*\" >> \"$FAKE_APT_LOG\"\ncase \"$*\" in *'install -y --fix-broken nodejs'*) [ -n \"$FAKE_APT_UPGRADES\" ] && printf ok > \"$FAKE_NODE_STATE\";; esac\nexit 0\n",
+				// Drain stdin like the real `sudo tee`/`sudo gpg`, or pipefail sees SIGPIPE.
+				"sudo": "#!/bin/sh\ncat > /dev/null\necho \"$*\" >> \"$FAKE_APT_LOG\"\ncase \"$*\" in *'install -y --fix-broken nodejs'*) [ -n \"$FAKE_APT_UPGRADES\" ] && printf ok > \"$FAKE_NODE_STATE\";; esac\nexit 0\n",
 			}
 			for name, body := range fake {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
