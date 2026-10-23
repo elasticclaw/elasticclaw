@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +103,15 @@ func TestNodeCompatibleExpr(t *testing.T) {
 				t.Fatalf("node %s accepted, want rejected", tc.version)
 			}
 		})
+	}
+}
+
+func TestAgentDockerfileChecksNodeCompatible(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docker", "agent.Dockerfile"))
+	if err != nil {
+		t.Fatalf("read agent.Dockerfile: %v", err)
+	}
+	if !strings.Contains(string(data), "\nRUN "+NodeCompatibleCheck+"\n") {
+		t.Fatal("agent.Dockerfile: missing `RUN <cliversion.NodeCompatibleCheck>` after the Node install")
 	}
 }
