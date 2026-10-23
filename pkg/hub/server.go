@@ -356,6 +356,7 @@ type clawConn struct {
 	gatewaySessionKeySeen  bool            // distinguishes the first live-key heartbeat from a loss
 	turnInputMessageID     string          // hub message that started the current turn
 	sessionLossInterrupted bool            // the bridge identified this turn as interrupted
+	turnInactiveSince      time.Time       // first inactive heartbeat during the current open turn
 	forcedFinishCount      int             // consecutive watchdog-forced streaming turn finishes
 	workflowStartPending   bool            // true while initial volume attach / wake is in flight
 	workflowStartDone      bool            // true once initial volume attach / wake has completed
@@ -558,6 +559,7 @@ func (cc *clawConn) resetTurnStateLocked() {
 	cc.streamingSplit = false
 	cc.streamingSplitText = ""
 	cc.streamingStartedAt = time.Time{}
+	cc.turnInactiveSince = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 }
@@ -3125,6 +3127,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			var hb struct {
 				GatewayHealthy bool  `json:"gateway_healthy"`
 				GatewayReady   *bool `json:"gateway_ready,omitempty"`
+				TurnActive     *bool `json:"turn_active"`
 				ContextUsage   int   `json:"context_usage"`
 				RestartCount   int   `json:"restart_count"`
 				// SessionKey is the usage snapshot from sessions.describe. GatewaySessionKey
@@ -3173,7 +3176,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// channel's 2-minute ping). The silent-death watchdog reads
 					// it so that losing the status channel alone can no longer
 					// condemn a claw that is plainly reporting in.
-					activeCC.lastHeartbeatAt = time.Now()
+					heartbeatAt := time.Now()
+					activeCC.applyTurnHeartbeatLocked(hb.TurnActive, heartbeatAt, liveness.lostTurnGrace)
+					activeCC.lastHeartbeatAt = heartbeatAt
 					// Log only on status changes, not every heartbeat
 					prevUsage = activeCC.contextUsage
 					activeCC.contextUsage = hb.ContextUsage
@@ -3394,6 +3399,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					cc.mu.Lock()
 					if cc.streamingStartedAt.IsZero() {
 						cc.streamingStartedAt = time.Now()
+						cc.turnInactiveSince = time.Time{}
 						cc.streamingTimeoutSent = false
 						cc.contextWarningSent = false
 					}
@@ -3435,6 +3441,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					if cc.streamingStartedAt.IsZero() {
 						cc.streamingStartedAt = time.Now()
+						cc.turnInactiveSince = time.Time{}
 					}
 					cc.streamingBuf.WriteString(chunk.Content)
 					msgID := cc.streamingMsgID
@@ -6546,7 +6553,7 @@ func (s *Server) checkClawStatus() {
 		// The bridge normally closes a turn with a message.  If that terminal
 		// message is lost, preserve the partial response and unblock the queue.
 		// A second consecutive recovery means the bridge is repeatedly wedged.
-		if !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > cfg.busyTurnMax {
+		if !s.recoverLostTurn(now, id, cc, cfg.lostTurnGrace) && !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > cfg.busyTurnMax {
 			var content, messageID string
 			var escalate bool
 			finished := false
@@ -6993,6 +7000,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	}
 	cc.awaitingResponse = true
 	cc.streamingStartedAt = time.Now()
+	cc.turnInactiveSince = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
@@ -7047,6 +7055,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	}
 	cc.awaitingResponse = true
 	cc.streamingStartedAt = time.Now()
+	cc.turnInactiveSince = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
@@ -9874,6 +9883,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.awaitingResponse = true
 	cc.turnInputMessageID = msg.ID
 	cc.streamingStartedAt = time.Now()
+	cc.turnInactiveSince = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
