@@ -3663,9 +3663,15 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 // installNodeGit installs Node.js 24 and git via apt.
 func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
-	// Node must satisfy cliversion.NodeCompatibleExpr: OpenClaw's npm preinstall
-	// aborts outside its engines range, and older patches carry CVE-2026-111497.
-	script := fmt.Sprintf(`
+	return runShell(nodeGitInstallScript)
+}
+
+// nodeGitInstallScript fails unless the node left on PATH satisfies
+// cliversion.NodeCompatibleRange: OpenClaw's npm preinstall aborts outside its
+// engines range, and older patches carry CVE-2026-111497. apt can succeed
+// without upgrading, and another node can shadow the apt one, so the result is
+// checked again after the install.
+var nodeGitInstallScript = fmt.Sprintf(`
 set -euo pipefail
 node_compatible() {
   command -v node >/dev/null 2>&1 && %s
@@ -3690,11 +3696,13 @@ if ! command -v npm >/dev/null 2>&1 || ! node_compatible; then
   sudo apt-get update -qq
   sudo apt-get install -y --fix-broken nodejs
 fi
+if ! node_compatible; then
+  echo "Node $(node --version 2>/dev/null || echo 'not found') does not satisfy %s (CVE-2026-111497)" >&2
+  exit 1
+fi
 echo "Node: $(node --version)"
 echo "Git: $(git --version)"
-`, cliversion.NodeCompatibleCheck)
-	return runShell(script)
-}
+`, cliversion.NodeCompatibleCheck, cliversion.NodeCompatibleRange)
 
 const openClawVersion = cliversion.OpenClawVersion
 const codexPluginVersion = cliversion.CodexPluginVersion

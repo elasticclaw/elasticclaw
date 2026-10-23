@@ -14,8 +14,11 @@ const (
 	GrokCLIVersion       = "0.2.103"
 )
 
-// NodeCompatibleExpr is a JS boolean over major, minor and patch for the Node
-// range claws accept: ">=24.22.1 <25 || >=26.12.1". OpenClaw 2026.9.x's own
+// NodeCompatibleRange is the Node range claws accept, in npm engines syntax.
+const NodeCompatibleRange = ">=24.22.1 <25 || >=26.12.1"
+
+// NodeCompatibleExpr is a JS boolean over major, minor and patch for
+// NodeCompatibleRange. OpenClaw 2026.9.x's own
 // engines clause starts at 24.16.0 / 26.1.0, but releases below 24.22.1 and
 // 26.12.1 bundle a Brotli decoder vulnerable to CVE-2026-111497, reachable from
 // any HTTP response an agent decompresses.
