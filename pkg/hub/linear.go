@@ -1300,6 +1300,10 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	if !pipeline.MessageSignals(rawMessage, doneSignalToken) {
 		return
 	}
+	s.nudgeRejectedPipelineSignals(clawID, rawMessage)
+	if s.pipelineRejectsMessageSignal(clawID, doneSignalToken) {
+		return
+	}
 	// Get the issue ID and tenant for this claw. Workflow claws may not have an
 	// issue, but [DONE] must still give those runs a terminal path.
 	var issueID, tenantID string
@@ -1400,7 +1404,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	if pipelineCtx, ok := s.findPipelineContextForIssue(issueID); ok {
 		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
 		if pl := parsePipelineForContext(pipelineCtx); pl != nil {
-			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+			if stage := pl.StageForMessageContains(rawMessage, s.getPipelineStage(clawID)); stage != nil {
 				s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
 				pipelineHandledDone = true
 			}
@@ -1420,7 +1424,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	}
 	if !pipelineHandledDone {
 		if pl := parsePipelineForFactory(factory); pl != nil {
-			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+			if stage := pl.StageForMessageContains(rawMessage, s.getPipelineStage(clawID)); stage != nil {
 				s.transitionPipelineStage(clawID, *stage, factory, issueID)
 				pipelineHandledDone = true
 			}
@@ -1635,6 +1639,10 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	// Same rule as handleClawDoneSignal: the teardown decision is re-made from
 	// the message here, not inherited from the caller's substring test.
 	if !pipeline.MessageSignals(rawMessage, terminateSignalToken) {
+		return
+	}
+	if s.pipelineRejectsMessageSignal(clawID, terminateSignalToken) {
+		s.nudgeRejectedPipelineSignals(clawID, rawMessage)
 		return
 	}
 	// Get the tenant ID and issue ID for this claw

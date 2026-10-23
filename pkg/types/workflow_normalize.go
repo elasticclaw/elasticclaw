@@ -9,6 +9,9 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 	if workflow == nil {
 		return nil
 	}
+	if err := validateWorkflowTriggerSources(workflow.Stages, workflow.PipelineYAML); err != nil {
+		return err
+	}
 	if workflow.SchemaVersion == "" {
 		workflow.SchemaVersion = "v1"
 	}

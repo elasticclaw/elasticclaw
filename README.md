@@ -116,6 +116,50 @@ For deterministic plan approval (schema gate instead of freeform chat), see
 [linear-issue-plan-gate.yaml](examples/workflows/linear-issue-plan-gate.yaml)
 and the docs on [plan approval](https://elasticclaw.ai/docs/workflows#plan-approval).
 
+### V1 stage triggers
+
+A stage's `message_contains` trigger accepts a token at the start of a message
+line (leading whitespace and markdown decoration are allowed). Optional `from`
+restricts the trigger to the claw's current stage ID: use a string or a non-empty
+list of existing stage IDs. Omit `from` to preserve matching from any stage.
+Blank, unknown or non-string IDs are validation errors.
+
+```yaml
+stages:
+  - id: implementation
+    entry: true
+  - id: build_check
+    triggers:
+      - message_contains: "[IMPLEMENTATION_DONE]"
+        from: implementation
+      - message_contains: "[RETRY_BUILD]"
+        from: fix_build
+  - id: fix_build
+    triggers:
+      - gate_result: {stage: build_check, verdict: fail}
+        from: build_check
+  - id: finished
+    terminal: true
+    triggers:
+      - message_contains: "[DONE]"
+        from: build_check
+  - id: blocked
+    terminal: true
+    triggers:
+      - message_contains: "[BLOCKED]"
+        from: [implementation, fix_build]
+```
+
+`from` also applies to `output_matches`, `gate_result`, `judge_verdict`,
+`pr_merged`, `pr_closed` and `pr_conditions`. It permits retry loops; it does not
+impose a forward-only stage order. An anchored token excluded by every matching
+trigger produces one hub correction per claw, stage and token, listing the
+message signals accepted in that stage.
+
+The v1-to-v2 converter preserves explicit `from` for supported PR triggers.
+`message_contains` still requires a manual choice of trusted v2 evidence and is
+reported as a conversion warning.
+
 ## Three ways to start work
 
 **From an issue tracker**

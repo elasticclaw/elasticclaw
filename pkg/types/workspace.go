@@ -176,6 +176,8 @@ type JiraWorkflowTrigger struct {
 
 // WorkflowStage is one step in a workflow state machine. It intentionally mirrors
 // the persisted pipeline stage shape without making pkg/types depend on hub.
+// Trigger maps preserve message_contains and its optional from (string or list)
+// through normalization into PipelineYAML.
 type WorkflowStage struct {
 	ID         string                   `yaml:"id" json:"id"`
 	Label      string                   `yaml:"label,omitempty" json:"label,omitempty"`

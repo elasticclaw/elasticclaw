@@ -3537,17 +3537,22 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// [DONE] trigger, let it handle that signal instead of the
 			// legacy factory PR-URL completion path below.
 			pipelineHandledDone := false
+			pipelineRejectedDone := false
 			var pipelineDoneCtx pipelineContext
 			var pipelineDoneStage *pipeline.Stage
 			if !workflowV2Controlled && !bridgeErrTurn {
 				doneSignalled = turnMaySignal(turnContent, doneSignalToken, bridgeErrTurn)
 				if doneSignalled {
+					pipelineRejectedDone = s.pipelineRejectsMessageSignal(clawID, doneSignalToken)
 					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
+					if !automaticContinuationPaused {
+						s.nudgeRejectedPipelineSignals(clawID, turnContent)
+					}
 				}
 			}
 			if automaticContinuationPaused {
 				pipelineHandledDone = false
-			} else if pipelineHandledDone {
+			} else if pipelineHandledDone && !pipelineRejectedDone {
 				// Same gates as handleClawDoneSignal: do not advance or arm
 				// PR monitoring while a required gate is failed. Keep
 				// pipelineHandledDone true so we do not also run the
@@ -3587,7 +3592,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				},
 			})
 			// Check for [DONE] signal from a factory-created claw
-			if !workflowV2Controlled && doneSignalled {
+			if !workflowV2Controlled && doneSignalled && !pipelineRejectedDone {
 				s.safeGo("done checkpoint", func() {
 					if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 						log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
