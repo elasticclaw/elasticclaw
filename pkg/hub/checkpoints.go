@@ -532,19 +532,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 		req.TTL = stored.tmplCfg.TTL
 	}
 	ctx := context.Background()
-	var provErr error
-	switch stored.provider {
-	case "daytona":
-		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, stored.env)
-	case "replicated":
-		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, stored.env)
-	case "exedev":
-		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, stored.env)
-	case "lambda-microvms":
-		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-	default:
-		provErr = fmt.Errorf("unsupported provider: %s", stored.provider)
-	}
+	provErr := s.provisionWithProvider(ctx, stored.provider, clawID, req, provCfg, fileBytes, stored.env)
 	if provErr != nil {
 		log.Printf("[restore] provision failed for claw %s: %v", clawID, provErr)
 		s.recordPipelineFailureRecord(clawID, "provision", "provision", "FATAL", provErr.Error(), map[string]interface{}{"error.type": "provision_failed"})

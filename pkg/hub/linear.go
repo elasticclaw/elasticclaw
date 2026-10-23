@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -1182,26 +1181,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		fileBytes[k] = []byte(v)
 	}
 
-	var provErr error
-	switch provider {
-	case "replicated":
-		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-	case "daytona":
-		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-	case "exedev":
-		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-	case "lambda-microvms":
-		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-	case "noop":
-		if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
-			provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
-		} else {
-			providerID := "noop-vm-" + clawID[:8]
-			_, _ = s.execStatusLogged("connect claw "+clawID, `UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
-		}
-	default:
-		provErr = fmt.Errorf("unsupported provider: %s", provider)
-	}
+	provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 	if provErr != nil {
 		log.Printf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)

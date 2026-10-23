@@ -9,7 +9,13 @@ import (
 
 // Pipeline is the parsed representation of a factory's pipeline_yaml field.
 type Pipeline struct {
-	Stages []Stage `yaml:"stages"`
+	InitialPlan *bool   `yaml:"initial_plan,omitempty"`
+	Stages      []Stage `yaml:"stages"`
+}
+
+// InitialPlanEnabled defaults to the freeform initial-plan handshake.
+func (p *Pipeline) InitialPlanEnabled() bool {
+	return p.InitialPlan == nil || *p.InitialPlan
 }
 
 // Stage represents a single stage in the pipeline.

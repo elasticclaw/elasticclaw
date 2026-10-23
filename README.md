@@ -154,6 +154,8 @@ ElasticClaw Server owns policy. Providers own compute. OpenClaw owns the coding 
 - [Linear integration](https://elasticclaw.ai/docs/linear-integration)
 - [CLI reference](https://elasticclaw.ai/docs/cli-reference)
 
+V1 workflows accept top-level `initial_plan: false` to disable the freeform initial-plan handshake (default: `true`). This key is also supported inside legacy factory `pipeline_yaml`. Deterministic `plan_gate` approval still disables the freeform handshake; `initial_plan` does not skip stages or gates. When freeform approval runs on a pipeline, its proceed message keeps the agent on the current stage.
+
 ## Project status
 
 ElasticClaw is early, open source, and moving quickly. The core loop is usable today: deploy ElasticClaw Server, connect a provider, configure GitHub and an issue tracker, and run agents from real work queues.

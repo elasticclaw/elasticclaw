@@ -62,6 +62,7 @@ type WorkflowConfig struct {
 	Repos               []string             `yaml:"repos,omitempty" json:"repos,omitempty"`
 	TriggerRepos        []string             `yaml:"trigger_repos,omitempty" json:"trigger_repos,omitempty"`
 	Trigger             *WorkflowTrigger     `yaml:"trigger,omitempty" json:"trigger,omitempty"`
+	InitialPlan         *bool                `yaml:"initial_plan,omitempty" json:"initialPlan,omitempty"`
 	Stages              []WorkflowStage      `yaml:"stages,omitempty" json:"stages,omitempty"`
 	PipelineYAML        string               `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
 	SessionResume       *SessionResumeConfig `yaml:"session_resume,omitempty" json:"sessionResume,omitempty"`

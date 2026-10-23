@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -809,26 +808,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		for k, v := range templateFiles {
 			fileBytes[k] = []byte(v)
 		}
-		var provErr error
-		switch provider {
-		case "replicated":
-			provErr = s.provisionReplicated(context.Background(), clawID, req, provCfg, env)
-		case "daytona":
-			provErr = s.provisionDaytona(context.Background(), clawID, req, provCfg, fileBytes, env)
-		case "exedev":
-			provErr = s.provisionExedev(context.Background(), clawID, req, provCfg, fileBytes, env)
-		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(context.Background(), clawID, req, provCfg, fileBytes)
-		case "noop":
-			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
-				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
-			} else {
-				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
-			}
-		default:
-			provErr = fmt.Errorf("unsupported provider: %s", provider)
-		}
+		provErr := s.provisionWithProvider(context.Background(), provider, clawID, req, provCfg, fileBytes, env)
 		if provErr != nil {
 			log.Printf("[factory:%s] provision failed for %s: %v", factory.Name, clawID[:8], provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
