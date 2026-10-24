@@ -13,10 +13,10 @@ func TestPinnedOpenClawVersions(t *testing.T) {
 	if got, want := OpenClawVersion, "2026.9.4"; got != want {
 		t.Fatalf("OpenClawVersion = %q, want %q", got, want)
 	}
-	if got, want := OpenClawImageVersion, "2026.9.4"; got != want {
+	if got, want := OpenClawImageVersion, "2026.10.6"; got != want {
 		t.Fatalf("OpenClawImageVersion = %q, want %q", got, want)
 	}
-	if got, want := OpenClawImage, "ghcr.io/openclaw/openclaw:2026.9.4"; got != want {
+	if got, want := OpenClawImage, "ghcr.io/openclaw/openclaw:2026.10.6"; got != want {
 		t.Fatalf("OpenClawImage = %q, want %q", got, want)
 	}
 }

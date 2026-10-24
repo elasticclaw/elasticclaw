@@ -6,8 +6,11 @@ import (
 )
 
 const (
-	OpenClawVersion      = "2026.9.4"
-	OpenClawImageVersion = "2026.9.4"
+	OpenClawVersion = "2026.9.4"
+	// OpenClawImageVersion is only the docker provider's runtime base: the
+	// bridge installs OpenClawVersion over it whenever the two differ. 2026.10.6
+	// is the first image whose Node (24.22.1) satisfies NodeCompatibleRange.
+	OpenClawImageVersion = "2026.10.6"
 	OpenClawImage        = "ghcr.io/openclaw/openclaw:" + OpenClawImageVersion
 	CodexPluginVersion   = "2026.9.4"
 	CodexCLIVersion      = "0.153.4"
