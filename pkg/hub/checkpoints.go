@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1255,6 +1256,39 @@ func (s *Server) restoreCheckpointFilesTo(ctx context.Context, clawID, checkpoin
 		return err
 	}
 	log.Printf("[checkpoint] claw %s: restore complete (%d files)", clawID, total)
+	return nil
+}
+
+func (s *Server) restoreCheckpointToDocker(ctx context.Context, clawID, containerID, homeDir string, p interface {
+	CopyIn(context.Context, string, string, []byte) error
+}) error {
+	checkpointID := s.pendingRestoreCheckpoint(clawID)
+	if checkpointID == "" {
+		return nil
+	}
+	s.setBootstrapStatus(clawID, "Restoring checkpoint files")
+	files, err := s.restoreCheckpointFiles(checkpointID)
+	if err != nil {
+		return err
+	}
+	stagingDir := path.Join(homeDir, ".elasticclaw", "checkpoint-restore")
+	for _, f := range files {
+		dest := path.Join(stagingDir, f.Path)
+		if path.IsAbs(f.Path) || !strings.HasPrefix(dest, stagingDir+"/") || path.Clean(f.Path) == ".complete" {
+			return fmt.Errorf("checkpoint path escapes staging directory or is reserved: %q", f.Path)
+		}
+	}
+	if err := s.restoreCheckpointFilesTo(ctx, clawID, checkpointID, files, func(rel string) string {
+		return path.Join(stagingDir, rel)
+	}, defaultCheckpointRestoreParallelism, func(ctx context.Context, remote string, data []byte) error {
+		return p.CopyIn(ctx, containerID, remote, data)
+	}); err != nil {
+		return err
+	}
+	if err := p.CopyIn(ctx, containerID, path.Join(stagingDir, ".complete"), []byte("ready\n")); err != nil {
+		return err
+	}
+	s.markRestoreApplied(clawID, checkpointID)
 	return nil
 }
 

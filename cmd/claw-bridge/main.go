@@ -4933,6 +4933,9 @@ func runBootstrap() error {
 	if err := cloneConfiguredGitHubRepos(); err != nil {
 		return fmt.Errorf("cloneConfiguredGitHubRepos: %w", err)
 	}
+	if err := restoreStagedCheckpoint(); err != nil {
+		return fmt.Errorf("restoreStagedCheckpoint: %w", err)
+	}
 
 	if err := syncOpenClawAPIKeyAuth(); err != nil {
 		return err

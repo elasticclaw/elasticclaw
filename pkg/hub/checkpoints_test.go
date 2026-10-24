@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -349,5 +350,108 @@ func assertPendingCheckpointDrained(t *testing.T, s *Server) {
 	}
 	if cc.pendingCheckpointID != "" {
 		t.Fatalf("expected pending checkpoint to be drained, got %q", cc.pendingCheckpointID)
+	}
+}
+
+type checkpointDockerCopier struct {
+	mu     sync.Mutex
+	paths  []string
+	files  map[string]string
+	failAt string
+}
+
+func (p *checkpointDockerCopier) CopyIn(_ context.Context, containerID, path string, data []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if containerID != "container" {
+		return errors.New("unexpected container ID")
+	}
+	if path == p.failAt {
+		return errors.New("copy failed")
+	}
+	p.paths = append(p.paths, path)
+	p.files[path] = string(data)
+	return nil
+}
+
+func TestRestoreCheckpointToDocker(t *testing.T) {
+	for _, scenario := range []string{"success", "copy failure", "marker failure", "escaping path", "absolute path", "reserved marker", "no checkpoint"} {
+		t.Run(scenario, func(t *testing.T) {
+			s := newCheckpointCompletionTestServer(t)
+			files := checkpointRestoreTestFiles(t, []string{"workspace content", "agent content", "config content"})
+			files[0].Path = "workspace/repo/file.txt"
+			files[1].Path = ".openclaw/agents/main/agent.json"
+			files[2].Path = ".openclaw/openclaw.json"
+			const staging = "/home/claw/.elasticclaw/checkpoint-restore/"
+			p := &checkpointDockerCopier{files: map[string]string{}}
+			switch scenario {
+			case "copy failure":
+				p.failAt = staging + files[0].Path
+			case "marker failure":
+				p.failAt = staging + ".complete"
+			case "escaping path":
+				files[0].Path = "workspace/../../outside"
+			case "absolute path":
+				files[0].Path = "/outside"
+			case "reserved marker":
+				files[0].Path = ".complete"
+			}
+			if scenario != "no checkpoint" {
+				if err := s.insertCheckpoint("restore", "tenant", "claw", "manual", "hub", "docker", "container"); err != nil {
+					t.Fatal(err)
+				}
+				rootSHA := strings.Repeat("f", 64)
+				data, err := json.Marshal(files)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(checkpointBlobPath(rootSHA)), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(checkpointBlobPath(rootSHA), data, 0644); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', root_tree_sha256=? WHERE id='restore'`, rootSHA); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.Exec(`UPDATE claws SET restore_checkpoint_id='restore' WHERE id='claw'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := s.restoreCheckpointToDocker(context.Background(), "claw", "container", "/home/claw", p)
+			if scenario == "no checkpoint" {
+				if err != nil || len(p.paths) != 0 {
+					t.Fatalf("no pending restore: copies=%v err=%v", p.paths, err)
+				}
+				return
+			}
+			if scenario != "success" {
+				if err == nil || s.pendingRestoreCheckpoint("claw") != "restore" {
+					t.Fatalf("failed restore must remain pending: %v", err)
+				}
+				if _, ok := p.files[staging+".complete"]; ok {
+					t.Fatal("failed restore wrote completion marker")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.paths) != 4 || p.paths[3] != staging+".complete" {
+				t.Fatalf("expected files followed by completion marker: %v", p.paths)
+			}
+			for i, content := range []string{"workspace content", "agent content", "config content"} {
+				if got := p.files[staging+files[i].Path]; got != content {
+					t.Errorf("staged %s = %q, want %q", files[i].Path, got, content)
+				}
+			}
+			var restored string
+			if err := s.db.QueryRow(`SELECT restored_from_checkpoint_id FROM claws WHERE id='claw'`).Scan(&restored); err != nil {
+				t.Fatal(err)
+			}
+			if s.pendingRestoreCheckpoint("claw") != "" || restored != "restore" {
+				t.Fatalf("restore not marked applied: restored=%q", restored)
+			}
+		})
 	}
 }

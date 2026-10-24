@@ -6062,6 +6062,10 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 			return fmt.Errorf("docker file copy failed: %s: %w", relPath, err)
 		}
 	}
+	if err := s.restoreCheckpointToDocker(ctx, clawID, instance.ID, homeDir, p); err != nil {
+		_ = p.Destroy(context.Background(), instance.ID, false)
+		return fmt.Errorf("docker checkpoint restore: %w", err)
+	}
 	if err := p.CopyIn(ctx, instance.ID, path.Join(workspaceDir, ".elasticclaw-workspace-ready"), []byte("ready\n")); err != nil {
 		_ = p.Destroy(context.Background(), instance.ID, false)
 		return fmt.Errorf("docker workspace ready marker: %w", err)
