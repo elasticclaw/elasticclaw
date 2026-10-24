@@ -5150,7 +5150,7 @@ func main() {
 		os.Exit(runControlCLI(os.Args[2:]))
 	}
 
-	lock, err := acquireDaemonLock(filepath.Join(os.TempDir(), "elasticclaw-claw-bridge.lock"))
+	lock, err := acquireDaemonLock("/tmp/elasticclaw-claw-bridge.lock")
 	if err != nil {
 		log.Fatal(err)
 	}

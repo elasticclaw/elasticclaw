@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -16,7 +18,13 @@ func TestDaemonLockExcludesSecondDescriptor(t *testing.T) {
 		t.Fatalf("first acquisition: file=%v err=%v", first, err)
 	}
 	t.Cleanup(func() { first.Close() })
-	if second, err := acquireDaemonLock(path); !errors.Is(err, errDaemonRunning) || second != nil {
+	info, err := first.Stat()
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("lock permissions: %v, %v", info, err)
+	}
+	// Changing TMPDIR must not change the explicitly selected lock path.
+	t.Setenv("TMPDIR", t.TempDir())
+	if second, err := acquireDaemonLock(path); !errors.Is(err, errDaemonRunning) || second != nil || !strings.Contains(err.Error(), "PID "+strconv.Itoa(os.Getpid())) {
 		if second != nil {
 			second.Close()
 		}
@@ -57,5 +65,21 @@ func TestDaemonLockReadOnlyFallback(t *testing.T) {
 			second.Close()
 		}
 		t.Fatalf("read-only second acquisition: file=%v err=%v", second, err)
+	}
+}
+
+func TestDaemonLockTruncatesOldPID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bridge.lock")
+	if err := os.WriteFile(path, []byte("12345678901234567890\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := acquireDaemonLock(path)
+	if err != nil || file == nil {
+		t.Fatalf("acquire: file=%v err=%v", file, err)
+	}
+	defer file.Close()
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != strconv.Itoa(os.Getpid())+"\n" {
+		t.Fatalf("lock PID = %q, err=%v", data, err)
 	}
 }
