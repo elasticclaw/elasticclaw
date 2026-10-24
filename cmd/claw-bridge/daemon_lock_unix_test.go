@@ -22,8 +22,6 @@ func TestDaemonLockExcludesSecondDescriptor(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("lock permissions: %v, %v", info, err)
 	}
-	// Changing TMPDIR must not change the explicitly selected lock path.
-	t.Setenv("TMPDIR", t.TempDir())
 	if second, err := acquireDaemonLock(path); !errors.Is(err, errDaemonRunning) || second != nil || !strings.Contains(err.Error(), "PID "+strconv.Itoa(os.Getpid())) {
 		if second != nil {
 			second.Close()
@@ -40,6 +38,14 @@ func TestDaemonLockExcludesSecondDescriptor(t *testing.T) {
 	third.Close()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("lock inode must remain after close: %v", err)
+	}
+}
+
+func TestDaemonLockPathIsFixed(t *testing.T) {
+	// TMPDIR and HOME differ across exec shells in a sandbox, so the daemon
+	// lock must not be derived from either.
+	if daemonLockPath != "/tmp/elasticclaw-claw-bridge.lock" {
+		t.Fatalf("daemonLockPath = %q", daemonLockPath)
 	}
 }
 

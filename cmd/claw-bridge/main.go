@@ -5132,6 +5132,10 @@ func printVersion() {
 	fmt.Printf("claw-bridge %s (commit: %s, built: %s)\n", Version, Commit, BuildDate)
 }
 
+// daemonLockPath is a fixed literal: TMPDIR and HOME vary across exec shells
+// in a sandbox, and a derived path would let a second daemon start.
+const daemonLockPath = "/tmp/elasticclaw-claw-bridge.lock"
+
 func main() {
 	command, bootstrapFlag := classifyBridgeArgs(os.Args[1:])
 	switch command {
@@ -5150,7 +5154,7 @@ func main() {
 		os.Exit(runControlCLI(os.Args[2:]))
 	}
 
-	lock, err := acquireDaemonLock("/tmp/elasticclaw-claw-bridge.lock")
+	lock, err := acquireDaemonLock(daemonLockPath)
 	if err != nil {
 		log.Fatal(err)
 	}
