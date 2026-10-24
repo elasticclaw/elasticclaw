@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -375,26 +376,25 @@ func (p *checkpointDockerCopier) CopyIn(_ context.Context, containerID, path str
 }
 
 func TestRestoreCheckpointToDocker(t *testing.T) {
-	for _, scenario := range []string{"success", "copy failure", "marker failure", "escaping path", "absolute path", "reserved marker", "no checkpoint"} {
+	for _, scenario := range []string{"success", "copy failure", "marker failure", "escaping path", "absolute path", "no checkpoint"} {
 		t.Run(scenario, func(t *testing.T) {
 			s := newCheckpointCompletionTestServer(t)
 			files := checkpointRestoreTestFiles(t, []string{"workspace content", "agent content", "config content"})
 			files[0].Path = "workspace/repo/file.txt"
 			files[1].Path = ".openclaw/agents/main/agent.json"
 			files[2].Path = ".openclaw/openclaw.json"
+			files[0].Mode = 0o755
 			const staging = "/home/claw/.elasticclaw/checkpoint-restore/"
 			p := &checkpointDockerCopier{files: map[string]string{}}
 			switch scenario {
 			case "copy failure":
-				p.failAt = staging + files[0].Path
+				p.failAt = staging + "files/0"
 			case "marker failure":
 				p.failAt = staging + ".complete"
 			case "escaping path":
 				files[0].Path = "workspace/../../outside"
 			case "absolute path":
 				files[0].Path = "/outside"
-			case "reserved marker":
-				files[0].Path = ".complete"
 			}
 			if scenario != "no checkpoint" {
 				if err := s.insertCheckpoint("restore", "tenant", "claw", "manual", "hub", "docker", "container"); err != nil {
@@ -441,9 +441,16 @@ func TestRestoreCheckpointToDocker(t *testing.T) {
 				t.Fatalf("expected files followed by completion marker: %v", p.paths)
 			}
 			for i, content := range []string{"workspace content", "agent content", "config content"} {
-				if got := p.files[staging+files[i].Path]; got != content {
+				if got := p.files[staging+"files/"+strconv.Itoa(i)]; got != content {
 					t.Errorf("staged %s = %q, want %q", files[i].Path, got, content)
 				}
+			}
+			var manifest dockerCheckpointManifest
+			if err := json.Unmarshal([]byte(p.files[staging+".complete"]), &manifest); err != nil {
+				t.Fatal(err)
+			}
+			if len(manifest.Files) != 3 || manifest.Files[0] != (dockerCheckpointManifestFile{Path: "workspace/repo/file.txt", Mode: 0o755}) || manifest.Files[2].Path != ".openclaw/openclaw.json" {
+				t.Fatalf("marker manifest = %+v", manifest)
 			}
 			var restored string
 			if err := s.db.QueryRow(`SELECT restored_from_checkpoint_id FROM claws WHERE id='claw'`).Scan(&restored); err != nil {

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1259,6 +1260,17 @@ func (s *Server) restoreCheckpointFilesTo(ctx context.Context, clawID, checkpoin
 	return nil
 }
 
+// dockerCheckpointManifest is the .complete marker the bridge reads to
+// overlay staged checkpoint files; Files[i] is staged as files/<i>.
+type dockerCheckpointManifest struct {
+	Files []dockerCheckpointManifestFile `json:"files"`
+}
+
+type dockerCheckpointManifestFile struct {
+	Path string `json:"path"`
+	Mode int64  `json:"mode"`
+}
+
 func (s *Server) restoreCheckpointToDocker(ctx context.Context, clawID, containerID, homeDir string, p interface {
 	CopyIn(context.Context, string, string, []byte) error
 }) error {
@@ -1271,21 +1283,33 @@ func (s *Server) restoreCheckpointToDocker(ctx context.Context, clawID, containe
 	if err != nil {
 		return err
 	}
+	// Stage files flat under files/<index> and describe them in the marker:
+	// CopyIn chowns only a file's directory and its parent, so a nested
+	// layout would leave root-owned ancestors the bridge cannot clean up,
+	// and CopyIn writes every file 0644, so modes travel in the manifest.
 	stagingDir := path.Join(homeDir, ".elasticclaw", "checkpoint-restore")
-	for _, f := range files {
-		dest := path.Join(stagingDir, f.Path)
-		if path.IsAbs(f.Path) || !strings.HasPrefix(dest, stagingDir+"/") || path.Clean(f.Path) == ".complete" {
-			return fmt.Errorf("checkpoint path escapes staging directory or is reserved: %q", f.Path)
+	manifest := dockerCheckpointManifest{Files: make([]dockerCheckpointManifestFile, len(files))}
+	index := make(map[string]int, len(files))
+	for i, f := range files {
+		clean := path.Clean(f.Path)
+		if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("checkpoint path escapes restore root: %q", f.Path)
 		}
+		manifest.Files[i] = dockerCheckpointManifestFile{Path: f.Path, Mode: f.Mode}
+		index[f.Path] = i
+	}
+	marker, err := json.Marshal(manifest)
+	if err != nil {
+		return err
 	}
 	if err := s.restoreCheckpointFilesTo(ctx, clawID, checkpointID, files, func(rel string) string {
-		return path.Join(stagingDir, rel)
+		return path.Join(stagingDir, "files", strconv.Itoa(index[rel]))
 	}, defaultCheckpointRestoreParallelism, func(ctx context.Context, remote string, data []byte) error {
 		return p.CopyIn(ctx, containerID, remote, data)
 	}); err != nil {
 		return err
 	}
-	if err := p.CopyIn(ctx, containerID, path.Join(stagingDir, ".complete"), []byte("ready\n")); err != nil {
+	if err := p.CopyIn(ctx, containerID, path.Join(stagingDir, ".complete"), marker); err != nil {
 		return err
 	}
 	s.markRestoreApplied(clawID, checkpointID)

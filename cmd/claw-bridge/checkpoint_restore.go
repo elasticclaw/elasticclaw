@@ -1,13 +1,23 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
+
+// stagedCheckpointManifest mirrors the hub's .complete marker: Files[i] is
+// staged as files/<i>, with the mode captured in the checkpoint.
+type stagedCheckpointManifest struct {
+	Files []struct {
+		Path string `json:"path"`
+		Mode int64  `json:"mode"`
+	} `json:"files"`
+}
 
 func restoreStagedCheckpoint() error {
 	home, err := os.UserHomeDir()
@@ -15,7 +25,8 @@ func restoreStagedCheckpoint() error {
 		return err
 	}
 	stagingDir := filepath.Join(home, ".elasticclaw", "checkpoint-restore")
-	marker, err := os.Lstat(filepath.Join(stagingDir, ".complete"))
+	markerPath := filepath.Join(stagingDir, ".complete")
+	marker, err := os.Lstat(markerPath)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -25,31 +36,45 @@ func restoreStagedCheckpoint() error {
 	if !marker.Mode().IsRegular() {
 		return fmt.Errorf("checkpoint restore marker is not a regular file")
 	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return err
+	}
+	var manifest stagedCheckpointManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse checkpoint restore marker: %w", err)
+	}
 	homeRoot, err := os.OpenRoot(home)
 	if err != nil {
 		return err
 	}
 	defer homeRoot.Close()
 	count := 0
-	err = filepath.WalkDir(stagingDir, func(source string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() || !entry.Type().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(stagingDir, source)
-		if err != nil {
-			return err
-		}
+	for i, f := range manifest.Files {
 		var destination, prefix string
 		switch {
-		case strings.HasPrefix(rel, "workspace/"):
+		case strings.HasPrefix(f.Path, "workspace/"):
 			destination, prefix = ".openclaw/workspace", "workspace/"
-		case strings.HasPrefix(rel, ".openclaw/agents/"):
+		case strings.HasPrefix(f.Path, ".openclaw/agents/"):
 			destination, prefix = ".openclaw/agents", ".openclaw/agents/"
 		default:
-			return nil
+			continue
+		}
+		source := filepath.Join(stagingDir, "files", strconv.Itoa(i))
+		info, err := os.Lstat(source)
+		if err != nil {
+			return fmt.Errorf("restore %s: %w", f.Path, err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		mode := os.FileMode(f.Mode).Perm()
+		if mode == 0 {
+			mode = 0644
+		}
+		content, err := os.ReadFile(source)
+		if err != nil {
+			return err
 		}
 		if err := homeRoot.MkdirAll(destination, 0755); err != nil {
 			return err
@@ -58,26 +83,20 @@ func restoreStagedCheckpoint() error {
 		if err != nil {
 			return err
 		}
-		defer root.Close()
-		info, err := entry.Info()
+		err = overlayCheckpointFile(root, strings.TrimPrefix(f.Path, prefix), content, mode)
+		root.Close()
 		if err != nil {
-			return err
-		}
-		data, err := os.ReadFile(source)
-		if err != nil {
-			return err
-		}
-		if err := overlayCheckpointFile(root, strings.TrimPrefix(rel, prefix), data, info.Mode().Perm()); err != nil {
-			return fmt.Errorf("restore %s: %w", rel, err)
+			return fmt.Errorf("restore %s: %w", f.Path, err)
 		}
 		count++
-		return nil
-	})
-	if err != nil {
+	}
+	// Removing the marker is what keeps a later bootstrap from overlaying
+	// stale checkpoint files again; the rest of the staging dir is only disk.
+	if err := os.Remove(markerPath); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(stagingDir); err != nil {
-		return err
+		log.Printf("[bootstrap] warning: remove checkpoint staging dir: %v", err)
 	}
 	log.Printf("[bootstrap] restored %d checkpoint files", count)
 	return nil
