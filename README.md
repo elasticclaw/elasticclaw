@@ -155,6 +155,9 @@ stages:
 impose a forward-only stage order. An anchored token excluded by every matching
 trigger produces one hub correction per claw, stage and token, listing the
 message signals accepted in that stage.
+For `pr_merged`/`pr_closed`, `from` only restricts the pipeline transition; if no
+trigger matches in the current stage, the existing PR-closed/merged handling
+(stopping the claw) still applies.
 
 The v1-to-v2 converter preserves explicit `from` for supported PR triggers.
 `message_contains` still requires a manual choice of trusted v2 evidence and is
