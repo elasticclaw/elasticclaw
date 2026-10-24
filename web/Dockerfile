@@ -1,4 +1,4 @@
-FROM node:22-slim AS builder
+FROM node:22.23.4-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN rm -f package-lock.json
@@ -6,7 +6,7 @@ COPY . .
 ENV NEXT_TURBOPACK=0
 RUN npm install --force && npm run build
 
-FROM node:22-slim AS runner
+FROM node:22.23.4-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
