@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -1182,26 +1181,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		fileBytes[k] = []byte(v)
 	}
 
-	var provErr error
-	switch provider {
-	case "replicated":
-		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-	case "daytona":
-		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-	case "exedev":
-		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-	case "lambda-microvms":
-		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-	case "noop":
-		if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
-			provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
-		} else {
-			providerID := "noop-vm-" + clawID[:8]
-			_, _ = s.execStatusLogged("connect claw "+clawID, `UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
-		}
-	default:
-		provErr = fmt.Errorf("unsupported provider: %s", provider)
-	}
+	provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 	if provErr != nil {
 		log.Printf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
@@ -1320,6 +1300,10 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	if !pipeline.MessageSignals(rawMessage, doneSignalToken) {
 		return
 	}
+	s.nudgeRejectedPipelineSignals(clawID, rawMessage)
+	if s.pipelineRejectsMessageSignal(clawID, doneSignalToken) {
+		return
+	}
 	// Get the issue ID and tenant for this claw. Workflow claws may not have an
 	// issue, but [DONE] must still give those runs a terminal path.
 	var issueID, tenantID string
@@ -1420,7 +1404,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	if pipelineCtx, ok := s.findPipelineContextForIssue(issueID); ok {
 		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
 		if pl := parsePipelineForContext(pipelineCtx); pl != nil {
-			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+			if stage := pl.StageForMessageContains(rawMessage, s.getPipelineStage(clawID)); stage != nil {
 				s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
 				pipelineHandledDone = true
 			}
@@ -1440,7 +1424,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	}
 	if !pipelineHandledDone {
 		if pl := parsePipelineForFactory(factory); pl != nil {
-			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+			if stage := pl.StageForMessageContains(rawMessage, s.getPipelineStage(clawID)); stage != nil {
 				s.transitionPipelineStage(clawID, *stage, factory, issueID)
 				pipelineHandledDone = true
 			}
@@ -1655,6 +1639,10 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	// Same rule as handleClawDoneSignal: the teardown decision is re-made from
 	// the message here, not inherited from the caller's substring test.
 	if !pipeline.MessageSignals(rawMessage, terminateSignalToken) {
+		return
+	}
+	if s.pipelineRejectsMessageSignal(clawID, terminateSignalToken) {
+		s.nudgeRejectedPipelineSignals(clawID, rawMessage)
 		return
 	}
 	// Get the tenant ID and issue ID for this claw

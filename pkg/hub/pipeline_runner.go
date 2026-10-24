@@ -105,6 +105,13 @@ func unanchoredSignalNudgeText(token string) string {
 //
 // No new queue: this rides the existing hub message injection.
 func (s *Server) nudgeUnanchoredSignal(clawID, message string) {
+	// A rejected anchored token gets its own correction, including when its
+	// destination was already visited and signalTokensForClaw omits it.
+	if ctx, ok := s.findPipelineContextForClaw(clawID); ok {
+		if pl := parsePipelineForContext(ctx); pl != nil && len(pl.RejectedMessageContainsTokens(message, s.getPipelineStage(clawID))) > 0 {
+			return
+		}
+	}
 	tokens := s.signalTokensForClaw(clawID)
 	var stray []string
 	for _, token := range tokens {
@@ -1466,7 +1473,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		if stage.PlanGate && s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
 			alreadyRouted := false
 			if pl := parsePipelineForContext(ctx); pl != nil {
-				alreadyRouted = pl.StageForGateResult(stage.ID, "pass") != nil
+				alreadyRouted = pl.StageForGateResult(stage.ID, "pass", s.getPipelineStage(clawID)) != nil
 			}
 			// Destination stage inject owns the next agent turn when routed.
 			if alreadyRouted {
@@ -1490,8 +1497,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			autoTransitionVerdict = "pass"
 		}
 		gateResultHasRoute := false
+		requiredGateHasRoute := false
 		if pl := parsePipelineForContext(ctx); pl != nil {
-			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict) != nil
+			currentStage := s.getPipelineStage(clawID)
+			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict, currentStage) != nil
+			requiredGateHasRoute = pl.StageForGateResult(stage.ID, gateResult.Verdict, currentStage) != nil
 		}
 		notifyGateResult := func(message string) {
 			// Always surface gate outcomes in the transcript for human observers.
@@ -1573,7 +1583,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			} else {
 				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 			}
-			if pl := parsePipelineForContext(ctx); pl != nil && pl.StageForGateResult(stage.ID, gateResult.Verdict) != nil {
+			if requiredGateHasRoute {
 				return false, &routedRequiredGateError{stageID: stage.ID, verdict: gateResult.Verdict}
 			}
 			return false, fmt.Errorf("required gate %q %s", stage.ID, gateResult.Verdict)
@@ -2060,6 +2070,7 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 // checkPipelineMessageTriggers evaluates pipeline triggers against a claw message
 // and transitions to the matching stage if found. Returns true if a transition occurred.
 func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
+	s.nudgeRejectedPipelineSignals(clawID, message)
 	ctx, stage, ok := s.pipelineStageForMessageContains(clawID, message)
 	if !ok {
 		ctx, ok = s.findPipelineContextForClaw(clawID)
@@ -2076,7 +2087,7 @@ func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
 		// prevent persistent DB state from re-triggering backwards regressions
 		// on every subsequent message.
 		outputs := s.loadPipelineOutputs(clawID)
-		stage = pl.StageForOutputMatches(outputs)
+		stage = pl.StageForOutputMatches(outputs, s.getPipelineStage(clawID))
 		if stage != nil && s.hasVisitedPipelineStage(clawID, stage.ID) {
 			stage = nil
 		}
@@ -2101,7 +2112,7 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 	if pl == nil {
 		return pipelineContext{}, nil, false
 	}
-	stage := pl.StageForMessageContains(message)
+	stage := pl.StageForMessageContains(message, s.getPipelineStage(clawID))
 	if stage == nil {
 		return pipelineContext{}, nil, false
 	}
@@ -2292,7 +2303,7 @@ func (s *Server) autoTransitionAfterJudge(clawID, verdict string, ctx pipelineCo
 	if pl == nil {
 		return
 	}
-	stage := pl.StageForJudgeVerdict(verdict)
+	stage := pl.StageForJudgeVerdict(verdict, s.getPipelineStage(clawID))
 	if stage == nil {
 		log.Printf("[pipeline] claw %s: no stage with judge_verdict=%q trigger found", clawID[:8], verdict)
 		return
@@ -2426,7 +2437,7 @@ func (s *Server) autoTransitionAfterGate(clawID, stageID, verdict string, ctx pi
 	if pl == nil {
 		return
 	}
-	stage := pl.StageForGateResult(stageID, verdict)
+	stage := pl.StageForGateResult(stageID, verdict, s.getPipelineStage(clawID))
 	if stage == nil {
 		log.Printf("[pipeline] claw %s: no stage with gate_result stage=%s verdict=%s trigger found", clawID[:8], stageID, verdict)
 		if verdict == "error" {

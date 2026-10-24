@@ -1899,6 +1899,10 @@ func (s *Server) injectExternalHubMessageByID(clawID, content string) {
 }
 
 func (s *Server) injectMessage(clawID, content, role string) {
+	s.injectMessageWithID(clawID, content, role, "")
+}
+
+func (s *Server) injectMessageWithID(clawID, content, role, messageID string) {
 	if role == "user" {
 		s.resumeNoProgressAfterUserInput(clawID)
 	}
@@ -1908,17 +1912,20 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		log.Printf("[pr-watcher] dropping %s message for claw %s: tenant lookup failed: %v", role, shortID(clawID), err)
 		return
 	}
-	var pendingDupes int
-	// Fail open on a dedup-check error: dropping the injection can strand
-	// the agent (a lost watchdog nudge or restart-resume prompt), while
-	// injecting blind at worst duplicates one pending message.
-	if err := s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE claw_id=? AND role=? AND content=? AND delivered_at IS NULL`, clawID, role, content).Scan(&pendingDupes); err != nil {
-		log.Printf("[pr-watcher] dedup check for claw %s failed, injecting anyway: %v", shortID(clawID), err)
-		pendingDupes = 0
-	}
-	if pendingDupes > 0 {
-		log.Printf("[pr-watcher] skipping duplicate pending %s message for claw %s", role, shortID(clawID))
-		return
+	if messageID == "" {
+		var pendingDupes int
+		// Fail open on a dedup-check error: dropping the injection can strand
+		// the agent (a lost watchdog nudge or restart-resume prompt), while
+		// injecting blind at worst duplicates one pending message.
+		if err := s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE claw_id=? AND role=? AND content=? AND delivered_at IS NULL`, clawID, role, content).Scan(&pendingDupes); err != nil {
+			log.Printf("[pr-watcher] dedup check for claw %s failed, injecting anyway: %v", shortID(clawID), err)
+			pendingDupes = 0
+		}
+		if pendingDupes > 0 {
+			log.Printf("[pr-watcher] skipping duplicate pending %s message for claw %s", role, shortID(clawID))
+			return
+		}
+		messageID = uuid.New().String()
 	}
 
 	format := ""
@@ -1926,7 +1933,7 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		format = "pre"
 	}
 	msg := types.HubMessage{
-		ID:        uuid.New().String(),
+		ID:        messageID,
 		ClawID:    clawID,
 		TenantID:  tenantID,
 		Role:      role,
@@ -1934,12 +1941,16 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		Format:    format,
 		CreatedAt: now(),
 	}
-	_, err := s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
+	result, err := s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO NOTHING`,
 		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to insert message: %v", err)
+		return
+	}
+
+	if rows, err := result.RowsAffected(); err != nil || rows == 0 {
 		return
 	}
 
@@ -2409,7 +2420,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 		pipelineHandled := false
 		if hasPipelineCtx {
 			if pl := parsePipelineForContext(pipelineCtx); pl != nil {
-				if stage := pl.StageForPRClosed(); stage != nil {
+				if stage := pl.StageForPRClosed(s.getPipelineStage(clawID)); stage != nil {
 					s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
 					if stage.Terminal {
 						_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
@@ -2495,7 +2506,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 	pipelineHandled := false
 	if hasMergeCtx {
 		if pl := parsePipelineForContext(mergeCtx); pl != nil {
-			if stage := pl.StageForPRMerged(); stage != nil {
+			if stage := pl.StageForPRMerged(s.getPipelineStage(clawID)); stage != nil {
 				s.transitionPipelineStageWithContext(clawID, *stage, mergeCtx)
 				if stage.Terminal {
 					pipelineHandled = true
@@ -2672,14 +2683,15 @@ func (s *Server) checkPRConditions(pr clawPR, token string, ctx pipelineContext)
 	if pl == nil {
 		return nil, prConditionsWaiting
 	}
-	stage := pl.StageForPRConditions()
+	currentStage := s.getPipelineStage(pr.clawID)
+	stage := pl.StageForPRConditions(currentStage)
 	if stage == nil {
 		return nil, prConditionsWaiting
 	}
 	// Find the pr_conditions trigger on this stage
 	var cond *pipeline.PRConditionsTrigger
 	for _, t := range stage.Triggers {
-		if t.PRConditions != nil {
+		if t.PRConditions != nil && t.AllowsFrom(currentStage) {
 			cond = t.PRConditions
 			break
 		}
