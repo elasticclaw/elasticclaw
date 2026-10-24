@@ -1497,8 +1497,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			autoTransitionVerdict = "pass"
 		}
 		gateResultHasRoute := false
+		requiredGateHasRoute := false
 		if pl := parsePipelineForContext(ctx); pl != nil {
-			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict, s.getPipelineStage(clawID)) != nil
+			currentStage := s.getPipelineStage(clawID)
+			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict, currentStage) != nil
+			requiredGateHasRoute = pl.StageForGateResult(stage.ID, gateResult.Verdict, currentStage) != nil
 		}
 		notifyGateResult := func(message string) {
 			// Always surface gate outcomes in the transcript for human observers.
@@ -1580,7 +1583,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			} else {
 				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 			}
-			if pl := parsePipelineForContext(ctx); pl != nil && pl.StageForGateResult(stage.ID, gateResult.Verdict, s.getPipelineStage(clawID)) != nil {
+			if requiredGateHasRoute {
 				return false, &routedRequiredGateError{stageID: stage.ID, verdict: gateResult.Verdict}
 			}
 			return false, fmt.Errorf("required gate %q %s", stage.ID, gateResult.Verdict)
