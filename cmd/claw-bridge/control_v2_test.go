@@ -249,6 +249,121 @@ func TestBridgeRejectsTaskAssignmentOlderThanAuthoritativeSnapshot(t *testing.T)
 	}
 }
 
+func journalRunningAssignment(t *testing.T, store *bridgeControlStore, binding workflowControlBinding,
+	messageID string, task typesv2.AgentTask) {
+	t.Helper()
+	payload, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := task.StateVersion
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: messageID, Kind: typesv2.MessageAgentTaskAssign, RunID: binding.RunID,
+		AttemptID: binding.AttemptID, TaskID: task.ID, ExpectedStateVersion: &version, Payload: payload}
+	if duplicate, err := store.recordIncoming(envelope); err != nil || duplicate {
+		t.Fatalf("journal assignment duplicate=%v err=%v", duplicate, err)
+	}
+	if claimed, err := store.setIncomingStatus(messageID, "accepted", "running"); err != nil || !claimed {
+		t.Fatalf("mark running claimed=%v err=%v", claimed, err)
+	}
+}
+
+func awaitOutboxKind(t *testing.T, store *bridgeControlStore, binding workflowControlBinding,
+	kind typesv2.ControlMessageKind) typesv2.ControlEnvelope {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ready, err := store.ready(binding, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, envelope := range ready {
+			if envelope.Kind == kind {
+				return envelope
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("outbox never contained %s", kind)
+	return typesv2.ControlEnvelope{}
+}
+
+func TestRecoverInterruptedResumesTaskStillCurrentOnHub(t *testing.T) {
+	store := openTestBridgeControlStore(t)
+	binding := workflowControlBinding{RunID: "run-resume", AttemptID: "attempt-resume"}
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor.binding = &binding
+	task := typesv2.AgentTask{ID: "task-resume", RunID: binding.RunID, AttemptID: binding.AttemptID,
+		State: "building", StateVersion: 5, Status: typesv2.AgentTaskRunning, Instructions: "keep reviewing",
+		Deadline: time.Now().Add(time.Hour)}
+	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID,
+		State: "building", StateVersion: 5, CurrentTask: &task}
+	journalRunningAssignment(t, store, binding, "assign-resume", task)
+
+	supervisor.recoverInterrupted(context.Background(), binding)
+
+	// The task was resumed, not failed as unknown: with no gateway attached the
+	// resumed execution fails with the gateway error, never the restart reason.
+	envelope := awaitOutboxKind(t, store, binding, typesv2.MessageAgentTaskFailed)
+	if envelope.TaskID != task.ID || strings.Contains(string(envelope.Payload), "outcome was unknown") ||
+		!strings.Contains(string(envelope.Payload), "gateway is not ready") {
+		t.Fatalf("resumed task envelope = %s %s", envelope.TaskID, envelope.Payload)
+	}
+}
+
+func TestRecoverInterruptedFailsTaskWhenHubMovedOn(t *testing.T) {
+	store := openTestBridgeControlStore(t)
+	binding := workflowControlBinding{RunID: "run-moved-on", AttemptID: "attempt-moved-on"}
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor.binding = &binding
+	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID,
+		State: "building", StateVersion: 6}
+	task := typesv2.AgentTask{ID: "task-orphaned", RunID: binding.RunID, AttemptID: binding.AttemptID,
+		State: "building", StateVersion: 5, Status: typesv2.AgentTaskRunning, Instructions: "old work",
+		Deadline: time.Now().Add(time.Hour)}
+	journalRunningAssignment(t, store, binding, "assign-orphaned", task)
+
+	supervisor.recoverInterrupted(context.Background(), binding)
+
+	envelope := awaitOutboxKind(t, store, binding, typesv2.MessageAgentTaskFailed)
+	if envelope.TaskID != task.ID || !strings.Contains(string(envelope.Payload), "outcome was unknown") {
+		t.Fatalf("orphaned task envelope = %s %s", envelope.TaskID, envelope.Payload)
+	}
+}
+
+func TestResumableTaskRejectsTerminalExpiredOrMismatchedTask(t *testing.T) {
+	store := openTestBridgeControlStore(t)
+	binding := workflowControlBinding{RunID: "run-resumable", AttemptID: "attempt-resumable"}
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor.binding = &binding
+	future := time.Now().Add(time.Hour)
+
+	if _, ok := supervisor.resumableTask(binding, "task-1"); ok {
+		t.Fatal("task resumable without a snapshot")
+	}
+	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID}
+	if _, ok := supervisor.resumableTask(binding, "task-1"); ok {
+		t.Fatal("task resumable without a current task")
+	}
+	for name, task := range map[string]typesv2.AgentTask{
+		"terminal":  {ID: "task-1", Status: typesv2.AgentTaskFailed, Deadline: future},
+		"expired":   {ID: "task-1", Status: typesv2.AgentTaskRunning, Deadline: time.Now().Add(-time.Minute)},
+		"different": {ID: "task-2", Status: typesv2.AgentTaskRunning, Deadline: future},
+	} {
+		supervisor.snapshot.CurrentTask = &task
+		if _, ok := supervisor.resumableTask(binding, "task-1"); ok {
+			t.Fatalf("%s task was resumable", name)
+		}
+	}
+	current := typesv2.AgentTask{ID: "task-1", Status: typesv2.AgentTaskRunning, Deadline: future,
+		Instructions: "resume me"}
+	supervisor.snapshot.CurrentTask = &current
+	resumed, ok := supervisor.resumableTask(binding, "task-1")
+	if !ok || resumed.Instructions != "resume me" {
+		t.Fatalf("resumable task = %#v, ok=%v", resumed, ok)
+	}
+}
+
 func TestWorkflowV2TaskPromptUsesTypedToolAndNotTranscriptMarkers(t *testing.T) {
 	prompt := workflowV2TaskPrompt(typesv2.AgentTask{ID: "task-1", State: "building", Instructions: "Implement it."})
 	if !strings.Contains(prompt, "claw-bridge control") || !strings.Contains(prompt, "never through phrases") {
