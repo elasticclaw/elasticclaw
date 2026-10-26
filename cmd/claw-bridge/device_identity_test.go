@@ -11,7 +11,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -289,43 +288,6 @@ func TestOpenClawStateDBPathHonorsStateDir(t *testing.T) {
 	}
 	if path != filepath.Join("/tmp/state-override", "state", "openclaw.sqlite") {
 		t.Fatalf("path = %q", path)
-	}
-}
-
-// TestNodeCompatibleExprMatchesOpenClawEngines exercises the exact JS
-// expression the bootstrap script embeds, with injected Node versions,
-// against OpenClaw 2026.9.x's engines clause ">=24.16.0 <25 || >=26.1.0".
-func TestNodeCompatibleExprMatchesOpenClawEngines(t *testing.T) {
-	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("node not in PATH")
-	}
-	cases := []struct {
-		version string
-		want    bool
-	}{
-		{"24.15.0", false}, // below the 24.x floor
-		{"24.16.0", true},  // floor
-		{"24.21.0", true},  // Daytona images
-		{"25.0.0", false},  // 25.x is excluded outright
-		{"25.9.1", false},
-		{"26.0.0", false}, // below the 26.x floor
-		{"26.1.0", true},  // floor
-		{"27.0.0", true},  // engines range is unbounded above 26.1
-		{"28.3.1", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.version, func(t *testing.T) {
-			script := "const [major, minor] = process.argv[1].split(\".\").map(Number);" +
-				"process.exit(" + nodeCompatibleExpr + " ? 0 : 1)"
-			cmd := exec.Command("node", "-e", script, tc.version)
-			err := cmd.Run()
-			if tc.want && err != nil {
-				t.Fatalf("node %s rejected, want accepted (exit=%v)", tc.version, err)
-			}
-			if !tc.want && err == nil {
-				t.Fatalf("node %s accepted, want rejected", tc.version)
-			}
-		})
 	}
 }
 

@@ -3660,22 +3660,21 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-// nodeCompatibleExpr mirrors OpenClaw 2026.9.x's engines clause
-// ">=24.16.0 <25 || >=26.1.0" — Node 24 from 24.16, anything 26.1 or newer
-// (the clause is unbounded above 26.1, so Node 27+ is supported), and never
-// 25.x or early 24.x. One expression shared by the bootstrap script and its
-// test so the two cannot drift.
-const nodeCompatibleExpr = "(major === 24 && minor >= 16) || major > 26 || (major === 26 && minor >= 1)"
-
 // installNodeGit installs Node.js 24 and git via apt.
 func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
-	// The OpenClaw npm preinstall aborts the install on anything else.
-	script := fmt.Sprintf(`
+	return runShell(nodeGitInstallScript)
+}
+
+// nodeGitInstallScript fails unless the node left on PATH satisfies
+// cliversion.NodeCompatibleRange: OpenClaw's npm preinstall aborts outside its
+// engines range, and older patches carry CVE-2026-111497. apt can succeed
+// without upgrading, and another node can shadow the apt one, so the result is
+// checked again after the install.
+var nodeGitInstallScript = fmt.Sprintf(`
 set -euo pipefail
 node_compatible() {
-  command -v node >/dev/null 2>&1 &&
-    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(%s ? 0 : 1)'
+  command -v node >/dev/null 2>&1 && %s
 }
 if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node_compatible; then
   echo "Node: $(node --version)"
@@ -3697,11 +3696,13 @@ if ! command -v npm >/dev/null 2>&1 || ! node_compatible; then
   sudo apt-get update -qq
   sudo apt-get install -y --fix-broken nodejs
 fi
+if ! node_compatible; then
+  echo "Node $(node --version 2>/dev/null || echo 'not found') does not satisfy %s (CVE-2026-111497)" >&2
+  exit 1
+fi
 echo "Node: $(node --version)"
 echo "Git: $(git --version)"
-`, nodeCompatibleExpr)
-	return runShell(script)
-}
+`, cliversion.NodeCompatibleCheck, cliversion.NodeCompatibleRange)
 
 const openClawVersion = cliversion.OpenClawVersion
 const codexPluginVersion = cliversion.CodexPluginVersion

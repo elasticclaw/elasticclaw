@@ -4202,6 +4202,17 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	return nil
 }
 
+// daytonaNodeSetup prefixes every Daytona exec: HOME points at the sandbox
+// user, and nvm is sourced because each exec is a fresh shell. Daytona
+// snapshots may ship non-LTS Node (e.g. v25) or a Node 24 patch below
+// cliversion.NodeCompatibleRange, so reuse the newest installed Node 24 when it
+// qualifies and otherwise install the latest Node 24. The exec fails, on
+// stdout so the retry error carries it, rather than run on a Node exposed to
+// CVE-2026-111497.
+var daytonaNodeSetup = `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; ` +
+	`if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; nvm use 24 >/dev/null 2>&1 || true; ` + cliversion.NodeCompatibleCheck + ` >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; fi; ` +
+	cliversion.NodeCompatibleCheck + ` >/dev/null 2>&1 || { echo "Node $(node --version 2>/dev/null || echo 'not found') does not satisfy ` + cliversion.NodeCompatibleRange + ` (CVE-2026-111497)"; exit 1; }; `
+
 func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanceID string, p *daytona.Provider, env map[string]string) error {
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 	s.setBootstrapStatus(clawID, "Preparing runtime")
@@ -4217,13 +4228,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				log.Printf("[daytona] %s retry %d/%d...", label, attempt, maxAttempts)
 				time.Sleep(5 * time.Second)
 			}
-			// Prefix HOME so commands run in the sandbox user's home, not the caller's.
-			// Also source nvm and pin a compatible Node 24 LTS — Daytona snapshots may ship with
-			// non-LTS Node (e.g. v25) and each exec is a fresh shell session.
-			// OpenClaw requires Node 24.15.0 or newer on the Node 24 line. Reuse a
-			// compatible installed patch; otherwise install the latest Node 24.
-			nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || true; node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 24 && minor >= 15 ? 0 : 1)' >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
-			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + cmd}, timeout)
+			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", daytonaNodeSetup + cmd}, timeout)
 			if err != nil {
 				lastErr = fmt.Errorf("%s: %w", label, err)
 				continue
@@ -5267,8 +5272,7 @@ func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceI
 			s.setBootstrapStatus(clawID, "Downloading ElasticClaw connector")
 		}
 
-		nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
-		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + downloadCmd}, 3*time.Minute)
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", daytonaNodeSetup + downloadCmd}, 3*time.Minute)
 		if err != nil {
 			lastErr = err
 			log.Printf("[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, err)
