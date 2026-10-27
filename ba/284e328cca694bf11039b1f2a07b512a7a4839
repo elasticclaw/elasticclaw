@@ -1,0 +1,21 @@
+go.mod
+  s_9901d808e78e99::t_953d7c00e7ba34 3,16-17,45,48,65-74,78-84
+go.sum
+  s_9901d808e78e99::t_d05017114030d3 61-62,77-78,128-129,134-155,162-165,168-173,175-182,185-192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ba284e328cca694bf11039b1f2a07b512a7a4839",
+  "prompts": {},
+  "sessions": {
+    "s_9901d808e78e99": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e8124be07ffeqj2uO3HYW2MsUO",
+        "model": "accounts/fireworks/routers/kimi-latest"
+      },
+      "human_author": "Xav Paice <xav@replicated.com>"
+    }
+  }
+}
