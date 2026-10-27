@@ -33,11 +33,6 @@ const WORKSPACE_SECTIONS = new Set<Section>([
   "mcp-servers",
 ])
 
-// What each section waits for before it can render anything true. Until then
-// it shows a placeholder — not nothing, and not content for the wrong scope.
-const NEEDS_SETTINGS = new Set<Section>(["runtimes", "models", "github", "authentication", "issue-trackers", "mcp-servers", "notifier"])
-const NEEDS_WORKSPACE = new Set<Section>(["github", "issue-trackers", "workspaces", "workflows", "secrets"])
-
 interface LLMKeyView {
   name: string
   provider: string
@@ -537,10 +532,44 @@ export default function SettingsSectionPage() {
     return `/settings/${id}`
   }
   const workspaceReady = !workspacesLoading
-  const showSectionSkeleton = !error && (
-    (NEEDS_SETTINGS.has(section) && !settings) ||
-    (NEEDS_WORKSPACE.has(section) && !workspaceReady)
-  )
+  // null means "what this section reads has not loaded", and the page shows a
+  // placeholder in its place. No undefined in the return type, so a section
+  // added to VALID_SECTIONS without a case here fails to compile.
+  const renderSection = (): React.ReactElement | null => {
+    switch (section) {
+      case "runtimes":
+        return settings ? <RuntimesSection settings={settings} onSave={save} saving={saving} /> : null
+      case "models":
+        return settings ? <LLMSection settings={settings} onSave={save} saving={saving} /> : null
+      case "github":
+        return settings && workspaceReady ? <GitHubSection settings={settings} onSave={save} saving={saving} workspace={selectedWorkspace} /> : null
+      case "authentication":
+        return settings ? <AuthenticationSection settings={settings} onSave={save} saving={saving} /> : null
+      case "issue-trackers":
+        return settings && workspaceReady ? <IntegrationsSection settings={settings} onSave={save} saving={saving} selectedWorkspace={selectedWorkspace} hubPublicUrl={hubPublicUrl} /> : null
+      case "workspaces":
+        return workspaceReady ? <WorkspacesSection selectedWorkspace={selectedWorkspace} /> : null
+      case "workflows":
+        return workspaceReady ? <WorkflowsSection selectedWorkspace={selectedWorkspace} /> : null
+      case "secrets":
+        return workspaceReady ? <SecretsSection settings={settings} workspace={selectedWorkspace} /> : null
+      case "mcp-servers":
+        return settings ? <MCPServersSection settings={settings} onSave={save} saving={saving} /> : null
+      case "notifier":
+        return settings ? <NotifierSection settings={settings} onSave={saveReportingError} saving={saving} /> : null
+      case "beta-features":
+        return <BetaFeaturesSettings />
+      case "ai-config":
+        return <AIConfigSection />
+      case "doctor":
+        return <DoctorSection />
+      case "troubleshoot":
+        return <TroubleshootSection />
+      case "analytics":
+        // Routable but empty: analytics has its own page at /analytics.
+        return <></>
+    }
+  }
   const selectWorkspace = (workspace: string) => {
     setSelectedWorkspace(workspace)
     const targetSection = WORKSPACE_SECTIONS.has(section) ? section : "workspaces"
@@ -629,50 +658,7 @@ export default function SettingsSectionPage() {
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
-          {showSectionSkeleton && <SectionSkeleton />}
-
-          {settings && section === "runtimes" && (
-            <RuntimesSection settings={settings} onSave={save} saving={saving} />
-          )}
-          {settings && section === "models" && (
-            <LLMSection settings={settings} onSave={save} saving={saving} />
-          )}
-          {settings && workspaceReady && section === "github" && (
-            <GitHubSection settings={settings} onSave={save} saving={saving} workspace={selectedWorkspace} />
-          )}
-          {settings && section === "authentication" && (
-            <AuthenticationSection settings={settings} onSave={save} saving={saving} />
-          )}
-          {settings && workspaceReady && section === "issue-trackers" && (
-            <IntegrationsSection settings={settings} onSave={save} saving={saving} selectedWorkspace={selectedWorkspace} hubPublicUrl={hubPublicUrl} />
-          )}
-          {workspaceReady && section === "workspaces" && (
-            <WorkspacesSection selectedWorkspace={selectedWorkspace} />
-          )}
-          {workspaceReady && section === "workflows" && (
-            <WorkflowsSection selectedWorkspace={selectedWorkspace} />
-          )}
-          {workspaceReady && section === "secrets" && (
-            <SecretsSection settings={settings} workspace={selectedWorkspace} />
-          )}
-          {settings && section === "mcp-servers" && (
-            <MCPServersSection settings={settings} onSave={save} saving={saving} />
-          )}
-          {settings && section === "notifier" && (
-            <NotifierSection settings={settings} onSave={saveReportingError} saving={saving} />
-          )}
-          {section === "beta-features" && (
-            <BetaFeaturesSettings />
-          )}
-          {section === "ai-config" && (
-            <AIConfigSection />
-          )}
-          {section === "doctor" && (
-            <DoctorSection />
-          )}
-          {section === "troubleshoot" && (
-            <TroubleshootSection />
-          )}
+          {renderSection() ?? (!error && <SectionSkeleton />)}
         </main>
       </div>
     </div>
