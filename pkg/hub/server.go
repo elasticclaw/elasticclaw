@@ -358,6 +358,7 @@ type clawConn struct {
 	gatewaySessionKeySeen  bool            // distinguishes the first live-key heartbeat from a loss
 	turnInputMessageID     string          // hub message that started the current turn
 	sessionLossInterrupted bool            // the bridge identified this turn as interrupted
+	turnInactiveSince      time.Time       // first inactive heartbeat during the current open turn
 	forcedFinishCount      int             // consecutive watchdog-forced streaming turn finishes
 	workflowStartPending   bool            // true while initial volume attach / wake is in flight
 	workflowStartDone      bool            // true once initial volume attach / wake has completed
@@ -560,6 +561,7 @@ func (cc *clawConn) resetTurnStateLocked() {
 	cc.streamingSplit = false
 	cc.streamingSplitText = ""
 	cc.streamingStartedAt = time.Time{}
+	cc.turnInactiveSince = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 }
@@ -1947,22 +1949,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	go func() {
 		log.Printf("Provisioning claw %s (%s) via %s (provider name: %s)...", req.Name, clawID, req.Provider, req.ProviderName)
 		ctx := context.Background()
-		var provErr error
-
-		switch req.Provider {
-		case "daytona":
-			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, templateFiles, env)
-		case "replicated":
-			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-		case "exedev":
-			provErr = s.provisionExedev(ctx, clawID, req, provCfg, templateFiles, env)
-		case "docker":
-			provErr = s.provisionDocker(ctx, clawID, req, provCfg, templateFiles)
-		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, templateFiles)
-		default:
-			provErr = fmt.Errorf("unsupported provider: %s", req.Provider)
-		}
+		provErr := s.provisionWithProvider(ctx, req.Provider, clawID, req, provCfg, templateFiles, env)
 
 		if provErr != nil {
 			log.Printf("provisioning failed for claw %s: %v", clawID, provErr)
@@ -3137,6 +3124,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			var hb struct {
 				GatewayHealthy bool  `json:"gateway_healthy"`
 				GatewayReady   *bool `json:"gateway_ready,omitempty"`
+				TurnActive     *bool `json:"turn_active"`
 				ContextUsage   int   `json:"context_usage"`
 				RestartCount   int   `json:"restart_count"`
 				// SessionKey is the usage snapshot from sessions.describe. GatewaySessionKey
@@ -3185,7 +3173,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// channel's 2-minute ping). The silent-death watchdog reads
 					// it so that losing the status channel alone can no longer
 					// condemn a claw that is plainly reporting in.
-					activeCC.lastHeartbeatAt = time.Now()
+					heartbeatAt := time.Now()
+					activeCC.applyTurnHeartbeatLocked(hb.TurnActive, heartbeatAt, liveness.lostTurnGrace)
+					activeCC.lastHeartbeatAt = heartbeatAt
 					// Log only on status changes, not every heartbeat
 					prevUsage = activeCC.contextUsage
 					activeCC.contextUsage = hb.ContextUsage
@@ -3406,6 +3396,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					cc.mu.Lock()
 					if cc.streamingStartedAt.IsZero() {
 						cc.streamingStartedAt = time.Now()
+						cc.turnInactiveSince = time.Time{}
 						cc.streamingTimeoutSent = false
 						cc.contextWarningSent = false
 					}
@@ -3447,6 +3438,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					if cc.streamingStartedAt.IsZero() {
 						cc.streamingStartedAt = time.Now()
+						cc.turnInactiveSince = time.Time{}
 					}
 					cc.streamingBuf.WriteString(chunk.Content)
 					msgID := cc.streamingMsgID
@@ -3557,17 +3549,22 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// [DONE] trigger, let it handle that signal instead of the
 			// legacy factory PR-URL completion path below.
 			pipelineHandledDone := false
+			pipelineRejectedDone := false
 			var pipelineDoneCtx pipelineContext
 			var pipelineDoneStage *pipeline.Stage
 			if !workflowV2Controlled && !bridgeErrTurn {
 				doneSignalled = turnMaySignal(turnContent, doneSignalToken, bridgeErrTurn)
 				if doneSignalled {
+					pipelineRejectedDone = s.pipelineRejectsMessageSignal(clawID, doneSignalToken)
 					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
+					if !automaticContinuationPaused {
+						s.nudgeRejectedPipelineSignals(clawID, turnContent)
+					}
 				}
 			}
 			if automaticContinuationPaused {
 				pipelineHandledDone = false
-			} else if pipelineHandledDone {
+			} else if pipelineHandledDone && !pipelineRejectedDone {
 				// Same gates as handleClawDoneSignal: do not advance or arm
 				// PR monitoring while a required gate is failed. Keep
 				// pipelineHandledDone true so we do not also run the
@@ -3607,7 +3604,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				},
 			})
 			// Check for [DONE] signal from a factory-created claw
-			if !workflowV2Controlled && doneSignalled {
+			if !workflowV2Controlled && doneSignalled && !pipelineRejectedDone {
 				s.safeGo("done checkpoint", func() {
 					if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 						log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
@@ -4214,6 +4211,17 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	return nil
 }
 
+// daytonaNodeSetup prefixes every Daytona exec: HOME points at the sandbox
+// user, and nvm is sourced because each exec is a fresh shell. Daytona
+// snapshots may ship non-LTS Node (e.g. v25) or a Node 24 patch below
+// cliversion.NodeCompatibleRange, so reuse the newest installed Node 24 when it
+// qualifies and otherwise install the latest Node 24. The exec fails, on
+// stdout so the retry error carries it, rather than run on a Node exposed to
+// CVE-2026-111497.
+var daytonaNodeSetup = `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; ` +
+	`if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; nvm use 24 >/dev/null 2>&1 || true; ` + cliversion.NodeCompatibleCheck + ` >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; fi; ` +
+	cliversion.NodeCompatibleCheck + ` >/dev/null 2>&1 || { echo "Node $(node --version 2>/dev/null || echo 'not found') does not satisfy ` + cliversion.NodeCompatibleRange + ` (CVE-2026-111497)"; exit 1; }; `
+
 func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanceID string, p *daytona.Provider, env map[string]string) error {
 	log.Printf("[daytona] bootstrapping claw %s (instance %s)", clawID, instanceID)
 	s.setBootstrapStatus(clawID, "Preparing runtime")
@@ -4229,13 +4237,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 				log.Printf("[daytona] %s retry %d/%d...", label, attempt, maxAttempts)
 				time.Sleep(5 * time.Second)
 			}
-			// Prefix HOME so commands run in the sandbox user's home, not the caller's.
-			// Also source nvm and pin a compatible Node 24 LTS — Daytona snapshots may ship with
-			// non-LTS Node (e.g. v25) and each exec is a fresh shell session.
-			// OpenClaw requires Node 24.15.0 or newer on the Node 24 line. Reuse a
-			// compatible installed patch; otherwise install the latest Node 24.
-			nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || true; node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 24 && minor >= 15 ? 0 : 1)' >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
-			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + cmd}, timeout)
+			result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", daytonaNodeSetup + cmd}, timeout)
 			if err != nil {
 				lastErr = fmt.Errorf("%s: %w", label, err)
 				continue
@@ -5279,8 +5281,7 @@ func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceI
 			s.setBootstrapStatus(clawID, "Downloading ElasticClaw connector")
 		}
 
-		nvmSetup := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && { nvm use 24 >/dev/null 2>&1 || nvm install 24 >/dev/null 2>&1; } ; `
-		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", nvmSetup + downloadCmd}, 3*time.Minute)
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", daytonaNodeSetup + downloadCmd}, 3*time.Minute)
 		if err != nil {
 			lastErr = err
 			log.Printf("[daytona] download claw-bridge attempt %d/%d failed: %v", attempt, maxAttempts, err)
@@ -5961,7 +5962,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	return nil
 }
 
-func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte) error {
+func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
 	p, err := newDockerProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("docker init: %w", err)
@@ -5997,10 +5998,10 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed).
-	// Start with the request environment so workflow and workspace secret refs reach
-	// Docker claws, then overlay hub-managed values to prevent callers from
+	// Merge request and workflow environments, then overlay hub-managed values
+	// so workflow and workspace secrets reach Docker claws without callers
 	// overriding the claw's identity or connection details.
-	containerEnv := mergeDockerContainerEnv(req.Env, map[string]string{
+	containerEnv := mergeDockerContainerEnv(mergeDockerContainerEnv(req.Env, env), map[string]string{
 		"ELASTICCLAW_HUB_URL":            dockerClawHubURL(hubCfg),
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
@@ -6051,7 +6052,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		Env:  containerEnv,
 	}
 
-	instance, err := p.Create(ctx, createReq)
+	instance, err := createDockerContainer(p, ctx, createReq)
 	if err != nil {
 		return fmt.Errorf("docker create: %w", err)
 	}
@@ -6076,6 +6077,10 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 			_ = p.Destroy(context.Background(), instance.ID, false)
 			return fmt.Errorf("docker file copy failed: %s: %w", relPath, err)
 		}
+	}
+	if err := s.restoreCheckpointToDocker(ctx, clawID, instance.ID, homeDir, p); err != nil {
+		_ = p.Destroy(context.Background(), instance.ID, false)
+		return fmt.Errorf("docker checkpoint restore: %w", err)
 	}
 	if err := p.CopyIn(ctx, instance.ID, path.Join(workspaceDir, ".elasticclaw-workspace-ready"), []byte("ready\n")); err != nil {
 		_ = p.Destroy(context.Background(), instance.ID, false)
@@ -6558,7 +6563,7 @@ func (s *Server) checkClawStatus() {
 		// The bridge normally closes a turn with a message.  If that terminal
 		// message is lost, preserve the partial response and unblock the queue.
 		// A second consecutive recovery means the bridge is repeatedly wedged.
-		if !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > cfg.busyTurnMax {
+		if !s.recoverLostTurn(now, id, cc, cfg.lostTurnGrace) && !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > cfg.busyTurnMax {
 			var content, messageID string
 			var escalate bool
 			finished := false
@@ -6864,8 +6869,9 @@ Before editing files, running builds, or doing broad tool exploration, send one 
 4. What you will verify or test.
 
 This first message must be a normal assistant message visible to the user. Tool calls, activity rows, and update_plan do not count. After that visible plan, wait for the hub's proceed message, then start implementation and continue sending visible progress updates.`
-	initialPlanProceedContent    = `[hub] Initial plan received. Proceed with implementation. Keep sending visible progress updates before and after substantial work; tool calls and activity rows do not count as user communication.`
-	initialPlanCorrectionContent = `[hub] Initial plan is required before implementation. Pause tool work and send a visible assistant message with your understanding of the issue, likely code area, rough plan, and verification approach.`
+	initialPlanProceedContent         = `[hub] Initial plan received. Proceed with implementation. Keep sending visible progress updates before and after substantial work; tool calls and activity rows do not count as user communication.`
+	pipelineInitialPlanProceedContent = `[hub] Initial plan received. This is not a stage transition: continue with your current stage's instructions and end the stage with its signal. Keep sending visible progress updates; tool calls and activity rows do not count as user communication.`
+	initialPlanCorrectionContent      = `[hub] Initial plan is required before implementation. Pause tool work and send a visible assistant message with your understanding of the issue, likely code area, rough plan, and verification approach.`
 	// planGateProceedContent is injected when a workflow plan_gate passes.
 	// It must be unambiguous: agents previously waited for freeform "proceed"
 	// or re-emitted [PLAN_READY] after the gate already passed.
@@ -7005,6 +7011,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	}
 	cc.awaitingResponse = true
 	cc.streamingStartedAt = time.Now()
+	cc.turnInactiveSince = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
@@ -7059,6 +7066,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	}
 	cc.awaitingResponse = true
 	cc.streamingStartedAt = time.Now()
+	cc.turnInactiveSince = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
@@ -7096,10 +7104,12 @@ func (s *Server) clawNeedsInitialPlan(clawID string) bool {
 	if !s.clawEligibleForInitialPlan(clawID) {
 		return false
 	}
-	// Workflows that declare a deterministic plan_gate own plan approval.
+	// Pipelines can opt out of freeform approval or own it with a plan_gate.
 	// Skip freeform keyword checks so we do not double-approve or freeze.
-	if s.clawPipelineHasPlanGate(clawID) {
-		return false
+	if ctx, ok := s.findPipelineContextForClaw(clawID); ok {
+		if pl := parsePipelineForContext(ctx); pl != nil && (!pl.InitialPlanEnabled() || pl.HasPlanGate()) {
+			return false
+		}
 	}
 	return true
 }
@@ -7181,7 +7191,11 @@ func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
 	correctionSent := s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker)
 	if isValidInitialPlan(content) || (correctionSent && isSubstantialInitialPlan(content)) {
 		_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
-		s.injectHubMessageByID(clawID, initialPlanProceedContent)
+		proceedContent := initialPlanProceedContent
+		if ctx, ok := s.findPipelineContextForClaw(clawID); ok && parsePipelineForContext(ctx) != nil {
+			proceedContent = pipelineInitialPlanProceedContent
+		}
+		s.injectHubMessageByID(clawID, proceedContent)
 		return
 	}
 	if !correctionSent {
@@ -9886,6 +9900,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.awaitingResponse = true
 	cc.turnInputMessageID = msg.ID
 	cc.streamingStartedAt = time.Now()
+	cc.turnInactiveSince = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()

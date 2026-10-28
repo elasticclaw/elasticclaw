@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -328,28 +327,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			return
 		}
 		ctx := context.Background()
-		var provErr error
-		switch provider {
-		case "replicated":
-			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-		case "daytona":
-			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-		case "exedev":
-			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-		case "docker":
-			provErr = s.provisionDocker(ctx, clawID, req, provCfg, fileBytes)
-		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-		case "noop":
-			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
-				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
-			} else {
-				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
-			}
-		default:
-			provErr = fmt.Errorf("unsupported provider: %s", provider)
-		}
+		provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 		if provErr != nil {
 			log.Printf("[workflow] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow provision failed: %v", provErr), false)

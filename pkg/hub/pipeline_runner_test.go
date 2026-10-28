@@ -2899,3 +2899,49 @@ func TestRunOnEnterCommentIssueEmptyBodyIsNoOp(t *testing.T) {
 	}
 }
 
+func TestRequiredGateRecoveryRouteSurvivesStageChange(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	const clawID = "claw-required-recovery"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "test", "base", "connected", "implementation"); err != nil {
+		t.Fatal(err)
+	}
+	s.persistPipelineOutput(clawID, "build_check", "build", &pipelineRunResult{Stdout: `{"status":"fail"}`})
+	factory := &types.FactoryConfig{Name: "required-recovery", PipelineYAML: `
+stages:
+  - id: build_check
+    entry: true
+  - id: fix_build
+    triggers:
+      - gate_result: {stage: build_check, verdict: fail}
+        from: build_check
+`}
+	// Move the stage before runOnEnter checks the required-gate route,
+	// regardless of whether its asynchronous transition has run yet.
+	if _, err := db.Exec(`CREATE TRIGGER move_before_required_gate_check AFTER INSERT ON messages
+		WHEN NEW.content LIKE '[hub] Error: Required gate%'
+		BEGIN UPDATE claws SET pipeline_stage='fix_build' WHERE id=NEW.claw_id; END`); err != nil {
+		t.Fatal(err)
+	}
+	stage := pipeline.Stage{ID: "build_check", Gate: &pipeline.Gate{
+		Output: "build", Required: true,
+		Pass: pipeline.GateCondition{Path: "status", Values: []string{"pass"}},
+		Fail: pipeline.GateCondition{Path: "status", Values: []string{"fail"}},
+	}}
+	if !s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory}) {
+		t.Fatal("expected stage transition")
+	}
+	var status, currentStage string
+	if err := db.QueryRow(`SELECT status, pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&status, &currentStage); err != nil {
+		t.Fatal(err)
+	}
+	if status != "connected" || currentStage != "fix_build" {
+		t.Fatalf("recovery claw: status=%q stage=%q", status, currentStage)
+	}
+	var stops int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE '%on_enter failed%'`, clawID).Scan(&stops); err != nil {
+		t.Fatal(err)
+	}
+	if stops != 0 {
+		t.Fatal("routed required gate stopped the claw")
+	}
+}

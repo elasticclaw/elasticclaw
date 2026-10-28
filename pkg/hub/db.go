@@ -173,6 +173,10 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "idle_resume_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// Persist the lost-turn budget across bridge and hub restarts.
+	if err := addColumn(db, "claws", "lost_turn_recovery_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	if err := addColumn(db, "claws", "session_loss_streak", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
@@ -618,6 +622,7 @@ func migrate(db *sql.DB) error {
 		stage_stalled_since INTEGER NOT NULL DEFAULT 0,
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,
 		idle_resume_count INTEGER NOT NULL DEFAULT 0,
+		lost_turn_recovery_count INTEGER NOT NULL DEFAULT 0,
 		session_loss_streak INTEGER NOT NULL DEFAULT 0,
 		session_loss_progress_mark TEXT NOT NULL DEFAULT '',
 		session_loss_completed_turns INTEGER NOT NULL DEFAULT 0,

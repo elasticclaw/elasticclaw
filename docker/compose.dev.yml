@@ -32,7 +32,7 @@ services:
       - GOFLAGS=-buildvcs=false
 
   web:
-    image: node:22-slim
+    image: node:22.23.4-slim
     working_dir: /app
     # npm install runs on every start so adding packages works without rebuilding the image
     command: sh -c "npm install && npm run dev"

@@ -22,7 +22,7 @@ type livenessSettings struct {
 	offlineGrace, provisioningMaxAge, claimTTL, interval time.Duration
 	gatewayUnhealthyMax                                  int
 	gatewayUnhealthyReconnectGrace                       time.Duration
-	busyTurnMax, silentDeathMax                          time.Duration
+	busyTurnMax, lostTurnGrace, silentDeathMax           time.Duration
 	prConditionsMaxWait                                  time.Duration
 	idleResumeEnabled                                    bool
 	idleResumeAfter                                      time.Duration
@@ -51,6 +51,7 @@ func (s *Server) livenessSettings() livenessSettings {
 
 		gatewayUnhealthyReconnectGrace: defaultGatewayUnhealthyReconnectGrace,
 		busyTurnMax:                    defaultBusyTurnMax,
+		lostTurnGrace:                  defaultLostTurnGrace,
 		silentDeathMax:                 defaultSilentDeathMax,
 		prConditionsMaxWait:            2 * time.Hour,
 		idleResumeEnabled:              true,
@@ -82,6 +83,11 @@ func (s *Server) livenessSettings() livenessSettings {
 	if cfg.busyTurnMax < minBusyTurnMax {
 		log.Printf("[reaper] busy_turn_max %s is below the minimum %s (bridge turn cap plus recovery margin); using %s", cfg.busyTurnMax, minBusyTurnMax, minBusyTurnMax)
 		cfg.busyTurnMax = minBusyTurnMax
+	}
+	cfg.lostTurnGrace = parse(l.LostTurnGrace, cfg.lostTurnGrace, "lost_turn_grace")
+	if cfg.lostTurnGrace < minLostTurnGrace {
+		log.Printf("[reaper] lost_turn_grace %s is below the minimum %s; using %s", cfg.lostTurnGrace, minLostTurnGrace, minLostTurnGrace)
+		cfg.lostTurnGrace = minLostTurnGrace
 	}
 	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
 	cfg.prConditionsMaxWait = parse(l.PRConditionsMaxWait, cfg.prConditionsMaxWait, "pr_conditions_max_wait")
