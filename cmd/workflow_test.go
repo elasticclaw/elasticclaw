@@ -720,3 +720,23 @@ func TestPrintWorkflowInspectionPrintsEffectsTasksFactsAndEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestReadWorkflowFilesRejectsUnknownTriggerFrom(t *testing.T) {
+	dir := t.TempDir()
+	data := `name: scoped
+stages:
+  - id: working
+  - id: done
+    triggers:
+      - message_contains: "[DONE]"
+        from: missing
+`
+	file := filepath.Join(dir, "workflow.yaml")
+	if err := os.WriteFile(file, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readWorkflowFiles([]string{file})
+	if err == nil || !strings.Contains(err.Error(), `from: unknown stage "missing"`) {
+		t.Fatalf("expected unknown from stage error, got %v", err)
+	}
+}

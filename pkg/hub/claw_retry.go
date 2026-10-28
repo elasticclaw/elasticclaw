@@ -546,7 +546,7 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 		UPDATE claws
 		   SET status='provisioning', no_progress_paused=CASE WHEN bridge_error_pause_kind!='' THEN 0 ELSE no_progress_paused END, bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
 		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
-		       rebrief_pending=1, idle_resume_count=0, bridge_error_auto_resumes=0, bridge_error_pause_kind='', idle_resume_at=0, session_loss_streak=0, session_loss_progress_mark=''
+		       rebrief_pending=1, idle_resume_count=0, lost_turn_recovery_count=0, bridge_error_auto_resumes=0, bridge_error_pause_kind='', idle_resume_at=0, session_loss_streak=0, session_loss_progress_mark=''
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
 		bootstrapStatus, bootstrapDiagnostic, checkpointID, clawID, tenantID)
 	if err != nil {

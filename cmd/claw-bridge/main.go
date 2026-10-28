@@ -165,8 +165,9 @@ type queuedMsg struct {
 }
 
 type msgQueue struct {
-	mu   sync.Mutex
-	msgs []queuedMsg
+	activeTurns atomic.Int64 // accepted inputs, including queued and replayed turns
+	mu          sync.Mutex
+	msgs        []queuedMsg
 
 	// dropped tracks inputs discarded (TTL or overflow) while the hub was
 	// unreachable, so drain() can tell the hub instead of losing them silently.
@@ -217,6 +218,7 @@ func (q *msgQueue) enqueueLocked(m queuedMsg) {
 		for i, existing := range q.msgs {
 			if existing.kind == queuedInput {
 				q.recordDropLocked(existing.content)
+				q.activeTurns.Add(-1)
 				q.msgs = append(q.msgs[:i], q.msgs[i+1:]...)
 				break
 			}
@@ -229,6 +231,7 @@ func (q *msgQueue) enqueueLocked(m queuedMsg) {
 func (q *msgQueue) pushInput(messageID, content string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.activeTurns.Add(1)
 	q.enqueueLocked(queuedMsg{kind: queuedInput, messageID: messageID, content: content, queuedAt: time.Now()})
 }
 
@@ -267,6 +270,7 @@ func (q *msgQueue) drain() []queuedMsg {
 		if m.kind == queuedInput && time.Since(m.queuedAt) >= msgQueueTTL {
 			log.Printf("[bridge] dropped queued input (TTL exceeded): %q", m.content[:min(len(m.content), 60)])
 			q.recordDropLocked(m.content)
+			q.activeTurns.Add(-1)
 			continue
 		}
 		out = append(out, m)
@@ -304,6 +308,7 @@ func replayQueued(queue *msgQueue, deliver func(role, content string) error, del
 			}
 		default: // queuedInput
 			runTurn(m.messageID, m.content)
+			queue.activeTurns.Add(-1)
 		}
 	}
 }
@@ -4929,6 +4934,9 @@ func runBootstrap() error {
 	if err := cloneConfiguredGitHubRepos(); err != nil {
 		return fmt.Errorf("cloneConfiguredGitHubRepos: %w", err)
 	}
+	if err := restoreStagedCheckpoint(); err != nil {
+		return fmt.Errorf("restoreStagedCheckpoint: %w", err)
+	}
 
 	if err := syncOpenClawAPIKeyAuth(); err != nil {
 		return err
@@ -5125,36 +5133,39 @@ func printVersion() {
 	fmt.Printf("claw-bridge %s (commit: %s, built: %s)\n", Version, Commit, BuildDate)
 }
 
+// daemonLockPath is a fixed literal: TMPDIR and HOME vary across exec shells
+// in a sandbox, and a derived path would let a second daemon start.
+const daemonLockPath = "/tmp/elasticclaw-claw-bridge.lock"
+
 func main() {
-	// Retain restart history when an external supervisor relaunches this bridge.
-	gatewayRestartBase = gatewayRestartBaseFromEnv()
-
-	// Handle version requests very early, before any env var requirements.
-	// Supports: claw-bridge version, claw-bridge --version, claw-bridge -v
-	if len(os.Args) > 1 {
-		arg := os.Args[1]
-		if arg == "version" || arg == "--version" || arg == "-v" {
-			printVersion()
-			os.Exit(0)
-		}
-	}
-
-	// Subcommand dispatch: linear CLI embedded in the bridge binary.
-	if len(os.Args) > 1 && os.Args[1] == "linear" {
+	command, bootstrapFlag := classifyBridgeArgs(os.Args[1:])
+	switch command {
+	case "help":
+		printBridgeUsage(os.Stdout)
+		return
+	case "invalid":
+		printBridgeUsage(os.Stderr)
+		os.Exit(2)
+	case "version":
+		printVersion()
+		return
+	case "linear":
 		os.Exit(runLinearCLI(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "control" {
+	case "control":
 		os.Exit(runControlCLI(os.Args[2:]))
 	}
 
-	// Bootstrap mode: run all VM setup steps before entering the bridge loop.
-	// Activated by --bootstrap flag or ELASTICCLAW_BOOTSTRAP=1 env var.
-	bootstrapMode := os.Getenv("ELASTICCLAW_BOOTSTRAP") == "1"
-	for _, arg := range os.Args[1:] {
-		if arg == "--bootstrap" {
-			bootstrapMode = true
-		}
+	lock, err := acquireDaemonLock(daemonLockPath)
+	if err != nil {
+		log.Fatal(err)
 	}
+	if lock != nil {
+		defer lock.Close()
+	}
+
+	// Retain restart history when an external supervisor relaunches this bridge.
+	gatewayRestartBase = gatewayRestartBaseFromEnv()
+	bootstrapMode := bootstrapFlag || os.Getenv("ELASTICCLAW_BOOTSTRAP") == "1"
 	if bootstrapMode {
 		if err := runBootstrap(); err != nil {
 			log.Fatalf("[bootstrap] fatal: %v", err)
@@ -5508,7 +5519,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		})
 	}
 	runTurn := func(messageID, content string) {
+		queue.activeTurns.Add(1)
 		go func(c string) {
+			defer queue.activeTurns.Add(-1)
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 			defer agentCancel()
 			reply, agentErr := gwSession.SendMessage(agentCtx, c, messageID, func(chunk string) {
@@ -5595,6 +5608,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		}, &subagentPollFailLogged)
 		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d%s", health, gwSession.IsReady(), cu, restarts, subagentLog)
 		heartbeatPayload := map[string]interface{}{"gateway_healthy": health, "gateway_ready": gwSession.IsReady(), "context_usage": cu, "restart_count": restarts}
+		queue.addTurnHeartbeat(heartbeatPayload)
 		for k, v := range subagentFields {
 			heartbeatPayload[k] = v
 		}
@@ -5636,24 +5650,26 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		log.Printf("recv type=%s", msg.Type)
 		switch msg.Type {
 		case "message":
-			go func(payload json.RawMessage) {
-				var m map[string]interface{}
-				if err := json.Unmarshal(payload, &m); err != nil {
-					log.Printf("payload unmarshal error: %v", err)
-					return
-				}
-				content, _ := m["content"].(string)
-				if content == "" {
-					return
-				}
-				id, _ := m["id"].(string)
-				if id == "" {
-					log.Printf("[bridge] warning: message without id, dedup disabled for it")
-				}
-				if deduper.seen(id) {
-					log.Printf("[bridge] skipping duplicate message id=%s", id)
-					return
-				}
+			var m map[string]interface{}
+			if err := json.Unmarshal(msg.Payload, &m); err != nil {
+				log.Printf("payload unmarshal error: %v", err)
+				continue
+			}
+			content, _ := m["content"].(string)
+			if content == "" {
+				continue
+			}
+			id, _ := m["id"].(string)
+			if id == "" {
+				log.Printf("[bridge] warning: message without id, dedup disabled for it")
+			}
+			if deduper.seen(id) {
+				log.Printf("[bridge] skipping duplicate message id=%s", id)
+				continue
+			}
+			queue.activeTurns.Add(1)
+			go func() {
+				defer queue.activeTurns.Add(-1)
 				if !gwSession.IsReady() {
 					log.Printf("[bridge] gateway not ready, queuing message for later")
 					queue.pushInput(id, content)
@@ -5691,7 +5707,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					log.Printf("[bridge] hub write failed, queuing completed reply for redelivery: %v", writeErr)
 					queue.pushReply(reply)
 				}
-			}(msg.Payload)
+			}()
 
 		case "model_auth_credential":
 			var credential managedModelAuthCredential

@@ -62,6 +62,7 @@ type WorkflowConfig struct {
 	Repos               []string             `yaml:"repos,omitempty" json:"repos,omitempty"`
 	TriggerRepos        []string             `yaml:"trigger_repos,omitempty" json:"trigger_repos,omitempty"`
 	Trigger             *WorkflowTrigger     `yaml:"trigger,omitempty" json:"trigger,omitempty"`
+	InitialPlan         *bool                `yaml:"initial_plan,omitempty" json:"initialPlan,omitempty"`
 	Stages              []WorkflowStage      `yaml:"stages,omitempty" json:"stages,omitempty"`
 	PipelineYAML        string               `yaml:"pipeline_yaml,omitempty" json:"pipelineYAML,omitempty"`
 	SessionResume       *SessionResumeConfig `yaml:"session_resume,omitempty" json:"sessionResume,omitempty"`
@@ -175,6 +176,8 @@ type JiraWorkflowTrigger struct {
 
 // WorkflowStage is one step in a workflow state machine. It intentionally mirrors
 // the persisted pipeline stage shape without making pkg/types depend on hub.
+// Trigger maps preserve message_contains and its optional from (string or list)
+// through normalization into PipelineYAML.
 type WorkflowStage struct {
 	ID         string                   `yaml:"id" json:"id"`
 	Label      string                   `yaml:"label,omitempty" json:"label,omitempty"`

@@ -4,12 +4,19 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
 
 // Pipeline is the parsed representation of a factory's pipeline_yaml field.
 type Pipeline struct {
-	Stages []Stage `yaml:"stages"`
+	InitialPlan *bool   `yaml:"initial_plan,omitempty"`
+	Stages      []Stage `yaml:"stages"`
+}
+
+// InitialPlanEnabled defaults to the freeform initial-plan handshake.
+func (p *Pipeline) InitialPlanEnabled() bool {
+	return p.InitialPlan == nil || *p.InitialPlan
 }
 
 // Stage represents a single stage in the pipeline.
@@ -47,8 +54,11 @@ type IssueLabelsSkip struct {
 }
 
 // Trigger defines a condition that causes a transition into the parent stage.
-// Exactly one field should be set.
+// Exactly one condition should be set, optionally restricted by From.
 type Trigger struct {
+	// From restricts this trigger to existing source stage IDs (a YAML string
+	// or list). Omitted means any stage.
+	From []string `yaml:"from,omitempty"`
 	// MessageContains matches when this token opens a line of a claw message,
 	// ignoring leading whitespace and markdown decoration. The name is kept for
 	// YAML compatibility, but the match is anchored, not a substring scan: see
@@ -70,6 +80,23 @@ type Trigger struct {
 	// any of the expected values. This is a general primitive for inspecting
 	// structured pipeline outputs without gate semantics.
 	OutputMatches *OutputMatchesTrigger `yaml:"output_matches,omitempty"`
+}
+
+// AllowsFrom reports whether this trigger accepts the current stage. A scoped
+// trigger cannot match when the caller has no current stage.
+func (t Trigger) AllowsFrom(currentStage ...string) bool {
+	if len(t.From) == 0 {
+		return true
+	}
+	if len(currentStage) == 0 {
+		return false
+	}
+	for _, source := range t.From {
+		if source == currentStage[0] {
+			return true
+		}
+	}
+	return false
 }
 
 // PRConditionsTrigger specifies compound PR state conditions that must all pass.
@@ -131,6 +158,16 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 		key := value.Content[i].Value
 		val := value.Content[i+1]
 		switch key {
+		case "from":
+			var raw interface{}
+			if err := val.Decode(&raw); err != nil {
+				return err
+			}
+			from, err := types.ParseTriggerFrom(raw)
+			if err != nil {
+				return err
+			}
+			t.From = from
 		case "message_contains":
 			t.MessageContains = val.Value
 		case "pr_merged":
@@ -469,6 +506,13 @@ func (p *Pipeline) Validate() error {
 		}
 	}
 	for _, stage := range p.Stages {
+		for i, trigger := range stage.Triggers {
+			for _, source := range trigger.From {
+				if !stageIDs[source] {
+					return fmt.Errorf("stage %q trigger[%d] from: unknown stage %q", stage.ID, i, source)
+				}
+			}
+		}
 		if stage.OnEnter.commentIssueRawPresent && strings.TrimSpace(stage.OnEnter.CommentIssue.Body) == "" {
 			return fmt.Errorf("stage %q: comment_issue.body must be a non-empty string", stage.ID)
 		}
@@ -600,10 +644,14 @@ func (p *Pipeline) StageByID(id string) *Stage {
 
 // StageForMessageContains returns the first stage whose message_contains
 // trigger token opens a line of the given message. Returns nil if none match.
+// From restrictions require a matching currentStage; omitted From is unrestricted.
 // The matching rule is MessageSignals; read it before changing this.
-func (p *Pipeline) StageForMessageContains(message string) *Stage {
+func (p *Pipeline) StageForMessageContains(message string, currentStage ...string) *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
+			if !t.AllowsFrom(currentStage...) {
+				continue
+			}
 			if t.MessageContains != "" && MessageSignals(message, t.MessageContains) {
 				return &p.Stages[i]
 			}
@@ -612,10 +660,6 @@ func (p *Pipeline) StageForMessageContains(message string) *Stage {
 	return nil
 }
 
-// MessageContainsTokens returns the distinct message_contains tokens declared by
-// this pipeline, in stage order. It exists so the hub can tell which tokens are
-// meaningful to a given run without re-parsing triggers, which is what the
-// unanchored-signal nudge needs.
 // StageIDForMessageContainsToken returns the id of the first stage triggered by
 // this token, or "" if none declares it. The caller needs it to tell a token
 // whose stage is still ahead from one whose stage is already behind.
@@ -630,12 +674,14 @@ func (p *Pipeline) StageIDForMessageContainsToken(token string) string {
 	return ""
 }
 
-func (p *Pipeline) MessageContainsTokens() []string {
+// MessageContainsTokens returns distinct message_contains tokens in stage order.
+// When currentStage is supplied, it includes only triggers allowed from that stage.
+func (p *Pipeline) MessageContainsTokens(currentStage ...string) []string {
 	var tokens []string
 	seen := map[string]bool{}
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
-			if t.MessageContains == "" {
+			if t.MessageContains == "" || (len(currentStage) > 0 && !t.AllowsFrom(currentStage...)) {
 				continue
 			}
 			key := strings.ToUpper(t.MessageContains)
@@ -647,6 +693,29 @@ func (p *Pipeline) MessageContainsTokens() []string {
 		}
 	}
 	return tokens
+}
+
+// RejectedMessageContainsTokens lists anchored tokens whose triggers all exclude
+// the current stage, even if another token in the same message is accepted.
+func (p *Pipeline) RejectedMessageContainsTokens(message, currentStage string) []string {
+	var rejected []string
+	for _, token := range p.MessageContainsTokens() {
+		if !MessageSignals(message, token) {
+			continue
+		}
+		allowed := false
+		for _, stage := range p.Stages {
+			for _, trigger := range stage.Triggers {
+				if strings.EqualFold(trigger.MessageContains, token) && trigger.AllowsFrom(currentStage) {
+					allowed = true
+				}
+			}
+		}
+		if !allowed {
+			rejected = append(rejected, token)
+		}
+	}
+	return rejected
 }
 
 // MessageSignals reports whether message emits token as a signal: the token must
@@ -723,9 +792,12 @@ func MessageMentionsUnanchored(message, token string) bool {
 const signalDecoration = " \t*_`#"
 
 // StageForPRMerged returns the first stage with a pr_merged trigger, or nil.
-func (p *Pipeline) StageForPRMerged() *Stage {
+func (p *Pipeline) StageForPRMerged(currentStage ...string) *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
+			if !t.AllowsFrom(currentStage...) {
+				continue
+			}
 			if t.PRMerged {
 				return &p.Stages[i]
 			}
@@ -735,9 +807,12 @@ func (p *Pipeline) StageForPRMerged() *Stage {
 }
 
 // StageForPRClosed returns the first stage with a pr_closed trigger, or nil.
-func (p *Pipeline) StageForPRClosed() *Stage {
+func (p *Pipeline) StageForPRClosed(currentStage ...string) *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
+			if !t.AllowsFrom(currentStage...) {
+				continue
+			}
 			if t.PRClosed {
 				return &p.Stages[i]
 			}
@@ -747,9 +822,12 @@ func (p *Pipeline) StageForPRClosed() *Stage {
 }
 
 // StageForPRConditions returns the first stage whose trigger has a non-nil PRConditions, or nil.
-func (p *Pipeline) StageForPRConditions() *Stage {
+func (p *Pipeline) StageForPRConditions(currentStage ...string) *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
+			if !t.AllowsFrom(currentStage...) {
+				continue
+			}
 			if t.PRConditions != nil {
 				return &p.Stages[i]
 			}
@@ -760,10 +838,13 @@ func (p *Pipeline) StageForPRConditions() *Stage {
 
 // StageForJudgeVerdict returns the first stage that has a judge_verdict trigger
 // matching the given verdict ("pass" or "fail"). Returns nil if none match.
-func (p *Pipeline) StageForJudgeVerdict(verdict string) *Stage {
+func (p *Pipeline) StageForJudgeVerdict(verdict string, currentStage ...string) *Stage {
 	verdict = strings.ToLower(strings.TrimSpace(verdict))
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
+			if !t.AllowsFrom(currentStage...) {
+				continue
+			}
 			if t.JudgeVerdict != "" && strings.EqualFold(t.JudgeVerdict, verdict) {
 				return &p.Stages[i]
 			}
@@ -774,10 +855,13 @@ func (p *Pipeline) StageForJudgeVerdict(verdict string) *Stage {
 
 // StageForGateResult returns the first stage that has a gate_result trigger
 // matching the given stage ID and verdict. Returns nil if none match.
-func (p *Pipeline) StageForGateResult(stageID, verdict string) *Stage {
+func (p *Pipeline) StageForGateResult(stageID, verdict string, currentStage ...string) *Stage {
 	verdict = strings.ToLower(strings.TrimSpace(verdict))
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
+			if !t.AllowsFrom(currentStage...) {
+				continue
+			}
 			if t.GateResult != nil &&
 				strings.EqualFold(t.GateResult.Stage, stageID) &&
 				strings.EqualFold(t.GateResult.Verdict, verdict) {
@@ -791,9 +875,12 @@ func (p *Pipeline) StageForGateResult(stageID, verdict string) *Stage {
 // StageForOutputMatches returns the first stage that has an output_matches
 // trigger that evaluates to true given the current outputs. Returns nil if
 // none match.
-func (p *Pipeline) StageForOutputMatches(outputs map[string]map[string]interface{}) *Stage {
+func (p *Pipeline) StageForOutputMatches(outputs map[string]map[string]interface{}, currentStage ...string) *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
+			if !t.AllowsFrom(currentStage...) {
+				continue
+			}
 			if t.OutputMatches != nil && outputMatches(t.OutputMatches, outputs) {
 				return &p.Stages[i]
 			}
