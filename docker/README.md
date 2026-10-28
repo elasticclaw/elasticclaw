@@ -103,7 +103,7 @@ For a hub running on the host, start the separate telemetry stack from the repos
 docker compose -f docker/compose.observability.yml up -d
 ```
 
-This stack uses host port 3000 for Grafana, which conflicts with the Next.js dev server above. Stop that server before starting Grafana. The collector exposes OTLP/HTTP on `127.0.0.1:4318` and OTLP/gRPC on `127.0.0.1:4317`; storage backends remain internal to the Compose network.
+Grafana listens on host port 3001 by default so it does not clash with the Next.js dev server; set `GRAFANA_PORT` to change it. The collector exposes OTLP/HTTP on `127.0.0.1:4318` and OTLP/gRPC on `127.0.0.1:4317`; storage backends remain internal to the Compose network.
 
 Add this block to the host hub's `hub.yaml` and restart the hub:
 
@@ -119,7 +119,7 @@ observability:
 
 Observability is disabled when this block is absent or `enabled` is false. Standard `OTEL_EXPORTER_OTLP_*` environment variables override exporter settings. The hub continues serving if the collector is unavailable. For a hub inside Docker Desktop, use `http://host.docker.internal:4318` with an appropriate reachable collector binding instead; the default loopback binding is intended for a host process.
 
-Open [Grafana](http://localhost:3000/grafana/), sign in with `admin` / `admin`, and set a password when prompted. In **Explore**, select:
+Open [Grafana](http://localhost:3001/grafana/), sign in with `admin` / `admin`, and set a password when prompted. In **Explore**, select:
 
 - **VictoriaMetrics** for Go runtime, HTTP, WebSocket connection, and host metrics. Metrics use Prometheus naming (dots become underscores); use the metric browser to find `http_server_request_duration_seconds` and `system_filesystem_inodes_usage`.
 - **VictoriaLogs** for hub messages; start with `*` and narrow the time range or filter `log.component`.

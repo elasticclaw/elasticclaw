@@ -46,12 +46,12 @@ services:
     image: grafana/grafana-oss:12.4.3
     restart: unless-stopped
     environment:
-      GF_SERVER_ROOT_URL: http://localhost:3000/grafana/
+      GF_SERVER_ROOT_URL: http://localhost:${GRAFANA_PORT:-3001}/grafana/
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
