@@ -56,3 +56,13 @@ providers:
     image: elasticclaw/claw-agent:dev
     # Docker network shared between hub and agent containers
     network: elasticclaw-dev
+
+# Optional telemetry for a hub running on the host; see docker/README.md.
+# Start the backend with docker compose -f docker/compose.observability.yml up -d.
+# observability:
+#   enabled: true
+#   otlp_endpoint: http://localhost:4318
+#   service_name: elasticclaw-hub
+#   environment: local
+#   traces_sample_ratio: 1.0
+#   metrics_interval: 15s

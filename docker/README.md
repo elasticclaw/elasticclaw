@@ -94,3 +94,42 @@ You can also trigger agents via workflows configured with `provider: docker` in 
 ## Limitations
 
 This environment is for local development only. For end-to-end testing with real issue trackers and PRs you still need a public URL (see `make e2e` in the root Makefile). Do not use this compose file in production.
+
+## Optional observability stack
+
+For a hub running on the host, start the separate telemetry stack from the repository root:
+
+```bash
+docker compose -f docker/compose.observability.yml up -d
+```
+
+This stack uses host port 3000 for Grafana, which conflicts with the Next.js dev server above. Stop that server before starting Grafana. The collector exposes OTLP/HTTP on `127.0.0.1:4318` and OTLP/gRPC on `127.0.0.1:4317`; storage backends remain internal to the Compose network.
+
+Add this block to the host hub's `hub.yaml` and restart the hub:
+
+```yaml
+observability:
+  enabled: true
+  otlp_endpoint: http://localhost:4318
+  service_name: elasticclaw-hub
+  environment: local
+  traces_sample_ratio: 1.0
+  metrics_interval: 15s
+```
+
+Observability is disabled when this block is absent or `enabled` is false. Standard `OTEL_EXPORTER_OTLP_*` environment variables override exporter settings. The hub continues serving if the collector is unavailable. For a hub inside Docker Desktop, use `http://host.docker.internal:4318` with an appropriate reachable collector binding instead; the default loopback binding is intended for a host process.
+
+Open [Grafana](http://localhost:3000/grafana/), sign in with `admin` / `admin`, and set a password when prompted. In **Explore**, select:
+
+- **VictoriaMetrics** for Go runtime, HTTP, WebSocket connection, and host metrics. Metrics use Prometheus naming (dots become underscores); use the metric browser to find `http_server_request_duration_seconds` and `system_filesystem_inodes_usage`.
+- **VictoriaLogs** for hub messages; start with `*` and narrow the time range or filter `log.component`.
+- **Tempo** for traces; search for the `elasticclaw-hub` service. A span's logs link queries VictoriaLogs by trace ID. Correlation requires a structured log emitted with the span context; legacy `log.Printf` messages have no trace context.
+
+Metrics are retained for 15 days, logs for 7 days, and traces for 72 hours in named volumes. The collector mounts the host filesystem read-only to collect CPU, memory, filesystem (including inodes), disk, network, and load metrics. On Docker Desktop these represent its Linux VM, not native macOS/Windows host metrics; native host collection needs a collector running on that host.
+
+```bash
+docker compose -f docker/compose.observability.yml logs -f collector
+docker compose -f docker/compose.observability.yml down
+```
+
+`down` preserves data; adding `--volumes` deletes it. The first Grafana startup requires internet access to install the VictoriaLogs datasource plugin. The stack is a single-node development setup; backend configuration lives under `docker/observability/` for reuse by deployment tooling.

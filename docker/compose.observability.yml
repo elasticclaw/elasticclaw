@@ -1,0 +1,67 @@
+name: elasticclaw-observability
+
+services:
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.164.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    restart: unless-stopped
+    mem_limit: 512m
+    volumes:
+      - ./observability/collector.yaml:/etc/otelcol/config.yaml:ro
+      - /:/hostfs:ro
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    depends_on:
+      - victoriametrics
+      - victorialogs
+      - tempo
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.155.0
+    command:
+      - -storageDataPath=/storage
+      - -retentionPeriod=15d
+      - -opentelemetry.usePrometheusNaming=true
+    restart: unless-stopped
+    volumes:
+      - metrics-data:/storage
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.53.0
+    command: ["-storageDataPath=/storage", "-retentionPeriod=7d"]
+    restart: unless-stopped
+    volumes:
+      - logs-data:/storage
+
+  tempo:
+    image: grafana/tempo:3.1.0
+    command: ["-target=all", "-config.file=/etc/tempo.yaml"]
+    restart: unless-stopped
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+      - traces-data:/var/tempo
+
+  grafana:
+    image: grafana/grafana-oss:12.4.14
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:3000/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - victoriametrics
+      - victorialogs
+      - tempo
+
+volumes:
+  metrics-data:
+  logs-data:
+  traces-data:
+  grafana-data:
