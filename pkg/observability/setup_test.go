@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestSetupDisabled(t *testing.T) {
@@ -36,6 +38,45 @@ func TestSetupDisabled(t *testing.T) {
 		if tp != otel.GetTracerProvider() || mp != otel.GetMeterProvider() || lp != global.GetLoggerProvider() || propagation != otel.GetTextMapPropagator() || errorsHandler != otel.GetErrorHandler() || transport != http.DefaultTransport || writer != log.Writer() || logger != Logger() {
 			t.Fatal("disabled setup changed global state")
 		}
+	}
+}
+
+func TestSetupEnabledRestoresGlobals(t *testing.T) {
+	for _, signal := range []string{"", "TRACES_", "METRICS_", "LOGS_"} {
+		t.Setenv("OTEL_EXPORTER_OTLP_"+signal+"ENDPOINT", "")
+	}
+	tp, mp, lp := otel.GetTracerProvider(), otel.GetMeterProvider(), global.GetLoggerProvider()
+	propagation, errorsHandler := otel.GetTextMapPropagator(), otel.GetErrorHandler()
+	transport, writer, logger := http.DefaultTransport, log.Writer(), Logger()
+	// Exporters do not dial on construction; port 1 refuses the final flush quickly.
+	shutdown, err := Setup(t.Context(), &types.ObservabilityConfig{Enabled: true, OTLPEndpoint: "http://127.0.0.1:1"}, "test", "commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := http.DefaultTransport.(*otelhttp.Transport); !ok {
+		t.Errorf("DefaultTransport = %T", http.DefaultTransport)
+	}
+	if _, ok := log.Writer().(*logTee); !ok {
+		t.Errorf("log writer = %T", log.Writer())
+	}
+	if _, ok := otel.GetTracerProvider().(*sdktrace.TracerProvider); !ok {
+		t.Errorf("tracer provider = %T", otel.GetTracerProvider())
+	}
+	if _, ok := otel.GetMeterProvider().(*sdkmetric.MeterProvider); !ok {
+		t.Errorf("meter provider = %T", otel.GetMeterProvider())
+	}
+	if Logger() == logger {
+		t.Error("structured logger not replaced")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	started := time.Now()
+	_ = shutdown(ctx) // The unreachable collector may fail the final export.
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Errorf("shutdown took %v", elapsed)
+	}
+	if tp != otel.GetTracerProvider() || mp != otel.GetMeterProvider() || lp != global.GetLoggerProvider() || propagation != otel.GetTextMapPropagator() || errorsHandler != otel.GetErrorHandler() || transport != http.DefaultTransport || writer != log.Writer() || logger != Logger() {
+		t.Fatal("shutdown did not restore global state")
 	}
 }
 
