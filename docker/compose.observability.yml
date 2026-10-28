@@ -43,7 +43,7 @@ services:
       - traces-data:/var/tempo
 
   grafana:
-    image: grafana/grafana-oss:12.4.14
+    image: grafana/grafana-oss:12.4.3
     restart: unless-stopped
     environment:
       GF_SERVER_ROOT_URL: http://localhost:3000/grafana/
