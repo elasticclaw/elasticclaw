@@ -1144,6 +1144,12 @@ func (h *HubConfig) Validate() error {
 		return fmt.Errorf("hub config is nil")
 	}
 
+	// Validate telemetry first so another feature's error cannot leave it enabled.
+	if err := h.Observability.Validate(); err != nil {
+		h.Observability.Enabled = false
+		return fmt.Errorf("observability disabled: %w", err)
+	}
+
 	// Validate factories
 	for i, factory := range h.Factories {
 		if err := factory.Validate(); err != nil {

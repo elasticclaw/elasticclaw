@@ -508,7 +508,19 @@ type S3ArtifactStorageConfig struct {
 	PathStyle       bool   `yaml:"path_style,omitempty" json:"pathStyle,omitempty"`
 }
 
+// ObservabilityConfig configures opt-in OTLP telemetry for the hub.
+type ObservabilityConfig struct {
+	Enabled           bool     `yaml:"enabled"`
+	OTLPEndpoint      string   `yaml:"otlp_endpoint,omitempty"`
+	ServiceName       string   `yaml:"service_name,omitempty"`
+	Environment       string   `yaml:"environment,omitempty"`
+	TracesSampleRatio *float64 `yaml:"traces_sample_ratio,omitempty"`
+	MetricsInterval   string   `yaml:"metrics_interval,omitempty"`
+}
+
 type HubConfig struct {
+	Observability *ObservabilityConfig `yaml:"observability,omitempty"`
+
 	// SchemaVersion is the schema version of this hub config file.
 	// Defaults to "v1" if not specified for backward compatibility.
 	SchemaVersion string `yaml:"schema_version,omitempty"`
