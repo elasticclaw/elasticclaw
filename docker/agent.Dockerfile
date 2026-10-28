@@ -17,9 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24 (same version claw-bridge would install at bootstrap time)
+# and fail the build below the CVE-2026-111497 fix. The check is
+# cliversion.NodeCompatibleCheck verbatim; a test keeps the two in sync.
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
+RUN node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); process.exit((major === 24 && (minor > 22 || (minor === 22 && patch >= 1))) || major > 26 || (major === 26 && (minor > 12 || (minor === 12 && patch >= 1))) ? 0 : 1)'
 
 # Pre-install OpenClaw globally so bootstrap skips the npm install step.
 # Keep in sync with pkg/cliversion OpenClawVersion. Do not use --ignore-scripts:

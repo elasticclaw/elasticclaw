@@ -59,6 +59,7 @@ func NewTestServerWithConfig(t interface {
 		gatewayUnhealthyCounts:   make(map[string]int),
 		gatewayGraceGrantedAt:    make(map[string]time.Time),
 		gatewayEscalatedAt:       make(map[string]time.Time),
+		reaperFirstSeen:          make(map[string]time.Time),
 		dependencyStatus:         newDependencyStatusService(cfg),
 		webhookDedup:             make(map[string]time.Time),
 		githubBaseURL:            githubBaseURL,

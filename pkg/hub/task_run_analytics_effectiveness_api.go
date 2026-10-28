@@ -59,12 +59,13 @@ type taskRunAnalyticsRunsPerTicket struct {
 	Tickets int    `json:"tickets"`
 }
 type taskRunAnalyticsTopTicket struct {
-	TicketKey  string  `json:"ticketKey"`
-	IssueID    string  `json:"issueId"`
-	IssueTitle string  `json:"issueTitle"`
-	CostUsd    float64 `json:"costUsd"`
-	Runs       int     `json:"runs"`
-	Outcome    string  `json:"outcome"`
+	Approximate bool    `json:"approximate,omitempty"`
+	TicketKey   string  `json:"ticketKey"`
+	IssueID     string  `json:"issueId"`
+	IssueTitle  string  `json:"issueTitle"`
+	CostUsd     float64 `json:"costUsd"`
+	Runs        int     `json:"runs"`
+	Outcome     string  `json:"outcome"`
 }
 
 func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +200,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),0),
-			COALESCE(SUM(estimated_cost_usd),0), MIN(started_at), MAX(started_at)
+			COALESCE(SUM(estimated_cost_usd),0), MIN(started_at), MAX(started_at), MAX(cost_approximate)
 			FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY `+taskRunAnalyticsTicketKeySQL, a...)
 		if err != nil {
 			return out, err
@@ -209,13 +210,14 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			key, issueID, issueTitle           string
 			runs, finished, delivered, running int
 			cost                               float64
+			approximate                        bool
 			earliest, latest                   int64
 		}
 		tickets := map[string]*ticketAggregate{}
 		for ticketRows.Next() {
 			var ticketKey string
 			var t ticketAggregate
-			if err = ticketRows.Scan(&ticketKey, &t.issueID, &t.issueTitle, &t.runs, &t.finished, &t.delivered, &t.running, &t.cost, &t.earliest, &t.latest); err != nil {
+			if err = ticketRows.Scan(&ticketKey, &t.issueID, &t.issueTitle, &t.runs, &t.finished, &t.delivered, &t.running, &t.cost, &t.earliest, &t.latest, &t.approximate); err != nil {
 				return out, err
 			}
 			t.key = ticketKey
@@ -260,7 +262,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			}
 			runBuckets[bucket]++
 			if t.cost > 0 {
-				out.TopTicketsByCost = append(out.TopTicketsByCost, taskRunAnalyticsTopTicket{TicketKey: t.key, IssueID: t.issueID, IssueTitle: t.issueTitle, CostUsd: t.cost, Runs: t.runs, Outcome: outcome})
+				out.TopTicketsByCost = append(out.TopTicketsByCost, taskRunAnalyticsTopTicket{TicketKey: t.key, IssueID: t.issueID, IssueTitle: t.issueTitle, CostUsd: t.cost, Approximate: t.approximate, Runs: t.runs, Outcome: outcome})
 			}
 		}
 		for _, d := range ticketsByDay {
@@ -308,6 +310,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 }
 
 type taskRunAnalyticsCostDriver struct {
+	Approximate     bool                        `json:"approximate,omitempty"`
 	Name            string                      `json:"name"`
 	Runs            int                         `json:"runs"`
 	SuccessRate     float64                     `json:"successRate"`
@@ -366,7 +369,7 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 		col = "workflow_name"
 	}
 	w, a := taskRunAnalyticsSummaryWhere(f)
-	q := fmt.Sprintf(`SELECT %s, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status!='running' THEN 1 ELSE 0 END),0) FROM task_run_summaries %s GROUP BY %s ORDER BY 3 DESC`, col, w, col)
+	q := fmt.Sprintf(`SELECT %s, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status!='running' THEN 1 ELSE 0 END),0), MAX(cost_approximate) FROM task_run_summaries %s GROUP BY %s ORDER BY 3 DESC`, col, w, col)
 	rows, err := s.db.Query(q, a...)
 	if err != nil {
 		return nil, err
@@ -376,7 +379,7 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 	for rows.Next() {
 		var x taskRunAnalyticsCostDriver
 		var suc, fin int
-		if err = rows.Scan(&x.Name, &x.Runs, &x.CostUsd, &x.MergedPrs, &suc, &fin); err != nil {
+		if err = rows.Scan(&x.Name, &x.Runs, &x.CostUsd, &x.MergedPrs, &suc, &fin, &x.Approximate); err != nil {
 			return nil, err
 		}
 		if fin > 0 {

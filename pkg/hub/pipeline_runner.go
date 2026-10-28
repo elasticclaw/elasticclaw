@@ -105,6 +105,13 @@ func unanchoredSignalNudgeText(token string) string {
 //
 // No new queue: this rides the existing hub message injection.
 func (s *Server) nudgeUnanchoredSignal(clawID, message string) {
+	// A rejected anchored token gets its own correction, including when its
+	// destination was already visited and signalTokensForClaw omits it.
+	if ctx, ok := s.findPipelineContextForClaw(clawID); ok {
+		if pl := parsePipelineForContext(ctx); pl != nil && len(pl.RejectedMessageContainsTokens(message, s.getPipelineStage(clawID))) > 0 {
+			return
+		}
+	}
 	tokens := s.signalTokensForClaw(clawID)
 	var stray []string
 	for _, token := range tokens {
@@ -1191,7 +1198,99 @@ func (s *Server) renderStageInject(clawID string, stage pipeline.Stage, ctx pipe
 	if inputContext := formatManualTriggerInputs(manualInputs); inputContext != "" {
 		injectMsg = inputContext + "\n\n" + injectMsg
 	}
+	if !stage.Terminal && s.clawPushesToGitHub(clawID) {
+		// Prepended, not appended: resume paths truncate the inject from the end.
+		injectMsg = pushBranchEachStageRule + "\n\n" + injectMsg
+	}
 	return injectMsg
+}
+
+// pushBranchEachStageRule is prepended by the hub to every non-terminal stage
+// inject of a claw that works in git repos. A sandbox replacement starts from
+// a fresh clone and checkpoints never carry .git, so commits that exist only
+// in the sandbox are lost (NEXT-1407 lost its whole implementation this way).
+const pushBranchEachStageRule = "[hub] Before you send the signal that ends this stage, commit your work on your ticket branch in every repository you changed and push that branch to origin. Never push to the default branch, and pushing is not opening a pull request. This sandbox can be replaced at any moment from a fresh clone: only what is on origin survives."
+
+// stageBranchCheckScript runs in the workspace before a non-entry stage
+// starts. In every repo it pushes each local branch that has work origin
+// lacks, whether or not it is checked out, and reports what it cannot fix. It
+// never commits, never forces, and never pushes the default branch, main,
+// master or release/*. It ends with stageBranchCheckDone, so a run that died
+// early is told apart from a clean one. Ranges use "X ^ref" because hub-run
+// commands must not contain "..".
+const stageBranchCheckScript = `{ export GIT_TERMINAL_PROMPT=0; for g in */.git .[!.]*/.git; do [ -e "$g" ] || continue; d=${g%/.git}; (
+cd -- "$d" || { echo "PROBLEM $d: cannot enter the repository"; exit 0; }
+[ -n "$(git status --porcelain --untracked-files=no)" ] && echo "PROBLEM $d: uncommitted changes"
+git symbolic-ref --quiet HEAD >/dev/null || echo "PROBLEM $d: detached HEAD"
+def=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD); def=${def#origin/}
+[ -n "$def" ] || { echo "PROBLEM $d: unknown default branch"; exit 0; }
+[ "$(git rev-list --count "refs/heads/$def" ^"refs/remotes/origin/$def" 2>/dev/null || echo 0)" = 0 ] || echo "PROBLEM $d: commits on the default branch $def"
+git for-each-ref --format="%(refname)" refs/heads | while read -r r; do
+b=${r#refs/heads/}
+case "$b" in "$def"|main|master|release/*) continue;; esac
+[ "$(git rev-list --count "$r" ^"refs/remotes/origin/$def")" = 0 ] && continue
+git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null && [ "$(git rev-list --count "$r" ^"refs/remotes/origin/$b")" = 0 ] && continue
+if git push --quiet -u origin "$r:$r" </dev/null >/dev/null 2>&1; then echo "PUSHED $d: $b"; else echo "PROBLEM $d: push of $b failed"; fi
+done
+); done; echo ` + stageBranchCheckDone + `; }`
+
+const stageBranchCheckDone = "BRANCH-CHECK-DONE"
+
+// ensureStageBranchesPushed pushes what the previous stage left unpushed and
+// returns a note for the agent about anything it could not fix ("" if none).
+func (s *Server) ensureStageBranchesPushed(clawID string) string {
+	var providerID string
+	_ = s.db.QueryRow(`SELECT COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&providerID)
+	if providerID == "" {
+		return "" // no sandbox yet, so nothing to push
+	}
+	result, err := s.executePipelineCommand(clawID, stageBranchCheckScript, 2*time.Minute)
+	var stdout string
+	if result != nil {
+		stdout = result.Stdout
+	}
+	pushed, problems, done := parseStageBranchCheck(stdout)
+	if !done {
+		// Report it: the previous stage's commits may still exist only here.
+		log.Printf("[pipeline] branch check for claw %s did not finish: %v", shortID(clawID), err)
+		problems = append(problems, "the hub could not finish checking your branches")
+	}
+	if len(pushed) > 0 {
+		s.publishHubNotice(clawID, "[hub] Pushed work the previous stage left only in the sandbox: "+strings.Join(pushed, "; "))
+	}
+	if len(problems) == 0 {
+		return ""
+	}
+	return "[hub] Branch check before this stage: " + strings.Join(problems, "; ") + ". Fix this first: commit on your ticket branch and push it to origin."
+}
+
+func parseStageBranchCheck(stdout string) (pushed, problems []string, done bool) {
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "PUSHED "); ok {
+			pushed = append(pushed, rest)
+		} else if rest, ok := strings.CutPrefix(line, "PROBLEM "); ok {
+			problems = append(problems, rest)
+		} else if line == stageBranchCheckDone {
+			done = true
+		}
+	}
+	return pushed, problems, done
+}
+
+// clawPushesToGitHub reports whether the claw clones at least one repo it can
+// write to, i.e. whether there is a branch it could push.
+func (s *Server) clawPushesToGitHub(clawID string) bool {
+	var reposJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&reposJSON)
+	var repos []types.GitHubRepoAccess
+	_ = json.Unmarshal([]byte(reposJSON), &repos)
+	for _, r := range repos {
+		if r.Permissions == "write" && !isRepositoryPattern(r.Repo) && shouldCloneRepo(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // runOnEnter executes the on_enter actions for a given stage.
@@ -1211,6 +1310,15 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	// required gate could block the stage (and leave the watcher able to kill
 	// the claw on merge/close while the workflow is still blocked).
 	var runStdoutForPRScan string
+	// Before anything else in a non-entry stage, make sure the previous stage's
+	// commits are on origin: a sandbox replacement would lose them otherwise.
+	var branchCheckNote string
+	if !stage.Entry && !stage.Terminal && s.clawPushesToGitHub(clawID) {
+		branchCheckNote = s.ensureStageBranchesPushed(clawID)
+		if branchCheckNote != "" && stage.OnEnter.Inject == "" {
+			s.publishHubNotice(clawID, branchCheckNote)
+		}
+	}
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
 		startMsg := fmt.Sprintf("[hub] ▶ Running workflow command for stage %q", stage.ID)
 		if stage.OnEnter.Run.Timeout != "" {
@@ -1365,7 +1473,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		if stage.PlanGate && s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
 			alreadyRouted := false
 			if pl := parsePipelineForContext(ctx); pl != nil {
-				alreadyRouted = pl.StageForGateResult(stage.ID, "pass") != nil
+				alreadyRouted = pl.StageForGateResult(stage.ID, "pass", s.getPipelineStage(clawID)) != nil
 			}
 			// Destination stage inject owns the next agent turn when routed.
 			if alreadyRouted {
@@ -1389,8 +1497,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			autoTransitionVerdict = "pass"
 		}
 		gateResultHasRoute := false
+		requiredGateHasRoute := false
 		if pl := parsePipelineForContext(ctx); pl != nil {
-			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict) != nil
+			currentStage := s.getPipelineStage(clawID)
+			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict, currentStage) != nil
+			requiredGateHasRoute = pl.StageForGateResult(stage.ID, gateResult.Verdict, currentStage) != nil
 		}
 		notifyGateResult := func(message string) {
 			// Always surface gate outcomes in the transcript for human observers.
@@ -1472,7 +1583,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			} else {
 				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 			}
-			if pl := parsePipelineForContext(ctx); pl != nil && pl.StageForGateResult(stage.ID, gateResult.Verdict) != nil {
+			if requiredGateHasRoute {
 				return false, &routedRequiredGateError{stageID: stage.ID, verdict: gateResult.Verdict}
 			}
 			return false, fmt.Errorf("required gate %q %s", stage.ID, gateResult.Verdict)
@@ -1493,6 +1604,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	if stage.OnEnter.Inject != "" {
 		injectMsg := s.renderStageInject(clawID, stage, ctx)
+		if branchCheckNote != "" {
+			injectMsg = branchCheckNote + "\n\n" + injectMsg
+		}
 		if s.clawNeedsInitialPlan(clawID) && s.insertSystemMarker(clawID, s.tenantIDForClaw(clawID), initialPlanRequiredMarker) {
 			injectMsg = initialPlanWakeContent + "\n\nTask context:\n" + injectMsg
 		}
@@ -1956,6 +2070,7 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 // checkPipelineMessageTriggers evaluates pipeline triggers against a claw message
 // and transitions to the matching stage if found. Returns true if a transition occurred.
 func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
+	s.nudgeRejectedPipelineSignals(clawID, message)
 	ctx, stage, ok := s.pipelineStageForMessageContains(clawID, message)
 	if !ok {
 		ctx, ok = s.findPipelineContextForClaw(clawID)
@@ -1972,7 +2087,7 @@ func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
 		// prevent persistent DB state from re-triggering backwards regressions
 		// on every subsequent message.
 		outputs := s.loadPipelineOutputs(clawID)
-		stage = pl.StageForOutputMatches(outputs)
+		stage = pl.StageForOutputMatches(outputs, s.getPipelineStage(clawID))
 		if stage != nil && s.hasVisitedPipelineStage(clawID, stage.ID) {
 			stage = nil
 		}
@@ -1997,7 +2112,7 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 	if pl == nil {
 		return pipelineContext{}, nil, false
 	}
-	stage := pl.StageForMessageContains(message)
+	stage := pl.StageForMessageContains(message, s.getPipelineStage(clawID))
 	if stage == nil {
 		return pipelineContext{}, nil, false
 	}
@@ -2188,7 +2303,7 @@ func (s *Server) autoTransitionAfterJudge(clawID, verdict string, ctx pipelineCo
 	if pl == nil {
 		return
 	}
-	stage := pl.StageForJudgeVerdict(verdict)
+	stage := pl.StageForJudgeVerdict(verdict, s.getPipelineStage(clawID))
 	if stage == nil {
 		log.Printf("[pipeline] claw %s: no stage with judge_verdict=%q trigger found", clawID[:8], verdict)
 		return
@@ -2322,7 +2437,7 @@ func (s *Server) autoTransitionAfterGate(clawID, stageID, verdict string, ctx pi
 	if pl == nil {
 		return
 	}
-	stage := pl.StageForGateResult(stageID, verdict)
+	stage := pl.StageForGateResult(stageID, verdict, s.getPipelineStage(clawID))
 	if stage == nil {
 		log.Printf("[pipeline] claw %s: no stage with gate_result stage=%s verdict=%s trigger found", clawID[:8], stageID, verdict)
 		if verdict == "error" {

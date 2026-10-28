@@ -1,18 +1,21 @@
 "use client"
 
-import { useEffect, useMemo, useState, type ReactNode } from "react"
-import { AlertCircle, Loader2 } from "lucide-react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { AlertCircle, ChevronDown, Loader2 } from "lucide-react"
 import { ApiError, fetchActivityMessages } from "@/lib/api"
-import type { AgentActivity, ApiMessage } from "@/lib/types"
+import type { AgentActivity, ApiMessage, WorkflowEffectEvent } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
 
 const activityPageSize = 100
 
 interface ActivityLogFetcher {
   fetchInitial: () => Promise<ApiMessage[]>
-  fetchOlder: (before: string) => Promise<ApiMessage[]>
+  // beforeId pairs with before as a compound (created_at, id) cursor so a page
+  // boundary inside a same-timestamp group cannot skip its remaining rows.
+  fetchOlder: (before: string, beforeId?: string) => Promise<ApiMessage[]>
 }
 
 export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?: ActivityLogFetcher }) {
@@ -26,9 +29,14 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
   const activeFetcher: ActivityLogFetcher | null = useMemo(() => {
     return fetcher || (clawId ? {
       fetchInitial: () => fetchActivityMessages(clawId, { limit: activityPageSize, order: "desc" }),
-      fetchOlder: (before: string) => fetchActivityMessages(clawId, { before, limit: activityPageSize, order: "desc" }),
+      fetchOlder: (before, beforeId) => fetchActivityMessages(clawId, { before, beforeId, limit: activityPageSize, order: "desc" }),
     } : null)
   }, [fetcher, clawId])
+
+  // Generation token for the active fetcher: bumped whenever the fetcher
+  // changes (or the component unmounts) so an in-flight older-page response
+  // from a previous fetcher cannot merge into the new target's messages.
+  const fetcherGeneration = useRef(0)
 
   useEffect(() => {
     if (!activeFetcher) return
@@ -36,6 +44,7 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
     queueMicrotask(() => {
       if (cancelled) return
       setLoading(true)
+      setLoadingOlder(false)
       setMessages([])
       setAccessDenied(false)
       setError(null)
@@ -52,24 +61,35 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
         })
         .finally(() => { if (!cancelled) setLoading(false) })
     })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      fetcherGeneration.current += 1
+    }
   }, [activeFetcher])
 
   const loadOlder = async () => {
     if (!activeFetcher) return
-    const before = messages[0]?.created_at
-    if (!before || loadingOlder) return
+    const oldest = messages[0]
+    if (!oldest?.created_at || loadingOlder) return
+    const generation = fetcherGeneration.current
     setLoadingOlder(true)
     setError(null)
     try {
-      const page = await activeFetcher.fetchOlder(before)
-      setMessages((current) => [...page.reverse(), ...current])
+      const page = await activeFetcher.fetchOlder(oldest.created_at, oldest.id)
+      if (generation !== fetcherGeneration.current) return
+      setMessages((current) => {
+        const seen = new Set(current.map((message) => message.id))
+        return [...page.reverse().filter((message) => !seen.has(message.id)), ...current]
+      })
       setHasOlder(page.length === activityPageSize)
     } catch (err) {
+      if (generation !== fetcherGeneration.current) return
       if (err instanceof ApiError && err.status === 403) setAccessDenied(true)
       else setError(err instanceof Error ? err.message : "Unable to load older activity")
     } finally {
-      setLoadingOlder(false)
+      // A stale response leaves the spinner to the next fetcher's effect
+      // reset rather than clearing state it no longer owns.
+      if (generation === fetcherGeneration.current) setLoadingOlder(false)
     }
   }
 
@@ -97,6 +117,8 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
 }
 
 function ActivityLine({ message }: { message: ApiMessage }) {
+  const effectEvent = parseWorkflowEffectEvent(message)
+  if (effectEvent) return <WorkflowEffectLine message={message} event={effectEvent} />
   const activity = parseActivity(message)
   const isState = message.role === "state"
   const label = activity?.tool || activity?.kind || (isState ? "state" : "activity")
@@ -139,13 +161,144 @@ function isSafeHttpUrl(value: string) {
   }
 }
 
+// WorkflowEffectLine renders a workflow v2 effect or agent-task lifecycle log
+// line: status, the command that ran, and collapsible stdout/stderr (or the
+// instructions given to the agent) so run logs explain what the workflow did.
+function WorkflowEffectLine({ message, event }: { message: ApiMessage; event: WorkflowEffectEvent }) {
+  const failed = event.succeeded === false ||
+    ["permanent_failed", "retryable_failed", "failed", "timed_out", "unknown"].includes(event.status ?? "")
+  return (
+    <div className="grid gap-2 px-3 py-3 text-sm sm:grid-cols-[8rem_10rem_minmax(0,1fr)]">
+      <time className="text-xs text-muted-foreground">{formatTimestamp(message.created_at)}</time>
+      <div className="flex min-w-0 items-start gap-2">
+        <span className="truncate font-medium text-primary">{event.kind}</span>
+        <Badge variant="outline" className="shrink-0 text-[10px]">effect</Badge>
+      </div>
+      <div className="min-w-0 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={failed ? "destructive" : "secondary"}>{event.status || event.phase}</Badge>
+          {event.attempt ? <span className="text-xs text-muted-foreground">attempt {event.attempt}</span> : null}
+          <span className="text-xs text-muted-foreground">{message.content}</span>
+        </div>
+        {event.command && <div className="break-all rounded bg-muted px-2 py-1 font-mono text-xs text-foreground">{event.command}</div>}
+        {event.task_id && <div className="text-xs text-muted-foreground">task {event.task_id}</div>}
+        {event.exit_code !== undefined && <div className="text-xs text-muted-foreground">exit code {event.exit_code}</div>}
+        {event.error && <div className="break-words text-destructive">{event.error}</div>}
+        {event.terminal_reason && <div className="break-words text-destructive">{event.terminal_reason}</div>}
+        <OutputBlock label="stdout" value={event.stdout} />
+        <OutputBlock label="stderr" value={event.stderr} />
+        <OutputBlock label="instructions" value={event.instructions} />
+      </div>
+    </div>
+  )
+}
+
+function OutputBlock({ label, value }: { label: string; value?: string }) {
+  if (!value) return null
+  const lineCount = value.trim().length === 0 ? 0 : value.trim().split("\n").length
+  return (
+    <Collapsible>
+      <CollapsibleTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-muted-foreground">
+          <ChevronDown className="size-3" />
+          {label} ({lineCount} line{lineCount === 1 ? "" : "s"})
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 font-mono text-xs">{value}</pre>
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
 function parseActivity(message: ApiMessage): AgentActivity | null {
   if (!message.format?.startsWith("activity:")) return null
+  let parsed: unknown
   try {
-    return JSON.parse(message.format.slice("activity:".length)) as AgentActivity
+    parsed = JSON.parse(message.format.slice("activity:".length))
   } catch {
     return null
   }
+  if (!isRecord(parsed) || typeof parsed.kind !== "string") return null
+  return {
+    kind: parsed.kind,
+    stream: optionalString(parsed, "stream"),
+    phase: optionalString(parsed, "phase"),
+    tool: optionalString(parsed, "tool"),
+    detail: optionalString(parsed, "detail"),
+    command: optionalString(parsed, "command"),
+    path: optionalString(parsed, "path"),
+    url: optionalString(parsed, "url"),
+    message: optionalString(parsed, "message"),
+    error: optionalString(parsed, "error"),
+    call_id: optionalString(parsed, "call_id"),
+    duration_ms: optionalNumber(parsed, "duration_ms"),
+    exit_code: optionalNumber(parsed, "exit_code"),
+    result: optionalString(parsed, "result"),
+    subagent_name: optionalString(parsed, "subagent_name"),
+    subagent_type: optionalString(parsed, "subagent_type"),
+    subagent_model: optionalString(parsed, "subagent_model"),
+    subagent_prompt: optionalString(parsed, "subagent_prompt"),
+  }
+}
+
+// The runtime phase allow-list is derived from the WorkflowEffectEvent["phase"]
+// union via an exhaustive Record: adding a phase to the union without listing
+// it here is a compile error, so the parser can never drift from the contract.
+const WORKFLOW_EFFECT_PHASES: Record<WorkflowEffectEvent["phase"], true> = {
+  planned: true,
+  started: true,
+  dispatched: true,
+  finished: true,
+  assigned: true,
+}
+
+function isWorkflowEffectPhase(value: unknown): value is WorkflowEffectEvent["phase"] {
+  return typeof value === "string" && value in WORKFLOW_EFFECT_PHASES
+}
+
+// parseWorkflowEffectEvent decodes the hub-authored "workflow:effect:<json>"
+// format. The payload is validated field by field so a malformed row degrades
+// to a plain-text line instead of crashing the log view.
+function parseWorkflowEffectEvent(message: ApiMessage): WorkflowEffectEvent | null {
+  if (!message.format?.startsWith("workflow:effect:")) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(message.format.slice("workflow:effect:".length))
+  } catch {
+    return null
+  }
+  if (!isRecord(parsed) || typeof parsed.kind !== "string" || !isWorkflowEffectPhase(parsed.phase)) {
+    return null
+  }
+  return {
+    kind: parsed.kind,
+    phase: parsed.phase,
+    status: optionalString(parsed, "status"),
+    attempt: optionalNumber(parsed, "attempt"),
+    definition_path: optionalString(parsed, "definition_path"),
+    command: optionalString(parsed, "command"),
+    task_id: optionalString(parsed, "task_id"),
+    exit_code: optionalNumber(parsed, "exit_code"),
+    succeeded: typeof parsed.succeeded === "boolean" ? parsed.succeeded : undefined,
+    stdout: optionalString(parsed, "stdout"),
+    stderr: optionalString(parsed, "stderr"),
+    error: optionalString(parsed, "error"),
+    instructions: optionalString(parsed, "instructions"),
+    terminal_reason: optionalString(parsed, "terminal_reason"),
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function optionalString(record: Record<string, unknown>, key: string): string | undefined {
+  return typeof record[key] === "string" ? (record[key] as string) : undefined
+}
+
+function optionalNumber(record: Record<string, unknown>, key: string): number | undefined {
+  return typeof record[key] === "number" ? (record[key] as number) : undefined
 }
 
 export function LoadingState({ label }: { label: string }) {

@@ -934,21 +934,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 			fileBytes[k] = []byte(v)
 		}
 
-		var provErr error
-		switch provider {
-		case "replicated":
-			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-		case "daytona":
-			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-		case "exedev":
-			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-		case "noop":
-			// Noop provider is not implemented; skip
-		default:
-			provErr = fmt.Errorf("unknown provider %s", provider)
-		}
+		provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 
 		if provErr != nil {
 			log.Printf("[factory] claw %s provision failed: %v", clawID[:8], provErr)

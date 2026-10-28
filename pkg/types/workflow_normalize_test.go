@@ -734,3 +734,28 @@ jobs:
 		t.Fatalf("yaml.Unmarshal() error = %v, want stages guidance", err)
 	}
 }
+
+func TestNormalizeWorkflowPreservesInitialPlan(t *testing.T) {
+	for _, setting := range []string{"", "initial_plan: true\n", "initial_plan: false\n"} {
+		t.Run(strings.TrimSpace(setting), func(t *testing.T) {
+			var workflow WorkflowConfig
+			if err := yaml.Unmarshal([]byte(setting+"name: plan-test\nstages:\n  - id: preflight\n    entry: true\n"), &workflow); err != nil {
+				t.Fatal(err)
+			}
+			if err := NormalizeWorkflowConfig(&workflow); err != nil {
+				t.Fatal(err)
+			}
+			var roundTrip WorkflowConfig
+			if err := yaml.Unmarshal([]byte(workflow.PipelineYAML), &roundTrip); err != nil {
+				t.Fatal(err)
+			}
+			if setting == "" {
+				if roundTrip.InitialPlan != nil {
+					t.Fatal("omitted initial_plan must remain unset")
+				}
+			} else if roundTrip.InitialPlan == nil || *roundTrip.InitialPlan != *workflow.InitialPlan {
+				t.Fatalf("initial_plan lost during normalization: %s", workflow.PipelineYAML)
+			}
+		})
+	}
+}

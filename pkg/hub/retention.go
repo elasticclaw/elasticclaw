@@ -190,7 +190,7 @@ func writeCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []types
 		}
 	}
 	if checkpointID != "" {
-		if _, err := tx.Exec(`UPDATE claw_checkpoints SET root_tree_sha256=? WHERE id=? AND root_tree_sha256=''`, rootSHA, checkpointID); err != nil {
+		if _, err := tx.Exec(`UPDATE claw_checkpoints SET root_tree_sha256=? WHERE id=? AND status='creating'`, rootSHA, checkpointID); err != nil {
 			return err
 		}
 	}
