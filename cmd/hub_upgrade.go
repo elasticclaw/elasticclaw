@@ -124,30 +124,7 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 		targetVer,
 	)
 
-	moveCmd := "mv /tmp/elasticclaw-new \"$SELF\""
-	versionCmd := "elasticclaw version 2>/dev/null"
-	restartCheckCmd := "systemctl is-active --quiet elasticclaw 2>/dev/null"
-	restartCmd := "systemctl restart elasticclaw"
-	if useSudo {
-		moveCmd = "sudo mv /tmp/elasticclaw-new \"$SELF\""
-		versionCmd = "sudo elasticclaw version 2>/dev/null"
-		restartCheckCmd = "sudo systemctl is-active --quiet elasticclaw 2>/dev/null"
-		restartCmd = "sudo systemctl restart elasticclaw"
-	}
-
-	script := fmt.Sprintf(`set -euo pipefail
-echo "Downloading %s..."
-curl -fsSL %q -o /tmp/elasticclaw-new
-chmod +x /tmp/elasticclaw-new
-SELF=$(which elasticclaw || echo /usr/local/bin/elasticclaw)
-%s
-echo "Upgraded to $(%s)"
-if %s; then
-  echo "Restarting hub service..."
-  %s
-  echo "Hub service restarted."
-fi
-`, targetVer, downloadURL, moveCmd, versionCmd, restartCheckCmd, restartCmd)
+	script := hubUpgradeScript(targetVer, downloadURL, useSudo)
 
 	fmt.Printf("Upgrading remote hub to %s...\n", targetVer)
 	out, err := sshRunClient(client, script)
@@ -245,4 +222,38 @@ func parseVersionFromOutput(s string) string {
 		}
 	}
 	return "unknown"
+}
+
+// hubUpgradeMinFreeKB is the free space required on /tmp before downloading.
+// The hub binary is ~100MB; the margin keeps SQLite and the SSM agent writable.
+const hubUpgradeMinFreeKB = 500 * 1024
+
+// hubUpgradeScript builds the remote upgrade script. It refuses to download
+// when /tmp is nearly full and always removes a partial download: a leftover
+// binary on a small root volume fills the disk, which breaks the hub's
+// sandbox uploads and locks out SSM sessions.
+func hubUpgradeScript(targetVer, downloadURL string, useSudo bool) string {
+	sudo := ""
+	if useSudo {
+		sudo = "sudo "
+	}
+	return fmt.Sprintf(`set -euo pipefail
+trap 'rm -f /tmp/elasticclaw-new' EXIT
+FREE_KB=$(df -Pk /tmp | awk 'NR==2 {print $4}')
+if [ "$FREE_KB" -lt %d ]; then
+  echo "Refusing to upgrade: only $((FREE_KB / 1024))MB free on /tmp (need %dMB)." >&2
+  exit 1
+fi
+echo "Downloading %s..."
+curl -fsSL %q -o /tmp/elasticclaw-new
+chmod +x /tmp/elasticclaw-new
+SELF=$(which elasticclaw || echo /usr/local/bin/elasticclaw)
+%smv /tmp/elasticclaw-new "$SELF"
+echo "Upgraded to $(%selasticclaw version 2>/dev/null)"
+if %ssystemctl is-active --quiet elasticclaw 2>/dev/null; then
+  echo "Restarting hub service..."
+  %ssystemctl restart elasticclaw
+  echo "Hub service restarted."
+fi
+`, hubUpgradeMinFreeKB, hubUpgradeMinFreeKB/1024, targetVer, downloadURL, sudo, sudo, sudo, sudo)
 }

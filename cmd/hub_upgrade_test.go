@@ -1,6 +1,12 @@
 package cmd
 
-import "testing"
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestParseVersionFromOutput(t *testing.T) {
 	t.Parallel()
@@ -78,5 +84,43 @@ func TestSameReleaseVersion(t *testing.T) {
 				t.Fatalf("sameReleaseVersion(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestHubUpgradeScriptGuardsDisk(t *testing.T) {
+	cases := []struct {
+		name    string
+		freeKB  string
+		wantOut string
+	}{
+		{name: "refuses when /tmp is nearly full", freeKB: "1024", wantOut: "Refusing to upgrade"},
+		{name: "removes partial download on curl failure", freeKB: "10000000", wantOut: "Downloading"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			writeStub(t, bin, "df", "echo header; echo \"fs 0 0 "+tc.freeKB+" 0% /tmp\"")
+			writeStub(t, bin, "curl", "echo partial > /tmp/elasticclaw-new; exit 23")
+
+			cmd := exec.Command("bash", "-c", hubUpgradeScript("v1", "https://example.invalid", false))
+			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("script succeeded, want failure; output:\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.wantOut) {
+				t.Fatalf("output missing %q:\n%s", tc.wantOut, out)
+			}
+			if _, statErr := os.Stat("/tmp/elasticclaw-new"); !os.IsNotExist(statErr) {
+				t.Fatalf("/tmp/elasticclaw-new left behind (stat err: %v)", statErr)
+			}
+		})
+	}
+}
+
+func writeStub(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
