@@ -349,6 +349,15 @@ func TestUninstallPreservesData(t *testing.T) {
 		if _, err := os.Stat(i.path(ConfigDir)); !os.IsNotExist(err) {
 			t.Fatal("configs retained")
 		}
+		var out bytes.Buffer
+		i.Out = &out
+		if err := i.Status(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		contains(t, out.String(), "Observability stack is not installed")
+		if !purge {
+			contains(t, out.String(), "Retained data: ")
+		}
 	}
 }
 

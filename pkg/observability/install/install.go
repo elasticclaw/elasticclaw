@@ -205,6 +205,13 @@ func (i *Installer) Status(ctx context.Context) error {
 	if err := i.platform(ctx); err != nil {
 		return err
 	}
+	if !i.installed() {
+		fmt.Fprintln(i.Out, "Observability stack is not installed")
+		if size, err := dirSize(i.path(DataDir)); err == nil {
+			fmt.Fprintf(i.Out, "Retained data: %s in %s\n", formatMiB(size), i.path(DataDir))
+		}
+		return nil
+	}
 	var failures []error
 	for _, c := range Components {
 		active, err := i.Runner.Run(ctx, "systemctl", "is-active", unitName(c.Name))
@@ -220,21 +227,8 @@ func (i *Installer) Status(ctx context.Context) error {
 		if target, err := os.Readlink(i.path(BinaryDir, c.Name, "current")); err == nil {
 			version = strings.TrimPrefix(filepath.Base(target), c.Name+"-")
 		}
-		var size int64
-		walkErr := filepath.WalkDir(i.path(DataDir, c.Name), func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.Type().IsRegular() {
-				info, err := entry.Info()
-				if err != nil {
-					return err
-				}
-				size += info.Size()
-			}
-			return nil
-		})
-		usage := fmt.Sprintf("%.1f MiB", float64(size)/(1<<20))
+		size, walkErr := dirSize(i.path(DataDir, c.Name))
+		usage := formatMiB(size)
 		if walkErr != nil && !os.IsNotExist(walkErr) {
 			usage = walkErr.Error()
 			failures = append(failures, walkErr)
@@ -246,3 +240,36 @@ func (i *Installer) Status(ctx context.Context) error {
 	}
 	return errors.Join(failures...)
 }
+
+// installed reports whether any part of the stack is present, including a failed install.
+func (i *Installer) installed() bool {
+	if _, err := os.Stat(i.path(MarkerFile)); err == nil {
+		return true
+	}
+	for _, c := range Components {
+		if _, err := os.Stat(i.path(UnitDir, unitName(c.Name))); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func dirSize(root string) (int64, error) {
+	var size int64
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
+}
+
+func formatMiB(size int64) string { return fmt.Sprintf("%.1f MiB", float64(size)/(1<<20)) }
