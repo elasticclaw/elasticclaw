@@ -5,7 +5,7 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
-  hostmetrics:
+  host_metrics:
     collection_interval: 15s
     root_path: /hostfs
     scrapers:
@@ -42,7 +42,7 @@ exporters:
 service:
   pipelines:
     metrics:
-      receivers: [otlp, hostmetrics]
+      receivers: [otlp, host_metrics]
       processors: [memory_limiter, batch]
       exporters: [otlp_http/metrics]
     logs:

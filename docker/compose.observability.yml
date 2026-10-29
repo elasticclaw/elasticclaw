@@ -48,7 +48,7 @@ services:
     environment:
       GF_SERVER_ROOT_URL: http://localhost:${GRAFANA_PORT:-3001}/grafana/
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_PLUGINS_PREINSTALL: victoriametrics-logs-datasource
+      GF_PLUGINS_PREINSTALL_SYNC: victoriametrics-logs-datasource@0.33.1
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
       - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"

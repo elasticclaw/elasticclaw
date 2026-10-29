@@ -12,11 +12,10 @@ live_store:
   max_trace_idle: 10s
   max_block_duration: 5m
 
-backend_scheduler:
-  provider:
-    compaction:
-      compaction:
-        block_retention: 72h
+# Retention is enforced by the backend worker; the scheduler's copy is ignored.
+backend_worker:
+  compaction:
+    block_retention: 72h
 
 storage:
   trace:
