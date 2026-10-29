@@ -46,3 +46,7 @@ storage:
       path: ${TEMPO_DATA_PATH}/wal
     local:
       path: ${TEMPO_DATA_PATH}/blocks
+
+# Self-hosted stack: never phone home to Grafana Labs.
+usage_report:
+  reporting_enabled: false

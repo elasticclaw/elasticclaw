@@ -87,7 +87,7 @@ func TestRenderUnitsAndConfigs(t *testing.T) {
 	}
 	contains(t, read(t, i.path(ConfigDir, "collector.env")), "HOST_ROOT=/\n", "127.0.0.1:4317", "127.0.0.1:4318", "127.0.0.1:4417", "127.0.0.1:13133", "/opentelemetry", "/insert/opentelemetry")
 	contains(t, read(t, i.path(ConfigDir, "tempo.env")), "TEMPO_LISTEN_ADDRESS=127.0.0.1", "TEMPO_ADVERTISE_ADDRESS=127.0.0.1", "TEMPO_OTLP_ENDPOINT=127.0.0.1:4417")
-	contains(t, read(t, i.path(ConfigDir, "grafana.ini")), "http_addr = 127.0.0.1", "http_port = 3001", "root_url = https://hub.example.com/grafana/", "serve_from_sub_path = true", "allow_sign_up = false", "[auth.anonymous]\nenabled = false", "reporting_enabled = false", "check_for_updates = false", "check_for_plugin_updates = false")
+	contains(t, read(t, i.path(ConfigDir, "grafana.ini")), "http_addr = 127.0.0.1", "http_port = 3001", "root_url = https://hub.example.com/grafana/", "serve_from_sub_path = true", "allow_sign_up = false", "[auth.anonymous]\nenabled = false", "reporting_enabled = false", "check_for_updates = false", "check_for_plugin_updates = false", "[plugins]\npreinstall_disabled = true")
 	for _, name := range []string{"collector.yaml", "tempo.yaml", "grafana/provisioning/datasources/datasources.yaml"} {
 		got := read(t, i.path(ConfigDir, name))
 		canonical, _ := stack.Files.ReadFile(name)
@@ -99,7 +99,7 @@ func TestRenderUnitsAndConfigs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	contains(t, read(t, i.path(ConfigDir, "tempo.yaml")), "backend_worker:\n  compaction:\n    block_retention: 72h", "grpc_listen_address: ${TEMPO_LISTEN_ADDRESS}", "bind_addr:", "path: ${TEMPO_DATA_PATH}/live-store/traces", "shutdown_marker_dir: ${TEMPO_DATA_PATH}/live-store/shutdown-marker", "local_work_path: ${TEMPO_DATA_PATH}/work")
+	contains(t, read(t, i.path(ConfigDir, "tempo.yaml")), "backend_worker:\n  compaction:\n    block_retention: 72h", "grpc_listen_address: ${TEMPO_LISTEN_ADDRESS}", "bind_addr:", "path: ${TEMPO_DATA_PATH}/live-store/traces", "shutdown_marker_dir: ${TEMPO_DATA_PATH}/live-store/shutdown-marker", "local_work_path: ${TEMPO_DATA_PATH}/work", "usage_report:\n  reporting_enabled: false")
 	contains(t, read(t, i.path(ConfigDir, "collector.yaml")), "host_metrics:", "memory_limiter:", "batch:", "extensions: [health_check]", "level: none")
 	contains(t, read(t, i.path(ConfigDir, "grafana/provisioning/datasources/datasources.yaml")), "uid: victoriametrics", "uid: victorialogs", "uid: tempo", "$${__trace.traceId}")
 }

@@ -187,8 +187,9 @@ All native listeners bind loopback. Expose Grafana through Caddy's HTTPS `/grafa
 which keeps its own login; hub authentication does not authenticate Grafana. Sign in as `admin`
 with the random password printed once at first install and saved in
 `/etc/elasticclaw-observability/grafana-admin-password` (0600). Reinstalling preserves it.
-Anonymous access, sign-up, analytics, and update checks are disabled. Changing the password
-inside Grafana does not update the installer password file; that file records the initial credential.
+Anonymous access, sign-up, analytics, update checks, plugin preinstalls, and Tempo usage
+reporting are disabled. Changing the password inside Grafana does not update the installer
+password file; that file records the initial credential.
 
 ```bash
 sudo elasticclaw hub observability uninstall
