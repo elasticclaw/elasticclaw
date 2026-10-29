@@ -23,6 +23,10 @@ func TestObservabilityDefaults(t *testing.T) {
 	if err := (&HubConfig{}).Validate(); err != nil {
 		t.Fatal(err)
 	}
+	disabled := &HubConfig{Observability: &ObservabilityConfig{MetricsInterval: "bad"}}
+	if err := disabled.Validate(); err != nil {
+		t.Fatalf("disabled block must not be validated: %v", err)
+	}
 }
 
 func TestObservabilityValidationDisablesInvalidConfig(t *testing.T) {

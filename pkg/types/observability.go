@@ -29,8 +29,9 @@ func (c *ObservabilityConfig) WithDefaults() ObservabilityConfig {
 	return cfg
 }
 
+// Validate ignores disabled blocks so an unused setting never surfaces warnings.
 func (c *ObservabilityConfig) Validate() error {
-	if c == nil {
+	if c == nil || !c.Enabled {
 		return nil
 	}
 	cfg := c.WithDefaults()
