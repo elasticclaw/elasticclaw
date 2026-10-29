@@ -74,7 +74,7 @@ func TestRenderUnitsAndConfigs(t *testing.T) {
 	}
 	for _, c := range Components {
 		unit := read(t, i.path(UnitDir, unitName(c.Name)))
-		contains(t, unit, "User=elasticclaw-obs", "Group=elasticclaw-obs", "MemoryMax="+c.Memory, "NoNewPrivileges=yes", "ProtectSystem=full", "PrivateTmp=yes", "Restart=on-failure", i.path(BinaryDir, c.Name, "current", c.Binary))
+		contains(t, unit, "User=elasticclaw-obs", "Group=elasticclaw-obs", "MemoryMax="+c.Memory, "NoNewPrivileges=yes", "ProtectSystem=full", "PrivateTmp=yes", "Restart=on-failure", "StartLimitBurst=5", i.path(BinaryDir, c.Name, "current", c.Binary))
 		contains(t, unit, expected[c.Name]...)
 		info, err := os.Stat(i.path(ConfigDir, c.Name+".env"))
 		if err != nil {
@@ -455,7 +455,7 @@ func TestInstallLifecycle(t *testing.T) {
 	all := strings.Join(commands, "\n")
 	contains(t, all, "useradd --system --user-group --no-create-home --shell /usr/sbin/nologin elasticclaw-obs", "systemctl daemon-reload")
 	for _, c := range Components {
-		contains(t, all, "systemctl enable --now "+unitName(c.Name), "systemctl restart "+unitName(c.Name))
+		contains(t, all, "systemctl enable --now "+unitName(c.Name), "systemctl reset-failed "+unitName(c.Name), "systemctl restart "+unitName(c.Name))
 	}
 	contains(t, read(t, i.path(MarkerFile)), "https://hub.example.com/grafana/")
 	var out bytes.Buffer

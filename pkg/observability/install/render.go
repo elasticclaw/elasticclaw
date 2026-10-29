@@ -46,6 +46,9 @@ func (i *Installer) RenderUnit(c Component) string {
 	return fmt.Sprintf(`[Unit]
 Description=ElasticClaw observability %s
 After=network.target
+# Stop retrying a broken install instead of crash-looping forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 User=elasticclaw-obs

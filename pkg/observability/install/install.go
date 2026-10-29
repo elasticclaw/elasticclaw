@@ -111,13 +111,17 @@ func (i *Installer) Install(ctx context.Context, opts Options) error {
 		if _, err := i.Runner.Run(ctx, "systemctl", "enable", "--now", unitName(c.Name)); err != nil {
 			return err
 		}
-		// enable --now does not restart already-running units after an upgrade.
+		// enable --now does not restart already-running units after an upgrade, and a unit
+		// that hit its start limit on an earlier attempt refuses to start until reset.
+		if _, err := i.Runner.Run(ctx, "systemctl", "reset-failed", unitName(c.Name)); err != nil {
+			return err
+		}
 		if _, err := i.Runner.Run(ctx, "systemctl", "restart", unitName(c.Name)); err != nil {
 			return err
 		}
 	}
 	if err := i.waitHealthy(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w\nInspect logs with: journalctl -u 'elasticclaw-obs-*'\nRemove the stack with: sudo elasticclaw hub observability uninstall", err)
 	}
 	return i.write(i.path(MarkerFile), []byte(grafanaURL+"\n"), 0644)
 }
