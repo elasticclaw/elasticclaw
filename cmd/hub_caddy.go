@@ -7,13 +7,14 @@ import (
 	"runtime"
 	"strings"
 
+	obsinstall "github.com/elasticclaw/elasticclaw/pkg/observability/install"
 	"github.com/spf13/cobra"
 )
 
 const caddyfilePath = "/etc/caddy/Caddyfile"
 const (
-	caddyManagedStart = "# BEGIN ElasticClaw managed Caddy config"
-	caddyManagedEnd   = "# END ElasticClaw managed Caddy config"
+	caddyManagedStart = obsinstall.CaddyManagedStart
+	caddyManagedEnd   = obsinstall.CaddyManagedEnd
 )
 
 var hubCaddyCmd = &cobra.Command{
@@ -75,7 +76,8 @@ apt-get install -y caddy`
 	}
 
 	// Write Caddyfile
-	caddyfile := fmt.Sprintf("%s\n%s {\n\treverse_proxy localhost:8080\n}\n%s\n", caddyManagedStart, hubCaddyDomain, caddyManagedEnd)
+	_, stackErr := os.Stat(obsinstall.MarkerFile)
+	caddyfile := obsinstall.Caddyfile(hubCaddyDomain, stackErr == nil)
 
 	fmt.Printf("Writing %s... ", caddyfilePath)
 	if err := os.WriteFile(caddyfilePath, []byte(caddyfile), 0644); err != nil {
