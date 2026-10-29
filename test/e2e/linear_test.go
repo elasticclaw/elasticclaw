@@ -104,6 +104,8 @@ func runLinearWorkflowE2E(t *testing.T, sandboxProvider string) {
 	postLinearWebhook(ctx, t, env.PublicURL+"/api/workspaces/"+workspaceName+"/webhooks/linear", webhookSecret, linearE2EWebhookPayload(issue, labelName, env.RunID))
 
 	agentID = waitForOneAgent(ctx, t, hub, issueIdentifier)
+	// The poller also sees the seeded issue; prove the webhook created the claw.
+	requireHubLogLine(t, hub, fmt.Sprintf("Linear issue %s entered %q — creating claw", issueIdentifier, linearE2ETriggerState))
 	waitForAgentStatus(ctx, t, hub, agentID, "connected")
 	waitForAgentReply(ctx, t, hub, agentID)
 	if !linear.SawAPICall() {
@@ -223,5 +225,16 @@ func postLinearWebhook(ctx context.Context, t *testing.T, webhookURL, secret str
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
 		t.Fatalf("Linear webhook returned %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+}
+
+func requireHubLogLine(t *testing.T, hub *hubProcess, line string) {
+	t.Helper()
+	data, err := os.ReadFile(hub.logPath)
+	if err != nil {
+		t.Fatalf("read hub log: %v", err)
+	}
+	if !strings.Contains(string(data), line) {
+		t.Fatalf("hub log is missing %q", line)
 	}
 }
