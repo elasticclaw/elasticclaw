@@ -1,0 +1,55 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  host_metrics:
+    collection_interval: 15s
+    root_path: /hostfs
+    scrapers:
+      cpu: {}
+      memory: {}
+      filesystem:
+        metrics:
+          system.filesystem.inodes.usage:
+            enabled: true
+      disk: {}
+      network: {}
+      load: {}
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 80
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+exporters:
+  otlp_http/metrics:
+    endpoint: http://victoriametrics:8428/opentelemetry
+  otlp_http/logs:
+    endpoint: http://victorialogs:9428/insert/opentelemetry
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp, host_metrics]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http/metrics]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http/logs]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/tempo]

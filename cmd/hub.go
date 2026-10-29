@@ -1,14 +1,17 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub"
+	"github.com/elasticclaw/elasticclaw/pkg/observability"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 )
@@ -107,6 +110,18 @@ func runHub(cmd *cobra.Command, args []string) error {
 
 	hub.Version = Version
 	hub.Commit = Commit
+
+	shutdownObservability, obsErr := observability.Setup(cmd.Context(), hubCfg.Observability, hub.Version, hub.Commit)
+	if obsErr != nil {
+		log.Printf("[hub] observability disabled: %v", obsErr)
+	} else if observability.Enabled() {
+		log.Printf("[hub] observability enabled: exporting OTLP to %s", hubCfg.Observability.WithDefaults().OTLPEndpoint)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownObservability(ctx)
+	}()
 
 	// Ensure external storage directories exist (templates/, workspaces/)
 	if err := hub.EnsureExternalDirs(); err != nil {

@@ -1170,5 +1170,12 @@ func (h *HubConfig) Validate() error {
 		return err
 	}
 
+	// Observability is checked last so its error never hides another feature's.
+	// It is not switched off here: the config may be saved back to hub.yaml, and
+	// observability.Setup refuses an invalid block on its own.
+	if err := h.Observability.Validate(); err != nil {
+		return fmt.Errorf("observability disabled: %w", err)
+	}
+
 	return nil
 }

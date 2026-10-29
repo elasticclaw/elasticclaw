@@ -40,6 +40,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
+	"github.com/elasticclaw/elasticclaw/pkg/observability"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
@@ -761,7 +762,11 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		}
 	}
 
-	srv := &http.Server{Addr: s.addr, Handler: corsMiddleware(mux)}
+	var handler http.Handler = mux
+	if observability.Enabled() {
+		handler = observability.Middleware(mux)
+	}
+	srv := &http.Server{Addr: s.addr, Handler: corsMiddleware(handler)}
 	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
