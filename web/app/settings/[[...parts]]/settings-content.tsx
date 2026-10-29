@@ -3849,7 +3849,7 @@ function AIConfigSection() {
     try {
       const res = await fetch(`${hubUrl}/api/settings/ai-config/stream`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({ message: userMsg.content, history: historyForRequest }),
       })
       if (!res.ok) throw new Error(await res.text())
@@ -7471,7 +7471,7 @@ function TroubleshootSection() {
 
       const res = await fetch(`${hubUrl}/api/troubleshoot/stream`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${token()}`, "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify(body),
       })
       if (!res.ok) throw new Error(await res.text())
