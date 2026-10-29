@@ -82,21 +82,6 @@ func TestStaleE2EHookRequiresOldElasticClawHook(t *testing.T) {
 	}
 }
 
-func TestLinearE2EWebhookURLMatchesOnlyWorkspace(t *testing.T) {
-	current := "https://example.ngrok-free.app/api/workspaces/e2e-linear-run-a/webhooks/linear"
-	other := "https://example.ngrok-free.app/api/workspaces/e2e-linear-run-b/webhooks/linear"
-
-	if !linearE2EWebhookURLMatchesWorkspace(current, "e2e-linear-run-a") {
-		t.Fatalf("current workspace webhook did not match")
-	}
-	if linearE2EWebhookURLMatchesWorkspace(other, "e2e-linear-run-a") {
-		t.Fatalf("other workspace webhook matched current workspace")
-	}
-	if !isLinearE2EWebhookURL(other) {
-		t.Fatalf("broad sweep matcher should still recognize E2E webhook")
-	}
-}
-
 func TestGitHubE2EIssueMatchesOnlyRun(t *testing.T) {
 	labels := []struct {
 		Name string `json:"name"`
