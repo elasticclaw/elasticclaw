@@ -111,7 +111,7 @@ func TestGrafanaURL(t *testing.T) {
 			t.Fatalf("%q: %q %v", tc.input, got, err)
 		}
 	}
-	for _, bad := range []string{"localhost:8080", "https://user:secret@hub/", "https://hub/?token=secret", "https://hub/\n[security]", "https://hub/#fragment"} {
+	for _, bad := range []string{"localhost:8080", "https://user:secret@hub/", "https://hub/?token=secret", "https://hub/\n[security]", "https://hub/#fragment", "https://example.com/hub"} {
 		if _, err := GrafanaURL(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}

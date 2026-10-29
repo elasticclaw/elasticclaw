@@ -175,6 +175,7 @@ Preflight requires at least 1.5 GiB available RAM and 12 GiB free on the data fi
 `--force` overrides these resource checks only; platform, root, systemd, and occupied-port checks remain enforced.
 
 Grafana uses `<hub.yaml public_url>/grafana/`; `--public-url https://hub.example.com` overrides it.
+The URL must be a site root (no path), because Caddy routes `/grafana*` at the root.
 Without either, the URL is `http://localhost:3001/grafana/`. An ElasticClaw-managed Caddyfile
 is updated and reloaded automatically, including on subsequent `hub caddy install` runs.
 For a manually maintained Caddyfile, add this before the hub proxy inside the site block:

@@ -20,6 +20,10 @@ func GrafanaURL(publicURL string) (string, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(publicURL, "\r\n\t \"\\$%#;") {
 		return "", fmt.Errorf("invalid public URL %q", publicURL)
 	}
+	// Caddy routes /grafana* at the site root, so Grafana cannot live under a sub-path.
+	if strings.Trim(u.Path, "/") != "" {
+		return "", fmt.Errorf("public URL %q must not contain a path; pass --public-url with the site root", publicURL)
+	}
 	return strings.TrimRight(publicURL, "/") + "/grafana/", nil
 }
 
