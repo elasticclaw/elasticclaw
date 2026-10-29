@@ -97,9 +97,7 @@ func Setup(ctx context.Context, cfg *types.ObservabilityConfig, version, commit 
 		return noop, err
 	}
 
-	oldTrace, oldMeter, oldLogs := otel.GetTracerProvider(), otel.GetMeterProvider(), global.GetLoggerProvider()
-	oldPropagation, oldErrors := otel.GetTextMapPropagator(), otel.GetErrorHandler()
-	oldTransport, oldOutput, oldLogger := http.DefaultTransport, log.Writer(), Logger()
+	oldOutput, oldLogger := log.Writer(), Logger()
 	// Report directly to the original writer: logging through the tee here would
 	// create another failing export and a self-sustaining error loop.
 	diagnostic := log.New(oldOutput, log.Prefix(), log.Flags())
@@ -117,22 +115,19 @@ func Setup(ctx context.Context, cfg *types.ObservabilityConfig, version, commit 
 	otel.SetMeterProvider(mp)
 	global.SetLoggerProvider(lp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
-	http.DefaultTransport = otelhttp.NewTransport(oldTransport)
+	http.DefaultTransport = otelhttp.NewTransport(http.DefaultTransport)
 	log.SetOutput(&logTee{writer: oldOutput, logger: lp.Logger("elasticclaw.hub"), flags: log.Flags(), prefix: log.Prefix()})
 	structuredLogger.Store(slog.New(fanoutHandler{slog.NewTextHandler(os.Stderr, nil), otelslog.NewHandler("elasticclaw.hub", otelslog.WithLoggerProvider(lp))}))
 	var once sync.Once
 	var shutdownErr error
 	return func(ctx context.Context) error {
 		once.Do(func() {
+			// Only the log output is restored: log.SetOutput is synchronized, while
+			// swapping http.DefaultTransport or the OTel globals back would race with
+			// pollers still running. Shut-down providers turn into no-ops instead.
 			log.SetOutput(oldOutput)
 			structuredLogger.Store(oldLogger)
-			http.DefaultTransport = oldTransport
 			shutdownErr = boundedShutdown(ctx, cleanups...)
-			otel.SetTracerProvider(oldTrace)
-			otel.SetMeterProvider(oldMeter)
-			global.SetLoggerProvider(oldLogs)
-			otel.SetTextMapPropagator(oldPropagation)
-			otel.SetErrorHandler(oldErrors)
 		})
 		return shutdownErr
 	}, nil

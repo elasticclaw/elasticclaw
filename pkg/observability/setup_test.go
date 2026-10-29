@@ -23,6 +23,15 @@ func TestSetupDisabled(t *testing.T) {
 	tp, mp, lp := otel.GetTracerProvider(), otel.GetMeterProvider(), global.GetLoggerProvider()
 	propagation, errorsHandler := otel.GetTextMapPropagator(), otel.GetErrorHandler()
 	transport, writer, logger := http.DefaultTransport, log.Writer(), Logger()
+	// Shutdown leaves the transport and OTel globals in place; undo them for later tests.
+	t.Cleanup(func() {
+		http.DefaultTransport = transport
+		otel.SetTracerProvider(tp)
+		otel.SetMeterProvider(mp)
+		global.SetLoggerProvider(lp)
+		otel.SetTextMapPropagator(propagation)
+		otel.SetErrorHandler(errorsHandler)
+	})
 	for _, cfg := range []*types.ObservabilityConfig{nil, {}, {Enabled: false, OTLPEndpoint: ":invalid"}, {Enabled: true, MetricsInterval: "bad"}} {
 		shutdown, err := Setup(t.Context(), cfg, "test", "commit")
 		if cfg != nil && cfg.Enabled {
@@ -41,13 +50,22 @@ func TestSetupDisabled(t *testing.T) {
 	}
 }
 
-func TestSetupEnabledRestoresGlobals(t *testing.T) {
+func TestSetupEnabledShutdownRestoresLogging(t *testing.T) {
 	for _, signal := range []string{"", "TRACES_", "METRICS_", "LOGS_"} {
 		t.Setenv("OTEL_EXPORTER_OTLP_"+signal+"ENDPOINT", "")
 	}
 	tp, mp, lp := otel.GetTracerProvider(), otel.GetMeterProvider(), global.GetLoggerProvider()
 	propagation, errorsHandler := otel.GetTextMapPropagator(), otel.GetErrorHandler()
 	transport, writer, logger := http.DefaultTransport, log.Writer(), Logger()
+	// Shutdown leaves the transport and OTel globals in place; undo them for later tests.
+	t.Cleanup(func() {
+		http.DefaultTransport = transport
+		otel.SetTracerProvider(tp)
+		otel.SetMeterProvider(mp)
+		global.SetLoggerProvider(lp)
+		otel.SetTextMapPropagator(propagation)
+		otel.SetErrorHandler(errorsHandler)
+	})
 	// Exporters do not dial on construction; port 1 refuses the final flush quickly.
 	shutdown, err := Setup(t.Context(), &types.ObservabilityConfig{Enabled: true, OTLPEndpoint: "http://127.0.0.1:1"}, "test", "commit")
 	if err != nil {
@@ -75,8 +93,8 @@ func TestSetupEnabledRestoresGlobals(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Errorf("shutdown took %v", elapsed)
 	}
-	if tp != otel.GetTracerProvider() || mp != otel.GetMeterProvider() || lp != global.GetLoggerProvider() || propagation != otel.GetTextMapPropagator() || errorsHandler != otel.GetErrorHandler() || transport != http.DefaultTransport || writer != log.Writer() || logger != Logger() {
-		t.Fatal("shutdown did not restore global state")
+	if writer != log.Writer() || logger != Logger() {
+		t.Fatal("shutdown did not restore log output")
 	}
 }
 
