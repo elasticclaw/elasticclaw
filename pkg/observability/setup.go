@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var enabled atomic.Bool
@@ -95,7 +97,7 @@ func Setup(ctx context.Context, cfg *types.ObservabilityConfig, version, commit 
 		cleanup()
 		return noop, err
 	}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(te), sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(*c.TracesSampleRatio))))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithSpanProcessor(redactingSpanProcessor{sdktrace.NewBatchSpanProcessor(te)}), sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(*c.TracesSampleRatio))))
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithResource(res), sdkmetric.WithView(httpMetricView()), sdkmetric.WithReader(sdkmetric.NewPeriodicReader(me, sdkmetric.WithInterval(interval))))
 	lp := sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(sdklog.NewBatchProcessor(le)))
 	cleanups = []func(context.Context) error{tp.Shutdown, mp.Shutdown, lp.Shutdown}
@@ -165,14 +167,56 @@ func boundedShutdown(ctx context.Context, shutdowns ...func(context.Context) err
 	return result
 }
 
-// Do not let HTTP hosts, URLs, or exporter-provided error strings become labels.
+// Keep remote hosts on client metrics only; incoming hosts and URL/error strings
+// must never create unbounded server metric labels.
 func httpMetricView() sdkmetric.View {
-	return sdkmetric.NewView(sdkmetric.Instrument{Name: "http.*"}, sdkmetric.Stream{AttributeFilter: func(kv attribute.KeyValue) bool {
-		switch kv.Key {
-		case "http.route", "http.request.method", "http.response.status_code", "http.method", "http.status_code":
-			return true
-		default:
-			return false
+	return func(instrument sdkmetric.Instrument) (sdkmetric.Stream, bool) {
+		if !strings.HasPrefix(instrument.Name, "http.") {
+			return sdkmetric.Stream{}, false
 		}
-	}})
+		client := strings.HasPrefix(instrument.Name, "http.client.")
+		return sdkmetric.Stream{Name: instrument.Name, Description: instrument.Description, Unit: instrument.Unit, AttributeFilter: func(kv attribute.KeyValue) bool {
+			switch kv.Key {
+			case "http.route", "http.request.method", "http.response.status_code", "http.method", "http.status_code":
+				return true
+			case "server.address":
+				return client
+			default:
+				return false
+			}
+		}}, true
+	}
 }
+
+// otelhttp sets url.full after OnStart. Sanitize the completed span before the
+// batch processor snapshots it, without changing the actual outbound request.
+type redactingSpanProcessor struct {
+	sdktrace.SpanProcessor
+}
+
+func (p redactingSpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
+	if span.SpanKind() == trace.SpanKindClient {
+		attrs := append([]attribute.KeyValue(nil), span.Attributes()...)
+		for i, attr := range attrs {
+			if attr.Key != "url.full" {
+				continue
+			}
+			u, err := url.Parse(attr.Value.AsString())
+			value := ""
+			if err == nil {
+				u.RawQuery, u.Fragment, u.RawFragment, u.ForceQuery, u.User = "", "", "", false, nil
+				value = u.String()
+			}
+			attrs[i] = attribute.String("url.full", value)
+		}
+		span = redactedSpan{ReadOnlySpan: span, attributes: attrs}
+	}
+	p.SpanProcessor.OnEnd(span)
+}
+
+type redactedSpan struct {
+	sdktrace.ReadOnlySpan
+	attributes []attribute.KeyValue
+}
+
+func (s redactedSpan) Attributes() []attribute.KeyValue { return s.attributes }

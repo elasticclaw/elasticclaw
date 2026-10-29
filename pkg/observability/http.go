@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -18,8 +20,8 @@ func Middleware(mux *http.ServeMux, opts ...otelhttp.Option) http.Handler {
 
 func middleware(mux *http.ServeMux, provider metric.MeterProvider, opts ...otelhttp.Option) http.Handler {
 	connections, _ := provider.Meter("github.com/elasticclaw/elasticclaw/pkg/observability").Int64UpDownCounter(
-		"elasticclaw.hub.websocket.connections",
-		metric.WithDescription("Active hub WebSocket connections"), metric.WithUnit("{connection}"),
+		"elasticclaw.hub.streaming.connections",
+		metric.WithDescription("Active hub streaming connections"), metric.WithUnit("{connection}"),
 	)
 	routed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r)
@@ -32,17 +34,17 @@ func middleware(mux *http.ServeMux, provider metric.MeterProvider, opts ...otelh
 		labeler.Add(route)
 		trace.SpanFromContext(r.Context()).SetAttributes(route)
 	})
-	opts = append(opts, otelhttp.WithMeterProvider(provider), otelhttp.WithServerName("elasticclaw-hub:0"))
+	opts = append(opts, otelhttp.WithMeterProvider(provider), otelhttp.WithServerName("elasticclaw-hub:0"), otelhttp.WithPublicEndpointFn(func(*http.Request) bool { return true }))
 	instrumented := otelhttp.NewHandler(routed, "hub", opts...)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Every WebSocket (agents, control, UI, terminal) is long-lived, so it would
-		// skew request latency; count it as a connection instead.
-		if isWebSocketUpgrade(r.Header) {
+		// Long-lived WebSocket and SSE streams would skew request latency.
+		protocol := streamingProtocol(r.Header)
+		if protocol != "" {
 			_, pattern := mux.Handler(r)
 			if pattern == "" {
 				pattern = "unmatched"
 			}
-			option := metric.WithAttributes(attribute.String("endpoint", pattern))
+			option := metric.WithAttributes(attribute.String("endpoint", pattern), attribute.String("protocol", protocol))
 			connections.Add(r.Context(), 1, option)
 			defer connections.Add(r.Context(), -1, option)
 			// Leave the original writer intact, including http.Hijacker.
@@ -64,4 +66,25 @@ func isWebSocketUpgrade(h http.Header) bool {
 		}
 	}
 	return false
+}
+
+func streamingProtocol(h http.Header) string {
+	if isWebSocketUpgrade(h) {
+		return "websocket"
+	}
+	for _, value := range h.Values("Accept") {
+		for _, part := range strings.Split(value, ",") {
+			mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(part))
+			if err == nil && strings.EqualFold(mediaType, "text/event-stream") {
+				if q, ok := params["q"]; ok {
+					quality, err := strconv.ParseFloat(q, 64)
+					if err != nil || quality <= 0 || quality > 1 {
+						continue
+					}
+				}
+				return "sse"
+			}
+		}
+	}
+	return ""
 }
