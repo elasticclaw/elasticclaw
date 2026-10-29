@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -28,6 +29,12 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
+
+var enabled atomic.Bool
+
+// Enabled reports whether Setup activated telemetry. Callers must use it rather
+// than the config flag, which stays as written in hub.yaml even when invalid.
+func Enabled() bool { return enabled.Load() }
 
 // Setup is called once at startup, before HTTP clients or handlers are started.
 // Shutdown must be called after the server has drained its requests.
@@ -118,6 +125,7 @@ func Setup(ctx context.Context, cfg *types.ObservabilityConfig, version, commit 
 	http.DefaultTransport = otelhttp.NewTransport(http.DefaultTransport)
 	log.SetOutput(&logTee{writer: oldOutput, logger: lp.Logger("elasticclaw.hub"), flags: log.Flags(), prefix: log.Prefix()})
 	structuredLogger.Store(slog.New(fanoutHandler{slog.NewTextHandler(os.Stderr, nil), otelslog.NewHandler("elasticclaw.hub", otelslog.WithLoggerProvider(lp))}))
+	enabled.Store(true)
 	var once sync.Once
 	var shutdownErr error
 	return func(ctx context.Context) error {
@@ -125,6 +133,7 @@ func Setup(ctx context.Context, cfg *types.ObservabilityConfig, version, commit 
 			// Only the log output is restored: log.SetOutput is synchronized, while
 			// swapping http.DefaultTransport or the OTel globals back would race with
 			// pollers still running. Shut-down providers turn into no-ops instead.
+			enabled.Store(false)
 			log.SetOutput(oldOutput)
 			structuredLogger.Store(oldLogger)
 			shutdownErr = boundedShutdown(ctx, cleanups...)

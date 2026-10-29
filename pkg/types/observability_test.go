@@ -29,7 +29,7 @@ func TestObservabilityDefaults(t *testing.T) {
 	}
 }
 
-func TestObservabilityValidationDisablesInvalidConfig(t *testing.T) {
+func TestObservabilityValidationRejectsInvalidConfig(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*ObservabilityConfig)
@@ -51,8 +51,8 @@ func TestObservabilityValidationDisablesInvalidConfig(t *testing.T) {
 			if err := cfg.Validate(); err == nil {
 				t.Fatal("expected validation warning")
 			}
-			if cfg.Observability.Enabled {
-				t.Fatal("invalid observability remains enabled")
+			if !cfg.Observability.Enabled {
+				t.Fatal("validation must not rewrite the persisted enabled flag")
 			}
 		})
 	}

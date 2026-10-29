@@ -759,7 +759,7 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 	}
 
 	var handler http.Handler = mux
-	if s.hubCfg.Observability != nil && s.hubCfg.Observability.Enabled {
+	if observability.Enabled() {
 		handler = observability.Middleware(mux)
 	}
 	srv := &http.Server{Addr: s.addr, Handler: corsMiddleware(handler)}

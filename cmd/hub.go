@@ -114,10 +114,7 @@ func runHub(cmd *cobra.Command, args []string) error {
 	shutdownObservability, obsErr := observability.Setup(cmd.Context(), hubCfg.Observability, hub.Version, hub.Commit)
 	if obsErr != nil {
 		log.Printf("[hub] observability disabled: %v", obsErr)
-		if hubCfg.Observability != nil {
-			hubCfg.Observability.Enabled = false
-		}
-	} else if hubCfg.Observability != nil && hubCfg.Observability.Enabled {
+	} else if observability.Enabled() {
 		log.Printf("[hub] observability enabled: exporting OTLP to %s", hubCfg.Observability.WithDefaults().OTLPEndpoint)
 	}
 	defer func() {

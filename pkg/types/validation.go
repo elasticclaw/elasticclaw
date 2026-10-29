@@ -1144,12 +1144,6 @@ func (h *HubConfig) Validate() error {
 		return fmt.Errorf("hub config is nil")
 	}
 
-	// Validate telemetry first so another feature's error cannot leave it enabled.
-	if err := h.Observability.Validate(); err != nil {
-		h.Observability.Enabled = false
-		return fmt.Errorf("observability disabled: %w", err)
-	}
-
 	// Validate factories
 	for i, factory := range h.Factories {
 		if err := factory.Validate(); err != nil {
@@ -1174,6 +1168,13 @@ func (h *HubConfig) Validate() error {
 	// Validate notifications
 	if err := ValidateNotificationsConfig(h.Notifications); err != nil {
 		return err
+	}
+
+	// Observability is checked last so its error never hides another feature's.
+	// It is not switched off here: the config may be saved back to hub.yaml, and
+	// observability.Setup refuses an invalid block on its own.
+	if err := h.Observability.Validate(); err != nil {
+		return fmt.Errorf("observability disabled: %w", err)
 	}
 
 	return nil

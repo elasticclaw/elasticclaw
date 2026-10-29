@@ -41,6 +41,9 @@ func TestSetupDisabled(t *testing.T) {
 		} else if err != nil {
 			t.Fatal(err)
 		}
+		if Enabled() {
+			t.Fatal("Enabled() true without active telemetry")
+		}
 		if err := shutdown(t.Context()); err != nil {
 			t.Fatal(err)
 		}
@@ -71,6 +74,9 @@ func TestSetupEnabledShutdownRestoresLogging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !Enabled() {
+		t.Error("Enabled() false after Setup")
+	}
 	if _, ok := http.DefaultTransport.(*otelhttp.Transport); !ok {
 		t.Errorf("DefaultTransport = %T", http.DefaultTransport)
 	}
@@ -92,6 +98,9 @@ func TestSetupEnabledShutdownRestoresLogging(t *testing.T) {
 	_ = shutdown(ctx) // The unreachable collector may fail the final export.
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Errorf("shutdown took %v", elapsed)
+	}
+	if Enabled() {
+		t.Error("Enabled() true after shutdown")
 	}
 	if writer != log.Writer() || logger != Logger() {
 		t.Fatal("shutdown did not restore log output")
