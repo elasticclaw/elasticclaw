@@ -1,13 +1,17 @@
+extensions:
+  health_check:
+    endpoint: ${env:COLLECTOR_HEALTH_ENDPOINT}
+
 receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: 0.0.0.0:4317
+        endpoint: ${env:OTLP_GRPC_ENDPOINT}
       http:
-        endpoint: 0.0.0.0:4318
+        endpoint: ${env:OTLP_HTTP_ENDPOINT}
   host_metrics:
     collection_interval: 15s
-    root_path: /hostfs
+    root_path: ${env:HOST_ROOT}
     scrapers:
       cpu: {}
       memory: {}
@@ -31,15 +35,19 @@ processors:
 
 exporters:
   otlp_http/metrics:
-    endpoint: http://victoriametrics:8428/opentelemetry
+    endpoint: ${env:METRICS_ENDPOINT}
   otlp_http/logs:
-    endpoint: http://victorialogs:9428/insert/opentelemetry
+    endpoint: ${env:LOGS_ENDPOINT}
   otlp_grpc/tempo:
-    endpoint: tempo:4317
+    endpoint: ${env:TRACES_ENDPOINT}
     tls:
       insecure: true
 
 service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      level: none
   pipelines:
     metrics:
       receivers: [otlp, host_metrics]

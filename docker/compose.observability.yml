@@ -6,8 +6,16 @@ services:
     command: ["--config=/etc/otelcol/config.yaml"]
     restart: unless-stopped
     mem_limit: 512m
+    environment:
+      OTLP_GRPC_ENDPOINT: 0.0.0.0:4317
+      OTLP_HTTP_ENDPOINT: 0.0.0.0:4318
+      COLLECTOR_HEALTH_ENDPOINT: 0.0.0.0:13133
+      HOST_ROOT: /hostfs
+      METRICS_ENDPOINT: http://victoriametrics:8428/opentelemetry
+      LOGS_ENDPOINT: http://victorialogs:9428/insert/opentelemetry
+      TRACES_ENDPOINT: tempo:4317
     volumes:
-      - ./observability/collector.yaml:/etc/otelcol/config.yaml:ro
+      - ../pkg/observability/stack/collector.yaml:/etc/otelcol/config.yaml:ro
       - /:/hostfs:ro
     ports:
       - "127.0.0.1:4317:4317"
@@ -36,16 +44,24 @@ services:
 
   tempo:
     image: grafana/tempo:3.1.0
-    command: ["-target=all", "-config.file=/etc/tempo.yaml"]
+    environment:
+      TEMPO_LISTEN_ADDRESS: 0.0.0.0
+      TEMPO_ADVERTISE_ADDRESS: 127.0.0.1
+      TEMPO_OTLP_ENDPOINT: 0.0.0.0:4317
+      TEMPO_DATA_PATH: /var/tempo
+    command: ["-target=all", "-config.file=/etc/tempo.yaml", "-config.expand-env=true"]
     restart: unless-stopped
     volumes:
-      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+      - ../pkg/observability/stack/tempo.yaml:/etc/tempo.yaml:ro
       - traces-data:/var/tempo
 
   grafana:
     image: grafana/grafana-oss:12.4.3
     restart: unless-stopped
     environment:
+      VICTORIAMETRICS_URL: http://victoriametrics:8428
+      VICTORIALOGS_URL: http://victorialogs:9428
+      TEMPO_URL: http://tempo:3200
       GF_SERVER_ROOT_URL: http://localhost:${GRAFANA_PORT:-3001}/grafana/
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_PLUGINS_PREINSTALL_SYNC: victoriametrics-logs-datasource@0.33.1
@@ -53,7 +69,7 @@ services:
     ports:
       - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
     volumes:
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../pkg/observability/stack/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
     depends_on:
       - victoriametrics

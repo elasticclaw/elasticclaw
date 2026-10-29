@@ -121,7 +121,7 @@ Observability is disabled when this block is absent or `enabled` is false. Stand
 
 Open [Grafana](http://localhost:3001/grafana/), sign in with `admin` / `admin`, and set a password when prompted. In **Explore**, select:
 
-- **VictoriaMetrics** for Go runtime, HTTP, WebSocket connection, and host metrics. Metrics use Prometheus naming (dots become underscores); use the metric browser to find `http_server_request_duration_seconds` and `system_filesystem_inodes_usage`.
+- **VictoriaMetrics** for Go runtime, HTTP, streaming connection, and host metrics. Metrics use Prometheus naming (dots become underscores); use the metric browser to find `http_server_request_duration_seconds` and `system_filesystem_inodes_usage`.
 - **VictoriaLogs** for hub messages; start with `*` and narrow the time range or filter `log.component`.
 - **Tempo** for traces; search for the `elasticclaw-hub` service. A span's logs link queries VictoriaLogs by trace ID. Correlation requires a structured log emitted with the span context; legacy `log.Printf` messages have no trace context.
 
@@ -132,4 +132,79 @@ docker compose -f docker/compose.observability.yml logs -f collector
 docker compose -f docker/compose.observability.yml down
 ```
 
-`down` preserves data; adding `--volumes` deletes it. The first Grafana startup requires internet access to install the VictoriaLogs datasource plugin. The stack is a single-node development setup; backend configuration lives under `docker/observability/` for reuse by deployment tooling.
+`down` preserves data; adding `--volumes` deletes it. The first Grafana startup requires internet access to install the VictoriaLogs datasource plugin. The stack is a single-node development setup; backend configuration lives under `pkg/observability/stack/` and is shared with the native production installer. Compose supplies the container-specific endpoints and `/hostfs`; the native installer supplies loopback endpoints and `/`.
+
+
+## Production install
+
+On the hub machine, run as root on Linux with systemd (`amd64` or `arm64`):
+
+```bash
+sudo elasticclaw hub observability install --environment production
+sudo systemctl restart elasticclaw
+sudo elasticclaw hub observability status
+```
+
+The installer downloads checksum-verified, pinned OSS releases: OpenTelemetry Collector Contrib 0.164.0,
+VictoriaMetrics v1.155.0, VictoriaLogs v1.53.0, Tempo 3.1.0, and Grafana OSS 12.4.3.
+It installs the VictoriaLogs datasource plugin 0.33.1 through Grafana's bundled CLI.
+Installation needs internet access to the release hosts and Grafana plugin registry; Docker is not required.
+Prerequisites include `systemctl`, `ss` (iproute2), `useradd`, and `chown`.
+
+Binaries live in `/opt/elasticclaw-observability/<component>-<version>/` with stable
+`<component>/current` symlinks; configs live in `/etc/elasticclaw-observability/` and data in
+`/var/lib/elasticclaw-observability/`. Re-running the installer renders configs again,
+upgrades to the pinned versions, and restarts the stack. Services run as the dedicated
+`elasticclaw-obs` system user with systemd hardening. The hub is restarted only with
+`--restart-hub`; otherwise the installer prints `sudo systemctl restart elasticclaw`.
+
+The installer preserves the existing hub config and enables local OTLP export with a 0.25 trace
+sample ratio if none was configured. `--environment` sets the telemetry environment.
+`elasticclaw hub init --observability` also writes an enabled block, but does not install backends.
+
+| Component | Loopback listeners | Retention / disk safety | MemoryMax |
+|---|---|---|---|
+| Collector | 4317 gRPC, 4318 HTTP, 13133 health | Batched, memory-limited export | 512 MiB |
+| VictoriaMetrics | 8428 HTTP | 15 days; stop ingestion below 2 GB free | 512 MiB |
+| VictoriaLogs | 9428 HTTP | 7 days; 4 GiB disk cap | 512 MiB |
+| Tempo | 3200 HTTP, 4417 OTLP gRPC, 9095 internal gRPC, 7946 memberlist | 72 hours | 768 MiB |
+| Grafana | 3001 HTTP | Persistent dashboards and settings | 384 MiB |
+
+The total MemoryMax budget is about 2.7 GiB; typical use is about 1 GiB (workload dependent).
+Preflight requires at least 1.5 GiB available RAM and 12 GiB free on the data filesystem.
+`--force` overrides these resource checks only; platform, root, systemd, and occupied-port checks remain enforced.
+
+Grafana uses `<hub.yaml public_url>/grafana/`; `--public-url https://hub.example.com` overrides it.
+Without either, the URL is `http://localhost:3001/grafana/`. An ElasticClaw-managed Caddyfile
+is updated and reloaded automatically, including on subsequent `hub caddy install` runs.
+For a manually maintained Caddyfile, add this before the hub proxy inside the site block:
+
+```caddyfile
+reverse_proxy /grafana* localhost:3001
+```
+
+All native listeners bind loopback. Expose Grafana through Caddy's HTTPS `/grafana` route,
+which keeps its own login; hub authentication does not authenticate Grafana. Sign in as `admin`
+with the random password printed once at first install and saved in
+`/etc/elasticclaw-observability/grafana-admin-password` (0600). Reinstalling preserves it.
+Anonymous access, sign-up, analytics, and update checks are disabled. Changing the password
+inside Grafana does not update the installer password file; that file records the initial credential.
+
+```bash
+sudo elasticclaw hub observability uninstall
+sudo systemctl restart elasticclaw
+# To delete telemetry and Grafana data too:
+sudo elasticclaw hub observability uninstall --purge-data
+```
+
+Uninstall disables the hub observability block and removes managed Caddy routing, units,
+binaries, and configs. Data is kept unless `--purge-data` is supplied, including a root-only
+credential recovery copy under `/var/lib/elasticclaw-observability/.credentials/` so reinstalling
+against the existing Grafana database does not generate an unusable new login.
+
+HTTP telemetry treats incoming trace contexts as links to new server traces. WebSockets and
+requests accepting `text/event-stream` bypass HTTP latency histograms and spans; monitor
+`elasticclaw.hub.streaming.connections` with `endpoint` (route pattern) and
+`protocol` (`websocket` or `sse`) instead. Only client HTTP metrics retain `server.address`;
+server metric labels stay bounded. Outbound client spans strip query strings and credentials
+from `url.full` before export while preserving scheme, host, and path.
