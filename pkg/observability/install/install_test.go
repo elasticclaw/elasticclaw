@@ -429,9 +429,24 @@ func TestInstallLifecycle(t *testing.T) {
 		}
 		return "", nil
 	})
+	// A restrictive root umask must not leave paths unreadable for the service user.
+	restore := setUmask(0o077)
 	for range 2 {
 		if err := i.Install(t.Context(), Options{Force: true, PublicURL: "https://hub.example.com"}); err != nil {
 			t.Fatal(err)
+		}
+	}
+	restore()
+	for _, path := range []string{DataDir, BinaryDir, ConfigDir, BinaryDir + "/collector-0.164.0/otelcol-contrib", ConfigDir + "/collector.yaml", ConfigDir + "/grafana/provisioning/datasources"} {
+		info, err := os.Stat(i.path(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0004 == 0 {
+			t.Errorf("%s mode %v is not world-readable", path, info.Mode().Perm())
+		}
+		if info.IsDir() && info.Mode().Perm()&0001 == 0 {
+			t.Errorf("%s mode %v is not traversable", path, info.Mode().Perm())
 		}
 	}
 	if downloads != len(Components) || pluginInstalls != 1 || hubRestarts != 0 {

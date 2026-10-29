@@ -58,6 +58,8 @@ func (i *Installer) Install(ctx context.Context, opts Options) error {
 	if err := i.Preflight(ctx, opts.Force); err != nil {
 		return err
 	}
+	// The service user must read binaries and configs regardless of root's umask.
+	defer setUmask(0o022)()
 	if err := os.MkdirAll(i.path(BinaryDir), 0755); err != nil {
 		return err
 	}
@@ -71,6 +73,13 @@ func (i *Installer) Install(ctx context.Context, opts Options) error {
 		if _, err := i.Runner.Run(ctx, "useradd", "--system", "--user-group", "--no-create-home", "--shell", "/usr/sbin/nologin", ServiceUser); err != nil {
 			return err
 		}
+	}
+	// The data root stays root-owned but must be traversable by the service user.
+	if err := os.MkdirAll(i.path(DataDir), 0755); err != nil {
+		return err
+	}
+	if err := os.Chmod(i.path(DataDir), 0755); err != nil {
+		return err
 	}
 	for _, name := range []string{"victoriametrics", "victorialogs", "tempo", "grafana"} {
 		if err := os.MkdirAll(i.path(DataDir, name), 0750); err != nil {
