@@ -141,7 +141,8 @@ type Server struct {
 
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
-	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
+	// linearBaseURL overrides the Linear API base for tests and E2E runs
+	// (ELASTICCLAW_E2E_LINEAR_API_URL; default: https://api.linear.app)
 	linearBaseURL string
 	// shortcutBaseURL overrides the Shortcut API base for testing (default: https://api.app.shortcut.com)
 	shortcutBaseURL string
@@ -658,6 +659,9 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		nowFunc:                  now,
 		ticketMetadataEnrichment: make(chan struct{}, 32),
 		ticketCursorKey:          randomTicketCursorKey(),
+		// E2E runs point Linear at an in-process fake so they never touch a
+		// real workspace (and its issue quota).
+		linearBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_LINEAR_API_URL")), "/"),
 	}
 	if err := srv.loadTaskRunAnalyticsTicketCursorKey(); err != nil {
 		_ = db.Close()
