@@ -35,17 +35,19 @@ func middleware(mux *http.ServeMux, provider metric.MeterProvider, opts ...otelh
 	opts = append(opts, otelhttp.WithMeterProvider(provider), otelhttp.WithServerName("elasticclaw-hub:0"))
 	instrumented := otelhttp.NewHandler(routed, "hub", opts...)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Every WebSocket (agents, control, UI, terminal) is long-lived, so it would
+		// skew request latency; count it as a connection instead.
 		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
 			_, pattern := mux.Handler(r)
-			switch pattern {
-			case "/claw/ws", "/claw/control/ws", "/api/ws":
-				option := metric.WithAttributes(attribute.String("endpoint", pattern))
-				connections.Add(r.Context(), 1, option)
-				defer connections.Add(r.Context(), -1, option)
-				// Leave the original writer intact, including http.Hijacker.
-				mux.ServeHTTP(w, r)
-				return
+			if pattern == "" {
+				pattern = "unmatched"
 			}
+			option := metric.WithAttributes(attribute.String("endpoint", pattern))
+			connections.Add(r.Context(), 1, option)
+			defer connections.Add(r.Context(), -1, option)
+			// Leave the original writer intact, including http.Hijacker.
+			mux.ServeHTTP(w, r)
+			return
 		}
 		instrumented.ServeHTTP(w, r)
 	})

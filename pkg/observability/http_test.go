@@ -110,7 +110,13 @@ func (w *hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 func TestMiddlewareWebSocket(t *testing.T) {
-	for _, endpoint := range []string{"/claw/ws", "/claw/control/ws", "/api/ws"} {
+	for _, tc := range []struct{ endpoint, path string }{
+		{"/claw/ws", "/claw/ws"},
+		{"/claw/control/ws", "/claw/control/ws"},
+		{"/api/ws", "/api/ws"},
+		{"/api/terminal/", "/api/terminal/claw-1"},
+	} {
+		endpoint := tc.endpoint
 		t.Run(endpoint, func(t *testing.T) {
 			meter, reader, tracer, spans := httpTestProviders(t)
 			assertConnections := func(want int64) {
@@ -153,7 +159,7 @@ func TestMiddlewareWebSocket(t *testing.T) {
 				_, _, _ = hijacker.Hijack()
 			})
 			handler := middleware(mux, meter, otelhttp.WithTracerProvider(tracer))
-			req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			req.Header.Set("Upgrade", "WebSocket")
 			w := &hijackRecorder{ResponseRecorder: httptest.NewRecorder()}
 			handler.ServeHTTP(w, req)
