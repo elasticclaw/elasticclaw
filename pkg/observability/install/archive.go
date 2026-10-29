@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func VerifyChecksum(r io.Reader, expected string) error {
@@ -107,10 +108,17 @@ func (i *Installer) installComponent(ctx context.Context, c Component) error {
 		sum = c.ARM64
 	}
 	verified, markerErr := os.ReadFile(filepath.Join(dest, ".verified"))
-	if markerErr == nil && strings.TrimSpace(string(verified)) != sum {
-		return fmt.Errorf("verification marker mismatch for %s", dest)
-	}
-	if markerErr != nil {
+	if markerErr != nil || strings.TrimSpace(string(verified)) != sum {
+		// Move an unverified directory aside; pruneVersions removes it after a healthy install.
+		if _, err := os.Lstat(dest); err == nil {
+			stale := fmt.Sprintf("%s.stale-%d", dest, time.Now().UnixNano())
+			if err := os.Rename(dest, stale); err != nil {
+				return err
+			}
+			fmt.Fprintf(i.Out, "Moved unverified %s to %s\n", dest, stale)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 		staging, err := os.MkdirTemp(i.path(BinaryDir), ".download-")
 		if err != nil {
 			return err
@@ -186,4 +194,24 @@ func (i *Installer) installComponent(ctx context.Context, c Component) error {
 		return fmt.Errorf("missing executable %s", c.Binary)
 	}
 	return SwapCurrent(i.path(BinaryDir, c.Name, "current"), dest)
+}
+
+// pruneVersions removes version directories that the current link no longer uses.
+func (i *Installer) pruneVersions(c Component) {
+	entries, err := os.ReadDir(i.path(BinaryDir))
+	if err != nil {
+		fmt.Fprintf(i.Out, "Warning: cannot list old %s versions: %v\n", c.Name, err)
+		return
+	}
+	keep := c.Name + "-" + c.Version
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == keep || !strings.HasPrefix(entry.Name(), c.Name+"-") {
+			continue
+		}
+		if err := os.RemoveAll(i.path(BinaryDir, entry.Name())); err != nil {
+			fmt.Fprintf(i.Out, "Warning: cannot remove %s: %v\n", entry.Name(), err)
+			continue
+		}
+		fmt.Fprintf(i.Out, "Removed old %s\n", entry.Name())
+	}
 }

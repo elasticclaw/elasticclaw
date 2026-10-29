@@ -232,6 +232,33 @@ func TestInstallArchiveAndAtomicLink(t *testing.T) {
 			if current == old {
 				t.Fatal("upgrade did not change current")
 			}
+			i.pruneVersions(c)
+			if _, err := os.Stat(old); !os.IsNotExist(err) {
+				t.Fatalf("old version not pruned: %v", err)
+			}
+			if _, err := os.Stat(current); err != nil {
+				t.Fatalf("current version pruned: %v", err)
+			}
+			// Unverified or tampered version directories are replaced, not fatal.
+			for _, marker := range []string{"", strings.Repeat("f", 64)} {
+				markerPath := filepath.Join(current, ".verified")
+				if err := os.Remove(markerPath); err != nil {
+					t.Fatal(err)
+				}
+				if marker != "" {
+					if err := os.WriteFile(markerPath, []byte(marker), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := downloads
+				if err := i.installComponent(t.Context(), c); err != nil {
+					t.Fatal(err)
+				}
+				if downloads != before+1 {
+					t.Fatal("unverified version reused")
+				}
+				contains(t, read(t, markerPath), c.AMD64)
+			}
 		})
 	}
 }

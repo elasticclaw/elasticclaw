@@ -123,6 +123,9 @@ func (i *Installer) Install(ctx context.Context, opts Options) error {
 	if err := i.waitHealthy(ctx); err != nil {
 		return fmt.Errorf("%w\nInspect logs with: journalctl -u 'elasticclaw-obs-*'\nRemove the stack with: sudo elasticclaw hub observability uninstall", err)
 	}
+	for _, c := range Components {
+		i.pruneVersions(c)
+	}
 	return i.write(i.path(MarkerFile), []byte(grafanaURL+"\n"), 0644)
 }
 
