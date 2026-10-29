@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -484,6 +485,22 @@ func TestCaddyValidationRollback(t *testing.T) {
 	if got := read(t, i.path(CaddyPath)); got != original {
 		t.Fatal("Caddy config not restored")
 	}
+	// A managed Caddyfile without the caddy binary only gets a manual hint.
+	var out bytes.Buffer
+	i.Out = &out
+	i.Runner = runnerFunc(func(_ context.Context, name string, _ ...string) (string, error) {
+		if name == "caddy" {
+			return "", fmt.Errorf("caddy validate: %w", exec.ErrNotFound)
+		}
+		return "", nil
+	})
+	if err := i.UpdateCaddy(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, i.path(CaddyPath)); got != original {
+		t.Fatal("Caddy config changed without caddy installed")
+	}
+	contains(t, out.String(), "Caddy is not installed", GrafanaRoute)
 }
 
 func TestPinnedComponents(t *testing.T) {

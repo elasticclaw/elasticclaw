@@ -2,8 +2,10 @@ package install
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 )
 
@@ -62,11 +64,7 @@ func (i *Installer) UpdateCaddy(ctx context.Context, installed bool) error {
 		return err
 	}
 	if !managed {
-		if installed {
-			fmt.Fprintf(i.Out, "Caddyfile is not ElasticClaw-managed. Add this inside the hub site, ahead of the hub proxy:\n  %s\n", GrafanaRoute)
-		} else {
-			fmt.Fprintln(i.Out, "Caddyfile is not ElasticClaw-managed; remove any Grafana route manually.")
-		}
+		i.caddyHint("Caddyfile is not ElasticClaw-managed", installed)
 		return nil
 	}
 	if updated == string(data) {
@@ -77,6 +75,10 @@ func (i *Installer) UpdateCaddy(ctx context.Context, installed bool) error {
 	}
 	if _, err := i.Runner.Run(ctx, "caddy", "validate", "--config", path); err != nil {
 		_ = i.write(path, data, 0644)
+		if errors.Is(err, exec.ErrNotFound) {
+			i.caddyHint("Caddy is not installed, so the Caddyfile was left unchanged", installed)
+			return nil
+		}
 		return fmt.Errorf("Caddy validation failed (original file restored): %w", err)
 	}
 	if _, err := i.Runner.Run(ctx, "systemctl", "reload", "caddy"); err != nil {
@@ -84,4 +86,12 @@ func (i *Installer) UpdateCaddy(ctx context.Context, installed bool) error {
 		return fmt.Errorf("Caddy reload failed (original file restored): %w", err)
 	}
 	return nil
+}
+
+func (i *Installer) caddyHint(reason string, installed bool) {
+	if installed {
+		fmt.Fprintf(i.Out, "%s. Add this inside the hub site, ahead of the hub proxy:\n  %s\n", reason, GrafanaRoute)
+	} else {
+		fmt.Fprintf(i.Out, "%s; remove any Grafana route manually.\n", reason)
+	}
 }
