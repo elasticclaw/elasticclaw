@@ -173,3 +173,25 @@ func TestMiddlewareWebSocket(t *testing.T) {
 		})
 	}
 }
+
+func TestIsWebSocketUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		values []string
+		want   bool
+	}{
+		{[]string{"websocket"}, true},
+		{[]string{"WebSocket"}, true},
+		{[]string{"h2c, websocket"}, true},
+		{[]string{"h2c", " websocket "}, true},
+		{[]string{"h2c"}, false},
+		{nil, false},
+	} {
+		h := http.Header{}
+		for _, v := range tc.values {
+			h.Add("Upgrade", v)
+		}
+		if got := isWebSocketUpgrade(h); got != tc.want {
+			t.Errorf("Upgrade %q = %v, want %v", tc.values, got, tc.want)
+		}
+	}
+}

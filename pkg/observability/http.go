@@ -37,7 +37,7 @@ func middleware(mux *http.ServeMux, provider metric.MeterProvider, opts ...otelh
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Every WebSocket (agents, control, UI, terminal) is long-lived, so it would
 		// skew request latency; count it as a connection instead.
-		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+		if isWebSocketUpgrade(r.Header) {
 			_, pattern := mux.Handler(r)
 			if pattern == "" {
 				pattern = "unmatched"
@@ -51,4 +51,17 @@ func middleware(mux *http.ServeMux, provider metric.MeterProvider, opts ...otelh
 		}
 		instrumented.ServeHTTP(w, r)
 	})
+}
+
+// isWebSocketUpgrade matches the websocket library's handshake check: the token
+// may appear anywhere in any Upgrade header value.
+func isWebSocketUpgrade(h http.Header) bool {
+	for _, value := range h.Values("Upgrade") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "websocket") {
+				return true
+			}
+		}
+	}
+	return false
 }
