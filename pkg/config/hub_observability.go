@@ -101,7 +101,15 @@ func UpdateHubObservability(enabled bool, environment *string) error {
 		return err
 	}
 	defer os.Remove(file.Name())
-	if err := file.Chmod(0600); err != nil {
+	mode := os.FileMode(0600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+		if err := preserveOwner(file, info); err != nil {
+			file.Close()
+			return err
+		}
+	}
+	if err := file.Chmod(mode); err != nil {
 		file.Close()
 		return err
 	}

@@ -45,6 +45,27 @@ func TestUpdateHubObservabilityPreservesConfig(t *testing.T) {
 	}
 }
 
+func TestUpdateHubObservabilityPreservesMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	if err := os.WriteFile(path, []byte("token: keep\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateHubObservability(true, nil); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0640 {
+		t.Fatalf("mode %v, want 0640", info.Mode().Perm())
+	}
+}
+
 func TestUpdateHubObservabilityDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.yaml")
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
