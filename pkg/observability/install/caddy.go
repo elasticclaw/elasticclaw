@@ -70,11 +70,13 @@ func (i *Installer) UpdateCaddy(ctx context.Context, installed bool) error {
 	if updated == string(data) {
 		return nil
 	}
-	if err := i.write(path, []byte(updated), 0644); err != nil {
+	// The Caddyfile may hold credentials outside the managed block: keep its mode and owner.
+	restore := func() { _ = i.writeLike(path, data) }
+	if err := i.writeLike(path, []byte(updated)); err != nil {
 		return err
 	}
 	if _, err := i.Runner.Run(ctx, "caddy", "validate", "--config", path); err != nil {
-		_ = i.write(path, data, 0644)
+		restore()
 		if errors.Is(err, exec.ErrNotFound) {
 			i.caddyHint("Caddy is not installed, so the Caddyfile was left unchanged", installed)
 			return nil
@@ -82,7 +84,7 @@ func (i *Installer) UpdateCaddy(ctx context.Context, installed bool) error {
 		return fmt.Errorf("Caddy validation failed (original file restored): %w", err)
 	}
 	if _, err := i.Runner.Run(ctx, "systemctl", "reload", "caddy"); err != nil {
-		_ = i.write(path, data, 0644)
+		restore()
 		return fmt.Errorf("Caddy reload failed (original file restored): %w", err)
 	}
 	return nil

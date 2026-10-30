@@ -492,7 +492,9 @@ func TestInstallLifecycle(t *testing.T) {
 	all := strings.Join(commands, "\n")
 	contains(t, all, "useradd --system --user-group --no-create-home --shell /usr/sbin/nologin elasticclaw-obs", "systemctl daemon-reload")
 	for _, c := range Components {
-		contains(t, all, "systemctl enable --now "+unitName(c.Name), "systemctl reset-failed "+unitName(c.Name), "systemctl restart "+unitName(c.Name))
+		// reset-failed must come first: a unit stuck at its start limit refuses enable --now.
+		unit := unitName(c.Name)
+		contains(t, all, "systemctl reset-failed "+unit+"\nsystemctl enable "+unit+"\nsystemctl restart "+unit)
 	}
 	contains(t, read(t, i.path(MarkerFile)), "https://hub.example.com/grafana/")
 	var out bytes.Buffer
@@ -537,6 +539,33 @@ func TestCaddyValidationRollback(t *testing.T) {
 		t.Fatal("Caddy config changed without caddy installed")
 	}
 	contains(t, out.String(), "Caddy is not installed", GrafanaRoute)
+}
+
+func TestCaddyUpdateKeepsModeAndRollbackMode(t *testing.T) {
+	i := testInstaller(t)
+	path := i.path(CaddyPath)
+	if err := i.write(path, []byte(Caddyfile("hub.example.com", false)), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := i.UpdateCaddy(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0640 {
+		t.Fatalf("updated Caddyfile mode = %v, %v; want 0640", info.Mode().Perm(), err)
+	}
+	contains(t, read(t, path), GrafanaRoute)
+	i.Runner = runnerFunc(func(_ context.Context, name string, _ ...string) (string, error) {
+		if name == "caddy" {
+			return "", fmt.Errorf("invalid config")
+		}
+		return "", nil
+	})
+	if err := i.UpdateCaddy(t.Context(), false); err == nil {
+		t.Fatal("validation failure ignored")
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0640 {
+		t.Fatalf("restored Caddyfile mode = %v, %v; want 0640", info.Mode().Perm(), err)
+	}
 }
 
 func TestPinnedComponents(t *testing.T) {

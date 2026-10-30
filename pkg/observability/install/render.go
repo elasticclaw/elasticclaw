@@ -123,6 +123,21 @@ mode = console
 	return i.write(i.path(ConfigDir, "grafana.ini"), []byte(ini), 0644)
 }
 
+// writeLike replaces path keeping its current mode and owner (0644 for a new file).
+func (i *Installer) writeLike(path string, content []byte) error {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return i.write(path, content, 0644)
+	}
+	if err != nil {
+		return err
+	}
+	if err := i.write(path, content, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return chownLike(path, info)
+}
+
 func (i *Installer) write(path string, content []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
