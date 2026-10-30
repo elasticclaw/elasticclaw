@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -22,6 +23,9 @@ func init() {
 			cfg, err := config.LoadHubConfig()
 			if err != nil {
 				return err
+			}
+			if !config.HubConfigExists() {
+				return config.ErrNoHubConfig
 			}
 			resolvedURL := publicURL
 			if resolvedURL == "" {
@@ -67,7 +71,9 @@ func init() {
 			if err := installer.Uninstall(cmd.Context(), purgeData); err != nil {
 				return err
 			}
-			if err := config.UpdateHubObservability(false, nil); err != nil {
+			if err := config.UpdateHubObservability(false, nil); errors.Is(err, config.ErrNoHubConfig) {
+				fmt.Fprintln(cmd.OutOrStdout(), "No hub.yaml found; nothing to disable.")
+			} else if err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "Observability stack removed. Apply disabled telemetry: sudo systemctl restart elasticclaw")

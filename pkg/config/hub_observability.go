@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,21 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrNoHubConfig means none of the hub.yaml locations exists.
+var ErrNoHubConfig = errors.New("no hub.yaml found; create one first with: elasticclaw hub init")
+
+// HubConfigExists reports whether any hub.yaml location exists.
+func HubConfigExists() bool { return loadedHubConfigPath() != "" }
+
+func loadedHubConfigPath() string {
+	for _, path := range hubConfigPaths() {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
 
 // UpdateHubObservability preserves unrelated YAML fields, including extension fields
 // unknown to this version of the hub. It uses the same config resolution as LoadHubConfig.
@@ -30,12 +46,14 @@ func UpdateHubObservability(enabled bool, environment *string) error {
 			cfg.Observability.TracesSampleRatio = &ratio
 		}
 	}
-	path, err := ActiveHubConfigPath()
-	if err != nil {
-		return err
+	// Write back to the file LoadHubConfig read. ActiveHubConfigPath may name a missing
+	// $ELASTICCLAW_HUB_CONFIG file, and creating it would shadow the real config.
+	path := loadedHubConfigPath()
+	if path == "" {
+		return ErrNoHubConfig
 	}
 	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil {
 		return err
 	}
 	var doc yaml.Node

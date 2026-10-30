@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -63,6 +65,39 @@ func TestUpdateHubObservabilityPreservesMode(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0640 {
 		t.Fatalf("mode %v, want 0640", info.Mode().Perm())
+	}
+}
+
+func TestUpdateHubObservabilityWritesTheLoadedFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	missing := filepath.Join(t.TempDir(), "missing.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", missing)
+	if _, err := os.Stat("/etc/elasticclaw/hub.yaml"); err == nil {
+		t.Skip("system hub.yaml present")
+	}
+	if err := UpdateHubObservability(true, nil); !errors.Is(err, ErrNoHubConfig) {
+		t.Fatalf("err = %v, want ErrNoHubConfig", err)
+	}
+	homeConfig := filepath.Join(home, ".elasticclaw", "hub.yaml")
+	if err := os.MkdirAll(filepath.Dir(homeConfig), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(homeConfig, []byte("token: keep\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateHubObservability(true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatal("created a config at the missing $ELASTICCLAW_HUB_CONFIG path, shadowing the real one")
+	}
+	data, err := os.ReadFile(homeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "token: keep") || !strings.Contains(string(data), "enabled: true") {
+		t.Fatalf("loaded config not updated in place:\n%s", data)
 	}
 }
 
