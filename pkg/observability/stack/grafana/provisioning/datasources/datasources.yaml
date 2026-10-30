@@ -6,7 +6,7 @@ datasources:
     uid: victoriametrics
     type: prometheus
     access: proxy
-    url: http://victoriametrics:8428
+    url: ${VICTORIAMETRICS_URL}
     isDefault: true
     jsonData:
       httpMethod: POST
@@ -16,7 +16,7 @@ datasources:
     uid: victorialogs
     type: victoriametrics-logs-datasource
     access: proxy
-    url: http://victorialogs:9428
+    url: ${VICTORIALOGS_URL}
     jsonData:
       derivedFields:
         - name: trace_id
@@ -30,7 +30,7 @@ datasources:
     uid: tempo
     type: tempo
     access: proxy
-    url: http://tempo:3200
+    url: ${TEMPO_URL}
     jsonData:
       tracesToLogsV2:
         datasourceUid: victorialogs

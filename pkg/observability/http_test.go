@@ -11,10 +11,12 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func httpTestProviders(t *testing.T) (*sdkmetric.MeterProvider, *sdkmetric.ManualReader, *sdktrace.TracerProvider, *tracetest.SpanRecorder) {
@@ -126,7 +128,7 @@ func TestMiddlewareWebSocket(t *testing.T) {
 					if m.Name == "http.server.request.duration" {
 						t.Error("WebSocket recorded HTTP duration")
 					}
-					if m.Name != "elasticclaw.hub.websocket.connections" {
+					if m.Name != "elasticclaw.hub.streaming.connections" {
 						continue
 					}
 					found = true
@@ -138,6 +140,10 @@ func TestMiddlewareWebSocket(t *testing.T) {
 						t.Errorf("connections = %d, want %d", points[0].Value, want)
 					}
 					attr, _ := points[0].Attributes.Value(attribute.Key("endpoint"))
+					protocol, _ := points[0].Attributes.Value(attribute.Key("protocol"))
+					if protocol.AsString() != "websocket" {
+						t.Errorf("protocol = %q", protocol.AsString())
+					}
 					if attr.AsString() != endpoint {
 						t.Errorf("endpoint = %q", attr.AsString())
 					}
@@ -192,6 +198,98 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 		}
 		if got := isWebSocketUpgrade(h); got != tc.want {
 			t.Errorf("Upgrade %q = %v, want %v", tc.values, got, tc.want)
+		}
+	}
+}
+
+func TestMiddlewarePublicEndpoint(t *testing.T) {
+	meter, _, tracer, spans := httpTestProviders(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {})
+	handler := middleware(mux, meter, otelhttp.WithTracerProvider(tracer), otelhttp.WithPropagators(propagation.TraceContext{}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("traceparent", "00-0102030405060708090a0b0c0d0e0f10-0102030405060708-01")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	ended := spans.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("spans = %d", len(ended))
+	}
+	if ended[0].Parent().IsValid() {
+		t.Error("untrusted traceparent became parent")
+	}
+	links := ended[0].Links()
+	remoteTrace, _ := trace.TraceIDFromHex("0102030405060708090a0b0c0d0e0f10")
+	if len(links) != 1 || links[0].SpanContext.TraceID() != remoteTrace {
+		t.Fatalf("missing incoming trace link: %v", links)
+	}
+}
+
+func TestMiddlewareSSE(t *testing.T) {
+	meter, reader, tracer, spans := httpTestProviders(t)
+	assertConnections := func(want int64) {
+		t.Helper()
+		found := false
+		for _, m := range collectHTTPMetrics(t, reader) {
+			if m.Name == "http.server.request.duration" {
+				t.Error("SSE recorded HTTP duration")
+			}
+			if m.Name != "elasticclaw.hub.streaming.connections" {
+				continue
+			}
+			found = true
+			points := m.Data.(metricdata.Sum[int64]).DataPoints
+			if len(points) != 1 || points[0].Value != want {
+				t.Fatalf("connections = %#v, want %d", points, want)
+			}
+			endpoint, _ := points[0].Attributes.Value(attribute.Key("endpoint"))
+			protocol, _ := points[0].Attributes.Value(attribute.Key("protocol"))
+			if endpoint.AsString() != "/stream/{id}" || protocol.AsString() != "sse" {
+				t.Errorf("attributes = %v", points[0].Attributes)
+			}
+		}
+		if !found {
+			t.Error("missing SSE counter")
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream/{id}", func(w http.ResponseWriter, r *http.Request) {
+		assertConnections(1)
+		if len(spans.Started()) != 0 {
+			t.Error("SSE started server span")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+	})
+	handler := middleware(mux, meter, otelhttp.WithTracerProvider(tracer))
+	req := httptest.NewRequest(http.MethodGet, "/stream/private-id", nil)
+	req.Header.Set("Accept", "application/json, text/event-stream; charset=utf-8")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if !w.Flushed {
+		t.Error("handler did not flush")
+	}
+	assertConnections(0)
+	if len(spans.Ended()) != 0 {
+		t.Error("SSE recorded span")
+	}
+}
+
+func TestStreamingProtocol(t *testing.T) {
+	for _, tc := range []struct {
+		accept []string
+		want   string
+	}{
+		{nil, ""},
+		{[]string{"application/json"}, ""},
+		{[]string{"text/event-stream"}, "sse"},
+		{[]string{"application/json", "text/event-stream; charset=utf-8"}, "sse"},
+		{[]string{"application/json, text/event-stream;q=0.5"}, "sse"},
+		{[]string{"text/event-stream;q=0.0"}, ""},
+		{[]string{"text/event-stream;q=invalid"}, ""},
+	} {
+		h := http.Header{"Accept": tc.accept}
+		if got := streamingProtocol(h); got != tc.want {
+			t.Errorf("Accept %q = %q, want %q", tc.accept, got, tc.want)
 		}
 	}
 }

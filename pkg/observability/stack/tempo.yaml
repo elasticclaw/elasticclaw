@@ -1,0 +1,52 @@
+server:
+  http_listen_address: ${TEMPO_LISTEN_ADDRESS}
+  grpc_listen_address: ${TEMPO_LISTEN_ADDRESS}
+  grpc_listen_port: 9095
+  http_listen_port: 3200
+
+memberlist:
+  bind_addr: ["${TEMPO_LISTEN_ADDRESS}"]
+  bind_port: 7946
+  advertise_addr: ${TEMPO_ADVERTISE_ADDRESS}
+
+distributor:
+  ring:
+    instance_addr: ${TEMPO_ADVERTISE_ADDRESS}
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: ${TEMPO_OTLP_ENDPOINT}
+
+live_store:
+  ring:
+    instance_addr: ${TEMPO_ADVERTISE_ADDRESS}
+  wal:
+    path: ${TEMPO_DATA_PATH}/live-store/traces
+  shutdown_marker_dir: ${TEMPO_DATA_PATH}/live-store/shutdown-marker
+  max_trace_idle: 10s
+  max_block_duration: 5m
+
+block_builder:
+  wal:
+    path: ${TEMPO_DATA_PATH}/block-builder/traces
+
+backend_scheduler:
+  local_work_path: ${TEMPO_DATA_PATH}/work
+
+# Retention is enforced by the backend worker; the scheduler's copy is ignored.
+backend_worker:
+  compaction:
+    block_retention: 72h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: ${TEMPO_DATA_PATH}/wal
+    local:
+      path: ${TEMPO_DATA_PATH}/blocks
+
+# Self-hosted stack: never phone home to Grafana Labs.
+usage_report:
+  reporting_enabled: false

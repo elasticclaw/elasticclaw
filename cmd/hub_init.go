@@ -13,11 +13,12 @@ import (
 )
 
 var (
-	initPublicURL string
-	initToken     string
-	initClawToken string
-	initForce     bool
-	initPrintOnly bool
+	initPublicURL     string
+	initToken         string
+	initClawToken     string
+	initForce         bool
+	initPrintOnly     bool
+	initObservability bool
 )
 
 var hubInitCmd = &cobra.Command{
@@ -44,6 +45,7 @@ func init() {
 	hubInitCmd.Flags().StringVar(&initPublicURL, "public-url", "", "public URL for this ElasticClaw Server (env: ELASTICCLAW_PUBLIC_URL)")
 	hubInitCmd.Flags().StringVar(&initToken, "token", "", "user API token (generated if empty; env: ELASTICCLAW_TOKEN)")
 	hubInitCmd.Flags().StringVar(&initClawToken, "claw-token", "", "agent auth token (generated if empty; env: ELASTICCLAW_CLAW_TOKEN)")
+	hubInitCmd.Flags().BoolVar(&initObservability, "observability", false, "enable telemetry export to the local observability stack")
 	hubInitCmd.Flags().BoolVar(&initForce, "force", false, "overwrite existing hub.yaml")
 	hubInitCmd.Flags().BoolVar(&initPrintOnly, "print", false, "print config to stdout instead of writing file")
 }
@@ -61,6 +63,10 @@ func runHubInit(cmd *cobra.Command, args []string) error {
 	}
 	if publicURL != "" {
 		cfg["public_url"] = publicURL
+	}
+
+	if initObservability {
+		cfg["observability"] = map[string]interface{}{"enabled": true, "otlp_endpoint": "http://localhost:4318", "traces_sample_ratio": 0.25}
 	}
 
 	data, err := yaml.Marshal(cfg)

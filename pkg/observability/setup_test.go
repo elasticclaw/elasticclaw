@@ -135,22 +135,39 @@ func TestBoundedShutdown(t *testing.T) {
 }
 
 func TestHTTPMetricCardinality(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithView(httpMetricView()))
-	defer provider.Shutdown(t.Context())
-	histogram, err := provider.Meter("test").Float64Histogram("http.client.request.duration")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, value := range []string{"one", "two"} {
-		histogram.Record(t.Context(), 1, metric.WithAttributes(attribute.String("server.address", value), attribute.String("url.path", value), attribute.String("error.type", value), attribute.String("http.request.method", "GET")))
-	}
-	var data metricdata.ResourceMetrics
-	if err := reader.Collect(t.Context(), &data); err != nil {
-		t.Fatal(err)
-	}
-	points := data.ScopeMetrics[0].Metrics[0].Data.(metricdata.Histogram[float64]).DataPoints
-	if len(points) != 1 || points[0].Count != 2 || points[0].Attributes.Len() != 1 {
-		t.Fatalf("unbounded attributes survived: %#v", points)
+	for _, signal := range []string{"server", "client"} {
+		t.Run(signal, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithView(httpMetricView()))
+			defer provider.Shutdown(t.Context())
+			histogram, err := provider.Meter("test").Float64Histogram("http." + signal + ".request.duration")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, host := range []string{"api.github.com", "api.anthropic.com"} {
+				for _, value := range []string{"one", "two"} {
+					histogram.Record(t.Context(), 1, metric.WithAttributes(attribute.String("server.address", host), attribute.String("url.path", value), attribute.String("error.type", value), attribute.String("http.request.method", "GET")))
+				}
+			}
+			var data metricdata.ResourceMetrics
+			if err := reader.Collect(t.Context(), &data); err != nil {
+				t.Fatal(err)
+			}
+			points := data.ScopeMetrics[0].Metrics[0].Data.(metricdata.Histogram[float64]).DataPoints
+			if signal == "server" {
+				if len(points) != 1 || points[0].Count != 4 || points[0].Attributes.Len() != 1 {
+					t.Fatalf("unbounded server attributes survived: %#v", points)
+				}
+			} else {
+				if len(points) != 2 {
+					t.Fatalf("client host labels missing: %#v", points)
+				}
+				for _, point := range points {
+					if point.Count != 2 || point.Attributes.Len() != 2 || !point.Attributes.HasValue("server.address") {
+						t.Errorf("unexpected client attributes: %#v", point)
+					}
+				}
+			}
+		})
 	}
 }
