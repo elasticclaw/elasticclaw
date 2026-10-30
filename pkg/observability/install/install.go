@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -108,12 +109,12 @@ func (i *Installer) Install(ctx context.Context, opts Options) error {
 		return err
 	}
 	for _, c := range Components {
-		// A unit that hit its start limit on an earlier attempt refuses to start until
-		// reset, so reset first; restart (not enable --now) also picks up upgrades.
-		if _, err := i.Runner.Run(ctx, "systemctl", "reset-failed", unitName(c.Name)); err != nil {
+		// Enable (without --now) loads the unit; reset-failed then clears a start limit hit
+		// on an earlier attempt (it rejects never-loaded units), and restart picks up upgrades.
+		if _, err := i.Runner.Run(ctx, "systemctl", "enable", unitName(c.Name)); err != nil {
 			return err
 		}
-		if _, err := i.Runner.Run(ctx, "systemctl", "enable", unitName(c.Name)); err != nil {
+		if _, err := i.Runner.Run(ctx, "systemctl", "reset-failed", unitName(c.Name)); err != nil {
 			return err
 		}
 		if _, err := i.Runner.Run(ctx, "systemctl", "restart", unitName(c.Name)); err != nil {
@@ -199,7 +200,28 @@ func (i *Installer) Uninstall(ctx context.Context, purge bool) error {
 		}
 	}
 	if purge {
-		return os.RemoveAll(i.path(DataDir))
+		return removeContents(i.path(DataDir))
+	}
+	return nil
+}
+
+// removeContents empties dir and then removes it; a dir that is its own mount point
+// cannot be removed, so it is left empty instead.
+func removeContents(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(dir); err != nil && !errors.Is(err, syscall.EBUSY) {
+		return err
 	}
 	return nil
 }

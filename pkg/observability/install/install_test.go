@@ -87,7 +87,7 @@ func TestRenderUnitsAndConfigs(t *testing.T) {
 	}
 	contains(t, read(t, i.path(ConfigDir, "collector.env")), "HOST_ROOT=/\n", "127.0.0.1:4317", "127.0.0.1:4318", "127.0.0.1:4417", "127.0.0.1:13133", "/opentelemetry", "/insert/opentelemetry")
 	contains(t, read(t, i.path(ConfigDir, "tempo.env")), "TEMPO_LISTEN_ADDRESS=127.0.0.1", "TEMPO_ADVERTISE_ADDRESS=127.0.0.1", "TEMPO_OTLP_ENDPOINT=127.0.0.1:4417")
-	contains(t, read(t, i.path(ConfigDir, "grafana.ini")), "http_addr = 127.0.0.1", "http_port = 3001", "root_url = https://hub.example.com/grafana/", "serve_from_sub_path = true", "allow_sign_up = false", "[auth.anonymous]\nenabled = false", "reporting_enabled = false", "check_for_updates = false", "check_for_plugin_updates = false", "[plugins]\npreinstall_disabled = true")
+	contains(t, read(t, i.path(ConfigDir, "grafana.ini")), "http_addr = 127.0.0.1", "http_port = 3001", "root_url = https://hub.example.com/grafana/", "serve_from_sub_path = true", "allow_sign_up = false", "[auth.anonymous]\nenabled = false", "reporting_enabled = false", "check_for_updates = false", "check_for_plugin_updates = false", "[plugins]\npreinstall_disabled = true", "cookie_secure = true")
 	for _, name := range []string{"collector.yaml", "tempo.yaml", "grafana/provisioning/datasources/datasources.yaml"} {
 		got := read(t, i.path(ConfigDir, name))
 		canonical, _ := stack.Files.ReadFile(name)
@@ -446,10 +446,22 @@ func TestInstallLifecycle(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data))}, nil
 	})
+	loaded := map[string]bool{}
 	i.Runner = runnerFunc(func(_ context.Context, name string, args ...string) (string, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		if name == "id" {
 			return "", fmt.Errorf("missing user")
+		}
+		// Like systemd 255: reset-failed rejects a unit that was never loaded.
+		if name == "systemctl" && len(args) == 2 {
+			switch args[0] {
+			case "enable":
+				loaded[args[1]] = true
+			case "reset-failed":
+				if !loaded[args[1]] {
+					return "", fmt.Errorf("Failed to reset failed state of unit %s: Unit %s not loaded.", args[1], args[1])
+				}
+			}
 		}
 		if name == "systemctl" && len(args) == 2 && args[0] == "restart" && args[1] == "elasticclaw" {
 			hubRestarts++
@@ -492,9 +504,9 @@ func TestInstallLifecycle(t *testing.T) {
 	all := strings.Join(commands, "\n")
 	contains(t, all, "useradd --system --user-group --no-create-home --shell /usr/sbin/nologin elasticclaw-obs", "systemctl daemon-reload")
 	for _, c := range Components {
-		// reset-failed must come first: a unit stuck at its start limit refuses enable --now.
+		// enable loads the unit, then reset-failed clears an old start limit, then restart.
 		unit := unitName(c.Name)
-		contains(t, all, "systemctl reset-failed "+unit+"\nsystemctl enable "+unit+"\nsystemctl restart "+unit)
+		contains(t, all, "systemctl enable "+unit+"\nsystemctl reset-failed "+unit+"\nsystemctl restart "+unit)
 	}
 	contains(t, read(t, i.path(MarkerFile)), "https://hub.example.com/grafana/")
 	var out bytes.Buffer
@@ -576,5 +588,21 @@ func TestPinnedComponents(t *testing.T) {
 		if !strings.HasPrefix(c.URL, "https://") {
 			t.Errorf("non-TLS download for %s", c.Name)
 		}
+	}
+}
+
+func TestRemoveContents(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(filepath.Join(dir, "victoriametrics", "x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeContents(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("data dir still present: %v", err)
+	}
+	if err := removeContents(dir); err != nil {
+		t.Fatalf("missing dir: %v", err)
 	}
 }
