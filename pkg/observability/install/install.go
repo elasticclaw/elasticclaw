@@ -108,12 +108,12 @@ func (i *Installer) Install(ctx context.Context, opts Options) error {
 		return err
 	}
 	for _, c := range Components {
-		if _, err := i.Runner.Run(ctx, "systemctl", "enable", "--now", unitName(c.Name)); err != nil {
+		// A unit that hit its start limit on an earlier attempt refuses to start until
+		// reset, so reset first; restart (not enable --now) also picks up upgrades.
+		if _, err := i.Runner.Run(ctx, "systemctl", "reset-failed", unitName(c.Name)); err != nil {
 			return err
 		}
-		// enable --now does not restart already-running units after an upgrade, and a unit
-		// that hit its start limit on an earlier attempt refuses to start until reset.
-		if _, err := i.Runner.Run(ctx, "systemctl", "reset-failed", unitName(c.Name)); err != nil {
+		if _, err := i.Runner.Run(ctx, "systemctl", "enable", unitName(c.Name)); err != nil {
 			return err
 		}
 		if _, err := i.Runner.Run(ctx, "systemctl", "restart", unitName(c.Name)); err != nil {
