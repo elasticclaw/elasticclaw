@@ -117,9 +117,10 @@ check_for_plugin_updates = false
 preinstall_disabled = true
 [security]
 admin_user = admin
+cookie_secure = %t
 [log]
 mode = console
-`, grafanaURL, i.path(DataDir, "grafana"), i.path(DataDir, "grafana", "logs"), i.path(DataDir, "grafana", "plugins"), i.path(ConfigDir, "grafana", "provisioning"))
+`, grafanaURL, i.path(DataDir, "grafana"), i.path(DataDir, "grafana", "logs"), i.path(DataDir, "grafana", "plugins"), i.path(ConfigDir, "grafana", "provisioning"), strings.HasPrefix(grafanaURL, "https://"))
 	return i.write(i.path(ConfigDir, "grafana.ini"), []byte(ini), 0644)
 }
 

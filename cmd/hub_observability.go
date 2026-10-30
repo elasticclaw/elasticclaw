@@ -68,13 +68,16 @@ func init() {
 				return err
 			}
 			installer := obsinstall.New("", cmd.OutOrStdout())
-			if err := installer.Uninstall(cmd.Context(), purgeData); err != nil {
-				return err
-			}
+			uninstallErr := installer.Uninstall(cmd.Context(), purgeData)
+			// Disable telemetry even if removal failed part-way, so the hub never keeps
+			// exporting to a stack that is gone.
 			if err := config.UpdateHubObservability(false, nil); errors.Is(err, config.ErrNoHubConfig) {
 				fmt.Fprintln(cmd.OutOrStdout(), "No hub.yaml found; nothing to disable.")
 			} else if err != nil {
-				return err
+				return errors.Join(uninstallErr, err)
+			}
+			if uninstallErr != nil {
+				return uninstallErr
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "Observability stack removed. Apply disabled telemetry: sudo systemctl restart elasticclaw")
 			return nil
