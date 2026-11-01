@@ -15,6 +15,9 @@ const (
 	CodexPluginVersion   = "2026.9.4"
 	CodexCLIVersion      = "0.153.4"
 	GrokCLIVersion       = "0.2.103"
+	// Pin the isolated, named-session CLI version validated by the browser
+	// evidence bootstrap and recording workflow.
+	BrowserUseVersion = "0.13.1"
 )
 
 // NodeCompatibleRange is the Node range claws accept, in npm engines syntax.

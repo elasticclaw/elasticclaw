@@ -591,6 +591,7 @@ func (s *Server) buildJiraContext(payload jiraWebhookPayload) string {
 		b.WriteString(text)
 		b.WriteString("\n")
 	}
+	fmt.Fprintf(&b, "\nJira attachment contents are intentionally omitted from this prompt. If diagnostic evidence is needed, use the Jira attachment workflow in TOOLS.md with issue %s and the sandbox-provided Jira credentials.\n", issue.Key)
 	return b.String()
 }
 
