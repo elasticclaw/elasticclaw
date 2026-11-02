@@ -2120,6 +2120,14 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 }
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
+	// Late triggers must not restart a completed pipeline. New runs initialize
+	// their entry stage separately; retry and restore retain their current stage.
+	if pl := parsePipelineForContext(ctx); pl != nil {
+		if current := pl.StageByID(s.getPipelineStage(clawID)); current != nil && current.Terminal {
+			log.Printf("[pipeline] claw %s: ignoring transition from terminal stage %q to %q", shortID(clawID), current.ID, stage.ID)
+			return false
+		}
+	}
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
 	transitioned, _ := s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx)
 	return transitioned

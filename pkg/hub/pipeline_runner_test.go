@@ -17,6 +17,81 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestPipelineTriggersAfterTerminalStage(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		stage   string
+		retry   bool
+		wantRun bool
+	}{
+		{name: "terminal", stage: "ready_to_merge"},
+		{name: "non-terminal", stage: "working", wantRun: true},
+		{name: "retry", stage: "working", retry: true, wantRun: true},
+		{name: "new run", wantRun: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, db, _ := newClawRetryTestServer(t, "offline")
+			s.hubCfg.Factories = []*types.FactoryConfig{{Name: "terminal-test", PipelineYAML: `
+stages:
+  - id: working
+    entry: true
+  - id: update-deps
+    triggers:
+      - message_contains: "[UPDATE_DEPS]"
+    on_enter:
+      run:
+        command: echo updated
+        output: update_result
+  - id: ready_to_merge
+    terminal: true
+`}}
+			const clawID = "retry-claw"
+			if _, err := db.Exec(`UPDATE claws SET tags='["factory:terminal-test"]', pipeline_stage=? WHERE id=?`, tt.stage, clawID); err != nil {
+				t.Fatal(err)
+			}
+			if tt.retry {
+				reset, err := s.resetClawForRetry("tenant", clawID, "", "retrying", "")
+				if err != nil || !reset {
+					t.Fatalf("reset for retry = %v, %v", reset, err)
+				}
+				if got := s.getPipelineStage(clawID); got != tt.stage {
+					t.Fatalf("retry stage = %q, want %q", got, tt.stage)
+				}
+			}
+			if _, err := db.Exec(`UPDATE claws SET status='connected', provider_id='test-instance' WHERE id=?`, clawID); err != nil {
+				t.Fatal(err)
+			}
+			if tt.stage == "" {
+				s.initializePipelineEntryIfNeeded(clawID)
+				if got := s.getPipelineStage(clawID); got != "working" {
+					t.Fatalf("entry stage = %q, want working", got)
+				}
+			}
+			if got := s.checkPipelineMessageTriggers(clawID, "[UPDATE_DEPS]"); got != tt.wantRun {
+				t.Fatalf("transition = %v, want %v", got, tt.wantRun)
+			}
+			wantStage := tt.stage
+			if tt.wantRun {
+				wantStage = "update-deps"
+			}
+			if got := s.getPipelineStage(clawID); got != wantStage {
+				t.Fatalf("stage = %q, want %q", got, wantStage)
+			}
+			_, ran := s.loadPipelineOutputs(clawID)["update_result"]
+			if ran != tt.wantRun {
+				t.Fatalf("on_enter command output present = %v, want %v", ran, tt.wantRun)
+			}
+			var commandNotices int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE '%Running workflow command for stage%'`, clawID).Scan(&commandNotices); err != nil {
+				t.Fatal(err)
+			}
+			if (commandNotices > 0) != tt.wantRun {
+				t.Fatalf("on_enter command notices = %d, want run=%v", commandNotices, tt.wantRun)
+			}
+		})
+	}
+}
+
 func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
