@@ -300,15 +300,18 @@ func (s *Server) reapOnce() {
 						log.Printf("[reaper] CMX VM %s for claw %s is gone; stopping as sandbox terminated", c.providerID, c.id)
 						reason, vmGone = "sandbox terminated: CMX VM "+c.providerID+" expired or no longer exists", true
 					}
-					// The lookup can take seconds: skip a claw that reconnected or
-					// moved to a new VM meanwhile, and let the next tick re-evaluate.
-					var status, providerID string
-					err = s.db.QueryRow(`SELECT status, COALESCE(provider_id,'') FROM claws WHERE id=?`, c.id).Scan(&status, &providerID)
-					if err != nil || status != "offline" || providerID != c.providerID {
-						log.Printf("[reaper] claw %s changed during VM lookup (status=%q provider_id=%q err=%v); not stopping", c.id, status, providerID, err)
-						s.firstSeen(key, false, n)
-						continue
-					}
+				}
+			}
+			// Earlier CMX lookups in this tick can take seconds: skip a claw that
+			// reconnected or moved to a new VM meanwhile, and let the next tick
+			// re-evaluate.
+			if lookupBudget != nil {
+				var status, providerID string
+				err := s.db.QueryRow(`SELECT status, COALESCE(provider_id,'') FROM claws WHERE id=?`, c.id).Scan(&status, &providerID)
+				if err != nil || status != "offline" || providerID != c.providerID {
+					log.Printf("[reaper] claw %s changed during VM lookup (status=%q provider_id=%q err=%v); not stopping", c.id, status, providerID, err)
+					s.firstSeen(key, false, n)
+					continue
 				}
 			}
 			log.Printf("[reaper] stopping offline claw %s", c.id)

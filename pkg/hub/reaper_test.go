@@ -792,3 +792,39 @@ func TestReaperOfflineVMLookupBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestReaperOfflineVMLookupBudgetSpentRechecksLaterClaws(t *testing.T) {
+	prev := reaperVMLookupBudget
+	reaperVMLookupBudget = time.Millisecond
+	t.Cleanup(func() { reaperVMLookupBudget = prev })
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+	for _, id := range []string{"offline-00", "offline-01"} {
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,created_at) VALUES(?,'tenant',?,'replicated',?,'offline',?)`, id, id, id, tm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.replicatedVMTerminatedOverride = func(ctx context.Context, _ string, _ time.Time) (bool, error) {
+		// Both claws reconnect while the first lookup spends the tick budget.
+		if _, err := db.Exec(`UPDATE claws SET status='connected'`); err != nil {
+			t.Error(err)
+		}
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	s.terminateVMOverride = func(string, string) error {
+		t.Error("terminated VM of a claw that reconnected during the tick")
+		return nil
+	}
+	s.reapOnce()
+	tm = tm.Add(11 * time.Minute)
+	s.reapOnce()
+	var stopped int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE status='error'`).Scan(&stopped); err != nil {
+		t.Fatal(err)
+	}
+	if stopped != 0 {
+		t.Fatalf("stopped %d reconnected claws; want 0", stopped)
+	}
+}
