@@ -267,3 +267,15 @@ func TestSelectFailureSummaryModelRejectsBlankExternalAPIKey(t *testing.T) {
 		t.Fatal("expected blank external API key to be rejected")
 	}
 }
+
+func TestBridgeArtifactUnavailableIsNotRetryable(t *testing.T) {
+	for _, prefix := range []string{"", "Bootstrap failed: ", "connector download: ", "Factory provision failed: "} {
+		msg := classifyAgentFailure(prefix + "bridge artifact unavailable: ttl.sh/owner/claw-bridge:1w")
+		if msg.Kind != agentFailureBridgeArtifact {
+			t.Errorf("prefix %q: kind = %s, want %s", prefix, msg.Kind, agentFailureBridgeArtifact)
+		}
+		if retryableAgentFailure(msg.Kind) {
+			t.Errorf("prefix %q: missing artifact must not retry", prefix)
+		}
+	}
+}

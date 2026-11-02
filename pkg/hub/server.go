@@ -4569,6 +4569,9 @@ exit 1`
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml (e.g. bridge_image: ttl.sh/your/claw-bridge:tag) or build a tagged release")
 	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
+	}
 	var downloadCmd string
 	if strings.HasPrefix(bridgeURL, "http://") || strings.HasPrefix(bridgeURL, "https://") {
 		downloadCmd = fmt.Sprintf(`rm -f /tmp/claw-bridge.download && curl -fsSL %q -o /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv -f /tmp/claw-bridge.download /tmp/claw-bridge && echo downloaded`, bridgeURL)
@@ -5838,6 +5841,9 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
 	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
+	}
 
 	// Generate a random gateway password for this VM
 	gatewayPassword := randomHex(16)
@@ -6141,6 +6147,9 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	}
 	if !strings.HasPrefix(bridgeURL, "http://") && !strings.HasPrefix(bridgeURL, "https://") {
 		return fmt.Errorf("docker provider requires an HTTP(S) claw-bridge URL, got %q", bridgeURL)
+	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
 	}
 	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL)
 	if err != nil {
@@ -7333,6 +7342,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	if bridgeURL == "" {
 		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
 		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
+		return
+	}
+	if err := bootstrapBridgePreflight.check(context.Background(), bridgeURL); err != nil {
+		s.stopAgentWithReason(clawID, err.Error(), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
