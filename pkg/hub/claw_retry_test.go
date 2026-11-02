@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -790,4 +792,84 @@ func TestStopAgentIfInstanceStopsCurrentInstance(t *testing.T) {
 	if status != "error" {
 		t.Fatalf("status=%q, want error for a failure on the current instance", status)
 	}
+}
+
+func TestSupersededBootstrapKeepsSuccessorBootstrapEnv(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "provisioning")
+	// A retry re-provisioned the claw on vm-successor and staged its env
+	// while the predecessor's bootstrap was still running.
+	if _, err := db.Exec(`UPDATE claws SET provider='replicated', provider_id='vm-successor', template_files='not json' WHERE id='retry-claw'`); err != nil {
+		t.Fatal(err)
+	}
+	s.rememberReplicatedBootstrapEnv("retry-claw", "vm-successor", map[string]string{"DEPOT_TOKEN": "successor"})
+	s.bootstrapReplicated("retry-claw", "Retry Claw", "vm-predecessor", types.ProviderConfig{}, nil)
+
+	env, ok := s.loadReplicatedBootstrapEnv("retry-claw")
+	if !ok || env["DEPOT_TOKEN"] != "successor" {
+		t.Fatalf("env=%v found=%v, predecessor bootstrap dropped the successor's env", env, ok)
+	}
+	s.forgetReplicatedBootstrapEnvForVM("retry-claw", "vm-successor")
+	if _, ok := s.loadReplicatedBootstrapEnv("retry-claw"); ok {
+		t.Fatal("env survived a forget by its own VM")
+	}
+}
+
+func TestReplicatedVMSyncIgnoresLossOfSupersededVM(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		respond  func(http.ResponseWriter)
+		replaced bool
+		want     string
+	}{
+		{"404 after replacement", respondReplicatedVMNotFound, true, "starting"},
+		{"terminated after replacement", respondReplicatedVMTerminated, true, "starting"},
+		{"404 on current VM", respondReplicatedVMNotFound, false, "error"},
+		{"terminated on current VM", respondReplicatedVMTerminated, false, "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db, runID := newClawRetryTestServer(t, "starting")
+			if _, err := db.Exec(`UPDATE claws SET provider='replicated', provider_id='vm-old' WHERE id='retry-claw'`); err != nil {
+				t.Fatal(err)
+			}
+			// Exhaust retries so an honoured stop settles synchronously as error.
+			if _, err := db.Exec(`UPDATE task_runs SET attempt_count=? WHERE id=?`, maxClawAttempts, runID); err != nil {
+				t.Fatal(err)
+			}
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/vm/vm-old" {
+					http.NotFound(w, r)
+					return
+				}
+				// A retry replaces the VM while this lookup is in flight.
+				if tc.replaced {
+					if _, err := db.Exec(`UPDATE claws SET provider_id='vm-new' WHERE id='retry-claw'`); err != nil {
+						t.Error(err)
+					}
+				}
+				tc.respond(w)
+			}))
+			t.Cleanup(api.Close)
+			s.hubCfg.Providers = map[string]types.ProviderConfig{"replicated": {Token: "token", APIURL: api.URL}}
+			s.vmSyncGo = func(f func()) { f() }
+
+			s.syncReplicatedVMs()
+
+			var status string
+			if err := db.QueryRow(`SELECT status FROM claws WHERE id='retry-claw'`).Scan(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status != tc.want {
+				t.Fatalf("status=%q, want %q", status, tc.want)
+			}
+		})
+	}
+}
+
+func respondReplicatedVMNotFound(w http.ResponseWriter) {
+	http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+}
+
+func respondReplicatedVMTerminated(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"vm":{"id":"vm-old","status":"terminated"}}`))
 }

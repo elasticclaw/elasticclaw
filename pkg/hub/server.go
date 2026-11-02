@@ -137,7 +137,7 @@ type Server struct {
 	agentIdleResumeBaselineCleared bool
 
 	replicatedBootstrapEnvMu sync.Mutex
-	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
+	replicatedBootstrapEnv   map[string]replicatedBootstrapEnvEntry // temporary handoff while a Replicated VM becomes reachable
 
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
@@ -191,6 +191,7 @@ type Server struct {
 	usageCostRatios     sync.Map
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
+	vmSyncGo            func(func())                    // test seam for VM sync goroutines; nil spawns
 
 	// Constructed notifiers are cached per notifier name so instances are
 	// genuinely reused across features (the lifecycle poller, the manual test
@@ -6323,7 +6324,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		return fmt.Errorf("replicated provision: %w", err)
 	}
 	recordE2EReplicatedVMID(vmID)
-	s.rememberReplicatedBootstrapEnv(clawID, env)
+	s.rememberReplicatedBootstrapEnv(clawID, vmID, env)
 	// Store vm_id in the claw record — keep status='provisioning' so the poller can detect
 	// the provisioning→running transition and trigger bootstrap. Skip if already deleted.
 	_, _ = s.db.Exec(
@@ -6333,7 +6334,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	var currentStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 	if currentStatus == "deleted" {
-		s.forgetReplicatedBootstrapEnv(clawID)
+		s.forgetReplicatedBootstrapEnvForVM(clawID, vmID)
 		log.Printf("[provision] claw %s deleted mid-provision, destroying VM %s", clawID[:8], vmID)
 		_ = p.DeleteVM(ctx, vmID)
 		return fmt.Errorf("claw deleted mid-provision")
@@ -6364,26 +6365,43 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	return nil
 }
 
-func (s *Server) rememberReplicatedBootstrapEnv(clawID string, env map[string]string) {
+// replicatedBootstrapEnvEntry binds a staged bootstrap env to the VM it was
+// provisioned for, so a bootstrap outliving its VM cannot drop a successor's.
+type replicatedBootstrapEnvEntry struct {
+	vmID string
+	env  map[string]string
+}
+
+func (s *Server) rememberReplicatedBootstrapEnv(clawID, vmID string, env map[string]string) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
 	if s.replicatedBootstrapEnv == nil {
-		s.replicatedBootstrapEnv = make(map[string]map[string]string)
+		s.replicatedBootstrapEnv = make(map[string]replicatedBootstrapEnvEntry)
 	}
-	s.replicatedBootstrapEnv[clawID] = cloneStringMap(env)
+	s.replicatedBootstrapEnv[clawID] = replicatedBootstrapEnvEntry{vmID: vmID, env: cloneStringMap(env)}
 }
 
 func (s *Server) loadReplicatedBootstrapEnv(clawID string) (map[string]string, bool) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
-	env, ok := s.replicatedBootstrapEnv[clawID]
-	return cloneStringMap(env), ok
+	entry, ok := s.replicatedBootstrapEnv[clawID]
+	return cloneStringMap(entry.env), ok
 }
 
 func (s *Server) forgetReplicatedBootstrapEnv(clawID string) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
 	delete(s.replicatedBootstrapEnv, clawID)
+}
+
+// forgetReplicatedBootstrapEnvForVM drops the staged env only while it still
+// belongs to vmID; a retry may have re-staged it for a successor VM.
+func (s *Server) forgetReplicatedBootstrapEnvForVM(clawID, vmID string) {
+	s.replicatedBootstrapEnvMu.Lock()
+	defer s.replicatedBootstrapEnvMu.Unlock()
+	if entry, ok := s.replicatedBootstrapEnv[clawID]; ok && entry.vmID == vmID {
+		delete(s.replicatedBootstrapEnv, clawID)
+	}
 }
 
 // ─── Provider status polling ──────────────────────────────────────────────────
@@ -6686,6 +6704,16 @@ func (s *Server) checkClawStatus() {
 	}
 }
 
+// goVMSync runs a VM sync side effect off the poll loop. The stops it runs
+// check c.providerID because a lookup can return after a retry replaced the VM.
+func (s *Server) goVMSync(f func()) {
+	if s.vmSyncGo != nil {
+		s.vmSyncGo(f)
+		return
+	}
+	go f()
+}
+
 func (s *Server) syncReplicatedVMs() {
 	s.mu.RLock()
 	replicatedCfg, ok := s.hubCfg.Providers["replicated"]
@@ -6739,7 +6767,9 @@ func (s *Server) syncReplicatedVMs() {
 			// retry/terminal funnel as an explicit terminated status.
 			if strings.Contains(err.Error(), "HTTP 404") {
 				log.Printf("pollProviderStatus: VM %s not found (404) for claw %s", c.providerID, c.id[:8])
-				go s.stopAgentWithReason(c.id, "Provider VM lost: replicated VM no longer exists", true)
+				s.goVMSync(func() {
+					s.stopAgentIfInstance(c.id, c.providerID, "Provider VM lost: replicated VM no longer exists", true)
+				})
 			} else {
 				log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			}
@@ -6765,14 +6795,16 @@ func (s *Server) syncReplicatedVMs() {
 					// starting an agent without its configured environment.
 					const reason = "Bootstrap failed: transient environment unavailable after hub restart; recreate the claw"
 					log.Printf("Claw %s (%s): %s", c.name, c.id[:8], reason)
-					go s.stopAgentWithReason(c.id, reason, false)
+					s.goVMSync(func() { s.stopAgentIfInstance(c.id, c.providerID, reason, false) })
 					continue
 				}
 				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg, env)
 			}
 		case "terminated", "error":
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
-			go s.stopAgentWithReason(c.id, "Provider VM lost: sandbox terminated (TTL expired or external shutdown)", true)
+			s.goVMSync(func() {
+				s.stopAgentIfInstance(c.id, c.providerID, "Provider VM lost: sandbox terminated (TTL expired or external shutdown)", true)
+			})
 			// Note: stopAgentWithReason handles disconnect, status, broadcast, VM cleanup
 			// Spawned in goroutine so slow issue-tracker APIs don't stall the poll loop.
 			// Skip the rest of the status update logic for this claw
@@ -7266,7 +7298,7 @@ func (s *Server) clawHasMessages(clawID string) bool {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig, env map[string]string) {
-	defer s.forgetReplicatedBootstrapEnv(clawID)
+	defer s.forgetReplicatedBootstrapEnvForVM(clawID, vmID)
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
 	// Bail immediately if claw was deleted while VM was spinning up
 	var checkStatus string
