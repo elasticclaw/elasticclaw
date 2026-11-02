@@ -17,6 +17,98 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const terminalTestPipelineYAML = `
+stages:
+  - id: working
+    entry: true
+  - id: update-deps
+    triggers:
+      - message_contains: "[UPDATE_DEPS]"
+    on_enter:
+      run:
+        command: echo updated
+        output: update_result
+  - id: ready_to_merge
+    terminal: true
+`
+
+// newTerminalStageTestServer returns a connected factory claw in stage, using
+// terminalTestPipelineYAML.
+func newTerminalStageTestServer(t *testing.T, stage string) (*Server, *sql.DB, string) {
+	t.Helper()
+	s, db, _ := newClawRetryTestServer(t, "connected")
+	s.hubCfg.Factories = []*types.FactoryConfig{{Name: "terminal-test", PipelineYAML: terminalTestPipelineYAML}}
+	const clawID = "retry-claw"
+	if _, err := db.Exec(`UPDATE claws SET tags='["factory:terminal-test"]', pipeline_stage=?, provider_id='test-instance' WHERE id=?`, stage, clawID); err != nil {
+		t.Fatal(err)
+	}
+	return s, db, clawID
+}
+
+func assertNoUpdateDepsRun(t *testing.T, s *Server, clawID string) {
+	t.Helper()
+	if got := s.getPipelineStage(clawID); got != "ready_to_merge" {
+		t.Fatalf("stage = %q, want ready_to_merge", got)
+	}
+	if _, ran := s.loadPipelineOutputs(clawID)["update_result"]; ran {
+		t.Fatal("update-deps on_enter ran after the terminal stage")
+	}
+}
+
+// TestPipelineTerminalStageWrittenAfterGuard covers a concurrent transition
+// writing the terminal stage after the early check read a non-terminal one:
+// the claim itself must refuse to leave the terminal stage.
+func TestPipelineTerminalStageWrittenAfterGuard(t *testing.T) {
+	s, db, clawID := newTerminalStageTestServer(t, "working")
+	afterTerminalStageGuard = func(id string) {
+		if _, err := db.Exec(`UPDATE claws SET pipeline_stage='ready_to_merge' WHERE id=?`, id); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterTerminalStageGuard = nil })
+
+	if s.checkPipelineMessageTriggers(clawID, "[UPDATE_DEPS]") {
+		t.Fatal("transition claimed over a concurrently written terminal stage")
+	}
+	assertNoUpdateDepsRun(t, s, clawID)
+}
+
+func TestClaimPipelineStageTransitionBlockedFrom(t *testing.T) {
+	s, _, clawID := newTerminalStageTestServer(t, "ready_to_merge")
+	if s.claimPipelineStageTransition(clawID, "update-deps", "ready_to_merge") {
+		t.Fatal("claim left a blocked stage")
+	}
+	if !s.claimPipelineStageTransition(clawID, "update-deps") {
+		t.Fatal("unguarded claim should still win")
+	}
+	if !s.claimPipelineStageTransition(clawID, "working", "ready_to_merge") {
+		t.Fatal("guarded claim from a non-blocked stage should win")
+	}
+}
+
+func TestPRConditionsIgnoredAfterTerminalStage(t *testing.T) {
+	s, db, clawID := newTerminalStageTestServer(t, "ready_to_merge")
+	pr := clawPR{id: "pr-terminal", clawID: clawID, prURL: "https://github.com/o/r/pull/1"}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, created_at) VALUES(?,?,?,?,?,datetime('now'))`, pr.id, pr.clawID, "o/r", 1, pr.prURL); err != nil {
+		t.Fatal(err)
+	}
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		t.Fatal("pipeline context not found")
+	}
+	stage := parsePipelineForContext(ctx).StageByID("update-deps")
+	s.firePRConditions(pr, *stage, ctx)
+
+	assertNoUpdateDepsRun(t, s, clawID)
+	var fired int
+	if err := db.QueryRow(`SELECT pr_conditions_fired FROM claw_prs WHERE id=?`, pr.id).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 {
+		t.Fatalf("pr_conditions_fired = %d, want 0", fired)
+	}
+}
+
 func TestPipelineTriggersAfterTerminalStage(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -31,20 +123,7 @@ func TestPipelineTriggersAfterTerminalStage(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s, db, _ := newClawRetryTestServer(t, "offline")
-			s.hubCfg.Factories = []*types.FactoryConfig{{Name: "terminal-test", PipelineYAML: `
-stages:
-  - id: working
-    entry: true
-  - id: update-deps
-    triggers:
-      - message_contains: "[UPDATE_DEPS]"
-    on_enter:
-      run:
-        command: echo updated
-        output: update_result
-  - id: ready_to_merge
-    terminal: true
-`}}
+			s.hubCfg.Factories = []*types.FactoryConfig{{Name: "terminal-test", PipelineYAML: terminalTestPipelineYAML}}
 			const clawID = "retry-claw"
 			if _, err := db.Exec(`UPDATE claws SET tags='["factory:terminal-test"]', pipeline_stage=? WHERE id=?`, tt.stage, clawID); err != nil {
 				t.Fatal(err)
