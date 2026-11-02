@@ -4197,7 +4197,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
+		s.stopAgentIfInstance(clawID, instance.ID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
 		// stopAgentWithReason already terminates the VM; no need to destroy again
 	}()
 	return nil
@@ -5769,7 +5769,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 	go func() {
 		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files, env); err != nil {
 			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentIfInstance(clawID, instance.ID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
 	}()
 
@@ -7286,13 +7286,13 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		clawID,
 	).Scan(&filesJSON, &templateName); err != nil {
 		log.Printf("[bootstrap] failed to load template_files for claw %s: %v", clawID[:8], err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
 		return
 	}
 	var files map[string]string
 	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
 		log.Printf("[bootstrap] failed to parse template_files for claw %s: %v", clawID[:8], err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
 		return
 	}
 	// Load github repos config for this claw
@@ -7332,7 +7332,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
-		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
+		s.stopAgentIfInstance(clawID, vmID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
@@ -7354,7 +7354,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	sshHome, err := sshHomeDir(sshUser)
 	if err != nil {
 		log.Printf("bootstrap: invalid SSH user %q: %v", sshUser, err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
 		return
 	}
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
@@ -7472,7 +7472,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 			},
 		}); err != nil {
 			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
 			return
 		}
 	}
@@ -7490,7 +7490,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 		},
 	}); err != nil {
 		log.Printf("Bootstrap failed for claw %s: %v", clawID, err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: %s", err), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Writing workspace files")
@@ -7516,7 +7516,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshWriteFiles(sshUser, sshHost, replicatedFinalWorkspaceDir(sshHome), files)
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
 			return
 		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
@@ -7528,7 +7528,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(replicatedFinalWorkspaceDir(sshHome), files))
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
 			return
 		}
 		log.Printf("Template files written for claw %s", clawName)
@@ -7536,7 +7536,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 
 	if err := s.restoreCheckpointToSSH(clawID, sshUser, sshHost); err != nil {
 		log.Printf("[bootstrap] restore checkpoint failed: %v", err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore checkpoint failed: %s", sanitizeBootstrapError(err)), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Restore checkpoint failed: %s", sanitizeBootstrapError(err)), false)
 		return
 	}
 
@@ -7549,7 +7549,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
 		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
 		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
 			return
 		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
@@ -7561,7 +7561,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshRun(sshUser, sshHost, credHelper)
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
 			return
 		}
 		log.Printf("[bootstrap] GitHub credential helper installed for claw %s workspace=%q", clawName, workspaceName)

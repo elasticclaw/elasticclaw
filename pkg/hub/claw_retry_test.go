@@ -738,3 +738,56 @@ func TestReaperGivesRetriedProvisioningClawFreshWindow(t *testing.T) {
 		t.Fatalf("first seen=%v, want the successor's own start %v", got, base)
 	}
 }
+
+func TestSupersededBootstrapFailureDoesNotStopSuccessor(t *testing.T) {
+	for _, tc := range []struct{ status, providerID string }{
+		{"provisioning", ""},
+		{"starting", "vm-successor"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			s, db, runID := newClawRetryTestServer(t, tc.status)
+			// A retry already replaced vm-predecessor; the invalid template
+			// metadata makes the predecessor's bootstrap fail deterministically.
+			if _, err := db.Exec(`UPDATE claws SET provider='replicated', provider_id=?, template_files='not json' WHERE id='retry-claw'`, tc.providerID); err != nil {
+				t.Fatal(err)
+			}
+			s.bootstrapReplicated("retry-claw", "Retry Claw", "vm-predecessor", types.ProviderConfig{}, nil)
+
+			var status, providerID string
+			var attempts, attemptRows int
+			if err := db.QueryRow(`SELECT status, COALESCE(provider_id,'') FROM claws WHERE id='retry-claw'`).Scan(&status, &providerID); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT attempt_count FROM task_runs WHERE id=?`, runID).Scan(&attempts); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_attempts WHERE run_id=?`, runID).Scan(&attemptRows); err != nil {
+				t.Fatal(err)
+			}
+			if status != tc.status || providerID != tc.providerID || attempts != 1 || attemptRows != 1 {
+				t.Fatalf("status=%q provider_id=%q attempts=%d rows=%d, successor charged with predecessor's failure", status, providerID, attempts, attemptRows)
+			}
+		})
+	}
+}
+
+func TestStopAgentIfInstanceStopsCurrentInstance(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, db, runID := newClawRetryTestServer(t, "starting")
+	if _, err := db.Exec(`UPDATE claws SET provider_id='vm-current' WHERE id='retry-claw'`); err != nil {
+		t.Fatal(err)
+	}
+	// Exhaust retries so the stop settles on the synchronous terminal path.
+	if _, err := db.Exec(`UPDATE task_runs SET attempt_count=? WHERE id=?`, maxClawAttempts, runID); err != nil {
+		t.Fatal(err)
+	}
+	s.stopAgentIfInstance("retry-claw", "vm-current", "Bootstrap failed: ssh dial", true)
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='retry-claw'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "error" {
+		t.Fatalf("status=%q, want error for a failure on the current instance", status)
+	}
+}
