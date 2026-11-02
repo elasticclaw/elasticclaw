@@ -14,6 +14,10 @@ import (
 const reaperActionLimit = 20
 const redriveGrace = 2 * time.Minute
 
+// reaperVMLookupBudget caps the time one tick may spend on CMX lookups; once
+// spent, remaining offline claws fall back to the generic offline reason.
+var reaperVMLookupBudget = 30 * time.Second
+
 // terminalStageRecoveryGrace must exceed the legitimate in-flight window of a
 // terminal pipeline transition (streaming wait ~30s + checkpoint wait 90s), so
 // the reaper never completes a stage the main path is still finishing.
@@ -270,25 +274,44 @@ func (s *Server) reapOnce() {
 	}
 	rows.Close()
 	seen := make(map[string]bool, len(claws))
+	var lookupBudget context.Context
 	for _, c := range claws {
 		key := "claw:" + c.id + ":" + c.status
 		seen[key] = true
 		first := s.firstSeen(key, true, n)
 		age := n.Sub(first)
 		if c.status == "offline" && age > cfg.offlineGrace && take() {
-			log.Printf("[reaper] stopping offline claw %s", c.id)
 			reason, vmGone := "agent offline for "+cfg.offlineGrace.String()+", sandbox presumed dead", false
 			if c.provider == "replicated" && c.providerID != "" {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				terminated, err := s.replicatedVMTerminated(ctx, c.providerID, n)
-				cancel()
-				if err != nil {
-					log.Printf("[reaper] get VM %s: %v", c.providerID, err)
-				} else if terminated {
-					log.Printf("[reaper] CMX VM %s for claw %s is gone; stopping as sandbox terminated", c.providerID, c.id)
-					reason, vmGone = "sandbox terminated: CMX VM "+c.providerID+" expired or no longer exists", true
+				if lookupBudget == nil {
+					var cancelBudget context.CancelFunc
+					lookupBudget, cancelBudget = context.WithTimeout(context.Background(), reaperVMLookupBudget)
+					defer cancelBudget()
+				}
+				if lookupBudget.Err() != nil {
+					log.Printf("[reaper] VM lookup budget spent; skipping CMX lookup for claw %s", c.id)
+				} else {
+					ctx, cancel := context.WithTimeout(lookupBudget, 10*time.Second)
+					terminated, err := s.replicatedVMTerminated(ctx, c.providerID, n)
+					cancel()
+					if err != nil {
+						log.Printf("[reaper] get VM %s: %v", c.providerID, err)
+					} else if terminated {
+						log.Printf("[reaper] CMX VM %s for claw %s is gone; stopping as sandbox terminated", c.providerID, c.id)
+						reason, vmGone = "sandbox terminated: CMX VM "+c.providerID+" expired or no longer exists", true
+					}
+					// The lookup can take seconds: skip a claw that reconnected or
+					// moved to a new VM meanwhile, and let the next tick re-evaluate.
+					var status, providerID string
+					err = s.db.QueryRow(`SELECT status, COALESCE(provider_id,'') FROM claws WHERE id=?`, c.id).Scan(&status, &providerID)
+					if err != nil || status != "offline" || providerID != c.providerID {
+						log.Printf("[reaper] claw %s changed during VM lookup (status=%q provider_id=%q err=%v); not stopping", c.id, status, providerID, err)
+						s.firstSeen(key, false, n)
+						continue
+					}
 				}
 			}
+			log.Printf("[reaper] stopping offline claw %s", c.id)
 			// A VM the provider already reports gone needs no terminate call.
 			s.stopAgentWithReason(c.id, reason, vmGone)
 		}
