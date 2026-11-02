@@ -763,6 +763,8 @@ func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
 	if parsed, ok := parse(stdout); ok {
 		return parsed, true
 	}
+	// Valid JSON that is not an object (an array or scalar) is never a result,
+	// so do not dig an object out of it.
 	if json.Valid([]byte(stdout)) {
 		return nil, false
 	}
@@ -771,6 +773,7 @@ func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
 		if parsed, ok := parse(lines[i]); ok {
 			return parsed, true
 		}
+		// Same for a segment that is a whole array or scalar.
 		if json.Valid([]byte(lines[i])) {
 			continue
 		}
@@ -781,6 +784,9 @@ func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
 	return nil, false
 }
 
+// lastPipelineOutputJSONObject returns the last balanced top-level object in s.
+// Objects nested in a top-level array are not candidates, and nothing after an
+// unclosed opener is either: it may be a truncated wrapper around them.
 func lastPipelineOutputJSONObject(s string) string {
 	var last string
 	start, depth := 0, 0
@@ -799,15 +805,15 @@ func lastPipelineOutputJSONObject(s string) string {
 		switch s[i] {
 		case '"':
 			inString = depth > 0
-		case '{':
+		case '{', '[':
 			if depth == 0 {
 				start = i
 			}
 			depth++
-		case '}':
+		case '}', ']':
 			if depth > 0 {
 				depth--
-				if depth == 0 {
+				if depth == 0 && s[start] == '{' {
 					last = s[start : i+1]
 				}
 			}

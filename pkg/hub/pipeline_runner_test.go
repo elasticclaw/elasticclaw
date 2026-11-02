@@ -1030,6 +1030,23 @@ func TestParsePipelineOutputJSON(t *testing.T) {
 			stdout: `progress {"result":{"status":"ready"}} done`,
 			want:   map[string]interface{}{"result": map[string]interface{}{"status": "ready"}},
 		},
+		{
+			name:   "array mixed with progress does not override earlier result",
+			stdout: "{\"status\":\"conflicts\"}\nprogress [{\"status\":\"ready\"}]\n",
+			want:   map[string]interface{}{"status": "conflicts"},
+		},
+		{
+			name:   "array after object in same segment",
+			stdout: `progress {"status":"conflicts"} [{"status":"ready"}] done`,
+			want:   map[string]interface{}{"status": "conflicts"},
+		},
+		{
+			name:   "bracketed progress before object",
+			stdout: `[3/6] rebasing {"status":"ready"}`,
+			want:   map[string]interface{}{"status": "ready"},
+		},
+		{name: "array-only segment mixed with progress", stdout: `progress [{"status":"ready"}] done`},
+		{name: "object after unclosed array", stdout: `progress [{"status":"ready"}`},
 		{name: "no JSON", stdout: "Rebasing (2/6)\rfinished\n"},
 		{name: "invalid last object", stdout: `{"status":"old"} {invalid}`},
 		{name: "unbalanced object", stdout: `progress {"status":"ready"`},
