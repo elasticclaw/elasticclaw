@@ -3,12 +3,69 @@ package hub
 import (
 	"encoding/base64"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"time"
 
 	gossh "golang.org/x/crypto/ssh"
 )
+
+func (s *Server) assignReplicatedVM(clawID, vmID string) error {
+	_, err := s.db.Exec(`
+		UPDATE claws SET provider='replicated', provider_id=?,
+			ssh_host=CASE WHEN provider_id != ? THEN '' ELSE ssh_host END,
+			ssh_port=CASE WHEN provider_id != ? THEN 0 ELSE ssh_port END,
+			ssh_user=CASE WHEN provider_id != ? THEN '' ELSE ssh_user END
+		WHERE id=? AND status NOT IN ('deleted','starting','connected','idle')
+	`, vmID, vmID, vmID, vmID, clawID)
+	return err
+}
+
+func (s *Server) storeReplicatedSSHEndpoint(clawID, vmID, host string, port int, user string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// An empty endpoint marks a newly assigned VM. Clear its old pin only once,
+	// atomically with storing the endpoint, so bootstrap retries retain trust.
+	addr := fmt.Sprintf("%s:%d", host, port)
+	result, err := tx.Exec(`
+		DELETE FROM ssh_known_hosts WHERE host=? AND EXISTS (
+			SELECT 1 FROM claws WHERE id=? AND provider='replicated' AND provider_id=? AND ssh_host=''
+		)
+	`, addr, clawID, vmID)
+	if err != nil {
+		return err
+	}
+	cleared, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	result, err = tx.Exec(`
+		UPDATE claws SET ssh_host=?, ssh_port=?, ssh_user=?
+		WHERE id=? AND provider='replicated' AND provider_id=?
+	`, host, port, user, clawID, vmID)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return fmt.Errorf("replicated VM %s is no longer assigned to claw %s", vmID, clawID)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if cleared > 0 {
+		log.Printf("[bootstrap] cleared stale SSH host key for %s for new replicated VM %s", addr, vmID)
+	}
+	return nil
+}
 
 func (s *Server) sshHostKeyCallback(host string) gossh.HostKeyCallback {
 	return func(_ string, _ net.Addr, key gossh.PublicKey) error {
