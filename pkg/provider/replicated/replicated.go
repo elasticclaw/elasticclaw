@@ -175,11 +175,9 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		}
 		var apiErr *apiError
 		var netErr net.Error
-		networkError := errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-		retryable := networkError
+		retryable := errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 		if errors.As(err, &apiErr) {
 			retryable = apiErr.status >= 500 && apiErr.status < 600
-			networkError = false
 		}
 		if !retryable {
 			return "", fmt.Errorf("create VM: %w", err)
@@ -194,17 +192,16 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 			case <-timer.C:
 			}
 		}
-		if networkError {
-			// A lost response may still have created the VM. Reconcile even after
-			// the last attempt so that VM is tracked instead of orphaned, and do
-			// not POST again unless no live VM with this name exists.
-			vmID, listErr := p.findLiveVMByName(ctx, req.Name)
-			if listErr != nil {
-				return "", fmt.Errorf("create VM: %w; reconcile VMs: %w", err, listErr)
-			}
-			if vmID != "" {
-				return vmID, nil
-			}
+		// Every retryable failure is ambiguous: a lost response or a gateway
+		// 5xx may still have created the VM. Reconcile even after the last
+		// attempt so that VM is tracked instead of orphaned, and do not POST
+		// again unless no live VM with this name exists.
+		vmID, listErr := p.findLiveVMByName(ctx, req.Name)
+		if listErr != nil {
+			return "", fmt.Errorf("create VM: %w; reconcile VMs: %w", err, listErr)
+		}
+		if vmID != "" {
+			return vmID, nil
 		}
 		if lastAttempt {
 			return "", fmt.Errorf("create VM: %w", err)

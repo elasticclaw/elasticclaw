@@ -229,30 +229,35 @@ func TestCreateVMRetries(t *testing.T) {
 		body        string
 		failures    int
 		wantPosts   int32
+		wantLists   int32
 		wantError   bool
 		wantCredits bool
 	}{
-		{"502 then success", 502, "bad gateway", 1, 2, false, false},
-		{"bounded retries", 503, "unavailable", 3, 3, true, false},
-		{"credits", 400, "Request exceeds available credits", 1, 1, true, true},
-		{"other bad request", 400, "invalid name", 1, 1, true, false},
-		{"unauthorized", 401, "unauthorized", 1, 1, true, false},
-		{"rate limited", 429, "too many requests", 1, 1, true, false},
+		{"502 then success", 502, "bad gateway", 1, 2, 1, false, false},
+		{"bounded retries", 503, "unavailable", 3, 3, 3, true, false},
+		{"credits", 400, "Request exceeds available credits", 1, 1, 0, true, true},
+		{"other bad request", 400, "invalid name", 1, 1, 0, true, false},
+		{"unauthorized", 401, "unauthorized", 1, 1, 0, true, false},
+		{"rate limited", 429, "too many requests", 1, 1, 0, true, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			var posts atomic.Int32
+			var posts, lists atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/vendor/v3/vm" {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/vendor/v3/vm":
+					if int(posts.Add(1)) <= tt.failures {
+						http.Error(w, tt.body, tt.status)
+						return
+					}
+					w.WriteHeader(http.StatusCreated)
+					w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw"}]}`))
+				case r.Method == http.MethodGet && r.URL.Path == "/vendor/v3/vms":
+					lists.Add(1)
+					w.Write([]byte(`{"vms":[]}`))
+				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 					w.WriteHeader(http.StatusNotFound)
-					return
 				}
-				if int(posts.Add(1)) <= tt.failures {
-					http.Error(w, tt.body, tt.status)
-					return
-				}
-				w.WriteHeader(http.StatusCreated)
-				w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw"}]}`))
 			}))
 			defer server.Close()
 			p, err := New(Config{Token: "test-token", APIURL: server.URL + "/vendor/v3"})
@@ -267,8 +272,43 @@ func TestCreateVMRetries(t *testing.T) {
 			if !tt.wantError && id != "vm-created" {
 				t.Errorf("VM ID = %q", id)
 			}
-			if posts.Load() != tt.wantPosts {
-				t.Errorf("POSTs = %d, want %d", posts.Load(), tt.wantPosts)
+			if posts.Load() != tt.wantPosts || lists.Load() != tt.wantLists {
+				t.Errorf("POSTs = %d, lists = %d, want %d, %d", posts.Load(), lists.Load(), tt.wantPosts, tt.wantLists)
+			}
+		})
+	}
+}
+
+func TestCreateVMReconcilesGatewayError(t *testing.T) {
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var posts, lists atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/vm":
+					// CMX created the VM, but the gateway returned an error.
+					posts.Add(1)
+					http.Error(w, "gateway error", status)
+				case r.Method == http.MethodGet && r.URL.Path == "/vms":
+					lists.Add(1)
+					w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued"}]}`))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			p, err := New(Config{Token: "test-token", APIURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.createBackoff = [2]time.Duration{}
+			id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+			if err != nil || id != "vm-created" {
+				t.Fatalf("CreateVM = %q, %v", id, err)
+			}
+			if posts.Load() != 1 || lists.Load() != 1 {
+				t.Errorf("POSTs = %d, lists = %d", posts.Load(), lists.Load())
 			}
 		})
 	}
@@ -366,6 +406,10 @@ func TestCreateVMReconcilesTimeoutOnLastAttempt(t *testing.T) {
 			<-r.Context().Done()
 		case r.Method == http.MethodGet && r.URL.Path == "/vms":
 			lists.Add(1)
+			if posts.Load() < 3 {
+				w.Write([]byte(`{"vms":[]}`))
+				return
+			}
 			w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued"}]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -383,7 +427,7 @@ func TestCreateVMReconcilesTimeoutOnLastAttempt(t *testing.T) {
 	if err != nil || id != "vm-created" {
 		t.Fatalf("CreateVM = %q, %v", id, err)
 	}
-	if posts.Load() != 3 || lists.Load() != 1 {
+	if posts.Load() != 3 || lists.Load() != 3 {
 		t.Errorf("POSTs = %d, lists = %d", posts.Load(), lists.Load())
 	}
 }
