@@ -2,7 +2,13 @@ package replicated
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -213,5 +219,133 @@ func TestSSHUserFromPublicKey(t *testing.T) {
 				t.Errorf("SSHUserFromPublicKey(%q) = %q, want %q", tt.key, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCreateVMRetries(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		status      int
+		body        string
+		failures    int
+		wantPosts   int32
+		wantError   bool
+		wantCredits bool
+	}{
+		{"502 then success", 502, "bad gateway", 1, 2, false, false},
+		{"bounded retries", 503, "unavailable", 3, 3, true, false},
+		{"credits", 400, "Request exceeds available credits", 1, 1, true, true},
+		{"other bad request", 400, "invalid name", 1, 1, true, false},
+		{"unauthorized", 401, "unauthorized", 1, 1, true, false},
+		{"rate limited", 429, "too many requests", 1, 1, true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/vendor/v3/vm" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if int(posts.Add(1)) <= tt.failures {
+					http.Error(w, tt.body, tt.status)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+				w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw"}]}`))
+			}))
+			defer server.Close()
+			p, err := New(Config{Token: "test-token", APIURL: server.URL + "/vendor/v3"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.createBackoff = [2]time.Duration{}
+			id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+			if (err != nil) != tt.wantError || errors.Is(err, ErrInsufficientCredits) != tt.wantCredits {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.wantError && id != "vm-created" {
+				t.Errorf("VM ID = %q", id)
+			}
+			if posts.Load() != tt.wantPosts {
+				t.Errorf("POSTs = %d, want %d", posts.Load(), tt.wantPosts)
+			}
+		})
+	}
+}
+
+func TestCreateVMReconcilesTimeout(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		listBody   string
+		listStatus int
+		wantPosts  int32
+		wantError  bool
+	}{
+		{"existing VM", `{"vms":[{"id":"other","name":"other"},{"id":"vm-created","name":"test-claw"}]}`, 200, 1, false},
+		{"missing VM", `{"vms":[]}`, 200, 2, false},
+		{"list failed", "unavailable", 503, 1, true},
+		{"invalid list", "{", 200, 1, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var posts, lists atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/vm":
+					if posts.Add(1) == 1 {
+						io.Copy(io.Discard, r.Body)
+						<-r.Context().Done()
+						return
+					}
+					w.WriteHeader(http.StatusCreated)
+					w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw"}]}`))
+				case r.Method == http.MethodGet && r.URL.Path == "/vms":
+					lists.Add(1)
+					w.WriteHeader(tt.listStatus)
+					w.Write([]byte(tt.listBody))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			p, err := New(Config{Token: "test-token", APIURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.createBackoff = [2]time.Duration{}
+			p.http.Timeout = 100 * time.Millisecond
+			id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+			if (err != nil) != tt.wantError {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.wantError && id != "vm-created" {
+				t.Errorf("VM ID = %q", id)
+			}
+			if posts.Load() != tt.wantPosts || lists.Load() != 1 {
+				t.Errorf("POSTs = %d, lists = %d", posts.Load(), lists.Load())
+			}
+		})
+	}
+}
+
+func TestCreateVMRetryCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+	p, err := New(Config{Token: "test-token", APIURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.createBackoff = [2]time.Duration{time.Hour, time.Hour}
+	time.AfterFunc(100*time.Millisecond, cancel)
+	_, err = p.CreateVM(ctx, VMCreateRequest{Name: "test-claw"})
+	if !errors.Is(err, context.Canceled) || posts.Load() != 1 {
+		t.Fatalf("error = %v, POSTs = %d", err, posts.Load())
 	}
 }

@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -44,13 +46,14 @@ func SSHUserFromPublicKey(authorizedKey string) string {
 
 // Provider implements the Replicated CMX VM provider.
 type Provider struct {
-	apiURL       string
-	token        string
-	defaultTTL   string
-	defaultType  string
-	sshPublicKey string   // hub's generated key, always injected
-	extraKeys    []string // operator debug keys from hub config
-	http         *http.Client
+	apiURL        string
+	token         string
+	defaultTTL    string
+	defaultType   string
+	sshPublicKey  string   // hub's generated key, always injected
+	extraKeys     []string // operator debug keys from hub config
+	http          *http.Client
+	createBackoff [2]time.Duration
 }
 
 // Config holds provider configuration from hub.yaml.
@@ -83,13 +86,14 @@ func New(cfg Config) (*Provider, error) {
 		instanceType = DefaultInstanceType
 	}
 	return &Provider{
-		apiURL:       strings.TrimRight(apiURL, "/"),
-		token:        cfg.Token,
-		defaultTTL:   ttl,
-		defaultType:  instanceType,
-		sshPublicKey: cfg.HubPublicKey,
-		extraKeys:    cfg.ExtraPublicKeys,
-		http:         &http.Client{Timeout: 30 * time.Second},
+		apiURL:        strings.TrimRight(apiURL, "/"),
+		token:         cfg.Token,
+		defaultTTL:    ttl,
+		defaultType:   instanceType,
+		sshPublicKey:  cfg.HubPublicKey,
+		extraKeys:     cfg.ExtraPublicKeys,
+		http:          &http.Client{Timeout: 30 * time.Second},
+		createBackoff: [2]time.Duration{2 * time.Second, 5 * time.Second},
 	}, nil
 }
 
@@ -157,9 +161,47 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		}
 	}
 
-	data, err := p.post(ctx, "/vm", body)
-	if err != nil {
-		return "", fmt.Errorf("create VM: %w", err)
+	var data []byte
+	for attempt := 0; ; attempt++ {
+		var err error
+		data, err = p.post(ctx, "/vm", body)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("create VM: %w", ctx.Err())
+		}
+		var apiErr *apiError
+		var netErr net.Error
+		networkError := errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		retryable := networkError
+		if errors.As(err, &apiErr) {
+			retryable = apiErr.status >= 500 && apiErr.status < 600
+			networkError = false
+		}
+		if !retryable || attempt == len(p.createBackoff) {
+			return "", fmt.Errorf("create VM: %w", err)
+		}
+		timer := time.NewTimer(p.createBackoff[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", fmt.Errorf("create VM: %w", ctx.Err())
+		case <-timer.C:
+		}
+		if networkError {
+			// A lost response may still have created the VM. Do not POST again
+			// unless we can confirm that no VM with this name exists.
+			vms, listErr := p.listVMs(ctx)
+			if listErr != nil {
+				return "", fmt.Errorf("create VM: %w; reconcile VMs: %w", err, listErr)
+			}
+			for _, vm := range vms {
+				if vm.Name == req.Name {
+					return vm.ID, nil
+				}
+			}
+		}
 	}
 
 	var resp vmResponse
@@ -215,6 +257,18 @@ func (p *Provider) GetVM(ctx context.Context, vmID string) (*vmDetail, error) {
 		return nil, fmt.Errorf("no VM in response")
 	}
 	return wrapped.VM, nil
+}
+
+func (p *Provider) listVMs(ctx context.Context) ([]vmDetail, error) {
+	data, err := p.get(ctx, "/vms")
+	if err != nil {
+		return nil, err
+	}
+	var resp vmResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse list VMs response: %w", err)
+	}
+	return resp.VMs, nil
 }
 
 // DeleteVM terminates a CMX VM.
@@ -296,6 +350,26 @@ func (p *Provider) delete(ctx context.Context, path string) ([]byte, error) {
 	return p.do(req)
 }
 
+// ErrInsufficientCredits indicates that CMX cannot provision until credits are added.
+var ErrInsufficientCredits = errors.New("replicated provider quota: exceeds available credits")
+
+type apiError struct {
+	status int
+	path   string
+	body   string
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("HTTP %d from %s: %s", e.status, e.path, e.body)
+}
+
+func (e *apiError) Unwrap() error {
+	if e.status == http.StatusBadRequest && strings.Contains(strings.ToLower(e.body), "exceeds available credits") {
+		return ErrInsufficientCredits
+	}
+	return nil
+}
+
 func (p *Provider) do(req *http.Request) ([]byte, error) {
 	req.Header.Set("Authorization", p.token)
 	req.Header.Set("Content-Type", "application/json")
@@ -307,11 +381,11 @@ func (p *Provider) do(req *http.Request) ([]byte, error) {
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, &apiError{status: resp.StatusCode, path: req.URL.Path, body: string(data)}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("HTTP %s %s: read response body: %w", req.Method, req.URL.Path, err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, req.URL.Path, string(data))
 	}
 	return data, nil
 }
