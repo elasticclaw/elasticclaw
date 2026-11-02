@@ -94,6 +94,47 @@ func TestPrepareClawRetryCreatesAttemptAndEmitsProviderLost(t *testing.T) {
 	}
 }
 
+func TestProvisioningTimeoutIsRetryable(t *testing.T) {
+	failure := classifyAgentFailure("provisioning timed out")
+	if failure.Kind != agentFailureProvisioning {
+		t.Fatalf("kind=%q, want %q", failure.Kind, agentFailureProvisioning)
+	}
+	if !retryableAgentFailure(failure.Kind) {
+		t.Fatal("provisioning timeout is not retryable")
+	}
+}
+
+func TestPrepareClawRetryProvisioningTimeout(t *testing.T) {
+	for _, status := range []string{"provisioning", "starting"} {
+		t.Run(status, func(t *testing.T) {
+			s, db, runID := newClawRetryTestServer(t, status)
+			for attempt := 1; attempt <= maxClawAttempts; attempt++ {
+				disposition, plan, err := s.prepareClawRetry("retry-claw", "provisioning timed out")
+				if err != nil {
+					t.Fatalf("prepare retry: %v", err)
+				}
+				if attempt == maxClawAttempts {
+					if disposition != clawRetryNotApplicable {
+						t.Fatalf("disposition=%v, want terminal", disposition)
+					}
+				} else if disposition != clawRetryScheduled || plan.attempt != attempt+1 || plan.failureType != taskRunFailureProvisionFailed {
+					t.Fatalf("unexpected retry plan: disposition=%v plan=%+v", disposition, plan)
+				}
+				if _, err := db.Exec(`UPDATE claws SET status=? WHERE id='retry-claw'`, status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_attempts WHERE run_id=?`, runID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != maxClawAttempts {
+				t.Fatalf("attempt count=%d, want %d", count, maxClawAttempts)
+			}
+		})
+	}
+}
+
 func TestPrepareClawRetryStopsAtMaxAttemptsAndRejectsNonRetryable(t *testing.T) {
 	t.Run("attempts exhausted", func(t *testing.T) {
 		s, db, runID := newClawRetryTestServer(t, "connected")
