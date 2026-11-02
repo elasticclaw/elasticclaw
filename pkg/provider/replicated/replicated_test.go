@@ -286,6 +286,8 @@ func TestCreateVMReconcilesTimeout(t *testing.T) {
 		{"missing VM", `{"vms":[]}`, 200, 2, false},
 		{"list failed", "unavailable", 503, 1, true},
 		{"invalid list", "{", 200, 1, true},
+		{"skips terminated predecessor", `{"vms":[{"id":"old","name":"test-claw","status":"terminated","created_at":"2026-11-02T10:00:00Z"}]}`, 200, 2, false},
+		{"prefers newest live VM", `{"vms":[{"id":"older","name":"test-claw","status":"running","created_at":"2026-11-02T09:00:00Z"},{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"},{"id":"expired","name":"test-claw","status":"expired","created_at":"2026-11-02T12:00:00Z"}]}`, 200, 1, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var posts, lists atomic.Int32
@@ -347,5 +349,41 @@ func TestCreateVMRetryCancellation(t *testing.T) {
 	_, err = p.CreateVM(ctx, VMCreateRequest{Name: "test-claw"})
 	if !errors.Is(err, context.Canceled) || posts.Load() != 1 {
 		t.Fatalf("error = %v, POSTs = %d", err, posts.Load())
+	}
+}
+
+func TestCreateVMReconcilesTimeoutOnLastAttempt(t *testing.T) {
+	var posts, lists atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/vm":
+			if posts.Add(1) <= 2 {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			// The third POST creates the VM but its response is lost.
+			io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+		case r.Method == http.MethodGet && r.URL.Path == "/vms":
+			lists.Add(1)
+			w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued"}]}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	p, err := New(Config{Token: "test-token", APIURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.createBackoff = [2]time.Duration{}
+	p.http.Timeout = 100 * time.Millisecond
+	id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+	if err != nil || id != "vm-created" {
+		t.Fatalf("CreateVM = %q, %v", id, err)
+	}
+	if posts.Load() != 3 || lists.Load() != 1 {
+		t.Errorf("POSTs = %d, lists = %d", posts.Load(), lists.Load())
 	}
 }

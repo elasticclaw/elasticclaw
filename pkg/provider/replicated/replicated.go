@@ -123,6 +123,8 @@ type vmDetail struct {
 	NetworkID         string `json:"network_id"`
 	DirectSSHEndpoint string `json:"direct_ssh_endpoint"`
 	DirectSSHPort     int    `json:"direct_ssh_port"`
+	// CreatedAt stays a string so an unexpected format cannot break GetVM.
+	CreatedAt string `json:"created_at"`
 }
 
 // ─── Provider methods ─────────────────────────────────────────────────────────
@@ -179,28 +181,33 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 			retryable = apiErr.status >= 500 && apiErr.status < 600
 			networkError = false
 		}
-		if !retryable || attempt == len(p.createBackoff) {
+		if !retryable {
 			return "", fmt.Errorf("create VM: %w", err)
 		}
-		timer := time.NewTimer(p.createBackoff[attempt])
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return "", fmt.Errorf("create VM: %w", ctx.Err())
-		case <-timer.C:
+		lastAttempt := attempt == len(p.createBackoff)
+		if !lastAttempt {
+			timer := time.NewTimer(p.createBackoff[attempt])
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return "", fmt.Errorf("create VM: %w", ctx.Err())
+			case <-timer.C:
+			}
 		}
 		if networkError {
-			// A lost response may still have created the VM. Do not POST again
-			// unless we can confirm that no VM with this name exists.
-			vms, listErr := p.listVMs(ctx)
+			// A lost response may still have created the VM. Reconcile even after
+			// the last attempt so that VM is tracked instead of orphaned, and do
+			// not POST again unless no live VM with this name exists.
+			vmID, listErr := p.findLiveVMByName(ctx, req.Name)
 			if listErr != nil {
 				return "", fmt.Errorf("create VM: %w; reconcile VMs: %w", err, listErr)
 			}
-			for _, vm := range vms {
-				if vm.Name == req.Name {
-					return vm.ID, nil
-				}
+			if vmID != "" {
+				return vmID, nil
 			}
+		}
+		if lastAttempt {
+			return "", fmt.Errorf("create VM: %w", err)
 		}
 	}
 
@@ -269,6 +276,36 @@ func (p *Provider) listVMs(ctx context.Context) ([]vmDetail, error) {
 		return nil, fmt.Errorf("parse list VMs response: %w", err)
 	}
 	return resp.VMs, nil
+}
+
+// findLiveVMByName returns the newest non-terminal VM named name, or "" if none.
+// Claw retries reuse the same name after terminating the predecessor, so a
+// terminated VM with this name must not be mistaken for the one just created.
+func (p *Provider) findLiveVMByName(ctx context.Context, name string) (string, error) {
+	vms, err := p.listVMs(ctx)
+	if err != nil {
+		return "", err
+	}
+	var newestID string
+	var newestAt time.Time
+	for _, vm := range vms {
+		if vm.Name != name || terminalVMStatus(vm.Status) {
+			continue
+		}
+		createdAt, _ := time.Parse(time.RFC3339Nano, vm.CreatedAt)
+		if newestID == "" || createdAt.After(newestAt) {
+			newestID, newestAt = vm.ID, createdAt
+		}
+	}
+	return newestID, nil
+}
+
+func terminalVMStatus(status string) bool {
+	switch status {
+	case "terminated", "error", "deleted", "expired":
+		return true
+	}
+	return false
 }
 
 // DeleteVM terminates a CMX VM.

@@ -278,6 +278,9 @@ func TestProviderCreditsFailureIsNotRetryable(t *testing.T) {
 			if retryableAgentFailure(msg.Kind) {
 				t.Fatal("credit exhaustion must not be retryable")
 			}
+			if got := taskRunFailureTypeForAgentFailure(msg.Kind); got != taskRunFailureProvisionFailed {
+				t.Fatalf("failure type=%q, want %q", got, taskRunFailureProvisionFailed)
+			}
 		})
 	}
 }
