@@ -700,3 +700,40 @@ func TestResetClawForRetryKeepsNonTransportPause(t *testing.T) {
 		t.Fatal("non-transport pause was lifted by replacement")
 	}
 }
+
+func TestReaperGivesRetriedProvisioningClawFreshWindow(t *testing.T) {
+	s, db, runID := newClawRetryTestServer(t, "provisioning")
+	s.reaperFirstSeen = map[string]time.Time{}
+	base := time.Now().UTC()
+	s.nowFunc = func() time.Time { return base }
+	s.reapOnce()
+	s.nowFunc = func() time.Time { return base.Add(31 * time.Minute) }
+	s.reapOnce()
+	attempts := func() int {
+		var n int
+		if err := db.QueryRow(`SELECT attempt_count FROM task_runs WHERE id=?`, runID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if got := attempts(); got != 2 {
+		t.Fatalf("attempt_count=%d after first reap, want 2", got)
+	}
+	// Stand in for the retry path re-provisioning the claw.
+	if _, err := db.Exec(`UPDATE claws SET status='error' WHERE id='retry-claw'`); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "", ""); err != nil || !reset {
+		t.Fatalf("reset=%v err=%v", reset, err)
+	}
+	s.nowFunc = func() time.Time { return base.Add(32 * time.Minute) }
+	s.reapOnce()
+	if got := attempts(); got != 2 {
+		t.Fatalf("attempt_count=%d, successor reaped before a fresh window elapsed", got)
+	}
+	s.nowFunc = func() time.Time { return base.Add(63 * time.Minute) }
+	s.reapOnce()
+	if got := attempts(); got != 3 {
+		t.Fatalf("attempt_count=%d, want 3 once the fresh window elapsed", got)
+	}
+}
