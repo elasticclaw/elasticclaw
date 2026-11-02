@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,10 @@ import (
 
 	"golang.org/x/sync/singleflight"
 )
+
+// errBridgeArtifactUnavailable marks a definitively missing connector artifact;
+// callers must not retry bootstrap on it.
+var errBridgeArtifactUnavailable = errors.New("bridge artifact unavailable")
 
 const bridgePreflightTTL = 3 * time.Minute
 
@@ -57,7 +62,7 @@ func (p *bridgeArtifactPreflight) check(ctx context.Context, ref string) error {
 		return missing, nil
 	})
 	if result.(bool) {
-		err := fmt.Errorf("bridge artifact unavailable: %s", ref)
+		err := fmt.Errorf("%w: %s", errBridgeArtifactUnavailable, ref)
 		log.Printf("[bootstrap] %v", err)
 		return err
 	}

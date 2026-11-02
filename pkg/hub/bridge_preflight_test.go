@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -129,5 +130,17 @@ func TestBridgeArtifactPreflightRegistry(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestBridgeArtifactPreflightErrorIsIdentifiable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	p := bridgeArtifactPreflight{client: server.Client()}
+	err := p.check(context.Background(), server.URL)
+	if !errors.Is(err, errBridgeArtifactUnavailable) {
+		t.Fatalf("expected errBridgeArtifactUnavailable, got %v", err)
 	}
 }

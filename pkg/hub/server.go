@@ -4150,6 +4150,12 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	if err != nil {
 		return fmt.Errorf("daytona init: %w", err)
 	}
+	// Fail before creating a sandbox when the connector artifact is definitively missing.
+	if bridgeURL := s.bridgeDownloadURL(); bridgeURL != "" {
+		if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+			return err
+		}
+	}
 	s.setBootstrapStatus(clawID, "Creating sandbox")
 	// Resolve snapshot: template snapshot > hub default_snapshot
 	snapshot := req.Snapshot
@@ -4189,6 +4195,9 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			lastErr = s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env)
 			if lastErr == nil {
 				return
+			}
+			if errors.Is(lastErr, errBridgeArtifactUnavailable) {
+				break
 			}
 			if s.daytonaBridgeRunning(context.Background(), instance.ID, p) {
 				log.Printf("[daytona] bootstrap attempt %d/%d for claw %s returned error after claw-bridge started; treating bootstrap as complete: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
