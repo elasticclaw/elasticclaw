@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -226,6 +227,23 @@ func (s *Server) firstSeen(key string, present bool, at time.Time) time.Time {
 	return at
 }
 
+func (s *Server) replicatedVMTerminated(ctx context.Context, providerID string, at time.Time) (bool, error) {
+	if s.replicatedVMTerminatedOverride != nil {
+		return s.replicatedVMTerminatedOverride(ctx, providerID, at)
+	}
+	s.mu.RLock()
+	var cfg types.ProviderConfig
+	if s.hubCfg != nil {
+		cfg = s.hubCfg.Providers["replicated"]
+	}
+	s.mu.RUnlock()
+	p, err := newReplicatedProvider(cfg)
+	if err != nil {
+		return false, fmt.Errorf("initialize replicated provider: %w", err)
+	}
+	return p.VMTerminated(ctx, providerID, at)
+}
+
 func (s *Server) reapOnce() {
 	cfg, n, actions := s.livenessSettings(), s.reaperNow(), 0
 	take := func() bool {
@@ -235,18 +253,18 @@ func (s *Server) reapOnce() {
 		actions++
 		return true
 	}
-	rows, err := s.db.Query(`SELECT id, status FROM claws WHERE status IN ('offline','provisioning','starting')`)
+	rows, err := s.db.Query(`SELECT id, status, COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE status IN ('offline','provisioning','starting')`)
 	if err != nil {
 		log.Printf("[reaper] claw query: %v", err)
 		return
 	}
 	type claw struct {
-		id, status string
+		id, status, provider, providerID string
 	}
 	var claws []claw
 	for rows.Next() {
 		var c claw
-		if rows.Scan(&c.id, &c.status) == nil {
+		if rows.Scan(&c.id, &c.status, &c.provider, &c.providerID) == nil {
 			claws = append(claws, c)
 		}
 	}
@@ -259,7 +277,18 @@ func (s *Server) reapOnce() {
 		age := n.Sub(first)
 		if c.status == "offline" && age > cfg.offlineGrace && take() {
 			log.Printf("[reaper] stopping offline claw %s", c.id)
-			s.stopAgentWithReason(c.id, "agent offline for "+cfg.offlineGrace.String()+", sandbox presumed dead", false)
+			reason := "agent offline for " + cfg.offlineGrace.String() + ", sandbox presumed dead"
+			if c.provider == "replicated" && c.providerID != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				terminated, err := s.replicatedVMTerminated(ctx, c.providerID, n)
+				cancel()
+				if err != nil {
+					log.Printf("[reaper] get VM %s: %v", c.providerID, err)
+				} else if terminated {
+					reason = "sandbox terminated: CMX VM " + c.providerID + " expired or no longer exists"
+				}
+			}
+			s.stopAgentWithReason(c.id, reason, false)
 		}
 		if (c.status == "provisioning" || c.status == "starting") && age > cfg.provisioningMaxAge && take() {
 			log.Printf("[reaper] stopping timed out provisioning claw %s", c.id)

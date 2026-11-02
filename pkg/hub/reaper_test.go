@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -595,5 +597,94 @@ func TestReleaseWorkflowV2CronSlotLoadsBeforeMarker(t *testing.T) {
 	s.releaseWorkflowV2CronSlot(context.Background(), "run-cron")
 	if s.cronSchedulerV2.running["ws/wf"] != 0 {
 		t.Fatalf("running counter decremented twice, got %d", s.cronSchedulerV2.running["ws/wf"])
+	}
+}
+
+func TestReaperOfflineReplicatedVM(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, providerID string
+		terminated                 bool
+		lookupErr                  error
+		wantLookup, wantRetryable  bool
+	}{
+		{"expired or missing", "replicated", "current-vm", true, nil, true, true},
+		{"replacement running", "replicated", "replacement-vm", false, nil, true, false},
+		{"lookup error", "replicated", "current-vm", false, errors.New("network error"), true, false},
+		{"other provider", "daytona", "current-vm", true, nil, false, false},
+		{"cleared provider ID", "replicated", "", true, nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := newReaperTestServer(t, &types.HubConfig{})
+			tm := time.Now().UTC()
+			s.nowFunc = func() time.Time { return tm }
+			// Recovery keeps created_at even when it replaces the VM.
+			if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,created_at) VALUES('offline-vm','tenant','offline',?,?,'offline',?)`, tc.provider, tc.providerID, tm.Add(-72*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			s.terminateVMOverride = func(string, string) error { return nil }
+			calls := 0
+			s.replicatedVMTerminatedOverride = func(ctx context.Context, id string, at time.Time) (bool, error) {
+				calls++
+				if id != tc.providerID || !at.Equal(tm) {
+					t.Errorf("lookup = %q, %v; want %q, %v", id, at, tc.providerID, tm)
+				}
+				if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 10*time.Second {
+					t.Error("lookup must have a deadline of at most 10 seconds")
+				}
+				return tc.terminated, tc.lookupErr
+			}
+			s.reapOnce()
+			if calls != 0 {
+				t.Fatal("looked up VM within offline grace")
+			}
+			tm = tm.Add(11 * time.Minute)
+			s.reapOnce()
+			if (calls == 1) != tc.wantLookup || calls > 1 {
+				t.Fatalf("lookup calls = %d; want lookup=%v", calls, tc.wantLookup)
+			}
+			var status, reason string
+			if err := db.QueryRow(`SELECT status, bootstrap_diagnostic FROM claws WHERE id='offline-vm'`).Scan(&status, &reason); err != nil {
+				t.Fatal(err)
+			}
+			if status != "error" {
+				t.Fatalf("status = %q; want error", status)
+			}
+			failure := classifyAgentFailure(reason)
+			if tc.wantRetryable {
+				if failure.Kind != agentFailureSandboxTerminated || !retryableAgentFailure(failure.Kind) {
+					t.Fatalf("reason %q classified as %v; want retryable sandbox termination", reason, failure.Kind)
+				}
+			} else if reason != "agent offline for 10m0s, sandbox presumed dead" {
+				t.Fatalf("unexpected fallback reason: %q", reason)
+			}
+		})
+	}
+}
+
+func TestReaperOfflineVMLookupActionLimit(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+	for i := 0; i < reaperActionLimit+1; i++ {
+		id := fmt.Sprintf("offline-%02d", i)
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,created_at) VALUES(?,'tenant',?,'replicated',?,'offline',?)`, id, id, id, tm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	s.replicatedVMTerminatedOverride = func(context.Context, string, time.Time) (bool, error) {
+		calls++
+		return false, nil
+	}
+	s.terminateVMOverride = func(string, string) error { return nil }
+	s.reapOnce()
+	tm = tm.Add(11 * time.Minute)
+	s.reapOnce()
+	var stopped int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE status='error'`).Scan(&stopped); err != nil {
+		t.Fatal(err)
+	}
+	if calls != reaperActionLimit || stopped != reaperActionLimit {
+		t.Fatalf("lookups=%d, stopped=%d; want %d each", calls, stopped, reaperActionLimit)
 	}
 }

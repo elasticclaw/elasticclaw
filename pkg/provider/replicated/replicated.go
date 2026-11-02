@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -111,14 +112,15 @@ type vmResponse struct {
 }
 
 type vmDetail struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	Status            string `json:"status"` // assigned, provisioning, preparing, running, terminated
-	Distribution      string `json:"distribution"`
-	InstanceType      string `json:"instance_type"`
-	NetworkID         string `json:"network_id"`
-	DirectSSHEndpoint string `json:"direct_ssh_endpoint"`
-	DirectSSHPort     int    `json:"direct_ssh_port"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	Status            string    `json:"status"` // assigned, provisioning, preparing, running, terminated
+	Distribution      string    `json:"distribution"`
+	InstanceType      string    `json:"instance_type"`
+	NetworkID         string    `json:"network_id"`
+	DirectSSHEndpoint string    `json:"direct_ssh_endpoint"`
+	DirectSSHPort     int       `json:"direct_ssh_port"`
 }
 
 // ─── Provider methods ─────────────────────────────────────────────────────────
@@ -217,6 +219,23 @@ func (p *Provider) GetVM(ctx context.Context, vmID string) (*vmDetail, error) {
 	return wrapped.VM, nil
 }
 
+// VMTerminated reports whether the current VM is gone or has expired.
+func (p *Provider) VMTerminated(ctx context.Context, vmID string, at time.Time) (bool, error) {
+	vm, err := p.GetVM(ctx, vmID)
+	if err != nil {
+		var apiErr *httpError
+		if errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound {
+			return true, nil
+		}
+		return false, err
+	}
+	switch vm.Status {
+	case "terminated", "deleted", "expired":
+		return true, nil
+	}
+	return !vm.ExpiresAt.IsZero() && vm.ExpiresAt.Before(at), nil
+}
+
 // DeleteVM terminates a CMX VM.
 func (p *Provider) DeleteVM(ctx context.Context, vmID string) error {
 	_, err := p.delete(ctx, "/vm/"+vmID)
@@ -296,6 +315,15 @@ func (p *Provider) delete(ctx context.Context, path string) ([]byte, error) {
 	return p.do(req)
 }
 
+type httpError struct {
+	status     int
+	path, body string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("HTTP %d from %s: %s", e.status, e.path, e.body)
+}
+
 func (p *Provider) do(req *http.Request) ([]byte, error) {
 	req.Header.Set("Authorization", p.token)
 	req.Header.Set("Content-Type", "application/json")
@@ -311,7 +339,7 @@ func (p *Provider) do(req *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("HTTP %s %s: read response body: %w", req.Method, req.URL.Path, err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, req.URL.Path, string(data))
+		return nil, &httpError{status: resp.StatusCode, path: req.URL.Path, body: string(data)}
 	}
 	return data, nil
 }
