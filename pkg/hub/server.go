@@ -6327,6 +6327,8 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	// Store vm_id in the claw record — keep status='provisioning' so the poller can detect
 	// the provisioning→running transition and trigger bootstrap. Skip if already deleted.
 	if err := s.assignReplicatedVM(clawID, vmID); err != nil {
+		s.forgetReplicatedBootstrapEnv(clawID)
+		_ = p.DeleteVM(ctx, vmID)
 		return fmt.Errorf("store replicated VM: %w", err)
 	}
 	// If deleted, clean up the VM and bail
@@ -7369,6 +7371,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	// Store SSH connection details in the DB for terminal access
 	if err := s.storeReplicatedSSHEndpoint(clawID, vmID, vm.DirectSSHEndpoint, vm.DirectSSHPort, sshUser); err != nil {
 		log.Printf("bootstrap: could not store SSH endpoint for VM %s: %v", vmID, err)
+		if !errors.Is(err, errReplicatedVMUnassigned) {
+			s.stopAgentWithReason(clawID, "Bootstrap failed: could not store SSH endpoint: "+err.Error(), false)
+		}
 		return
 	}
 

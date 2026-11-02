@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -10,6 +11,10 @@ import (
 
 	gossh "golang.org/x/crypto/ssh"
 )
+
+// errReplicatedVMUnassigned means the claw no longer owns the VM (deleted or
+// replaced), so the caller should stop quietly rather than fail the claw.
+var errReplicatedVMUnassigned = errors.New("replicated VM is no longer assigned to the claw")
 
 func (s *Server) assignReplicatedVM(clawID, vmID string) error {
 	_, err := s.db.Exec(`
@@ -56,7 +61,7 @@ func (s *Server) storeReplicatedSSHEndpoint(clawID, vmID, host string, port int,
 		return err
 	}
 	if updated != 1 {
-		return fmt.Errorf("replicated VM %s is no longer assigned to claw %s", vmID, clawID)
+		return fmt.Errorf("%w: vm %s, claw %s", errReplicatedVMUnassigned, vmID, clawID)
 	}
 	if err := tx.Commit(); err != nil {
 		return err
