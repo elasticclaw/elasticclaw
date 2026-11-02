@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -975,6 +976,78 @@ func TestPersistPipelineOutputNonJSON(t *testing.T) {
 	// Non-JSON stdout should result in empty parsed_json
 	if len(plain) != 0 {
 		t.Fatalf("expected empty parsed map for non-JSON, got %v", plain)
+	}
+}
+
+func TestParsePipelineOutputJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		stdout string
+		want   map[string]interface{}
+	}{
+		{
+			name:   "carriage return progress",
+			stdout: "Rebasing (2/6)\rRebasing (3/6)\r{\"status\": \"conflicts\", \"branch\": \"deps/x\"}",
+			want:   map[string]interface{}{"status": "conflicts", "branch": "deps/x"},
+		},
+		{
+			name:   "JSON spliced into git push output",
+			stdout: " + 93b1c2d...a4f5e6b deps/kots-update-go -> deps/kots-update-go ({\"status\":\"ready\",\"branch\":\"deps/kots-update-go\"}\nforced update)",
+			want:   map[string]interface{}{"status": "ready", "branch": "deps/kots-update-go"},
+		},
+		{
+			name:   "plain JSON last line",
+			stdout: "git status\n{\"status\":\"ready\"}\n",
+			want:   map[string]interface{}{"status": "ready"},
+		},
+		{
+			name:   "braces and escapes inside strings",
+			stdout: `progress {"message":"} \" { \\"} done`,
+			want:   map[string]interface{}{"message": "} \" { \\"},
+		},
+		{
+			name:   "last object in segment wins",
+			stdout: `progress {"status":"old"} then {"status":"ready"} done`,
+			want:   map[string]interface{}{"status": "ready"},
+		},
+		{
+			name:   "later segment wins",
+			stdout: "{\"status\":\"old\"}\rprogress {\"status\":\"ready\"}\nfinished",
+			want:   map[string]interface{}{"status": "ready"},
+		},
+		{
+			name:   "Windows line endings",
+			stdout: "progress\r\n{\"status\":\"ready\"}\r\n",
+			want:   map[string]interface{}{"status": "ready"},
+		},
+		{
+			name:   "whole output takes precedence",
+			stdout: "{\n\"result\":\n{\"status\":\"ready\"}\n}",
+			want:   map[string]interface{}{"result": map[string]interface{}{"status": "ready"}},
+		},
+		{
+			name:   "nested object",
+			stdout: `progress {"result":{"status":"ready"}} done`,
+			want:   map[string]interface{}{"result": map[string]interface{}{"status": "ready"}},
+		},
+		{name: "no JSON", stdout: "Rebasing (2/6)\rfinished\n"},
+		{name: "invalid last object", stdout: `{"status":"old"} {invalid}`},
+		{name: "unbalanced object", stdout: `progress {"status":"ready"`},
+		{name: "array", stdout: `[{"status":"ready"}]`},
+		{name: "multiline array", stdout: "[\n{\"status\":\"ready\"}\n]"},
+		{name: "string", stdout: `"ready"`},
+		{name: "number", stdout: `42`},
+		{name: "boolean", stdout: `true`},
+		{name: "null", stdout: `null`},
+		{name: "empty output"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parsePipelineOutputJSON(tt.stdout)
+			if ok != (tt.want != nil) || !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("parsePipelineOutputJSON() = (%v, %v), want (%v, %v)", got, ok, tt.want, tt.want != nil)
+			}
+		})
 	}
 }
 

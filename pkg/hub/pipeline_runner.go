@@ -755,7 +755,7 @@ func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
 			return nil, false
 		}
 		var parsed map[string]interface{}
-		if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+		if err := json.Unmarshal([]byte(s), &parsed); err != nil || parsed == nil {
 			return nil, false
 		}
 		return parsed, true
@@ -763,13 +763,57 @@ func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
 	if parsed, ok := parse(stdout); ok {
 		return parsed, true
 	}
-	lines := strings.Split(stdout, "\n")
+	if json.Valid([]byte(stdout)) {
+		return nil, false
+	}
+	lines := strings.FieldsFunc(stdout, func(r rune) bool { return r == '\n' || r == '\r' })
 	for i := len(lines) - 1; i >= 0; i-- {
 		if parsed, ok := parse(lines[i]); ok {
 			return parsed, true
 		}
+		if json.Valid([]byte(lines[i])) {
+			continue
+		}
+		if parsed, ok := parse(lastPipelineOutputJSONObject(lines[i])); ok {
+			return parsed, true
+		}
 	}
 	return nil, false
+}
+
+func lastPipelineOutputJSONObject(s string) string {
+	var last string
+	start, depth := 0, 0
+	inString, escaped := false, false
+	for i := 0; i < len(s); i++ {
+		if inString {
+			if escaped {
+				escaped = false
+			} else if s[i] == '\\' {
+				escaped = true
+			} else if s[i] == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch s[i] {
+		case '"':
+			inString = depth > 0
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 {
+					last = s[start : i+1]
+				}
+			}
+		}
+	}
+	return last
 }
 
 // loadPipelineOutputs returns all persisted outputs for a claw as a map of
