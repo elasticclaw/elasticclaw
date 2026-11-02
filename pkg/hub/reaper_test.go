@@ -642,9 +642,19 @@ func TestReaperOfflineReplicatedVM(t *testing.T) {
 			if (calls == 1) != tc.wantLookup || calls > 1 {
 				t.Fatalf("lookup calls = %d; want lookup=%v", calls, tc.wantLookup)
 			}
-			var status, reason string
-			if err := db.QueryRow(`SELECT status, bootstrap_diagnostic FROM claws WHERE id='offline-vm'`).Scan(&status, &reason); err != nil {
-				t.Fatal(err)
+			// Stopping clears provider_id, asynchronously when it terminates the
+			// VM; wait so that write cannot outlive the test's database.
+			var status, reason, providerID string
+			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				if err := db.QueryRow(`SELECT status, bootstrap_diagnostic, COALESCE(provider_id,'') FROM claws WHERE id='offline-vm'`).Scan(&status, &reason, &providerID); err != nil {
+					t.Fatal(err)
+				}
+				if providerID == "" || time.Now().After(deadline) {
+					break
+				}
+			}
+			if providerID != "" {
+				t.Fatalf("provider_id = %q; want cleared after stop", providerID)
 			}
 			if status != "error" {
 				t.Fatalf("status = %q; want error", status)

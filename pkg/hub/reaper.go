@@ -277,7 +277,7 @@ func (s *Server) reapOnce() {
 		age := n.Sub(first)
 		if c.status == "offline" && age > cfg.offlineGrace && take() {
 			log.Printf("[reaper] stopping offline claw %s", c.id)
-			reason := "agent offline for " + cfg.offlineGrace.String() + ", sandbox presumed dead"
+			reason, vmGone := "agent offline for "+cfg.offlineGrace.String()+", sandbox presumed dead", false
 			if c.provider == "replicated" && c.providerID != "" {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				terminated, err := s.replicatedVMTerminated(ctx, c.providerID, n)
@@ -285,10 +285,12 @@ func (s *Server) reapOnce() {
 				if err != nil {
 					log.Printf("[reaper] get VM %s: %v", c.providerID, err)
 				} else if terminated {
-					reason = "sandbox terminated: CMX VM " + c.providerID + " expired or no longer exists"
+					log.Printf("[reaper] CMX VM %s for claw %s is gone; stopping as sandbox terminated", c.providerID, c.id)
+					reason, vmGone = "sandbox terminated: CMX VM "+c.providerID+" expired or no longer exists", true
 				}
 			}
-			s.stopAgentWithReason(c.id, reason, false)
+			// A VM the provider already reports gone needs no terminate call.
+			s.stopAgentWithReason(c.id, reason, vmGone)
 		}
 		if (c.status == "provisioning" || c.status == "starting") && age > cfg.provisioningMaxAge && take() {
 			log.Printf("[reaper] stopping timed out provisioning claw %s", c.id)

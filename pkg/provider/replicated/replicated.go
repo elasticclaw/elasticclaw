@@ -230,7 +230,7 @@ func (p *Provider) VMTerminated(ctx context.Context, vmID string, at time.Time) 
 		return false, err
 	}
 	switch vm.Status {
-	case "terminated", "deleted", "expired":
+	case "terminated", "deleted", "expired", "error":
 		return true, nil
 	}
 	return !vm.ExpiresAt.IsZero() && vm.ExpiresAt.Before(at), nil
