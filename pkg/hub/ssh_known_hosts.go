@@ -28,6 +28,18 @@ func (s *Server) assignReplicatedVM(clawID, vmID string) error {
 }
 
 func (s *Server) storeReplicatedSSHEndpoint(clawID, vmID, host string, port int, user string) error {
+	var err error
+	for attempt := 0; attempt < 20; attempt++ {
+		err = s.storeReplicatedSSHEndpointOnce(clawID, vmID, host, port, user)
+		if err == nil || !isSQLiteBusy(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	return err
+}
+
+func (s *Server) storeReplicatedSSHEndpointOnce(clawID, vmID, host string, port int, user string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
