@@ -1100,3 +1100,38 @@ func TestPRDiscoveryWebhookRefreshPreservesInference(t *testing.T) {
 		})
 	}
 }
+
+func TestPRDiscoveryTerminalInferredOnlyRunIsRescanned(t *testing.T) {
+	s, mock := discoveryServer(t)
+	started := time.Now().Add(-time.Hour)
+	run := discoveryRun(t, s, "partial-backfill", started)
+	associatePRForTest(t, s, run, "owner/repo", 1, taskRunPRStateClosed)
+	// A partial backfill leaves only inferred rows and the run unscanned.
+	if _, err := s.db.Exec(`UPDATE task_run_prs SET inferred=1 WHERE run_id=?`, run); err != nil {
+		t.Fatal(err)
+	}
+	recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: run, EventKey: "stop", EventType: taskRunEventManualStopBeforeDelivery, OccurredAt: started.Add(30 * time.Minute)})
+	s.reconcileUnreportedPRs("")
+	if mock.calls == 0 {
+		t.Fatal("run with only inferred PRs was not rescanned")
+	}
+}
+
+func TestTaskRunPRRefreshKeepsHeadFields(t *testing.T) {
+	s, _ := discoveryServer(t)
+	run := discoveryRun(t, s, "head-fields", time.Now().Add(-time.Hour))
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: run, Repo: "owner/repo", PRNumber: 1, URL: "https://github.com/owner/repo/pull/1",
+		HeadSHA: "abc", HeadBranch: "NEXT-1-x", BaseBranch: "main", State: taskRunPRStateOpen}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: run, Repo: "owner/repo", PRNumber: 1, URL: "https://github.com/owner/repo/pull/1", State: taskRunPRStateOpen}); err != nil {
+		t.Fatal(err)
+	}
+	var sha, head, base string
+	if err := s.db.QueryRow(`SELECT head_sha, head_branch, base_branch FROM task_run_prs WHERE run_id=?`, run).Scan(&sha, &head, &base); err != nil {
+		t.Fatal(err)
+	}
+	if sha != "abc" || head != "NEXT-1-x" || base != "main" {
+		t.Fatalf("refresh blanked head fields: sha=%q head=%q base=%q", sha, head, base)
+	}
+}

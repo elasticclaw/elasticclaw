@@ -477,10 +477,10 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		ON CONFLICT(tenant_id, run_id, repo, pr_number) DO UPDATE SET
 			inferred=CASE WHEN ? THEN task_run_prs.inferred ELSE MIN(task_run_prs.inferred, excluded.inferred) END,
 			pr_url=excluded.pr_url,
-			head_sha=excluded.head_sha,
+			head_sha=CASE WHEN excluded.head_sha != '' THEN excluded.head_sha ELSE task_run_prs.head_sha END,
 			last_agent_head_sha=CASE WHEN excluded.last_agent_head_sha != '' THEN excluded.last_agent_head_sha ELSE task_run_prs.last_agent_head_sha END,
-			head_branch=excluded.head_branch,
-			base_branch=excluded.base_branch,
+			head_branch=CASE WHEN excluded.head_branch != '' THEN excluded.head_branch ELSE task_run_prs.head_branch END,
+			base_branch=CASE WHEN excluded.base_branch != '' THEN excluded.base_branch ELSE task_run_prs.base_branch END,
 			state=CASE WHEN task_run_prs.merged = 1 OR task_run_prs.state = 'closed' THEN task_run_prs.state ELSE excluded.state END,
 			merged=CASE WHEN excluded.merged = 1 THEN 1 ELSE task_run_prs.merged END,
 			opened_at=CASE WHEN excluded.opened_at != 0 AND (task_run_prs.opened_at = 0 OR ?) THEN excluded.opened_at ELSE task_run_prs.opened_at END,

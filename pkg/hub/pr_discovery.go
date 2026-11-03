@@ -270,7 +270,7 @@ func (s *Server) reconcileUnreportedPRs(after string) string {
 		JOIN task_run_summaries trs ON trs.run_id=tr.id
 		WHERE trs.phase='terminal' AND tr.requires_pr=1 AND trs.finished_at>=?
 		  AND tr.pr_discovery_scanned=0 AND tr.id>?
-		  AND NOT EXISTS(SELECT 1 FROM task_run_prs p WHERE p.run_id=tr.id)
+		  AND NOT EXISTS(SELECT 1 FROM task_run_prs p WHERE p.run_id=tr.id AND p.inferred=0)
 		ORDER BY tr.id LIMIT ?`, time.Now().Add(-14*24*time.Hour).UnixMilli(), after, prDiscoveryRunLimit)
 	if err != nil {
 		log.Printf("[pr-discovery] query terminal runs: %v", err)
