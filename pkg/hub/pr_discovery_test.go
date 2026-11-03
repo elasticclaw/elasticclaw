@@ -235,10 +235,16 @@ func TestPRDiscoveryRespectsQuota(t *testing.T) {
 	run := discoveryRun(t, s, "claw-discovery-quota", time.Now().Add(-time.Hour))
 	mock.prs = []map[string]interface{}{discoveryPR(1, time.Now().Add(-time.Minute), time.Time{})}
 	defaultGitHubClient.mu.Lock()
+	prevHaveLimit, prevRemaining, prevReset := defaultGitHubClient.haveLimit, defaultGitHubClient.remaining, defaultGitHubClient.reset
 	defaultGitHubClient.haveLimit = true
 	defaultGitHubClient.remaining = 0
 	defaultGitHubClient.reset = time.Now().Add(time.Hour)
 	defaultGitHubClient.mu.Unlock()
+	t.Cleanup(func() {
+		defaultGitHubClient.mu.Lock()
+		defaultGitHubClient.haveLimit, defaultGitHubClient.remaining, defaultGitHubClient.reset = prevHaveLimit, prevRemaining, prevReset
+		defaultGitHubClient.mu.Unlock()
+	})
 	s.discoverClawPRs("claw-discovery-quota", run)
 	var count int
 	_ = s.db.QueryRow("SELECT COUNT(*) FROM claw_prs").Scan(&count)

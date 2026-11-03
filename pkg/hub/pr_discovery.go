@@ -281,7 +281,12 @@ func (s *Server) reconcileUnreportedPRs(after string) string {
 			ids = append(ids, id)
 		}
 	}
+	iterErr := rows.Err()
 	rows.Close()
+	if iterErr != nil {
+		log.Printf("[pr-discovery] iterate terminal runs: %v", iterErr)
+		return after
+	}
 	for _, id := range ids {
 		if !defaultGitHubClient.allowLowPriority() {
 			return after
