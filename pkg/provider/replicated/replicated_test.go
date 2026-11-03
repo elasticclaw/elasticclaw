@@ -265,6 +265,7 @@ func TestCreateVMRetries(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.createBackoff = [2]time.Duration{}
+			p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
 			id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
 			if (err != nil) != tt.wantError || errors.Is(err, ErrInsufficientCredits) != tt.wantCredits {
 				t.Fatalf("unexpected error: %v", err)
@@ -291,7 +292,7 @@ func TestCreateVMReconcilesGatewayError(t *testing.T) {
 					http.Error(w, "gateway error", status)
 				case r.Method == http.MethodGet && r.URL.Path == "/vms":
 					lists.Add(1)
-					w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued"}]}`))
+					w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"}]}`))
 				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 					w.WriteHeader(http.StatusNotFound)
@@ -303,6 +304,7 @@ func TestCreateVMReconcilesGatewayError(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.createBackoff = [2]time.Duration{}
+			p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
 			id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
 			if err != nil || id != "vm-created" {
 				t.Fatalf("CreateVM = %q, %v", id, err)
@@ -323,13 +325,14 @@ func TestCreateVMReconcilesTimeout(t *testing.T) {
 		wantLists  int32
 		wantError  bool
 	}{
-		{"existing VM", `{"vms":[{"id":"other","name":"other"},{"id":"vm-created","name":"test-claw"}]}`, 200, 1, 1, false},
+		{"existing VM", `{"vms":[{"id":"other","name":"other"},{"id":"vm-created","name":"test-claw","created_at":"2026-11-02T11:00:00Z"}]}`, 200, 1, 1, false},
 		{"missing VM", `{"vms":[]}`, 200, 2, 1, false},
 		{"list failed", "unavailable", 503, 1, 3, true},
 		{"invalid list", "{", 200, 1, 3, true},
 		{"skips terminated predecessor", `{"vms":[{"id":"old","name":"test-claw","status":"terminated","created_at":"2026-11-02T10:00:00Z"}]}`, 200, 2, 1, false},
 		{"skips VM created before the request", `{"vms":[{"id":"unrelated","name":"test-claw","status":"running","created_at":"2026-11-02T09:00:00Z"}]}`, 200, 2, 1, false},
 		{"prefers newest live VM", `{"vms":[{"id":"older","name":"test-claw","status":"running","created_at":"2026-11-02T10:58:00Z"},{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"},{"id":"expired","name":"test-claw","status":"expired","created_at":"2026-11-02T12:00:00Z"}]}`, 200, 1, 1, false},
+		{"missing created_at is inconclusive", `{"vms":[{"id":"unknown","name":"test-claw","status":"running"}]}`, 200, 1, 3, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var posts, lists atomic.Int32
@@ -413,7 +416,7 @@ func TestCreateVMReconcilesTimeoutOnLastAttempt(t *testing.T) {
 				w.Write([]byte(`{"vms":[]}`))
 				return
 			}
-			w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued"}]}`))
+			w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"}]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -425,6 +428,7 @@ func TestCreateVMReconcilesTimeoutOnLastAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.createBackoff = [2]time.Duration{}
+	p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
 	p.http.Timeout = 100 * time.Millisecond
 	id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
 	if err != nil || id != "vm-created" {
@@ -449,7 +453,7 @@ func TestCreateVMRetriesTransientReconcileFailure(t *testing.T) {
 				http.Error(w, "unavailable", http.StatusServiceUnavailable)
 				return
 			}
-			w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued"}]}`))
+			w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"}]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -461,6 +465,7 @@ func TestCreateVMRetriesTransientReconcileFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.createBackoff = [2]time.Duration{}
+	p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
 	p.http.Timeout = 100 * time.Millisecond
 	id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
 	if err != nil || id != "vm-created" {

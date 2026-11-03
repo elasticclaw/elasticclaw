@@ -304,7 +304,8 @@ func (p *Provider) reconcileVMByName(ctx context.Context, name string, notBefore
 // findLiveVMByName returns the newest non-terminal VM named name created at or
 // after notBefore, or "" if none. Claw names are unique per attempt, but a
 // terminated or older VM with this name must never be mistaken for the one
-// just created.
+// just created. A live same-name VM without a valid created_at cannot be
+// proven to be ours or not, so reconciliation is inconclusive.
 func (p *Provider) findLiveVMByName(ctx context.Context, name string, notBefore time.Time) (string, error) {
 	vms, err := p.listVMs(ctx)
 	if err != nil {
@@ -317,7 +318,10 @@ func (p *Provider) findLiveVMByName(ctx context.Context, name string, notBefore 
 			continue
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, vm.CreatedAt)
-		if err == nil && createdAt.Before(notBefore) {
+		if err != nil {
+			return "", fmt.Errorf("VM %s named %q has no valid created_at %q", vm.ID, name, vm.CreatedAt)
+		}
+		if createdAt.Before(notBefore) {
 			continue
 		}
 		if newestID == "" || createdAt.After(newestAt) {
