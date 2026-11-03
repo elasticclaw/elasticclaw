@@ -1,10 +1,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -514,7 +516,7 @@ func TestPRDiscoveryMissingRepoTokenContinues(t *testing.T) {
 	}
 }
 
-func TestPRDiscoveryPageLimitKeepsCandidates(t *testing.T) {
+func TestPRDiscoveryPageLimitIsIncomplete(t *testing.T) {
 	s, mock := discoveryServer(t)
 	started := time.Now().Add(-time.Hour)
 	run := discoveryRun(t, s, "claw-pages", started)
@@ -531,9 +533,12 @@ func TestPRDiscoveryPageLimitKeepsCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.finished = started.Add(30 * time.Minute).UnixMilli()
-	prs, err := s.discoverRunPRs(r)
-	if err != nil || len(prs) == 0 {
-		t.Fatalf("collected candidates lost at page limit: %d %v", len(prs), err)
+	prs, complete, err := s.discoverRunPRsWithCompletion(r)
+	if err != nil || len(prs) == 0 || complete {
+		t.Fatalf("page limit: candidates=%d complete=%v err=%v", len(prs), complete, err)
+	}
+	if prs, err := s.discoverRunPRs(r); err == nil || len(prs) != 0 {
+		t.Fatalf("incomplete discovery published %d PRs: %v", len(prs), err)
 	}
 }
 
@@ -573,43 +578,49 @@ func TestPRDiscoveryWorkspaceBotIdentity(t *testing.T) {
 }
 
 func TestPRDiscoveryTerminalPartialTokenFailureRetries(t *testing.T) {
-	s, mock := discoveryServer(t)
-	started := time.Now().Add(-time.Hour)
-	run := discoveryRun(t, s, "claw-partial", started)
-	recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: run, EventKey: "stop", EventType: taskRunEventManualStopBeforeDelivery, OccurredAt: started.Add(30 * time.Minute)})
-	_, err := s.db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"},{"repo":"missing/repo"}]' WHERE id='claw-partial'`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := githubTokenCacheKey([]RepoAccess{{Repo: "missing/repo", Permissions: "read"}})
-	s.ghTokenCache = map[string]cachedGitHubToken{key: {expiresAt: time.Now().Add(time.Hour)}}
-	// Closed-unmerged keeps the run terminal even after a partial association.
-	pr := discoveryPR(1, started.Add(time.Minute), time.Time{})
-	pr["state"], pr["closed_at"] = "closed", started.Add(2*time.Minute).Format(time.RFC3339)
-	mock.prs = []map[string]interface{}{pr}
-	s.reconcileUnreportedPRs("")
-	var scanned, count int
-	if err := s.db.QueryRow(`SELECT pr_discovery_scanned FROM task_runs WHERE id=?`, run).Scan(&scanned); err != nil {
-		t.Fatal(err)
-	}
-	if scanned != 0 {
-		t.Fatal("partial token failure marked complete")
-	}
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM task_run_prs WHERE run_id=?`, run).Scan(&count)
-	if count != 1 {
-		t.Fatal("accessible repository candidate lost")
-	}
-	delete(s.ghTokenCache, key)
-	calls := mock.calls
-	s.reconcileUnreportedPRs("")
-	if mock.calls <= calls {
-		t.Fatal("partially associated terminal run not retried")
-	}
-	if err := s.db.QueryRow(`SELECT pr_discovery_scanned FROM task_runs WHERE id=?`, run).Scan(&scanned); err != nil {
-		t.Fatal(err)
-	}
-	if scanned != 1 {
-		t.Fatal("successful retry not marked complete")
+	for _, outcome := range []string{"open", "merged", "closed"} {
+		t.Run(outcome, func(t *testing.T) {
+			s, mock := discoveryServer(t)
+			started := time.Now().Add(-time.Hour).Truncate(time.Second)
+			run := discoveryRun(t, s, "claw-partial", started)
+			stop := started.Add(30 * time.Minute)
+			recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: run, EventKey: "stop", EventType: taskRunEventManualStopBeforeDelivery, OccurredAt: stop})
+			if _, err := s.db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"},{"repo":"missing/repo"}]' WHERE id='claw-partial'`); err != nil {
+				t.Fatal(err)
+			}
+			key := githubTokenCacheKey([]RepoAccess{{Repo: "missing/repo", Permissions: "read"}})
+			s.ghTokenCache = map[string]cachedGitHubToken{key: {expiresAt: time.Now().Add(time.Hour)}}
+			pr := discoveryPR(1, started.Add(time.Minute), time.Time{})
+			if outcome == "merged" {
+				pr = discoveryPR(1, started.Add(time.Minute), started.Add(20*time.Minute))
+			} else if outcome == "closed" {
+				pr["state"], pr["closed_at"] = "closed", started.Add(20*time.Minute).Format(time.RFC3339)
+			}
+			mock.prs = []map[string]interface{}{pr}
+			s.reconcileUnreportedPRs("")
+			var scanned, count int
+			var phase string
+			var finished int64
+			if err := s.db.QueryRow(`SELECT tr.pr_discovery_scanned,ts.phase,ts.finished_at,(SELECT COUNT(*) FROM task_run_prs p WHERE p.run_id=tr.id)
+				FROM task_runs tr JOIN task_run_summaries ts ON ts.run_id=tr.id WHERE tr.id=?`, run).Scan(&scanned, &phase, &finished, &count); err != nil {
+				t.Fatal(err)
+			}
+			if scanned != 0 || count != 0 || phase != taskRunPhaseTerminal || finished != stop.UnixMilli() {
+				t.Fatalf("incomplete discovery mutated run: scanned=%d count=%d phase=%s finished=%d", scanned, count, phase, finished)
+			}
+			delete(s.ghTokenCache, key)
+			calls := mock.calls
+			s.reconcileUnreportedPRs("")
+			if mock.calls <= calls {
+				t.Fatal("incomplete discovery was not retried")
+			}
+			if err := s.db.QueryRow(`SELECT pr_discovery_scanned,(SELECT COUNT(*) FROM task_run_prs WHERE run_id=?) FROM task_runs WHERE id=?`, run, run).Scan(&scanned, &count); err != nil {
+				t.Fatal(err)
+			}
+			if scanned != 1 || count != 1 {
+				t.Fatalf("retry: scanned=%d count=%d", scanned, count)
+			}
+		})
 	}
 }
 
@@ -876,6 +887,215 @@ func TestPRDiscoveryDoneSignalConfirmsDiscoveredPR(t *testing.T) {
 			}
 			if err := s.db.QueryRow(`SELECT COUNT(*) FROM factory_analytics WHERE claw_id='done-after-discovery' AND action='pr_opened' AND detail='owner/repo#1'`).Scan(&opened); err != nil || opened != 1 {
 				t.Fatalf("pr_opened events=%d err=%v, want 1", opened, err)
+			}
+		})
+	}
+}
+
+func TestPRDiscoveryLivePartialResultRetriesOnSchedule(t *testing.T) {
+	s, mock := discoveryServer(t)
+	at := time.Now().Truncate(time.Second)
+	discoveryRun(t, s, "claw-partial-live", at.Add(-time.Hour))
+	s.claws["claw-partial-live"] = idleTestConn("claw-partial-live", 30*time.Minute)
+	if _, err := s.db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"},{"repo":"missing/repo"}]' WHERE id='claw-partial-live'`); err != nil {
+		t.Fatal(err)
+	}
+	key := githubTokenCacheKey([]RepoAccess{{Repo: "missing/repo", Permissions: "read"}})
+	s.ghTokenCache = map[string]cachedGitHubToken{key: {expiresAt: at.Add(time.Hour)}}
+	mock.prs = []map[string]interface{}{discoveryPR(1, at.Add(-time.Minute), time.Time{})}
+	s.scheduleIdlePRDiscovery(at)
+	waitPRDiscovery(t, s, "claw-partial-live")
+	var count int
+	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM claw_prs)+(SELECT COUNT(*) FROM task_run_prs)`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("partial result persisted: count=%d err=%v", count, err)
+	}
+	calls := mock.calls
+	s.scheduleIdlePRDiscovery(at.Add(time.Minute))
+	waitPRDiscovery(t, s, "claw-partial-live")
+	if mock.calls != calls {
+		t.Fatal("incomplete discovery retried too soon")
+	}
+	delete(s.ghTokenCache, key)
+	s.scheduleIdlePRDiscovery(at.Add(prDiscoveryRetryInterval))
+	waitPRDiscovery(t, s, "claw-partial-live")
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("complete retry: count=%d err=%v", count, err)
+	}
+}
+
+func TestPRDiscoveryTerminalReportedPRSkipsScan(t *testing.T) {
+	s, mock := discoveryServer(t)
+	started := time.Now().Add(-time.Hour)
+	run := discoveryRun(t, s, "reported-pr", started)
+	associatePRForTest(t, s, run, "owner/repo", 1, taskRunPRStateClosed)
+	recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: run, EventKey: "stop", EventType: taskRunEventManualStopBeforeDelivery, OccurredAt: started.Add(30 * time.Minute)})
+	s.reconcileUnreportedPRs("")
+	if mock.calls != 0 {
+		t.Fatalf("reported PR spent quota: %d calls", mock.calls)
+	}
+}
+
+func TestPRDiscoveryMentionOnlyDoesNotGateDiscoveryOrReminder(t *testing.T) {
+	for _, scheduled := range []bool{false, true} {
+		t.Run(fmt.Sprint(scheduled), func(t *testing.T) {
+			s, mock := discoveryServer(t)
+			at := time.Now()
+			run := discoveryRun(t, s, "mention-discovery", at.Add(-time.Hour))
+			if _, err := s.db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,mention_only,created_at)
+				VALUES('mention','mention-discovery','owner/repo',99,'https://github.com/owner/repo/pull/99',1,?)`, at); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(s.agentIdleResumeMessageForClaw("mention-discovery", 30*time.Minute), "[DONE]") {
+				t.Error("mention-only row suppressed delivery reminder")
+			}
+			mock.prs = []map[string]interface{}{discoveryPR(1, at.Add(-time.Minute), time.Time{})}
+			if scheduled {
+				s.claws["mention-discovery"] = idleTestConn("mention-discovery", 30*time.Minute)
+				s.scheduleIdlePRDiscovery(at)
+				waitPRDiscovery(t, s, "mention-discovery")
+			} else {
+				s.discoverClawPRs("mention-discovery", run)
+			}
+			var count int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id='mention-discovery' AND mention_only=0`).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("mention-only row gated discovery: count=%d err=%v", count, err)
+			}
+		})
+	}
+}
+
+func TestPRDiscoveryDeliveryConfirmsWithoutChangingAgentSHA(t *testing.T) {
+	for _, path := range []string{"scanner", "done-single", "done-multi"} {
+		t.Run(path, func(t *testing.T) {
+			s, mock := discoveryServer(t)
+			started := time.Now().Add(-time.Hour)
+			run := discoveryRun(t, s, "confirm-discovery", started)
+			s.hubCfg.Factories = []*types.FactoryConfig{{Name: "discovery"}}
+			if _, err := s.db.Exec(`UPDATE claws SET tags='["factory:discovery"]' WHERE id='confirm-discovery'`); err != nil {
+				t.Fatal(err)
+			}
+			mock.prs = []map[string]interface{}{discoveryPR(1, started.Add(time.Minute), time.Time{}), discoveryPR(2, started.Add(2*time.Minute), time.Time{})}
+			s.discoverClawPRs("confirm-discovery", run)
+			if _, err := s.db.Exec(`UPDATE task_run_prs SET last_agent_head_sha='agent-sha' WHERE run_id=?`, run); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`UPDATE claw_prs SET last_ci_sha='human-sha' WHERE claw_id='confirm-discovery'`); err != nil {
+				t.Fatal(err)
+			}
+			urls := []string{"https://github.com/owner/repo/pull/1"}
+			if path == "done-multi" {
+				urls = append(urls, "https://github.com/owner/repo/pull/2")
+			}
+			// Mentions must not confirm inferred delivery.
+			s.scanMessageForPRs("confirm-discovery", urls[0], true)
+			var inferred int
+			if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=? AND pr_number=1`, run).Scan(&inferred); err != nil || inferred != 1 {
+				t.Fatalf("mention confirmed delivery: inferred=%d err=%v", inferred, err)
+			}
+			for i := 0; i < 2; i++ {
+				if path == "scanner" {
+					s.scanMessageForPRs("confirm-discovery", urls[0], false)
+				} else if failed := s.registerDonePRURLs("confirm-discovery", urls); failed != "" {
+					t.Fatal(failed)
+				}
+				var sha string
+				var opened int
+				if err := s.db.QueryRow(`SELECT inferred,last_agent_head_sha FROM task_run_prs WHERE run_id=? AND pr_number=1`, run).Scan(&inferred, &sha); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM factory_analytics WHERE claw_id='confirm-discovery' AND action='pr_opened' AND detail='owner/repo#1'`).Scan(&opened); err != nil {
+					t.Fatal(err)
+				}
+				if inferred != 0 || sha != "agent-sha" || opened != 1 {
+					t.Fatalf("confirmation: inferred=%d agentSHA=%q opened=%d", inferred, sha, opened)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskRunPRMissingAssociationLogsSkip(t *testing.T) {
+	for _, path := range []string{"refresh", "merge-event"} {
+		t.Run(path, func(t *testing.T) {
+			s, _ := discoveryServer(t)
+			run := discoveryRun(t, s, "missing-association", time.Now().Add(-time.Hour))
+			var output bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&output)
+			defer log.SetOutput(previous)
+			if path == "refresh" {
+				if err := s.associateTaskRunPR(TaskRunPR{RunID: run, Repo: "owner/repo", PRNumber: 42, PreserveInference: true, Merged: true, State: taskRunPRStateClosed}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: run, EventKey: "merge", EventType: taskRunEventPRMerged, Detail: map[string]any{"repo": "owner/repo", "prNumber": 42}})
+			}
+			if got := output.String(); !strings.Contains(got, "skipping PR") || !strings.Contains(got, run) || !strings.Contains(got, "owner/repo#42") || !strings.Contains(got, "no associated PR") {
+				t.Fatalf("missing skip context: %q", got)
+			}
+			var count int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_run_prs`).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("skip created association: count=%d err=%v", count, err)
+			}
+		})
+	}
+}
+
+func TestPRDiscoveryTerminalQueryFailure(t *testing.T) {
+	s, _ := discoveryServer(t)
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	if cursor := s.reconcileUnreportedPRs("previous"); cursor != "" {
+		t.Fatalf("query error cursor=%q", cursor)
+	}
+	if !strings.Contains(output.String(), "[pr-discovery] query terminal runs:") {
+		t.Fatalf("query error not logged: %q", output.String())
+	}
+}
+
+func TestPRDiscoveryWebhookRefreshPreservesInference(t *testing.T) {
+	for _, path := range []string{"closed-live", "closed-dead", "ready"} {
+		t.Run(path, func(t *testing.T) {
+			s, _ := discoveryServer(t)
+			started := time.Now().Add(-time.Hour)
+			run := discoveryRun(t, s, "webhook-inferred", started)
+			s.hubCfg.Factories = []*types.FactoryConfig{{Name: "discovery", Integration: "github", Repos: []string{"owner/repo"}, Trigger: &types.GitHubTrigger{On: "pull_request"}}}
+			url := "https://github.com/owner/repo/pull/1"
+			if err := s.associateTaskRunPR(TaskRunPR{RunID: run, Repo: "owner/repo", PRNumber: 1, URL: url, Exclusive: true}); err != nil {
+				t.Fatal(err)
+			}
+			if failed := s.insertClawPRsAtomic("webhook-inferred", []prMentionCandidate{{repo: "owner/repo", number: 1, url: url, inferred: true}}, false); failed != "" {
+				t.Fatal(failed)
+			}
+			if path == "closed-dead" {
+				if _, err := s.db.Exec(`UPDATE claws SET status='deleted' WHERE id='webhook-inferred'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			payload := githubPRPayload{Action: "closed", Number: 1}
+			payload.Repository.FullName = "owner/repo"
+			payload.PullRequest.HTMLURL = url
+			payload.PullRequest.Merged = true
+			payload.PullRequest.MergedAt = started.Add(20 * time.Minute).UTC().Format(time.RFC3339)
+			wantState := taskRunPRStateClosed
+			if path == "ready" {
+				payload.Action = "ready_for_review"
+				payload.PullRequest.UpdatedAt = started.Add(10 * time.Minute).UTC().Format(time.RFC3339)
+				wantState = taskRunPRStateOpen
+			}
+			s.processGitHubPREvent(payload)
+			var inferred, ready int
+			var state string
+			if err := s.db.QueryRow(`SELECT inferred,state,ready_at FROM task_run_prs WHERE run_id=?`, run).Scan(&inferred, &state, &ready); err != nil {
+				t.Fatal(err)
+			}
+			if inferred != 1 || state != wantState || (path == "ready" && ready == 0) {
+				t.Fatalf("provider refresh: inferred=%d state=%s ready=%d", inferred, state, ready)
 			}
 		})
 	}

@@ -2,7 +2,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -47,7 +46,10 @@ type prDiscoveryPR struct {
 
 // Discovery only searches the run's repository access. Pages and runs are bounded.
 func (s *Server) discoverRunPRs(r prDiscoveryRun) ([]prDiscoveryPR, error) {
-	prs, _, err := s.discoverRunPRsWithCompletion(r)
+	prs, complete, err := s.discoverRunPRsWithCompletion(r)
+	if err == nil && !complete {
+		return nil, fmt.Errorf("incomplete PR discovery")
+	}
 	return prs, err
 }
 
@@ -217,7 +219,8 @@ func (s *Server) discoverRunPRsWithCompletion(r prDiscoveryRun) ([]prDiscoveryPR
 				break
 			}
 			if page == 10 {
-				log.Printf("[pr-discovery] page limit for %s; keeping collected candidates", repo.Repo)
+				complete = false
+				log.Printf("[pr-discovery] page limit for %s", repo.Repo)
 			}
 		}
 	}
@@ -229,7 +232,7 @@ func (s *Server) discoverRunPRsWithCompletion(r prDiscoveryRun) ([]prDiscoveryPR
 
 func (s *Server) discoverClawPRs(clawID, runID string) {
 	var count int
-	if !s.taskRunRequiresPRForClaw(clawID) || s.db.QueryRow("SELECT COUNT(*) FROM claw_prs WHERE claw_id=?", clawID).Scan(&count) != nil || count != 0 {
+	if !s.taskRunRequiresPRForClaw(clawID) || s.db.QueryRow("SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND mention_only=0", clawID).Scan(&count) != nil || count != 0 {
 		return
 	}
 	r, err := s.prDiscoveryRun(runID)
@@ -267,11 +270,10 @@ func (s *Server) reconcileUnreportedPRs(after string) string {
 		JOIN task_run_summaries trs ON trs.run_id=tr.id
 		WHERE trs.phase='terminal' AND tr.requires_pr=1 AND trs.finished_at>=?
 		  AND tr.pr_discovery_scanned=0 AND tr.id>?
+		  AND NOT EXISTS(SELECT 1 FROM task_run_prs p WHERE p.run_id=tr.id)
 		ORDER BY tr.id LIMIT ?`, time.Now().Add(-14*24*time.Hour).UnixMilli(), after, prDiscoveryRunLimit)
 	if err != nil {
-		if err != sql.ErrNoRows {
-			log.Printf("[pr-discovery] query terminal runs: %v", err)
-		}
+		log.Printf("[pr-discovery] query terminal runs: %v", err)
 		return ""
 	}
 	var ids []string
@@ -301,7 +303,10 @@ func (s *Server) reconcileUnreportedPRs(after string) string {
 			log.Printf("[pr-discovery] discover run %s: %v", id, err)
 			continue
 		}
-		success := complete
+		if !complete {
+			continue
+		}
+		success := true
 		for _, p := range prs {
 			if err := s.associateTaskRunPR(p.TaskRunPR); err != nil {
 				success = false
@@ -391,7 +396,7 @@ func (s *Server) scheduleIdlePRDiscovery(at time.Time) {
 		}
 		var run string
 		if err := s.db.QueryRow(`SELECT c.task_run_id FROM claws c JOIN task_runs tr ON tr.id=c.task_run_id
- WHERE c.id=? AND c.status='connected' AND tr.requires_pr=1 AND NOT EXISTS(SELECT 1 FROM claw_prs p WHERE p.claw_id=c.id)`, id).Scan(&run); err != nil {
+ WHERE c.id=? AND c.status='connected' AND tr.requires_pr=1 AND NOT EXISTS(SELECT 1 FROM claw_prs p WHERE p.claw_id=c.id AND p.mention_only=0)`, id).Scan(&run); err != nil {
 			continue
 		}
 		s.prDiscoveryMu.Lock()

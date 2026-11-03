@@ -85,8 +85,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
 		if !mentionOnly {
-			if err := s.upgradeMentionOnlyPR(clawID, prURL); err != nil {
-				return false, err
+			if failed := s.insertClawPRsAtomic(clawID, []prMentionCandidate{{repo: repo, number: prNumber, url: prURL}}, false); failed != "" {
+				return false, fmt.Errorf("confirm delivered PR %s", failed)
 			}
 		}
 		return false, nil
@@ -164,8 +164,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 		// A concurrent writer already registered this PR. If it was the message
 		// scanner, its row may be mention-only while this call is a delivery.
 		if !mentionOnly {
-			if err := s.upgradeMentionOnlyPR(clawID, prURL); err != nil {
-				return false, err
+			if failed := s.insertClawPRsAtomic(clawID, []prMentionCandidate{{repo: repo, number: prNumber, url: prURL}}, false); failed != "" {
+				return false, fmt.Errorf("confirm delivered PR %s", failed)
 			}
 		}
 		return false, nil
@@ -343,6 +343,7 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 				}
 			}
 			if !mentionOnly && !row.inferred {
+				row.headSHA = "" // Confirm delivery without replacing the agent baseline.
 				inserted = append(inserted, row)
 			}
 			continue
@@ -364,6 +365,7 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 				}
 			}
 			if !mentionOnly && !row.inferred {
+				row.headSHA = "" // Confirm delivery without replacing the agent baseline.
 				inserted = append(inserted, row)
 			}
 			continue // concurrent insert won the race
@@ -400,7 +402,7 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 				PRNumber:     row.number,
 				URL:          row.url,
 				HeadSHA:      row.headSHA,
-				AgentHeadSHA: true,
+				AgentHeadSHA: row.headSHA != "",
 				State:        taskRunPRStateOpen,
 			}); err != nil {
 				log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", row.repo, row.number, clawID, err)

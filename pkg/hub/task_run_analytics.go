@@ -430,6 +430,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			return err
 		}
 		if associated == 0 {
+			log.Printf("[task-run-analytics] skipping PR refresh for run %s, %s#%d: no associated PR", input.RunID, input.Repo, input.PRNumber)
 			return nil
 		}
 	}
@@ -1011,6 +1012,7 @@ func applyTaskRunPREventTx(tx *sql.Tx, input TaskRunEvent) error {
 		return err
 	}
 	if associated == 0 {
+		log.Printf("[task-run-analytics] skipping PR event %s for run %s, %s#%d: no associated PR", input.EventType, input.RunID, repo, prNumber)
 		return nil
 	}
 	eventTime := epochMillis(firstNonZeroTime(input.EventTime, input.OccurredAt, now()))

@@ -1818,14 +1818,9 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 
 	// Single URL: reuse the normal path (no multi-row partial-write risk).
 	if len(prs) == 1 {
-		inserted, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url, false)
-		if err != nil {
+		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url, false); err != nil {
 			log.Printf("[factory] failed to register PR %s for claw %s: %v", prs[0].url, shortID(clawID), err)
 			return prs[0].url
-		}
-		if !inserted {
-			// Already tracked (e.g. by PR discovery): confirm it as delivered.
-			return s.insertClawPRsAtomic(clawID, []prMentionCandidate{s.trackedPRCandidate(clawID, prs[0].repo, prs[0].number, prs[0].url)}, false)
 		}
 		return ""
 	}
@@ -1853,9 +1848,8 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 // trackedPRCandidate rebuilds a candidate for an already-tracked claw_prs row
 // so an explicit [DONE] can confirm a PR that discovery registered first.
 func (s *Server) trackedPRCandidate(clawID, repo string, number int, url string) prMentionCandidate {
-	row := prMentionCandidate{repo: repo, number: number, url: url}
-	_ = s.db.QueryRow(`SELECT COALESCE(last_ci_sha,'') FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, url).Scan(&row.headSHA)
-	return row
+	// Confirmation must not use last_ci_sha as the agent baseline.
+	return prMentionCandidate{repo: repo, number: number, url: url}
 }
 
 // validateDonePRs checks that every PR URL in the [DONE] signal refers to an open PR.
