@@ -117,14 +117,15 @@ type vmResponse struct {
 }
 
 type vmDetail struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	Status            string `json:"status"` // assigned, provisioning, preparing, running, terminated
-	Distribution      string `json:"distribution"`
-	InstanceType      string `json:"instance_type"`
-	NetworkID         string `json:"network_id"`
-	DirectSSHEndpoint string `json:"direct_ssh_endpoint"`
-	DirectSSHPort     int    `json:"direct_ssh_port"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	Status            string    `json:"status"` // assigned, provisioning, preparing, running, terminated
+	Distribution      string    `json:"distribution"`
+	InstanceType      string    `json:"instance_type"`
+	NetworkID         string    `json:"network_id"`
+	DirectSSHEndpoint string    `json:"direct_ssh_endpoint"`
+	DirectSSHPort     int       `json:"direct_ssh_port"`
 	// CreatedAt stays a string so an unexpected format cannot break GetVM.
 	CreatedAt string `json:"created_at"`
 }
@@ -337,6 +338,22 @@ func terminalVMStatus(status string) bool {
 		return true
 	}
 	return false
+}
+
+// VMTerminated reports whether the current VM is gone or has expired.
+func (p *Provider) VMTerminated(ctx context.Context, vmID string, at time.Time) (bool, error) {
+	vm, err := p.GetVM(ctx, vmID)
+	if err != nil {
+		var apiErr *apiError
+		if errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound {
+			return true, nil
+		}
+		return false, err
+	}
+	if terminalVMStatus(vm.Status) {
+		return true, nil
+	}
+	return !vm.ExpiresAt.IsZero() && vm.ExpiresAt.Before(at), nil
 }
 
 // DeleteVM terminates a CMX VM.
