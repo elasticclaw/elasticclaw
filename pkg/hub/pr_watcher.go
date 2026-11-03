@@ -228,6 +228,7 @@ func (s *Server) upgradeMentionOnlyPR(clawID, prURL string) error {
 
 // prMentionCandidate is a PR URL pending claw_prs registration.
 type prMentionCandidate struct {
+	inferred       bool
 	repo           string
 	number         int
 	url            string
@@ -322,6 +323,12 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 
 	var inserted []prMentionCandidate
 	for _, row := range rows {
+		if row.inferred {
+			var owned int
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs p JOIN claws c ON c.task_run_id=p.run_id WHERE c.id=? AND c.status='connected' AND lower(p.repo)=lower(?) AND p.pr_number=?)`, clawID, row.repo, row.number).Scan(&owned); err != nil || owned == 0 {
+				return row.url
+			}
+		}
 		// Re-check inside the transaction so a concurrent writer is handled
 		// via INSERT OR IGNORE rather than a hard failure.
 		var existing string
@@ -369,6 +376,9 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 	// Side effects only after the rows are durably present.
 	factory, issueID := s.findFactoryForClaw(clawID)
 	for _, row := range inserted {
+		if row.inferred {
+			continue
+		}
 		if factory != nil {
 			s.trackPROpened(factory.Name, issueID, clawID, row.repo, row.number)
 		}
@@ -451,6 +461,13 @@ func (s *Server) nextPollDelay() time.Duration {
 
 // startPRWatcher launches the background poller.
 func (s *Server) startPRWatcher() {
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.scheduleIdlePRDiscovery(time.Now())
+		}
+	}()
 	go func() {
 		cursor := s.reconcileUnreportedPRs("")
 		ticker := time.NewTicker(15 * time.Minute)
@@ -543,13 +560,14 @@ func (s *Server) reconcileDeadClawPRs() {
 		}
 		at := parseRFC3339Timestamp(atValue)
 		if err := s.associateTaskRunPR(TaskRunPR{
-			RunID:      p.runID,
-			Repo:       p.repo,
-			PRNumber:   p.prNumber,
-			URL:        p.url,
-			State:      taskRunPRStateClosed,
-			Merged:     merged,
-			OccurredAt: at,
+			PreserveInference: true,
+			RunID:             p.runID,
+			Repo:              p.repo,
+			PRNumber:          p.prNumber,
+			URL:               p.url,
+			State:             taskRunPRStateClosed,
+			Merged:            merged,
+			OccurredAt:        at,
 		}); err != nil {
 			log.Printf("[pr-reconciler] failed to reconcile run %s PR %s#%d: %v", p.runID, p.repo, p.prNumber, err)
 		} else {
@@ -1026,6 +1044,10 @@ func (s *Server) githubAppConfigsForTokens() []*types.GitHubAppConfig {
 // resolveGitHubTokenWithRepos is a shared helper that resolves a GitHub App installation token
 // with optional repo-scoped access.
 func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
+	return s.resolveGitHubTokenWithReposContext(context.Background(), repoAccess)
+}
+
+func (s *Server) resolveGitHubTokenWithReposContext(ctx context.Context, repoAccess []RepoAccess) string {
 	appCfgs := s.githubAppConfigsForTokens()
 	if len(appCfgs) == 0 {
 		return ""
@@ -1034,8 +1056,17 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	// GitHub App requests on every poll of every PR, which was its own
 	// rate-limit exhaustion path.
 	cacheKey := githubTokenCacheKey(repoAccess)
-	s.ghTokenMu.Lock()
+	for !s.ghTokenMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	defer s.ghTokenMu.Unlock()
+	if ctx.Err() != nil {
+		return ""
+	}
 	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		return cached.token
 	}
@@ -1057,7 +1088,7 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 			lastErr = err
 			continue
 		}
-		token, expiresAt, err := provider.InstallationToken(context.Background(), 0, repoAccess)
+		token, expiresAt, err := provider.InstallationToken(ctx, 0, repoAccess)
 		if err != nil {
 			log.Printf("[pr-watcher] GitHub token provider failed (app_id=%d): %v", appCfg.AppID, err)
 			lastErr = err
@@ -2354,7 +2385,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 		if _, runID, _, ok, err := s.taskRunContextForClaw(pr.clawID); err == nil && ok {
 			var readyAt int64
 			if err := s.db.QueryRow(`SELECT ready_at FROM task_run_prs WHERE run_id=? AND repo=? AND pr_number=?`, runID, pr.repo, pr.prNumber).Scan(&readyAt); err == nil && readyAt == 0 {
-				if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateOpen, ReadyAt: epochMillis(now())}); err != nil {
+				if err := s.associateTaskRunPR(TaskRunPR{PreserveInference: true, RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateOpen, ReadyAt: epochMillis(now())}); err != nil {
 					log.Printf("[pr-watcher] failed to detect ready_at for run %s: %v", runID, err)
 				}
 			}
@@ -2402,7 +2433,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 		}
 		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
 			closedAtValue, _ := data["closed_at"].(string)
-			if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber,
+			if err := s.associateTaskRunPR(TaskRunPR{PreserveInference: true, RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber,
 				URL: pr.prURL, State: taskRunPRStateClosed, OpenedAt: createdAt,
 				OccurredAt: parseRFC3339Timestamp(closedAtValue)}); err != nil {
 				log.Printf("[pr-watcher] failed to record close for run %s: %v", runID, err)
@@ -2485,11 +2516,11 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
 		if !createdAt.IsZero() {
-			if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateOpen, OccurredAt: createdAt}); err != nil {
+			if err := s.associateTaskRunPR(TaskRunPR{PreserveInference: true, RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateOpen, OccurredAt: createdAt}); err != nil {
 				log.Printf("[pr-watcher] failed to backfill opened_at for run %s: %v", runID, err)
 			}
 		}
-		if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateClosed, Merged: true, OccurredAt: firstNonZeroTime(mergedAt, now())}); err != nil {
+		if err := s.associateTaskRunPR(TaskRunPR{PreserveInference: true, RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateClosed, Merged: true, OccurredAt: firstNonZeroTime(mergedAt, now())}); err != nil {
 			log.Printf("[pr-watcher] failed to record merge for run %s: %v", runID, err)
 		}
 	}

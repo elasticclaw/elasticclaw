@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -39,55 +40,69 @@ func (s *Server) prDiscoveryRun(runID string) (prDiscoveryRun, error) {
 	return r, err
 }
 
-// Discovery only searches the run's repository access, never all repositories
-// reachable by the installation token. Pages and runs are bounded per pass.
-func (s *Server) discoverRunPRs(r prDiscoveryRun) ([]TaskRunPR, error) {
-	if r.issue == "" || r.started == 0 || !defaultGitHubClient.allowLowPriority() {
-		return nil, nil
+type prDiscoveryPR struct {
+	TaskRunPR
+	mention prMentionCandidate
+}
+
+// Discovery only searches the run's repository access. Pages and runs are bounded.
+func (s *Server) discoverRunPRs(r prDiscoveryRun) ([]prDiscoveryPR, error) {
+	prs, _, err := s.discoverRunPRsWithCompletion(r)
+	return prs, err
+}
+
+func (s *Server) discoverRunPRsWithCompletion(r prDiscoveryRun) ([]prDiscoveryPR, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if r.issue == "" || r.started == 0 {
+		return nil, false, nil
 	}
 	var repos []types.GitHubRepoAccess
 	if r.repos != "" {
 		if err := json.Unmarshal([]byte(r.repos), &repos); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	} else if ws, _, ok := loadWorkflowPipelineContext(r.workspace, r.workflow); ok {
 		repos = append(repos, ws.Repositories...)
 	}
 	if hasRepositoryGlob(repos) {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cancel()
 		var err error
 		repos, err = s.expandWorkspaceRepositories(ctx, r.workspace, repos)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	base := s.githubBaseURL
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	var result []TaskRunPR
+	var result []prDiscoveryPR
 	seen := map[string]bool{}
+	queried := false
+	complete := true
 	for _, repo := range repos {
 		if !defaultGitHubClient.allowLowPriority() {
-			return nil, nil
+			return nil, false, fmt.Errorf("discovery quota unavailable")
 		}
 		if seen[strings.ToLower(repo.Repo)] {
 			continue
 		}
 		seen[strings.ToLower(repo.Repo)] = true
-		token := s.resolveGitHubTokenForRepo(repo.Repo)
+		token := s.resolveGitHubTokenWithReposContext(ctx, []RepoAccess{{Repo: repo.Repo, Permissions: "read"}})
 		if token == "" {
-			return nil, fmt.Errorf("no repository token for %s", repo.Repo)
+			complete = false
+			log.Printf("[pr-discovery] no repository token for %s", repo.Repo)
+			continue
 		}
 		for page := 1; page <= 10; page++ {
 			if !defaultGitHubClient.allowLowPriority() {
-				return nil, nil
+				return nil, false, fmt.Errorf("discovery quota unavailable")
 			}
-			items, err := githubAPIListWithBase(base, fmt.Sprintf("repos/%s/pulls?state=all&sort=created&direction=desc&page=%d", repo.Repo, page), token)
+			items, err := githubAPIListWithBaseContext(ctx, base, fmt.Sprintf("repos/%s/pulls?state=all&sort=created&direction=desc&page=%d", repo.Repo, page), token)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
+			queried = true
 			older := false
 			for _, item := range items {
 				data, _ := item.(map[string]interface{})
@@ -109,27 +124,40 @@ func (s *Server) discoverRunPRs(r prDiscoveryRun) ([]TaskRunPR, error) {
 				if !issueTokenMatches(title, r.issue) && !issueTokenMatches(branch, r.issue) {
 					continue
 				}
+				user, _ := data["user"].(map[string]interface{})
+				login, _ := user["login"].(string)
+				if !s.isDiscoveryAppBot(r.workspace, login) {
+					continue
+				}
+				var overlapping int
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_runs tr JOIN task_run_summaries ts ON ts.run_id=tr.id
+ WHERE tr.workspace_name=? AND lower(tr.issue_id)=lower(?) AND ts.started_at<=? AND (ts.finished_at=0 OR ts.finished_at>=?)`, r.workspace, r.issue, at.UnixMilli(), at.UnixMilli()).Scan(&overlapping); err != nil {
+					return nil, false, err
+				}
+				if overlapping > 1 {
+					continue
+				}
 				number, _ := data["number"].(float64)
 				var owned int
 				if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE lower(repo)=lower(?) AND pr_number=? AND run_id<>?)
 			OR EXISTS(SELECT 1 FROM claw_prs p JOIN claws c ON c.id=p.claw_id
 				WHERE lower(p.repo)=lower(?) AND p.pr_number=? AND c.task_run_id<>? AND c.task_run_id<>'')`, repo.Repo, int(number), r.id, repo.Repo, int(number), r.id).Scan(&owned); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				if owned != 0 || number <= 0 {
 					continue
 				}
 				// Pull-list responses do not include the authoritative merged flag.
 				if !defaultGitHubClient.allowLowPriority() {
-					return nil, nil
+					return nil, false, fmt.Errorf("discovery quota unavailable")
 				}
-				pr, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/pulls/%d", repo.Repo, int(number)), token)
+				pr, err := githubAPIWithBaseContext(ctx, base, fmt.Sprintf("repos/%s/pulls/%d", repo.Repo, int(number)), token)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				state, _ := pr["state"].(string)
 				if state != taskRunPRStateOpen && state != taskRunPRStateClosed {
-					return nil, fmt.Errorf("invalid PR state for %s#%d", repo.Repo, int(number))
+					return nil, false, fmt.Errorf("invalid PR state for %s#%d", repo.Repo, int(number))
 				}
 				merged, _ := pr["merged"].(bool)
 				mergedAt, _ := pr["merged_at"].(string)
@@ -149,17 +177,48 @@ func (s *Server) discoverRunPRs(r prDiscoveryRun) ([]TaskRunPR, error) {
 				if (merged || state == taskRunPRStateClosed) && p.OccurredAt.IsZero() {
 					continue
 				}
-				result = append(result, p)
+				candidate := prDiscoveryPR{TaskRunPR: p}
+				if r.finished == 0 && (state == taskRunPRStateOpen || merged) {
+					// Fetch every watermark before publishing any watcher row.
+					row := prMentionCandidate{repo: p.Repo, number: p.PRNumber, url: p.URL, headSHA: p.HeadSHA, inferred: true}
+					row.title, _ = pr["title"].(string)
+					row.mergeableState, _ = pr["mergeable_state"].(string)
+					comments, err := githubAPIListWithBaseContext(ctx, base, fmt.Sprintf("repos/%s/issues/%d/comments", repo.Repo, p.PRNumber), token)
+					if err != nil {
+						return nil, false, err
+					}
+					for _, item := range comments {
+						comment, _ := item.(map[string]interface{})
+						id, _ := comment["id"].(float64)
+						if int64(id) > row.comment {
+							row.comment = int64(id)
+						}
+						created, _ := comment["created_at"].(string)
+						if parseRFC3339Timestamp(created).After(parseRFC3339Timestamp(row.commentAt)) {
+							row.commentAt = created
+						}
+					}
+					reviews, err := githubAPIListWithBaseContext(ctx, base, fmt.Sprintf("repos/%s/pulls/%d/reviews", repo.Repo, p.PRNumber), token)
+					if err != nil {
+						return nil, false, err
+					}
+					row.review = maxPRReviewID(reviews, 0)
+					candidate.mention = row
+				}
+				result = append(result, candidate)
 			}
 			if older || len(items) < 100 {
 				break
 			}
 			if page == 10 {
-				return nil, fmt.Errorf("discovery page limit for %s", repo.Repo)
+				log.Printf("[pr-discovery] page limit for %s; keeping collected candidates", repo.Repo)
 			}
 		}
 	}
-	return result, nil
+	if !queried {
+		return nil, false, fmt.Errorf("no repository could be queried")
+	}
+	return result, complete, nil
 }
 
 func (s *Server) discoverClawPRs(clawID, runID string) {
@@ -177,17 +236,21 @@ func (s *Server) discoverClawPRs(clawID, runID string) {
 		log.Printf("[pr-discovery] discover claw %s: %v", shortID(clawID), err)
 		return
 	}
+	var rows []prMentionCandidate
 	for _, p := range prs {
-		// Reserve ownership atomically before arming the watcher. Leave state open:
-		// checkPRMerged must observe the terminal provider state and run teardown.
-		p.State, p.Merged, p.OccurredAt = taskRunPRStateOpen, false, p.OpenedAt
-		if err := s.associateTaskRunPR(p); err != nil {
-			log.Printf("[pr-discovery] associate claw %s: %v", shortID(clawID), err)
+		if p.State == taskRunPRStateClosed && !p.Merged {
 			continue
 		}
-		if inserted, err := s.storePRMention(clawID, p.Repo, p.PRNumber, p.URL, false); err == nil && inserted {
-			log.Printf("[pr-discovery] registered unreported PR %s#%d for claw %s (issue %s)", p.Repo, p.PRNumber, shortID(clawID), r.issue)
+		// Reserve ownership before atomically arming the watcher for the full set.
+		p.State, p.Merged, p.OccurredAt = taskRunPRStateOpen, false, p.OpenedAt
+		if err := s.associateTaskRunPR(p.TaskRunPR); err != nil {
+			log.Printf("[pr-discovery] reserve claw %s: %v", shortID(clawID), err)
+			return
 		}
+		rows = append(rows, p.mention)
+	}
+	if failed := s.insertClawPRsAtomic(clawID, rows, false); failed != "" {
+		log.Printf("[pr-discovery] register claw %s failed at %s", shortID(clawID), failed)
 	}
 }
 
@@ -197,7 +260,7 @@ func (s *Server) reconcileUnreportedPRs(after string) string {
 	rows, err := s.db.Query(`SELECT tr.id FROM task_runs tr
 		JOIN task_run_summaries trs ON trs.run_id=tr.id
 		WHERE trs.phase='terminal' AND tr.requires_pr=1 AND trs.finished_at>=?
-		  AND tr.id>? AND NOT EXISTS(SELECT 1 FROM task_run_prs p WHERE p.run_id=tr.id)
+		  AND tr.pr_discovery_scanned=0 AND tr.id>?
 		ORDER BY tr.id LIMIT ?`, time.Now().Add(-14*24*time.Hour).UnixMilli(), after, prDiscoveryRunLimit)
 	if err != nil {
 		if err != sql.ErrNoRows {
@@ -222,21 +285,112 @@ func (s *Server) reconcileUnreportedPRs(after string) string {
 		if err != nil {
 			continue
 		}
-		prs, err := s.discoverRunPRs(r)
+		prs, complete, err := s.discoverRunPRsWithCompletion(r)
 		if err != nil {
 			log.Printf("[pr-discovery] discover run %s: %v", id, err)
 			continue
 		}
+		success := complete
 		for _, p := range prs {
-			if err := s.associateTaskRunPR(p); err != nil {
+			if err := s.associateTaskRunPR(p.TaskRunPR); err != nil {
+				success = false
 				log.Printf("[pr-discovery] backfill run %s: %v", id, err)
 				continue
 			}
 			log.Printf("[pr-discovery] backfilled PR %s#%d for run %s (issue %s)", p.Repo, p.PRNumber, id, r.issue)
+		}
+		if success {
+			if _, err := s.db.Exec(`UPDATE task_runs SET pr_discovery_scanned=1 WHERE id=?`, id); err != nil {
+				log.Printf("[pr-discovery] mark run %s: %v", id, err)
+			}
 		}
 	}
 	if len(ids) < prDiscoveryRunLimit {
 		return ""
 	}
 	return after
+}
+
+// Scope bot identity to the run's workspace; legacy runs use hub app settings.
+func (s *Server) isDiscoveryAppBot(workspace, login string) bool {
+	if workspace == "" {
+		return s.isOwnAppBot(login)
+	}
+	apps, err := loadWorkspaceGitHubAppConfigs(workspace)
+	if err != nil {
+		return false
+	}
+	if len(apps) == 0 {
+		s.mu.RLock()
+		apps = append(apps, s.hubCfg.GitHubApps...)
+		s.mu.RUnlock()
+	}
+	for _, app := range apps {
+		if app == nil {
+			continue
+		}
+		slug := strings.TrimSuffix(app.URL, "/")
+		slug = slug[strings.LastIndex(slug, "/")+1:]
+		if slug != "" && strings.EqualFold(login, slug+"[bot]") {
+			return true
+		}
+	}
+	return false
+}
+
+func githubAPIListWithBaseContext(ctx context.Context, base, path, token string) ([]interface{}, error) {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	resp, err := defaultGitHubClient.getContext(ctx, base+"/"+path+separator+"per_page=100", token)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(resp.Body), RateLimited: resp.rateLimited()}
+	}
+	var items []interface{}
+	err = json.Unmarshal(resp.Body, &items)
+	return items, err
+}
+
+// Independent of auto-resume settings, latches, caps and no-progress pauses.
+func (s *Server) scheduleIdlePRDiscovery(at time.Time) {
+	s.mu.RLock()
+	connections := make(map[string]*clawConn, len(s.claws))
+	for id, cc := range s.claws {
+		connections[id] = cc
+	}
+	s.mu.RUnlock()
+	for id, cc := range connections {
+		snap := agentIdleSnapshotOf(cc)
+		if snap.busy || snap.stretchStartAt.IsZero() || at.Sub(snap.stretchStartAt) < s.livenessSettings().idleResumeAfter {
+			continue
+		}
+		var run string
+		if err := s.db.QueryRow(`SELECT c.task_run_id FROM claws c JOIN task_runs tr ON tr.id=c.task_run_id
+ WHERE c.id=? AND c.status='connected' AND tr.requires_pr=1 AND NOT EXISTS(SELECT 1 FROM claw_prs p WHERE p.claw_id=c.id)`, id).Scan(&run); err != nil {
+			continue
+		}
+		s.prDiscoveryMu.Lock()
+		if s.prDiscoveryInFlight[id] || at.Sub(s.prDiscoveryAttempts[id]) < 10*time.Minute {
+			s.prDiscoveryMu.Unlock()
+			continue
+		}
+		if s.prDiscoveryAttempts == nil {
+			s.prDiscoveryAttempts = map[string]time.Time{}
+			s.prDiscoveryInFlight = map[string]bool{}
+		}
+		s.prDiscoveryAttempts[id], s.prDiscoveryInFlight[id] = at, true
+		s.prDiscoveryMu.Unlock()
+		go func(id, run string) {
+			defer func() {
+				s.prDiscoveryMu.Lock()
+				delete(s.prDiscoveryInFlight, id)
+				s.prDiscoveryMu.Unlock()
+			}()
+			s.discoverClawPRs(id, run)
+		}(id, run)
+	}
 }

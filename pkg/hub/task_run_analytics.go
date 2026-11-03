@@ -175,8 +175,10 @@ type TaskRunEvent struct {
 }
 
 type TaskRunPR struct {
-	// Exclusive rejects discovery candidates already owned by another run.
+	// Exclusive marks inferred discovery candidates and rejects PRs owned by another run.
 	Exclusive bool
+	// PreserveInference is used by provider state refreshes, not delivery paths.
+	PreserveInference bool
 	// OpenedAt preserves provider creation time when recording a terminal PR.
 	OpenedAt      time.Time
 	TenantID      string
@@ -410,7 +412,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	} else if input.TenantID != runTenantID {
 		return fmt.Errorf("associate task run PR: tenant mismatch for run %s", input.RunID)
 	}
-	if input.Exclusive {
+	if input.Exclusive || input.PreserveInference {
 		var owned int
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE lower(repo)=lower(?) AND pr_number=? AND run_id<>?)
 			OR EXISTS(SELECT 1 FROM claw_prs p JOIN claws c ON c.id=p.claw_id
@@ -419,6 +421,11 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		}
 		if owned != 0 {
 			return fmt.Errorf("discover task run PR: %s#%d belongs to another run", input.Repo, input.PRNumber)
+		}
+	}
+	if !input.Exclusive && !input.PreserveInference {
+		if err := removeInferredTaskRunPRsTx(tx, input.RunID, input.Repo, input.PRNumber); err != nil {
+			return err
 		}
 	}
 	if input.State == "" {
@@ -454,9 +461,10 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	if _, err := tx.Exec(`
 		INSERT INTO task_run_prs(
 			id, tenant_id, run_id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
-			state, merged, opened_at, closed_at, merged_at, ready_at, merged_by_login, created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			state, merged, opened_at, closed_at, merged_at, ready_at, merged_by_login, created_at, updated_at, inferred
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(tenant_id, run_id, repo, pr_number) DO UPDATE SET
+			inferred=CASE WHEN ? THEN task_run_prs.inferred ELSE MIN(task_run_prs.inferred, excluded.inferred) END,
 			pr_url=excluded.pr_url,
 			head_sha=excluded.head_sha,
 			last_agent_head_sha=CASE WHEN excluded.last_agent_head_sha != '' THEN excluded.last_agent_head_sha ELSE task_run_prs.last_agent_head_sha END,
@@ -472,7 +480,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			updated_at=excluded.updated_at`,
 		uuid.New().String(), input.TenantID, input.RunID, input.Repo, input.PRNumber, input.URL,
 		input.HeadSHA, input.HeadBranch, agentHeadSHA, input.BaseBranch, input.State, boolInt(input.Merged),
-		openedAt, closedAt, mergedAt, readyAt, input.MergedByLogin, at, at,
+		openedAt, closedAt, mergedAt, readyAt, input.MergedByLogin, at, at, boolInt(input.Exclusive), boolInt(input.PreserveInference),
 		boolInt(authoritativeOpen), boolInt(input.AuthoritativeReadyAt),
 	); err != nil {
 		return err
@@ -517,6 +525,43 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// Explicit delivery supersedes guesses, including their watcher rows and events.
+func removeInferredTaskRunPRsTx(tx *sql.Tx, run, repo string, number int) error {
+	rows, err := tx.Query(`SELECT run_id FROM task_run_prs WHERE run_id<>? AND lower(repo)=lower(?) AND pr_number=? AND inferred=1`, run, repo, number)
+	if err != nil {
+		return err
+	}
+	var displaced []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		displaced = append(displaced, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range displaced {
+		if _, err := tx.Exec(`DELETE FROM claw_prs WHERE lower(repo)=lower(?) AND pr_number=? AND claw_id IN (SELECT id FROM claws WHERE task_run_id=?)`, repo, number, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM task_run_prs WHERE run_id=? AND lower(repo)=lower(?) AND pr_number=? AND inferred=1`, id, repo, number); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM task_run_events WHERE run_id=? AND event_type IN ('pr_associated','pr_opened') AND lower(json_extract(detail,'$.repo'))=lower(?) AND json_extract(detail,'$.prNumber')=?`, id, repo, number); err != nil {
+			return err
+		}
+		if err := materializeTaskRunTx(tx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) materializeTaskRun(runID string) error {
@@ -948,6 +993,14 @@ func applyTaskRunPREventTx(tx *sql.Tx, input TaskRunEvent) error {
 	}
 	repo, prNumber := detailPR(input.Detail)
 	if repo == "" || prNumber <= 0 {
+		return nil
+	}
+	// A stale provider refresh must not resurrect a displaced inferred association.
+	var owned int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE lower(repo)=lower(?) AND pr_number=? AND run_id<>?)`, repo, prNumber, input.RunID).Scan(&owned); err != nil {
+		return err
+	}
+	if owned != 0 {
 		return nil
 	}
 	eventTime := epochMillis(firstNonZeroTime(input.EventTime, input.OccurredAt, now()))

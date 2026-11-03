@@ -577,9 +577,6 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		// no longer eligible, parked).
 		s.clearAgentIdleResumeLatch(clawID)
 	}
-	if status == "connected" {
-		s.discoverClawPRs(clawID, taskRunID)
-	}
 	if resumeCount >= agentIdleResumeMaxAttempts {
 		return // cap already reached and already logged (see below)
 	}

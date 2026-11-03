@@ -53,6 +53,10 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
+	prDiscoveryMu       sync.Mutex
+	prDiscoveryAttempts map[string]time.Time
+	prDiscoveryInFlight map[string]bool
+
 	db        *sql.DB
 	addr      string
 	hubCfg    *types.HubConfig
