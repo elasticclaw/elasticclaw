@@ -616,6 +616,17 @@ func (p *Pipeline) EntryStage() *Stage {
 	return nil
 }
 
+// TerminalStageIDs returns the IDs of all stages marked terminal:true.
+func (p *Pipeline) TerminalStageIDs() []string {
+	var ids []string
+	for i := range p.Stages {
+		if p.Stages[i].Terminal {
+			ids = append(ids, p.Stages[i].ID)
+		}
+	}
+	return ids
+}
+
 // HasPlanGate reports whether this pipeline opts into deterministic plan
 // approval: at least one stage with plan_gate: true and a configured gate.
 // Ordinary validation gates do not count — freeform hub plan approval remains

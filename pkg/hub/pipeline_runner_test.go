@@ -17,6 +17,160 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const terminalTestPipelineYAML = `
+stages:
+  - id: working
+    entry: true
+  - id: update-deps
+    triggers:
+      - message_contains: "[UPDATE_DEPS]"
+    on_enter:
+      run:
+        command: echo updated
+        output: update_result
+  - id: ready_to_merge
+    terminal: true
+`
+
+// newTerminalStageTestServer returns a connected factory claw in stage, using
+// terminalTestPipelineYAML.
+func newTerminalStageTestServer(t *testing.T, stage string) (*Server, *sql.DB, string) {
+	t.Helper()
+	s, db, _ := newClawRetryTestServer(t, "connected")
+	s.hubCfg.Factories = []*types.FactoryConfig{{Name: "terminal-test", PipelineYAML: terminalTestPipelineYAML}}
+	const clawID = "retry-claw"
+	if _, err := db.Exec(`UPDATE claws SET tags='["factory:terminal-test"]', pipeline_stage=?, provider_id='test-instance' WHERE id=?`, stage, clawID); err != nil {
+		t.Fatal(err)
+	}
+	return s, db, clawID
+}
+
+func assertNoUpdateDepsRun(t *testing.T, s *Server, clawID string) {
+	t.Helper()
+	if got := s.getPipelineStage(clawID); got != "ready_to_merge" {
+		t.Fatalf("stage = %q, want ready_to_merge", got)
+	}
+	if _, ran := s.loadPipelineOutputs(clawID)["update_result"]; ran {
+		t.Fatal("update-deps on_enter ran after the terminal stage")
+	}
+}
+
+// TestPipelineTerminalStageWrittenAfterGuard covers a concurrent transition
+// writing the terminal stage after the early check read a non-terminal one:
+// the claim itself must refuse to leave the terminal stage.
+func TestPipelineTerminalStageWrittenAfterGuard(t *testing.T) {
+	s, db, clawID := newTerminalStageTestServer(t, "working")
+	afterTerminalStageGuard = func(id string) {
+		if _, err := db.Exec(`UPDATE claws SET pipeline_stage='ready_to_merge' WHERE id=?`, id); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterTerminalStageGuard = nil })
+
+	if s.checkPipelineMessageTriggers(clawID, "[UPDATE_DEPS]") {
+		t.Fatal("transition claimed over a concurrently written terminal stage")
+	}
+	assertNoUpdateDepsRun(t, s, clawID)
+}
+
+func TestClaimPipelineStageTransitionBlockedFrom(t *testing.T) {
+	s, _, clawID := newTerminalStageTestServer(t, "ready_to_merge")
+	if s.claimPipelineStageTransition(clawID, "update-deps", "ready_to_merge") {
+		t.Fatal("claim left a blocked stage")
+	}
+	if !s.claimPipelineStageTransition(clawID, "update-deps") {
+		t.Fatal("unguarded claim should still win")
+	}
+	if !s.claimPipelineStageTransition(clawID, "working", "ready_to_merge") {
+		t.Fatal("guarded claim from a non-blocked stage should win")
+	}
+}
+
+func TestPRConditionsIgnoredAfterTerminalStage(t *testing.T) {
+	s, db, clawID := newTerminalStageTestServer(t, "ready_to_merge")
+	pr := clawPR{id: "pr-terminal", clawID: clawID, prURL: "https://github.com/o/r/pull/1"}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, created_at) VALUES(?,?,?,?,?,datetime('now'))`, pr.id, pr.clawID, "o/r", 1, pr.prURL); err != nil {
+		t.Fatal(err)
+	}
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		t.Fatal("pipeline context not found")
+	}
+	stage := parsePipelineForContext(ctx).StageByID("update-deps")
+	s.firePRConditions(pr, *stage, ctx)
+
+	assertNoUpdateDepsRun(t, s, clawID)
+	var fired int
+	if err := db.QueryRow(`SELECT pr_conditions_fired FROM claw_prs WHERE id=?`, pr.id).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 {
+		t.Fatalf("pr_conditions_fired = %d, want 0", fired)
+	}
+}
+
+func TestPipelineTriggersAfterTerminalStage(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		stage   string
+		retry   bool
+		wantRun bool
+	}{
+		{name: "terminal", stage: "ready_to_merge"},
+		{name: "non-terminal", stage: "working", wantRun: true},
+		{name: "retry", stage: "working", retry: true, wantRun: true},
+		{name: "new run", wantRun: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, db, _ := newClawRetryTestServer(t, "offline")
+			s.hubCfg.Factories = []*types.FactoryConfig{{Name: "terminal-test", PipelineYAML: terminalTestPipelineYAML}}
+			const clawID = "retry-claw"
+			if _, err := db.Exec(`UPDATE claws SET tags='["factory:terminal-test"]', pipeline_stage=? WHERE id=?`, tt.stage, clawID); err != nil {
+				t.Fatal(err)
+			}
+			if tt.retry {
+				reset, err := s.resetClawForRetry("tenant", clawID, "", "retrying", "")
+				if err != nil || !reset {
+					t.Fatalf("reset for retry = %v, %v", reset, err)
+				}
+				if got := s.getPipelineStage(clawID); got != tt.stage {
+					t.Fatalf("retry stage = %q, want %q", got, tt.stage)
+				}
+			}
+			if _, err := db.Exec(`UPDATE claws SET status='connected', provider_id='test-instance' WHERE id=?`, clawID); err != nil {
+				t.Fatal(err)
+			}
+			if tt.stage == "" {
+				s.initializePipelineEntryIfNeeded(clawID)
+				if got := s.getPipelineStage(clawID); got != "working" {
+					t.Fatalf("entry stage = %q, want working", got)
+				}
+			}
+			if got := s.checkPipelineMessageTriggers(clawID, "[UPDATE_DEPS]"); got != tt.wantRun {
+				t.Fatalf("transition = %v, want %v", got, tt.wantRun)
+			}
+			wantStage := tt.stage
+			if tt.wantRun {
+				wantStage = "update-deps"
+			}
+			if got := s.getPipelineStage(clawID); got != wantStage {
+				t.Fatalf("stage = %q, want %q", got, wantStage)
+			}
+			_, ran := s.loadPipelineOutputs(clawID)["update_result"]
+			if ran != tt.wantRun {
+				t.Fatalf("on_enter command output present = %v, want %v", ran, tt.wantRun)
+			}
+			var commandNotices int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE '%Running workflow command for stage%'`, clawID).Scan(&commandNotices); err != nil {
+				t.Fatal(err)
+			}
+			if (commandNotices > 0) != tt.wantRun {
+				t.Fatalf("on_enter command notices = %d, want run=%v", commandNotices, tt.wantRun)
+			}
+		})
+	}
+}
+
 func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 

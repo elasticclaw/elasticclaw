@@ -2119,15 +2119,39 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 	return ctx, stage, true
 }
 
+// afterTerminalStageGuard is a test seam: it runs between the early terminal
+// stage check and the atomic claim in transitionPipelineStageWithContext.
+var afterTerminalStageGuard func(clawID string)
+
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
+	// Late triggers must not restart a completed pipeline. New runs initialize
+	// their entry stage separately (unguarded); retry keeps the current stage,
+	// and checkpoint restore never writes pipeline_stage. The early check only
+	// avoids work in the common case: triggers run concurrently, so the claim
+	// itself refuses to leave a terminal stage.
+	var terminalIDs []string
+	if pl := parsePipelineForContext(ctx); pl != nil {
+		if current := pl.StageByID(s.getPipelineStage(clawID)); current != nil && current.Terminal {
+			log.Printf("[pipeline] claw %s: ignoring transition from terminal stage %q to %q", shortID(clawID), current.ID, stage.ID)
+			return false
+		}
+		terminalIDs = pl.TerminalStageIDs()
+	}
+	if afterTerminalStageGuard != nil {
+		afterTerminalStageGuard(clawID)
+	}
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
-	transitioned, _ := s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx, terminalIDs...)
 	return transitioned
 }
 
-func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) (transitioned, injectDelivered bool) {
-	if !s.claimPipelineStageTransition(clawID, stage.ID) {
-		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
+func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext, blockedFrom ...string) (transitioned, injectDelivered bool) {
+	if !s.claimPipelineStageTransition(clawID, stage.ID, blockedFrom...) {
+		if len(blockedFrom) > 0 {
+			log.Printf("[pipeline] claw %s already in stage %q (%s) or a terminal stage, skipping transition", clawID[:8], stage.ID, stage.Label)
+		} else {
+			log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
+		}
 		return false, false
 	}
 	stageLabel := strings.TrimSpace(stage.Label)
