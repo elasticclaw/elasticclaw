@@ -175,6 +175,10 @@ type TaskRunEvent struct {
 }
 
 type TaskRunPR struct {
+	// Exclusive rejects discovery candidates already owned by another run.
+	Exclusive bool
+	// OpenedAt preserves provider creation time when recording a terminal PR.
+	OpenedAt      time.Time
 	TenantID      string
 	RunID         string
 	Repo          string
@@ -406,13 +410,24 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	} else if input.TenantID != runTenantID {
 		return fmt.Errorf("associate task run PR: tenant mismatch for run %s", input.RunID)
 	}
+	if input.Exclusive {
+		var owned int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE lower(repo)=lower(?) AND pr_number=? AND run_id<>?)
+			OR EXISTS(SELECT 1 FROM claw_prs p JOIN claws c ON c.id=p.claw_id
+				WHERE lower(p.repo)=lower(?) AND p.pr_number=? AND c.task_run_id<>? AND c.task_run_id<>'')`, input.Repo, input.PRNumber, input.RunID, input.Repo, input.PRNumber, input.RunID).Scan(&owned); err != nil {
+			return err
+		}
+		if owned != 0 {
+			return fmt.Errorf("discover task run PR: %s#%d belongs to another run", input.Repo, input.PRNumber)
+		}
+	}
 	if input.State == "" {
 		input.State = taskRunPRStateOpen
 	}
 	// A caller-supplied OccurredAt is an authoritative provider timestamp and
 	// may overwrite an earlier detection-time opened_at; the now() fallback is
 	// write-once so it never clobbers an authoritative value.
-	authoritativeOpen := input.State == taskRunPRStateOpen && !input.OccurredAt.IsZero()
+	authoritativeOpen := !input.OpenedAt.IsZero() || (input.State == taskRunPRStateOpen && !input.OccurredAt.IsZero())
 	if input.OccurredAt.IsZero() {
 		input.OccurredAt = now()
 	}
@@ -420,6 +435,9 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	openedAt, closedAt, mergedAt := int64(0), int64(0), int64(0)
 	if input.State == taskRunPRStateOpen {
 		openedAt = at
+	}
+	if !input.OpenedAt.IsZero() {
+		openedAt = epochMillis(input.OpenedAt)
 	}
 	if input.State == taskRunPRStateClosed {
 		closedAt = at
@@ -976,11 +994,19 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		return err
 	}
 
+	counts := taskRunPRCounts(prs)
 	warnings := map[string]bool{}
 	humanInteractions := 0
 	dashboardInteractions := 0
 	externalInteractions := 0
 	for _, event := range events {
+		// Stopping a workspace after delivery completed is cleanup, not a
+		// human intervention needed to deliver the task.
+		if counts.open == 0 && counts.merged > 0 && counts.latestMergedAt > 0 &&
+			event.eventTime >= counts.latestMergedAt &&
+			(event.eventType == taskRunEventManualStopBeforeDelivery || event.eventType == taskRunEventAgentStopped) {
+			continue
+		}
 		if warning := normalizeTaskRunWarningType(event.warningType); warning != "" {
 			warnings[warning] = true
 		}
@@ -996,7 +1022,6 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		}
 	}
 
-	counts := taskRunPRCounts(prs)
 	phaseTimes := taskRunPhaseTimes(events)
 	// task_run_prs.opened_at may carry GitHub's authoritative created_at
 	// (backfilled by the PR watcher or webhook), while pr_opened events are

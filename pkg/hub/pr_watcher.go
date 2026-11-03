@@ -452,6 +452,14 @@ func (s *Server) nextPollDelay() time.Duration {
 // startPRWatcher launches the background poller.
 func (s *Server) startPRWatcher() {
 	go func() {
+		cursor := s.reconcileUnreportedPRs("")
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			cursor = s.reconcileUnreportedPRs(cursor)
+		}
+	}()
+	go func() {
 		timer := time.NewTimer(prWatcherBaseInterval)
 		defer timer.Stop()
 		reconcileTicker := time.NewTicker(5 * time.Minute)
@@ -2389,6 +2397,16 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 		pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(clawID)
 		if hasPipelineCtx {
 			s.trackPRClosed(pipelineCtx.Name(), pipelineCtx.IssueID, clawID, pr.repo, pr.prNumber)
+		} else {
+			s.trackPRClosed("", "", clawID, pr.repo, pr.prNumber)
+		}
+		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
+			closedAtValue, _ := data["closed_at"].(string)
+			if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber,
+				URL: pr.prURL, State: taskRunPRStateClosed, OpenedAt: createdAt,
+				OccurredAt: parseRFC3339Timestamp(closedAtValue)}); err != nil {
+				log.Printf("[pr-watcher] failed to record close for run %s: %v", runID, err)
+			}
 		}
 
 		remaining, err := s.clawOpenPRCount(clawID)
