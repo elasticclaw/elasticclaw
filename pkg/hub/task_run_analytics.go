@@ -412,7 +412,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	} else if input.TenantID != runTenantID {
 		return fmt.Errorf("associate task run PR: tenant mismatch for run %s", input.RunID)
 	}
-	if input.Exclusive || input.PreserveInference {
+	if input.Exclusive {
 		var owned int
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE lower(repo)=lower(?) AND pr_number=? AND run_id<>?)
 			OR EXISTS(SELECT 1 FROM claw_prs p JOIN claws c ON c.id=p.claw_id
@@ -421,6 +421,16 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		}
 		if owned != 0 {
 			return fmt.Errorf("discover task run PR: %s#%d belongs to another run", input.Repo, input.PRNumber)
+		}
+	}
+	if input.PreserveInference {
+		// Provider refreshes may update shared PRs, but must not recreate displaced rows.
+		var associated int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE run_id=? AND lower(repo)=lower(?) AND pr_number=?)`, input.RunID, input.Repo, input.PRNumber).Scan(&associated); err != nil {
+			return err
+		}
+		if associated == 0 {
+			return nil
 		}
 	}
 	if !input.Exclusive && !input.PreserveInference {
@@ -996,11 +1006,11 @@ func applyTaskRunPREventTx(tx *sql.Tx, input TaskRunEvent) error {
 		return nil
 	}
 	// A stale provider refresh must not resurrect a displaced inferred association.
-	var owned int
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE lower(repo)=lower(?) AND pr_number=? AND run_id<>?)`, repo, prNumber, input.RunID).Scan(&owned); err != nil {
+	var associated int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE run_id=? AND lower(repo)=lower(?) AND pr_number=?)`, input.RunID, repo, prNumber).Scan(&associated); err != nil {
 		return err
 	}
-	if owned != 0 {
+	if associated == 0 {
 		return nil
 	}
 	eventTime := epochMillis(firstNonZeroTime(input.EventTime, input.OccurredAt, now()))

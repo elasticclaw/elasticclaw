@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -388,8 +389,8 @@ func TestPRDiscoveryExplicitAssociationWins(t *testing.T) {
 	if count != 0 {
 		t.Fatal("old watcher row retained")
 	}
-	if err := s.associateTaskRunPR(TaskRunPR{RunID: inferred, Repo: "owner/repo", PRNumber: 1, PreserveInference: true, State: taskRunPRStateClosed, Merged: true}); err == nil {
-		t.Fatal("stale watcher resurrected displaced association")
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: inferred, Repo: "owner/repo", PRNumber: 1, PreserveInference: true, State: taskRunPRStateClosed, Merged: true}); err != nil {
+		t.Fatal(err)
 	}
 	recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: inferred, EventKey: "late-merge", EventType: taskRunEventPRMerged, Detail: map[string]any{"repo": "owner/repo", "prNumber": 1}})
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM task_run_prs WHERE pr_number=1`).Scan(&count)
@@ -656,5 +657,188 @@ func TestPRDiscoveryExplicitDeliveryPathsReplaceInference(t *testing.T) {
 				t.Fatalf("count=%d run=%s inferred=%d", count, run, inferredFlag)
 			}
 		})
+	}
+}
+
+func TestPRDiscoverySharedAcrossRunsProviderMerge(t *testing.T) {
+	for _, path := range []string{"watcher-refresh", "merge-event", "close-event"} {
+		t.Run(path, func(t *testing.T) {
+			s, _ := discoveryServer(t)
+			started := time.Now().Add(-2 * time.Hour)
+			first := discoveryRun(t, s, "shared-first", started)
+			second := discoveryRun(t, s, "shared-second", started.Add(time.Hour))
+			for _, run := range []string{first, second} {
+				if err := s.associateTaskRunPR(TaskRunPR{RunID: run, Repo: "owner/repo", PRNumber: 7, State: taskRunPRStateOpen}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wantMerged, wantStatus := 1, taskRunStatusClean
+			switch path {
+			case "watcher-refresh":
+				if err := s.associateTaskRunPR(TaskRunPR{RunID: second, Repo: "owner/repo", PRNumber: 7,
+					PreserveInference: true, State: taskRunPRStateClosed, Merged: true}); err != nil {
+					t.Fatal(err)
+				}
+			case "merge-event", "close-event":
+				eventType := taskRunEventPRMerged
+				if path == "close-event" {
+					eventType = taskRunEventPRClosedUnmerged
+					wantMerged = 0
+				}
+				recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: second, EventKey: path, EventType: eventType,
+					Detail: map[string]any{"repo": "owner/repo", "prNumber": 7}})
+			}
+			var merged int
+			var state, phase, status string
+			if err := s.db.QueryRow(`SELECT state,merged FROM task_run_prs WHERE run_id=?`, second).Scan(&state, &merged); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`SELECT phase,status FROM task_run_summaries WHERE run_id=?`, second).Scan(&phase, &status); err != nil {
+				t.Fatal(err)
+			}
+			if state != taskRunPRStateClosed || merged != wantMerged || phase != taskRunPhaseTerminal || status != wantStatus {
+				t.Fatalf("state=%s merged=%d phase=%s status=%s", state, merged, phase, status)
+			}
+		})
+	}
+}
+
+func TestPRDiscoveryTerminalNothingToDiscoverScanned(t *testing.T) {
+	for _, setup := range []string{
+		`UPDATE task_runs SET issue_id='' WHERE id=?`,
+		`UPDATE claws SET github_repos='[]' WHERE task_run_id=?`,
+		`UPDATE claws SET github_repos='' WHERE task_run_id=?`,
+	} {
+		t.Run(setup, func(t *testing.T) {
+			s, mock := discoveryServer(t)
+			started := time.Now().Add(-time.Hour)
+			run := discoveryRun(t, s, "nothing-to-discover", started)
+			recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: run, EventKey: "stop", EventType: taskRunEventManualStopBeforeDelivery,
+				OccurredAt: started.Add(30 * time.Minute)})
+			if _, err := s.db.Exec(setup, run); err != nil {
+				t.Fatal(err)
+			}
+			s.reconcileUnreportedPRs("")
+			var scanned int
+			if err := s.db.QueryRow(`SELECT pr_discovery_scanned FROM task_runs WHERE id=?`, run).Scan(&scanned); err != nil {
+				t.Fatal(err)
+			}
+			if scanned != 1 || mock.calls != 0 {
+				t.Fatalf("scanned=%d github calls=%d", scanned, mock.calls)
+			}
+		})
+	}
+}
+
+func TestPRDiscoveryExplicitDonePromotesExistingAssociation(t *testing.T) {
+	for _, path := range []string{"existing-row", "insert-race"} {
+		t.Run(path, func(t *testing.T) {
+			s, mock := discoveryServer(t)
+			started := time.Now().Add(-time.Hour)
+			run := discoveryRun(t, s, "late-done", started)
+			s.hubCfg.Factories = []*types.FactoryConfig{{Name: "discovery"}}
+			if _, err := s.db.Exec(`UPDATE claws SET tags='["factory:discovery"]' WHERE id='late-done'`); err != nil {
+				t.Fatal(err)
+			}
+			mock.prs = []map[string]interface{}{discoveryPR(1, started.Add(time.Minute), time.Time{})}
+			s.discoverClawPRs("late-done", run)
+			var inferred, opened int
+			if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=?`, run).Scan(&inferred); err != nil || inferred != 1 {
+				t.Fatalf("initial inference=%d err=%v", inferred, err)
+			}
+			row := prMentionCandidate{repo: "owner/repo", number: 1, url: "https://github.com/owner/repo/pull/1"}
+			// A mention alone is not explicit delivery.
+			if failed := s.insertClawPRsAtomic("late-done", []prMentionCandidate{row}, true); failed != "" {
+				t.Fatal(failed)
+			}
+			if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=?`, run).Scan(&inferred); err != nil || inferred != 1 {
+				t.Fatalf("mention inference=%d err=%v", inferred, err)
+			}
+			if path == "insert-race" {
+				if _, err := s.db.Exec(`DELETE FROM claw_prs WHERE claw_id='late-done'`); err != nil {
+					t.Fatal(err)
+				}
+				// Simulate another writer publishing the row after the existence check.
+				if _, err := s.db.Exec(`CREATE TRIGGER concurrent_discovery_pr BEFORE INSERT ON claw_prs
+			WHEN NOT EXISTS(SELECT 1 FROM claw_prs WHERE claw_id=NEW.claw_id AND pr_url=NEW.pr_url)
+			BEGIN
+				INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,mention_only,created_at)
+				VALUES('concurrent-pr',NEW.claw_id,NEW.repo,NEW.pr_number,NEW.pr_url,1,NEW.created_at);
+				SELECT RAISE(IGNORE);
+			END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < 2; i++ {
+				if failed := s.insertClawPRsAtomic("late-done", []prMentionCandidate{row}, false); failed != "" {
+					t.Fatal(failed)
+				}
+				if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=?`, run).Scan(&inferred); err != nil || inferred != 0 {
+					t.Fatalf("delivered inference=%d err=%v", inferred, err)
+				}
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM factory_analytics WHERE claw_id='late-done' AND action='pr_opened' AND detail='owner/repo#1'`).Scan(&opened); err != nil || opened != 1 {
+					t.Fatalf("opened events=%d err=%v", opened, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPRDiscoveryIdlePrunesStaleAttempts(t *testing.T) {
+	s, _ := discoveryServer(t)
+	at := time.Now()
+	s.prDiscoveryAttempts = map[string]time.Time{
+		"removed-claw": at.Add(-24 * time.Hour),
+		"retry-due":    at.Add(-prDiscoveryRetryInterval),
+		"recent":       at.Add(-time.Minute),
+	}
+	s.scheduleIdlePRDiscovery(at)
+	if len(s.prDiscoveryAttempts) != 1 || s.prDiscoveryAttempts["recent"].IsZero() {
+		t.Fatalf("remaining attempts: %v", s.prDiscoveryAttempts)
+	}
+}
+
+func TestPRDiscoveryTokenLockCancellationAndBackgroundWait(t *testing.T) {
+	s, mock := discoveryServer(t)
+	repos := []RepoAccess{{Repo: "owner/repo", Permissions: "read"}}
+	s.ghTokenCache = map[string]cachedGitHubToken{githubTokenCacheKey(repos): {token: "cached-token", expiresAt: time.Now().Add(time.Hour)}}
+	s.ghTokenMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.ghTokenMu.Unlock()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	cancelled := make(chan string, 1)
+	go func() { cancelled <- s.resolveGitHubTokenWithReposContext(ctx, repos) }()
+	select {
+	case token := <-cancelled:
+		if token != "" || ctx.Err() == nil {
+			t.Fatalf("cancelled token=%q err=%v", token, ctx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("discovery did not cancel while waiting for token mutex")
+	}
+	background := make(chan string, 1)
+	go func() { background <- s.resolveGitHubTokenWithRepos(repos) }()
+	select {
+	case <-background:
+		t.Fatal("background resolver bypassed token mutex")
+	case <-time.After(20 * time.Millisecond):
+	}
+	s.ghTokenMu.Unlock()
+	locked = false
+	select {
+	case token := <-background:
+		if token != "cached-token" {
+			t.Fatalf("background token=%q", token)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background resolver did not resume")
+	}
+	if mock.calls != 0 {
+		t.Fatalf("cache hit made %d network calls", mock.calls)
 	}
 }

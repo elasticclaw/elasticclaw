@@ -342,6 +342,9 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 					return row.url
 				}
 			}
+			if !mentionOnly && !row.inferred {
+				inserted = append(inserted, row)
+			}
 			continue
 		}
 		prID := uuid.New().String()
@@ -359,6 +362,9 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
 					return row.url
 				}
+			}
+			if !mentionOnly && !row.inferred {
+				inserted = append(inserted, row)
 			}
 			continue // concurrent insert won the race
 		}
@@ -380,7 +386,10 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 			continue
 		}
 		if factory != nil {
-			s.trackPROpened(factory.Name, issueID, clawID, row.repo, row.number)
+			var tracked int
+			if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM factory_analytics WHERE claw_id=? AND action='pr_opened' AND detail=?)`, clawID, fmt.Sprintf("%s#%d", row.repo, row.number)).Scan(&tracked); err == nil && tracked == 0 {
+				s.trackPROpened(factory.Name, issueID, clawID, row.repo, row.number)
+			}
 		}
 		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 			log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
@@ -1056,11 +1065,15 @@ func (s *Server) resolveGitHubTokenWithReposContext(ctx context.Context, repoAcc
 	// GitHub App requests on every poll of every PR, which was its own
 	// rate-limit exhaustion path.
 	cacheKey := githubTokenCacheKey(repoAccess)
-	for !s.ghTokenMu.TryLock() {
-		select {
-		case <-ctx.Done():
-			return ""
-		case <-time.After(10 * time.Millisecond):
+	if ctx.Done() == nil {
+		s.ghTokenMu.Lock()
+	} else {
+		for !s.ghTokenMu.TryLock() {
+			select {
+			case <-ctx.Done():
+				return ""
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
 	}
 	defer s.ghTokenMu.Unlock()

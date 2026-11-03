@@ -54,7 +54,10 @@ func (s *Server) discoverRunPRs(r prDiscoveryRun) ([]prDiscoveryPR, error) {
 func (s *Server) discoverRunPRsWithCompletion(r prDiscoveryRun) ([]prDiscoveryPR, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if r.issue == "" || r.started == 0 {
+	if strings.TrimSpace(r.issue) == "" {
+		return nil, true, nil
+	}
+	if r.started == 0 {
 		return nil, false, nil
 	}
 	var repos []types.GitHubRepoAccess
@@ -71,6 +74,9 @@ func (s *Server) discoverRunPRsWithCompletion(r prDiscoveryRun) ([]prDiscoveryPR
 		if err != nil {
 			return nil, false, err
 		}
+	}
+	if len(repos) == 0 {
+		return nil, true, nil
 	}
 	base := s.githubBaseURL
 	if base == "" {
@@ -355,8 +361,18 @@ func githubAPIListWithBaseContext(ctx context.Context, base, path, token string)
 	return items, err
 }
 
+const prDiscoveryRetryInterval = 10 * time.Minute
+
 // Independent of auto-resume settings, latches, caps and no-progress pauses.
 func (s *Server) scheduleIdlePRDiscovery(at time.Time) {
+	s.prDiscoveryMu.Lock()
+	for id, attempted := range s.prDiscoveryAttempts {
+		if at.Sub(attempted) >= prDiscoveryRetryInterval {
+			delete(s.prDiscoveryAttempts, id)
+		}
+	}
+	s.prDiscoveryMu.Unlock()
+
 	s.mu.RLock()
 	connections := make(map[string]*clawConn, len(s.claws))
 	for id, cc := range s.claws {
@@ -374,7 +390,7 @@ func (s *Server) scheduleIdlePRDiscovery(at time.Time) {
 			continue
 		}
 		s.prDiscoveryMu.Lock()
-		if s.prDiscoveryInFlight[id] || at.Sub(s.prDiscoveryAttempts[id]) < 10*time.Minute {
+		if s.prDiscoveryInFlight[id] || at.Sub(s.prDiscoveryAttempts[id]) < prDiscoveryRetryInterval {
 			s.prDiscoveryMu.Unlock()
 			continue
 		}
