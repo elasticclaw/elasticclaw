@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -45,13 +46,15 @@ func SSHUserFromPublicKey(authorizedKey string) string {
 
 // Provider implements the Replicated CMX VM provider.
 type Provider struct {
-	apiURL       string
-	token        string
-	defaultTTL   string
-	defaultType  string
-	sshPublicKey string   // hub's generated key, always injected
-	extraKeys    []string // operator debug keys from hub config
-	http         *http.Client
+	apiURL        string
+	token         string
+	defaultTTL    string
+	defaultType   string
+	sshPublicKey  string   // hub's generated key, always injected
+	extraKeys     []string // operator debug keys from hub config
+	http          *http.Client
+	createBackoff [2]time.Duration
+	now           func() time.Time
 }
 
 // Config holds provider configuration from hub.yaml.
@@ -84,13 +87,15 @@ func New(cfg Config) (*Provider, error) {
 		instanceType = DefaultInstanceType
 	}
 	return &Provider{
-		apiURL:       strings.TrimRight(apiURL, "/"),
-		token:        cfg.Token,
-		defaultTTL:   ttl,
-		defaultType:  instanceType,
-		sshPublicKey: cfg.HubPublicKey,
-		extraKeys:    cfg.ExtraPublicKeys,
-		http:         &http.Client{Timeout: 30 * time.Second},
+		apiURL:        strings.TrimRight(apiURL, "/"),
+		token:         cfg.Token,
+		defaultTTL:    ttl,
+		defaultType:   instanceType,
+		sshPublicKey:  cfg.HubPublicKey,
+		extraKeys:     cfg.ExtraPublicKeys,
+		http:          &http.Client{Timeout: 30 * time.Second},
+		createBackoff: [2]time.Duration{2 * time.Second, 5 * time.Second},
+		now:           time.Now,
 	}, nil
 }
 
@@ -121,6 +126,8 @@ type vmDetail struct {
 	NetworkID         string    `json:"network_id"`
 	DirectSSHEndpoint string    `json:"direct_ssh_endpoint"`
 	DirectSSHPort     int       `json:"direct_ssh_port"`
+	// CreatedAt stays a string so an unexpected format cannot break GetVM.
+	CreatedAt string `json:"created_at"`
 }
 
 // ─── Provider methods ─────────────────────────────────────────────────────────
@@ -159,9 +166,52 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		}
 	}
 
-	data, err := p.post(ctx, "/vm", body)
-	if err != nil {
-		return "", fmt.Errorf("create VM: %w", err)
+	// Only a VM created after this request started can be the one it created;
+	// allow for clock skew between the hub and CMX.
+	notBefore := p.now().Add(-reconcileClockSkew)
+	var data []byte
+	for attempt := 0; ; attempt++ {
+		var err error
+		data, err = p.post(ctx, "/vm", body)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("create VM: %w", ctx.Err())
+		}
+		var apiErr *apiError
+		var netErr net.Error
+		retryable := errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		if errors.As(err, &apiErr) {
+			retryable = apiErr.status >= 500 && apiErr.status < 600
+		}
+		if !retryable {
+			return "", fmt.Errorf("create VM: %w", err)
+		}
+		lastAttempt := attempt == len(p.createBackoff)
+		if !lastAttempt {
+			timer := time.NewTimer(p.createBackoff[attempt])
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return "", fmt.Errorf("create VM: %w", ctx.Err())
+			case <-timer.C:
+			}
+		}
+		// Every retryable failure is ambiguous: a lost response or a gateway
+		// 5xx may still have created the VM. Reconcile even after the last
+		// attempt so that VM is tracked instead of orphaned, and do not POST
+		// again unless no live VM with this name exists.
+		vmID, listErr := p.reconcileVMByName(ctx, req.Name, notBefore)
+		if listErr != nil {
+			return "", fmt.Errorf("create VM: %w; reconcile VMs: %w", err, listErr)
+		}
+		if vmID != "" {
+			return vmID, nil
+		}
+		if lastAttempt {
+			return "", fmt.Errorf("create VM: %w", err)
+		}
 	}
 
 	var resp vmResponse
@@ -219,18 +269,88 @@ func (p *Provider) GetVM(ctx context.Context, vmID string) (*vmDetail, error) {
 	return wrapped.VM, nil
 }
 
+func (p *Provider) listVMs(ctx context.Context) ([]vmDetail, error) {
+	data, err := p.get(ctx, "/vms")
+	if err != nil {
+		return nil, err
+	}
+	var resp vmResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse list VMs response: %w", err)
+	}
+	return resp.VMs, nil
+}
+
+// reconcileClockSkew bounds how far CMX's created_at may trail the hub clock.
+const reconcileClockSkew = 5 * time.Minute
+
+// reconcileVMByName retries transient list failures with the create backoff,
+// so one failed GET does not orphan a VM the timed-out POST may have created.
+func (p *Provider) reconcileVMByName(ctx context.Context, name string, notBefore time.Time) (string, error) {
+	for attempt := 0; ; attempt++ {
+		vmID, err := p.findLiveVMByName(ctx, name, notBefore)
+		if err == nil || attempt == len(p.createBackoff) || ctx.Err() != nil {
+			return vmID, err
+		}
+		timer := time.NewTimer(p.createBackoff[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", err
+		case <-timer.C:
+		}
+	}
+}
+
+// findLiveVMByName returns the newest non-terminal VM named name created at or
+// after notBefore, or "" if none. Claw names are unique per attempt, but a
+// terminated or older VM with this name must never be mistaken for the one
+// just created. A live same-name VM without a valid created_at cannot be
+// proven to be ours or not, so reconciliation is inconclusive.
+func (p *Provider) findLiveVMByName(ctx context.Context, name string, notBefore time.Time) (string, error) {
+	vms, err := p.listVMs(ctx)
+	if err != nil {
+		return "", err
+	}
+	var newestID string
+	var newestAt time.Time
+	for _, vm := range vms {
+		if vm.Name != name || terminalVMStatus(vm.Status) {
+			continue
+		}
+		createdAt, err := time.Parse(time.RFC3339Nano, vm.CreatedAt)
+		if err != nil {
+			return "", fmt.Errorf("VM %s named %q has no valid created_at %q", vm.ID, name, vm.CreatedAt)
+		}
+		if createdAt.Before(notBefore) {
+			continue
+		}
+		if newestID == "" || createdAt.After(newestAt) {
+			newestID, newestAt = vm.ID, createdAt
+		}
+	}
+	return newestID, nil
+}
+
+func terminalVMStatus(status string) bool {
+	switch status {
+	case "terminated", "error", "deleted", "expired":
+		return true
+	}
+	return false
+}
+
 // VMTerminated reports whether the current VM is gone or has expired.
 func (p *Provider) VMTerminated(ctx context.Context, vmID string, at time.Time) (bool, error) {
 	vm, err := p.GetVM(ctx, vmID)
 	if err != nil {
-		var apiErr *httpError
+		var apiErr *apiError
 		if errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound {
 			return true, nil
 		}
 		return false, err
 	}
-	switch vm.Status {
-	case "terminated", "deleted", "expired", "error":
+	if terminalVMStatus(vm.Status) {
 		return true, nil
 	}
 	return !vm.ExpiresAt.IsZero() && vm.ExpiresAt.Before(at), nil
@@ -315,13 +435,24 @@ func (p *Provider) delete(ctx context.Context, path string) ([]byte, error) {
 	return p.do(req)
 }
 
-type httpError struct {
-	status     int
-	path, body string
+// ErrInsufficientCredits indicates that CMX cannot provision until credits are added.
+var ErrInsufficientCredits = errors.New("replicated provider quota: exceeds available credits")
+
+type apiError struct {
+	status int
+	path   string
+	body   string
 }
 
-func (e *httpError) Error() string {
+func (e *apiError) Error() string {
 	return fmt.Sprintf("HTTP %d from %s: %s", e.status, e.path, e.body)
+}
+
+func (e *apiError) Unwrap() error {
+	if e.status == http.StatusBadRequest && strings.Contains(strings.ToLower(e.body), "exceeds available credits") {
+		return ErrInsufficientCredits
+	}
+	return nil
 }
 
 func (p *Provider) do(req *http.Request) ([]byte, error) {
@@ -335,11 +466,11 @@ func (p *Provider) do(req *http.Request) ([]byte, error) {
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, &apiError{status: resp.StatusCode, path: req.URL.Path, body: string(data)}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("HTTP %s %s: read response body: %w", req.Method, req.URL.Path, err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, &httpError{status: resp.StatusCode, path: req.URL.Path, body: string(data)}
 	}
 	return data, nil
 }
