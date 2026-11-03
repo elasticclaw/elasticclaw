@@ -2,7 +2,11 @@ package replicated
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -214,4 +218,49 @@ func TestSSHUserFromPublicKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVMTerminated(t *testing.T) {
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, body          string
+		status              int
+		terminated, wantErr bool
+	}{
+		{"not found", ``, 404, true, false},
+		{"terminated", `{"vm":{"status":"terminated"}}`, 200, true, false},
+		{"deleted", `{"vm":{"status":"deleted"}}`, 200, true, false},
+		{"expired", `{"vm":{"status":"expired"}}`, 200, true, false},
+		{"past expiry", `{"vm":{"status":"running","expires_at":"2026-11-02T11:59:59Z"}}`, 200, true, false},
+		{"future expiry", `{"vm":{"status":"running","expires_at":"2026-11-04T12:00:00Z"}}`, 200, false, false},
+		{"running", `{"vm":{"status":"running"}}`, 200, false, false},
+		{"provisioning", `{"vm":{"status":"provisioning"}}`, 200, false, false},
+		{"unauthorized", ``, 401, false, true},
+		{"server error", `HTTP 404`, 500, false, true},
+		{"missing VM", `{}`, 200, false, true},
+		{"invalid response", `{`, 200, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := New(Config{Token: "test-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.http.Transport = vmLookupTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodGet || r.URL.Path != "/vendor/v3/vm/vm-abc123" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+			got, err := p.VMTerminated(context.Background(), "vm-abc123", at)
+			if got != tc.terminated || (err != nil) != tc.wantErr {
+				t.Fatalf("VMTerminated = %v, %v; want %v, error=%v", got, err, tc.terminated, tc.wantErr)
+			}
+		})
+	}
+}
+
+type vmLookupTransport func(*http.Request) (*http.Response, error)
+
+func (f vmLookupTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }

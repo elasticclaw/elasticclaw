@@ -2,6 +2,7 @@ package hub
 
 import (
 	"log"
+	"strings"
 	"time"
 )
 
@@ -15,8 +16,10 @@ func (s *Server) getPipelineStage(clawID string) string {
 
 // claimPipelineStageTransition atomically updates the pipeline stage only if the
 // claw is not already in that stage. It returns true when the caller won the
-// transition and should run on_enter actions.
-func (s *Server) claimPipelineStageTransition(clawID, stageID string) bool {
+// transition and should run on_enter actions. When blockedFrom is given, the
+// claim also fails while the claw sits in any of those stages, so a terminal
+// stage written by a concurrent transition cannot be overwritten.
+func (s *Server) claimPipelineStageTransition(clawID, stageID string, blockedFrom ...string) bool {
 	// A won transition re-arms the idle auto-resume budget: idle_resume_count
 	// is a per-work-unit runaway cap (agentIdleResumeMaxAttempts), and a new
 	// stage is a new unit of work. Counting across stages let ten successful,
@@ -28,7 +31,15 @@ func (s *Server) claimPipelineStageTransition(clawID, stageID string) bool {
 	// idle_resume_at is deliberately left alone — it is the once-per-stretch
 	// dedupe latch, not budget, and a stage whose on_enter runs nothing that
 	// finishes a turn would otherwise have the SAME idle stretch poked twice.
-	res, err := s.db.Exec(`UPDATE claws SET pipeline_stage=?, stage_entered_at=?, idle_resume_count=0, lost_turn_recovery_count=0, bridge_error_auto_resumes=0, session_loss_streak=0, session_loss_progress_mark='' WHERE id=? AND pipeline_stage<>?`, stageID, time.Now().UnixMilli(), clawID, stageID)
+	query := `UPDATE claws SET pipeline_stage=?, stage_entered_at=?, idle_resume_count=0, lost_turn_recovery_count=0, bridge_error_auto_resumes=0, session_loss_streak=0, session_loss_progress_mark='' WHERE id=? AND pipeline_stage<>?`
+	args := []any{stageID, time.Now().UnixMilli(), clawID, stageID}
+	if len(blockedFrom) > 0 {
+		query += ` AND pipeline_stage NOT IN (?` + strings.Repeat(`,?`, len(blockedFrom)-1) + `)`
+		for _, id := range blockedFrom {
+			args = append(args, id)
+		}
+	}
+	res, err := s.db.Exec(query, args...)
 	if err != nil {
 		log.Printf("[pipeline] failed to set stage %q for claw %s: %v", stageID, clawID[:8], err)
 		return false
