@@ -842,3 +842,35 @@ func TestPRDiscoveryTokenLockCancellationAndBackgroundWait(t *testing.T) {
 		t.Fatalf("cache hit made %d network calls", mock.calls)
 	}
 }
+
+func TestPRDiscoveryDoneSignalConfirmsDiscoveredPR(t *testing.T) {
+	for _, urls := range [][]string{
+		{"https://github.com/owner/repo/pull/1"},
+		{"https://github.com/owner/repo/pull/1", "https://github.com/owner/repo/pull/2"},
+	} {
+		t.Run(fmt.Sprintf("%d-urls", len(urls)), func(t *testing.T) {
+			s, mock := discoveryServer(t)
+			started := time.Now().Add(-time.Hour)
+			run := discoveryRun(t, s, "done-after-discovery", started)
+			s.hubCfg.Factories = []*types.FactoryConfig{{Name: "discovery"}}
+			if _, err := s.db.Exec(`UPDATE claws SET tags='["factory:discovery"]' WHERE id='done-after-discovery'`); err != nil {
+				t.Fatal(err)
+			}
+			mock.prs = []map[string]interface{}{
+				discoveryPR(1, started.Add(time.Minute), time.Time{}),
+				discoveryPR(2, started.Add(2*time.Minute), time.Time{}),
+			}
+			s.discoverClawPRs("done-after-discovery", run)
+			if failed := s.registerDonePRURLs("done-after-discovery", urls); failed != "" {
+				t.Fatalf("registerDonePRURLs failed on %s", failed)
+			}
+			var inferred, opened int
+			if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=? AND pr_number=1`, run).Scan(&inferred); err != nil || inferred != 0 {
+				t.Fatalf("PR #1 inferred=%d err=%v, want explicit after [DONE]", inferred, err)
+			}
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM factory_analytics WHERE claw_id='done-after-discovery' AND action='pr_opened' AND detail='owner/repo#1'`).Scan(&opened); err != nil || opened != 1 {
+				t.Fatalf("pr_opened events=%d err=%v, want 1", opened, err)
+			}
+		})
+	}
+}
