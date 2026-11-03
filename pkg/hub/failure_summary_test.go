@@ -279,3 +279,20 @@ func TestBridgeArtifactUnavailableIsNotRetryable(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderCreditsFailureIsNotRetryable(t *testing.T) {
+	for _, prefix := range []string{"restore provision failed", "provision failed", "factory provision failed"} {
+		t.Run(prefix, func(t *testing.T) {
+			msg := classifyAgentFailure(prefix + ": create VM: HTTP 400 from /vendor/v3/vm: Request exceeds available credits")
+			if msg.Kind != agentFailureProviderQuota || msg.StatusCode != 400 {
+				t.Fatalf("unexpected classification: %+v", msg)
+			}
+			if retryableAgentFailure(msg.Kind) {
+				t.Fatal("credit exhaustion must not be retryable")
+			}
+			if got := taskRunFailureTypeForAgentFailure(msg.Kind); got != taskRunFailureProvisionFailed {
+				t.Fatalf("failure type=%q, want %q", got, taskRunFailureProvisionFailed)
+			}
+		})
+	}
+}

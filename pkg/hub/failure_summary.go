@@ -37,6 +37,7 @@ type agentFailureKind string
 
 const (
 	agentFailureUnknown            agentFailureKind = "unknown"
+	agentFailureProviderQuota      agentFailureKind = "provider_quota"
 	agentFailureTrackerRead        agentFailureKind = "tracker_read"
 	agentFailureTemplate           agentFailureKind = "template"
 	agentFailureProviderConfig     agentFailureKind = "provider_config"
@@ -79,6 +80,7 @@ type agentFailureRule struct {
 
 var agentFailureRules = []agentFailureRule{
 	{agentFailureBridgeArtifact, []string{"bridge artifact unavailable:"}},
+	{agentFailureProviderQuota, []string{"exceeds available credits"}},
 	{agentFailureProviderLost, []string{"provider vm lost", "vm not found", "provider lost"}},
 	{agentFailureTrackerRead, []string{"cannot read issue", "fetchgithubissuedetails", "fetchlinearissuedetails"}},
 	{agentFailureTemplate, []string{"template \"", "template '", "resolvetemplatefiles"}},
@@ -153,6 +155,8 @@ func agentFailureUserMessage(kind agentFailureKind) string {
 		return "ElasticClaw could not read the source issue/ticket."
 	case agentFailureTemplate:
 		return "ElasticClaw could not load the workspace template."
+	case agentFailureProviderQuota:
+		return "The execution provider has insufficient credits."
 	case agentFailureProviderConfig:
 		return "ElasticClaw could not find a valid execution provider."
 	case agentFailureHubPersistence:
@@ -204,6 +208,8 @@ func agentFailureNextStep(kind agentFailureKind) string {
 	switch kind {
 	case agentFailureBridgeArtifact:
 		return "Publish the connector artifact or update bridge_image, then re-trigger the workflow."
+	case agentFailureProviderQuota:
+		return "Add provider credits, then re-trigger the workflow."
 	case agentFailureTrackerRead, agentFailureTrackerAPI:
 		return "Check the issue tracker token permissions, then re-trigger the workflow."
 	case agentFailureTemplate, agentFailureProviderConfig, agentFailureWorkspaceSecrets, agentFailureGitHubCredentials, agentFailureWorkflowVolume:

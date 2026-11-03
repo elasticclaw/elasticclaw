@@ -186,11 +186,12 @@ type Server struct {
 
 	// Reaper state is deliberately in-memory: its conservative timers reset on
 	// a hub restart rather than treating an uncertain outage as an agent failure.
-	reaperMu            sync.Mutex
-	reaperFirstSeen     map[string]time.Time
-	usageCostRatios     sync.Map
-	nowFunc             func() time.Time
-	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
+	reaperMu                       sync.Mutex
+	reaperFirstSeen                map[string]time.Time
+	usageCostRatios                sync.Map
+	nowFunc                        func() time.Time
+	terminateVMOverride            func(provider, id string) error // test seam for terminal cleanup
+	replicatedVMTerminatedOverride func(context.Context, string, time.Time) (bool, error)
 
 	// Constructed notifiers are cached per notifier name so instances are
 	// genuinely reused across features (the lifecycle poller, the manual test
@@ -6344,9 +6345,11 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	s.rememberReplicatedBootstrapEnv(clawID, env)
 	// Store vm_id in the claw record — keep status='provisioning' so the poller can detect
 	// the provisioning→running transition and trigger bootstrap. Skip if already deleted.
-	_, _ = s.db.Exec(
-		`UPDATE claws SET provider='replicated', provider_id=? WHERE id=? AND status NOT IN ('deleted','starting','connected','idle')`, vmID, clawID,
-	)
+	if err := s.assignReplicatedVM(clawID, vmID); err != nil {
+		s.forgetReplicatedBootstrapEnv(clawID)
+		_ = p.DeleteVM(ctx, vmID)
+		return fmt.Errorf("store replicated VM: %w", err)
+	}
 	// If deleted, clean up the VM and bail
 	var currentStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
@@ -7389,10 +7392,13 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	}
 	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 	// Store SSH connection details in the DB for terminal access
-	_, _ = s.db.Exec(
-		`UPDATE claws SET ssh_host=?, ssh_port=?, ssh_user=? WHERE id=?`,
-		vm.DirectSSHEndpoint, vm.DirectSSHPort, sshUser, clawID,
-	)
+	if err := s.storeReplicatedSSHEndpoint(clawID, vmID, vm.DirectSSHEndpoint, vm.DirectSSHPort, sshUser); err != nil {
+		log.Printf("bootstrap: could not store SSH endpoint for VM %s: %v", vmID, err)
+		if !errors.Is(err, errReplicatedVMUnassigned) {
+			s.stopAgentWithReason(clawID, "Bootstrap failed: could not store SSH endpoint: "+err.Error(), false)
+		}
+		return
+	}
 
 	// Generate a random gateway password for this VM so claw-bridge can connect with full scopes
 	gatewayPassword := randomHex(16)

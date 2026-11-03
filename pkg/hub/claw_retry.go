@@ -49,7 +49,7 @@ func retryableAgentFailure(kind agentFailureKind) bool {
 
 func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
 	switch kind {
-	case agentFailureProvisioning:
+	case agentFailureProvisioning, agentFailureProviderQuota:
 		return taskRunFailureProvisionFailed
 	case agentFailureSandboxTerminated, agentFailureProviderLost:
 		return taskRunFailureProviderLost

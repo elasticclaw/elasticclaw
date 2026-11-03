@@ -755,7 +755,7 @@ func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
 			return nil, false
 		}
 		var parsed map[string]interface{}
-		if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+		if err := json.Unmarshal([]byte(s), &parsed); err != nil || parsed == nil {
 			return nil, false
 		}
 		return parsed, true
@@ -763,13 +763,63 @@ func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
 	if parsed, ok := parse(stdout); ok {
 		return parsed, true
 	}
-	lines := strings.Split(stdout, "\n")
+	// Valid JSON that is not an object (an array or scalar) is never a result,
+	// so do not dig an object out of it.
+	if json.Valid([]byte(stdout)) {
+		return nil, false
+	}
+	lines := strings.FieldsFunc(stdout, func(r rune) bool { return r == '\n' || r == '\r' })
 	for i := len(lines) - 1; i >= 0; i-- {
 		if parsed, ok := parse(lines[i]); ok {
 			return parsed, true
 		}
+		// Same for a segment that is a whole array or scalar.
+		if json.Valid([]byte(lines[i])) {
+			continue
+		}
+		if parsed, ok := parse(lastPipelineOutputJSONObject(lines[i])); ok {
+			return parsed, true
+		}
 	}
 	return nil, false
+}
+
+// lastPipelineOutputJSONObject returns the last balanced top-level object in s.
+// Objects nested in a top-level array are not candidates, and nothing after an
+// unclosed opener is either: it may be a truncated wrapper around them.
+func lastPipelineOutputJSONObject(s string) string {
+	var last string
+	start, depth := 0, 0
+	inString, escaped := false, false
+	for i := 0; i < len(s); i++ {
+		if inString {
+			if escaped {
+				escaped = false
+			} else if s[i] == '\\' {
+				escaped = true
+			} else if s[i] == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch s[i] {
+		case '"':
+			inString = depth > 0
+		case '{', '[':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}', ']':
+			if depth > 0 {
+				depth--
+				if depth == 0 && s[start] == '{' {
+					last = s[start : i+1]
+				}
+			}
+		}
+	}
+	return last
 }
 
 // loadPipelineOutputs returns all persisted outputs for a claw as a map of
@@ -2119,15 +2169,39 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 	return ctx, stage, true
 }
 
+// afterTerminalStageGuard is a test seam: it runs between the early terminal
+// stage check and the atomic claim in transitionPipelineStageWithContext.
+var afterTerminalStageGuard func(clawID string)
+
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
+	// Late triggers must not restart a completed pipeline. New runs initialize
+	// their entry stage separately (unguarded); retry keeps the current stage,
+	// and checkpoint restore never writes pipeline_stage. The early check only
+	// avoids work in the common case: triggers run concurrently, so the claim
+	// itself refuses to leave a terminal stage.
+	var terminalIDs []string
+	if pl := parsePipelineForContext(ctx); pl != nil {
+		if current := pl.StageByID(s.getPipelineStage(clawID)); current != nil && current.Terminal {
+			log.Printf("[pipeline] claw %s: ignoring transition from terminal stage %q to %q", shortID(clawID), current.ID, stage.ID)
+			return false
+		}
+		terminalIDs = pl.TerminalStageIDs()
+	}
+	if afterTerminalStageGuard != nil {
+		afterTerminalStageGuard(clawID)
+	}
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
-	transitioned, _ := s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx, terminalIDs...)
 	return transitioned
 }
 
-func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) (transitioned, injectDelivered bool) {
-	if !s.claimPipelineStageTransition(clawID, stage.ID) {
-		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
+func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext, blockedFrom ...string) (transitioned, injectDelivered bool) {
+	if !s.claimPipelineStageTransition(clawID, stage.ID, blockedFrom...) {
+		if len(blockedFrom) > 0 {
+			log.Printf("[pipeline] claw %s already in stage %q (%s) or a terminal stage, skipping transition", clawID[:8], stage.ID, stage.Label)
+		} else {
+			log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
+		}
 		return false, false
 	}
 	stageLabel := strings.TrimSpace(stage.Label)
