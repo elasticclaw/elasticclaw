@@ -246,12 +246,12 @@ func TestVMTerminated(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.http.Transport = vmLookupTransport(func(r *http.Request) (*http.Response, error) {
-				if r.Method != http.MethodGet || r.URL.Path != "/vendor/v3/vm/current-vm" {
+				if r.Method != http.MethodGet || r.URL.Path != "/vendor/v3/vm/vm-abc123" {
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 				}
 				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
 			})
-			got, err := p.VMTerminated(context.Background(), "current-vm", at)
+			got, err := p.VMTerminated(context.Background(), "vm-abc123", at)
 			if got != tc.terminated || (err != nil) != tc.wantErr {
 				t.Fatalf("VMTerminated = %v, %v; want %v, error=%v", got, err, tc.terminated, tc.wantErr)
 			}
