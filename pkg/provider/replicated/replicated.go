@@ -54,6 +54,7 @@ type Provider struct {
 	extraKeys     []string // operator debug keys from hub config
 	http          *http.Client
 	createBackoff [2]time.Duration
+	now           func() time.Time
 }
 
 // Config holds provider configuration from hub.yaml.
@@ -94,6 +95,7 @@ func New(cfg Config) (*Provider, error) {
 		extraKeys:     cfg.ExtraPublicKeys,
 		http:          &http.Client{Timeout: 30 * time.Second},
 		createBackoff: [2]time.Duration{2 * time.Second, 5 * time.Second},
+		now:           time.Now,
 	}, nil
 }
 
@@ -163,6 +165,9 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		}
 	}
 
+	// Only a VM created after this request started can be the one it created;
+	// allow for clock skew between the hub and CMX.
+	notBefore := p.now().Add(-reconcileClockSkew)
 	var data []byte
 	for attempt := 0; ; attempt++ {
 		var err error
@@ -196,7 +201,7 @@ func (p *Provider) CreateVM(ctx context.Context, req VMCreateRequest) (string, e
 		// 5xx may still have created the VM. Reconcile even after the last
 		// attempt so that VM is tracked instead of orphaned, and do not POST
 		// again unless no live VM with this name exists.
-		vmID, listErr := p.findLiveVMByName(ctx, req.Name)
+		vmID, listErr := p.reconcileVMByName(ctx, req.Name, notBefore)
 		if listErr != nil {
 			return "", fmt.Errorf("create VM: %w; reconcile VMs: %w", err, listErr)
 		}
@@ -275,10 +280,32 @@ func (p *Provider) listVMs(ctx context.Context) ([]vmDetail, error) {
 	return resp.VMs, nil
 }
 
-// findLiveVMByName returns the newest non-terminal VM named name, or "" if none.
-// Claw retries reuse the same name after terminating the predecessor, so a
-// terminated VM with this name must not be mistaken for the one just created.
-func (p *Provider) findLiveVMByName(ctx context.Context, name string) (string, error) {
+// reconcileClockSkew bounds how far CMX's created_at may trail the hub clock.
+const reconcileClockSkew = 5 * time.Minute
+
+// reconcileVMByName retries transient list failures with the create backoff,
+// so one failed GET does not orphan a VM the timed-out POST may have created.
+func (p *Provider) reconcileVMByName(ctx context.Context, name string, notBefore time.Time) (string, error) {
+	for attempt := 0; ; attempt++ {
+		vmID, err := p.findLiveVMByName(ctx, name, notBefore)
+		if err == nil || attempt == len(p.createBackoff) || ctx.Err() != nil {
+			return vmID, err
+		}
+		timer := time.NewTimer(p.createBackoff[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", err
+		case <-timer.C:
+		}
+	}
+}
+
+// findLiveVMByName returns the newest non-terminal VM named name created at or
+// after notBefore, or "" if none. Claw names are unique per attempt, but a
+// terminated or older VM with this name must never be mistaken for the one
+// just created.
+func (p *Provider) findLiveVMByName(ctx context.Context, name string, notBefore time.Time) (string, error) {
 	vms, err := p.listVMs(ctx)
 	if err != nil {
 		return "", err
@@ -289,7 +316,10 @@ func (p *Provider) findLiveVMByName(ctx context.Context, name string) (string, e
 		if vm.Name != name || terminalVMStatus(vm.Status) {
 			continue
 		}
-		createdAt, _ := time.Parse(time.RFC3339Nano, vm.CreatedAt)
+		createdAt, err := time.Parse(time.RFC3339Nano, vm.CreatedAt)
+		if err == nil && createdAt.Before(notBefore) {
+			continue
+		}
 		if newestID == "" || createdAt.After(newestAt) {
 			newestID, newestAt = vm.ID, createdAt
 		}
