@@ -59,7 +59,7 @@ func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
 		// is starting. Folding them into bootstrap_failed made the two
 		// indistinguishable in analytics.
 		return taskRunFailureWorkspaceUnresponsive
-	case agentFailureBootstrap, agentFailureRestore, agentFailureWorkspaceFiles:
+	case agentFailureBootstrap, agentFailureBridgeArtifact, agentFailureRestore, agentFailureWorkspaceFiles:
 		return taskRunFailureBootstrapFailed
 	case agentFailureGitHubCredentials:
 		return taskRunFailurePermissionOrAuth

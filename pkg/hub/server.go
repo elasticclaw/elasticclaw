@@ -4152,6 +4152,12 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	if err != nil {
 		return fmt.Errorf("daytona init: %w", err)
 	}
+	// Fail before creating a sandbox when the connector artifact is definitively missing.
+	if bridgeURL := s.bridgeDownloadURL(); bridgeURL != "" {
+		if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+			return err
+		}
+	}
 	s.setBootstrapStatus(clawID, "Creating sandbox")
 	// Resolve snapshot: template snapshot > hub default_snapshot
 	snapshot := req.Snapshot
@@ -4191,6 +4197,9 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			lastErr = s.bootstrapDaytona(context.Background(), clawID, clawName, instance.ID, p, env)
 			if lastErr == nil {
 				return
+			}
+			if errors.Is(lastErr, errBridgeArtifactUnavailable) {
+				break
 			}
 			if s.daytonaBridgeRunning(context.Background(), instance.ID, p) {
 				log.Printf("[daytona] bootstrap attempt %d/%d for claw %s returned error after claw-bridge started; treating bootstrap as complete: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
@@ -4570,6 +4579,9 @@ exit 1`
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml (e.g. bridge_image: ttl.sh/your/claw-bridge:tag) or build a tagged release")
+	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
 	}
 	var downloadCmd string
 	if strings.HasPrefix(bridgeURL, "http://") || strings.HasPrefix(bridgeURL, "https://") {
@@ -5840,6 +5852,9 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
 	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
+	}
 
 	// Generate a random gateway password for this VM
 	gatewayPassword := randomHex(16)
@@ -6143,6 +6158,9 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	}
 	if !strings.HasPrefix(bridgeURL, "http://") && !strings.HasPrefix(bridgeURL, "https://") {
 		return fmt.Errorf("docker provider requires an HTTP(S) claw-bridge URL, got %q", bridgeURL)
+	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
 	}
 	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL)
 	if err != nil {
@@ -7368,6 +7386,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	if bridgeURL == "" {
 		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
 		s.stopAgentIfInstance(clawID, vmID, "Bootstrap failed: bridge_image not configured", false)
+		return
+	}
+	if err := bootstrapBridgePreflight.check(context.Background(), bridgeURL); err != nil {
+		s.stopAgentWithReason(clawID, err.Error(), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")

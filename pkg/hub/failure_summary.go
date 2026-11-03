@@ -47,6 +47,7 @@ const (
 	agentFailureTriggerClaim       agentFailureKind = "trigger_claim"
 	agentFailureTaskRunAnalytics   agentFailureKind = "task_run_analytics"
 	agentFailureProvisioning       agentFailureKind = "provisioning"
+	agentFailureBridgeArtifact     agentFailureKind = "bridge_artifact"
 	agentFailureBootstrap          agentFailureKind = "bootstrap"
 	agentFailureWorkspaceReadiness agentFailureKind = "workspace_readiness"
 	agentFailureWorkspaceFiles     agentFailureKind = "workspace_files"
@@ -78,6 +79,7 @@ type agentFailureRule struct {
 }
 
 var agentFailureRules = []agentFailureRule{
+	{agentFailureBridgeArtifact, []string{"bridge artifact unavailable:"}},
 	{agentFailureProviderQuota, []string{"exceeds available credits"}},
 	{agentFailureProviderLost, []string{"provider vm lost", "vm not found", "provider lost"}},
 	{agentFailureTrackerRead, []string{"cannot read issue", "fetchgithubissuedetails", "fetchlinearissuedetails"}},
@@ -167,6 +169,8 @@ func agentFailureUserMessage(kind agentFailureKind) string {
 		return "ElasticClaw could not create the run tracking record."
 	case agentFailureProvisioning:
 		return "ElasticClaw could not start the agent workspace."
+	case agentFailureBridgeArtifact:
+		return "ElasticClaw connector artifact is unavailable."
 	case agentFailureBootstrap:
 		return "ElasticClaw started the workspace but could not finish preparing it."
 	case agentFailureWorkspaceReadiness:
@@ -202,6 +206,8 @@ func agentFailureUserMessage(kind agentFailureKind) string {
 
 func agentFailureNextStep(kind agentFailureKind) string {
 	switch kind {
+	case agentFailureBridgeArtifact:
+		return "Publish the connector artifact or update bridge_image, then re-trigger the workflow."
 	case agentFailureProviderQuota:
 		return "Add provider credits, then re-trigger the workflow."
 	case agentFailureTrackerRead, agentFailureTrackerAPI:
