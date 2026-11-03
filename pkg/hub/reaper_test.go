@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -595,5 +597,234 @@ func TestReleaseWorkflowV2CronSlotLoadsBeforeMarker(t *testing.T) {
 	s.releaseWorkflowV2CronSlot(context.Background(), "run-cron")
 	if s.cronSchedulerV2.running["ws/wf"] != 0 {
 		t.Fatalf("running counter decremented twice, got %d", s.cronSchedulerV2.running["ws/wf"])
+	}
+}
+
+func TestReaperOfflineReplicatedVM(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, providerID string
+		terminated                 bool
+		lookupErr                  error
+		wantLookup, wantRetryable  bool
+	}{
+		{"expired or missing", "replicated", "current-vm", true, nil, true, true},
+		{"replacement running", "replicated", "replacement-vm", false, nil, true, false},
+		{"lookup error", "replicated", "current-vm", false, errors.New("network error"), true, false},
+		{"other provider", "daytona", "current-vm", true, nil, false, false},
+		{"cleared provider ID", "replicated", "", true, nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := newReaperTestServer(t, &types.HubConfig{})
+			tm := time.Now().UTC()
+			s.nowFunc = func() time.Time { return tm }
+			// Recovery keeps created_at even when it replaces the VM.
+			if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,created_at) VALUES('offline-vm','tenant','offline',?,?,'offline',?)`, tc.provider, tc.providerID, tm.Add(-72*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			s.terminateVMOverride = func(string, string) error { return nil }
+			calls := 0
+			s.replicatedVMTerminatedOverride = func(ctx context.Context, id string, at time.Time) (bool, error) {
+				calls++
+				if id != tc.providerID || !at.Equal(tm) {
+					t.Errorf("lookup = %q, %v; want %q, %v", id, at, tc.providerID, tm)
+				}
+				if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 10*time.Second {
+					t.Error("lookup must have a deadline of at most 10 seconds")
+				}
+				return tc.terminated, tc.lookupErr
+			}
+			s.reapOnce()
+			if calls != 0 {
+				t.Fatal("looked up VM within offline grace")
+			}
+			tm = tm.Add(11 * time.Minute)
+			s.reapOnce()
+			if (calls == 1) != tc.wantLookup || calls > 1 {
+				t.Fatalf("lookup calls = %d; want lookup=%v", calls, tc.wantLookup)
+			}
+			// Stopping clears provider_id, asynchronously when it terminates the
+			// VM; wait so that write cannot outlive the test's database.
+			var status, reason, providerID string
+			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				if err := db.QueryRow(`SELECT status, bootstrap_diagnostic, COALESCE(provider_id,'') FROM claws WHERE id='offline-vm'`).Scan(&status, &reason, &providerID); err != nil {
+					t.Fatal(err)
+				}
+				if providerID == "" || time.Now().After(deadline) {
+					break
+				}
+			}
+			if providerID != "" {
+				t.Fatalf("provider_id = %q; want cleared after stop", providerID)
+			}
+			if status != "error" {
+				t.Fatalf("status = %q; want error", status)
+			}
+			failure := classifyAgentFailure(reason)
+			if tc.wantRetryable {
+				if failure.Kind != agentFailureSandboxTerminated || !retryableAgentFailure(failure.Kind) {
+					t.Fatalf("reason %q classified as %v; want retryable sandbox termination", reason, failure.Kind)
+				}
+			} else if reason != "agent offline for 10m0s, sandbox presumed dead" {
+				t.Fatalf("unexpected fallback reason: %q", reason)
+			}
+		})
+	}
+}
+
+func TestReaperOfflineVMLookupActionLimit(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+	for i := 0; i < reaperActionLimit+1; i++ {
+		id := fmt.Sprintf("offline-%02d", i)
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,created_at) VALUES(?,'tenant',?,'replicated',?,'offline',?)`, id, id, id, tm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	s.replicatedVMTerminatedOverride = func(context.Context, string, time.Time) (bool, error) {
+		calls++
+		return false, nil
+	}
+	s.terminateVMOverride = func(string, string) error { return nil }
+	s.reapOnce()
+	tm = tm.Add(11 * time.Minute)
+	s.reapOnce()
+	var stopped int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE status='error'`).Scan(&stopped); err != nil {
+		t.Fatal(err)
+	}
+	if calls != reaperActionLimit || stopped != reaperActionLimit {
+		t.Fatalf("lookups=%d, stopped=%d; want %d each", calls, stopped, reaperActionLimit)
+	}
+}
+
+func TestReaperOfflineVMLookupSkipsClawChangedDuringLookup(t *testing.T) {
+	for _, tc := range []struct{ name, update string }{
+		{"reconnected", `UPDATE claws SET status='connected' WHERE id='offline-vm'`},
+		{"replaced VM", `UPDATE claws SET provider_id='replacement-vm' WHERE id='offline-vm'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := newReaperTestServer(t, &types.HubConfig{})
+			tm := time.Now().UTC()
+			s.nowFunc = func() time.Time { return tm }
+			if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,created_at) VALUES('offline-vm','tenant','offline','replicated','current-vm','offline',?)`, tm); err != nil {
+				t.Fatal(err)
+			}
+			s.terminateVMOverride = func(string, string) error {
+				t.Error("terminated VM of a claw that changed during lookup")
+				return nil
+			}
+			calls := 0
+			s.replicatedVMTerminatedOverride = func(context.Context, string, time.Time) (bool, error) {
+				calls++
+				if _, err := db.Exec(tc.update); err != nil {
+					t.Error(err)
+				}
+				return true, nil
+			}
+			s.reapOnce()
+			tm = tm.Add(11 * time.Minute)
+			s.reapOnce()
+			if calls != 1 {
+				t.Fatalf("lookup calls = %d; want 1", calls)
+			}
+			var status, reason string
+			if err := db.QueryRow(`SELECT status, COALESCE(bootstrap_diagnostic,'') FROM claws WHERE id='offline-vm'`).Scan(&status, &reason); err != nil {
+				t.Fatal(err)
+			}
+			if status == "error" || reason != "" {
+				t.Fatalf("claw stopped after changing during lookup: status=%q reason=%q", status, reason)
+			}
+		})
+	}
+}
+
+func TestReaperOfflineVMLookupBudget(t *testing.T) {
+	prev := reaperVMLookupBudget
+	reaperVMLookupBudget = time.Millisecond
+	t.Cleanup(func() { reaperVMLookupBudget = prev })
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("offline-%02d", i)
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,created_at) VALUES(?,'tenant',?,'replicated',?,'offline',?)`, id, id, id, tm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	s.replicatedVMTerminatedOverride = func(ctx context.Context, _ string, _ time.Time) (bool, error) {
+		calls++
+		<-ctx.Done() // the first lookup spends the whole tick budget
+		return false, ctx.Err()
+	}
+	s.terminateVMOverride = func(string, string) error { return nil }
+	s.reapOnce()
+	tm = tm.Add(11 * time.Minute)
+	s.reapOnce()
+	if calls != 1 {
+		t.Fatalf("lookup calls = %d; want 1 before the budget is spent", calls)
+	}
+	// Fallback stops terminate the VM asynchronously and then clear provider_id;
+	// wait so that write cannot outlive the test's database.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var pending int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE COALESCE(provider_id,'') != ''`).Scan(&pending); err != nil {
+			t.Fatal(err)
+		}
+		if pending == 0 || time.Now().After(deadline) {
+			break
+		}
+	}
+	rows, err := db.Query(`SELECT id, status, bootstrap_diagnostic FROM claws`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, status, reason string
+		if err := rows.Scan(&id, &status, &reason); err != nil {
+			t.Fatal(err)
+		}
+		if status != "error" || reason != "agent offline for 10m0s, sandbox presumed dead" {
+			t.Fatalf("claw %s: status=%q reason=%q; want fallback stop", id, status, reason)
+		}
+	}
+}
+
+func TestReaperOfflineVMLookupBudgetSpentRechecksLaterClaws(t *testing.T) {
+	prev := reaperVMLookupBudget
+	reaperVMLookupBudget = time.Millisecond
+	t.Cleanup(func() { reaperVMLookupBudget = prev })
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+	for _, id := range []string{"offline-00", "offline-01"} {
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,provider,provider_id,status,created_at) VALUES(?,'tenant',?,'replicated',?,'offline',?)`, id, id, id, tm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.replicatedVMTerminatedOverride = func(ctx context.Context, _ string, _ time.Time) (bool, error) {
+		// Both claws reconnect while the first lookup spends the tick budget.
+		if _, err := db.Exec(`UPDATE claws SET status='connected'`); err != nil {
+			t.Error(err)
+		}
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	s.terminateVMOverride = func(string, string) error {
+		t.Error("terminated VM of a claw that reconnected during the tick")
+		return nil
+	}
+	s.reapOnce()
+	tm = tm.Add(11 * time.Minute)
+	s.reapOnce()
+	var stopped int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE status='error'`).Scan(&stopped); err != nil {
+		t.Fatal(err)
+	}
+	if stopped != 0 {
+		t.Fatalf("stopped %d reconnected claws; want 0", stopped)
 	}
 }
