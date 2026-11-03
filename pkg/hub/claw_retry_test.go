@@ -708,8 +708,8 @@ func TestReaperGivesRetriedProvisioningClawFreshWindow(t *testing.T) {
 	base := time.Now().UTC()
 	// The predecessor has already been provisioning for longer than the window.
 	s.reaperFirstSeen = map[string]time.Time{
-		"claw:retry-claw:provisioning": base.Add(-31 * time.Minute),
-		"claw:retry-claw:starting":     base.Add(-31 * time.Minute),
+		reaperClawKey("retry-claw", "provisioning"): base.Add(-31 * time.Minute),
+		reaperClawKey("retry-claw", "starting"):     base.Add(-31 * time.Minute),
 	}
 	// Stand in for the retry path re-provisioning the claw.
 	if _, err := db.Exec(`UPDATE claws SET status='error' WHERE id='retry-claw'`); err != nil {
@@ -718,7 +718,7 @@ func TestReaperGivesRetriedProvisioningClawFreshWindow(t *testing.T) {
 	if reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "", ""); err != nil || !reset {
 		t.Fatalf("reset=%v err=%v", reset, err)
 	}
-	for _, key := range []string{"claw:retry-claw:provisioning", "claw:retry-claw:starting"} {
+	for _, key := range []string{reaperClawKey("retry-claw", "provisioning"), reaperClawKey("retry-claw", "starting")} {
 		if _, ok := s.reaperFirstSeen[key]; ok {
 			t.Fatalf("%s survived the retry reset", key)
 		}
@@ -736,7 +736,7 @@ func TestReaperGivesRetriedProvisioningClawFreshWindow(t *testing.T) {
 	if status != "provisioning" || attempts != 1 {
 		t.Fatalf("status=%q attempts=%d, successor reaped before its own window", status, attempts)
 	}
-	if got := s.reaperFirstSeen["claw:retry-claw:provisioning"]; !got.Equal(base) {
+	if got := s.reaperFirstSeen[reaperClawKey("retry-claw", "provisioning")]; !got.Equal(base) {
 		t.Fatalf("first seen=%v, want the successor's own start %v", got, base)
 	}
 }

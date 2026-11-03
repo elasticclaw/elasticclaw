@@ -226,6 +226,9 @@ func (s *Server) firstSeen(key string, present bool, at time.Time) time.Time {
 	return at
 }
 
+// reaperClawKey is the firstSeen key the reaper ages a claw status under.
+func reaperClawKey(clawID, status string) string { return "claw:" + clawID + ":" + status }
+
 func (s *Server) reapOnce() {
 	cfg, n, actions := s.livenessSettings(), s.reaperNow(), 0
 	take := func() bool {
@@ -253,7 +256,7 @@ func (s *Server) reapOnce() {
 	rows.Close()
 	seen := make(map[string]bool, len(claws))
 	for _, c := range claws {
-		key := "claw:" + c.id + ":" + c.status
+		key := reaperClawKey(c.id, c.status)
 		seen[key] = true
 		first := s.firstSeen(key, true, n)
 		age := n.Sub(first)
