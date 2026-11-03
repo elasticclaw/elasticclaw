@@ -2573,6 +2573,20 @@ func (s *Server) stopAgentWithReason(clawID, reason string, skipVMTerminate bool
 	s.promotePendingClaws()
 }
 
+// stopAgentIfInstance is stopAgentWithReason for bootstrap goroutines, which
+// can outlive the instance they were started for: a retry tears that instance
+// down and re-provisions the claw under the same ID. Once the claw no longer
+// points at providerID, the orphaned bootstrap's failure belongs to a dead
+// predecessor and must not consume a retry attempt or destroy the successor.
+func (s *Server) stopAgentIfInstance(clawID, providerID, reason string, skipVMTerminate bool) {
+	var current string
+	if err := s.db.QueryRow(`SELECT COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).Scan(&current); err == nil && current != providerID {
+		log.Printf("[stopAgent] claw %s: ignoring failure from superseded instance %s (now %q): %s", shortID(clawID), providerID, current, sanitizeFailureDetails(reason))
+		return
+	}
+	s.stopAgentWithReason(clawID, reason, skipVMTerminate)
+}
+
 func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTerminate bool) {
 	// Resolve workflow/factory + issueID
 	pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(clawID)

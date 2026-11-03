@@ -137,7 +137,7 @@ type Server struct {
 	agentIdleResumeBaselineCleared bool
 
 	replicatedBootstrapEnvMu sync.Mutex
-	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
+	replicatedBootstrapEnv   map[string]replicatedBootstrapEnvEntry // temporary handoff while a Replicated VM becomes reachable
 
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
@@ -192,6 +192,7 @@ type Server struct {
 	nowFunc                        func() time.Time
 	terminateVMOverride            func(provider, id string) error // test seam for terminal cleanup
 	replicatedVMTerminatedOverride func(context.Context, string, time.Time) (bool, error)
+	vmSyncGo                       func(func()) // test seam for VM sync goroutines; nil spawns
 
 	// Constructed notifiers are cached per notifier name so instances are
 	// genuinely reused across features (the lifecycle poller, the manual test
@@ -4198,7 +4199,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
+		s.stopAgentIfInstance(clawID, instance.ID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
 		// stopAgentWithReason already terminates the VM; no need to destroy again
 	}()
 	return nil
@@ -5770,7 +5771,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 	go func() {
 		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files, env); err != nil {
 			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentIfInstance(clawID, instance.ID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
 	}()
 
@@ -6324,11 +6325,11 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		return fmt.Errorf("replicated provision: %w", err)
 	}
 	recordE2EReplicatedVMID(vmID)
-	s.rememberReplicatedBootstrapEnv(clawID, env)
+	s.rememberReplicatedBootstrapEnv(clawID, vmID, env)
 	// Store vm_id in the claw record — keep status='provisioning' so the poller can detect
 	// the provisioning→running transition and trigger bootstrap. Skip if already deleted.
 	if err := s.assignReplicatedVM(clawID, vmID); err != nil {
-		s.forgetReplicatedBootstrapEnv(clawID)
+		s.forgetReplicatedBootstrapEnvForVM(clawID, vmID)
 		_ = p.DeleteVM(ctx, vmID)
 		return fmt.Errorf("store replicated VM: %w", err)
 	}
@@ -6336,7 +6337,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	var currentStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 	if currentStatus == "deleted" {
-		s.forgetReplicatedBootstrapEnv(clawID)
+		s.forgetReplicatedBootstrapEnvForVM(clawID, vmID)
 		log.Printf("[provision] claw %s deleted mid-provision, destroying VM %s", clawID[:8], vmID)
 		_ = p.DeleteVM(ctx, vmID)
 		return fmt.Errorf("claw deleted mid-provision")
@@ -6367,26 +6368,43 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	return nil
 }
 
-func (s *Server) rememberReplicatedBootstrapEnv(clawID string, env map[string]string) {
+// replicatedBootstrapEnvEntry binds a staged bootstrap env to the VM it was
+// provisioned for, so a bootstrap outliving its VM cannot drop a successor's.
+type replicatedBootstrapEnvEntry struct {
+	vmID string
+	env  map[string]string
+}
+
+func (s *Server) rememberReplicatedBootstrapEnv(clawID, vmID string, env map[string]string) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
 	if s.replicatedBootstrapEnv == nil {
-		s.replicatedBootstrapEnv = make(map[string]map[string]string)
+		s.replicatedBootstrapEnv = make(map[string]replicatedBootstrapEnvEntry)
 	}
-	s.replicatedBootstrapEnv[clawID] = cloneStringMap(env)
+	s.replicatedBootstrapEnv[clawID] = replicatedBootstrapEnvEntry{vmID: vmID, env: cloneStringMap(env)}
 }
 
 func (s *Server) loadReplicatedBootstrapEnv(clawID string) (map[string]string, bool) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
-	env, ok := s.replicatedBootstrapEnv[clawID]
-	return cloneStringMap(env), ok
+	entry, ok := s.replicatedBootstrapEnv[clawID]
+	return cloneStringMap(entry.env), ok
 }
 
 func (s *Server) forgetReplicatedBootstrapEnv(clawID string) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
 	delete(s.replicatedBootstrapEnv, clawID)
+}
+
+// forgetReplicatedBootstrapEnvForVM drops the staged env only while it still
+// belongs to vmID; a retry may have re-staged it for a successor VM.
+func (s *Server) forgetReplicatedBootstrapEnvForVM(clawID, vmID string) {
+	s.replicatedBootstrapEnvMu.Lock()
+	defer s.replicatedBootstrapEnvMu.Unlock()
+	if entry, ok := s.replicatedBootstrapEnv[clawID]; ok && entry.vmID == vmID {
+		delete(s.replicatedBootstrapEnv, clawID)
+	}
 }
 
 // ─── Provider status polling ──────────────────────────────────────────────────
@@ -6689,6 +6707,16 @@ func (s *Server) checkClawStatus() {
 	}
 }
 
+// goVMSync runs a VM sync side effect off the poll loop. The stops it runs
+// check c.providerID because a lookup can return after a retry replaced the VM.
+func (s *Server) goVMSync(f func()) {
+	if s.vmSyncGo != nil {
+		s.vmSyncGo(f)
+		return
+	}
+	go f()
+}
+
 func (s *Server) syncReplicatedVMs() {
 	s.mu.RLock()
 	replicatedCfg, ok := s.hubCfg.Providers["replicated"]
@@ -6742,7 +6770,9 @@ func (s *Server) syncReplicatedVMs() {
 			// retry/terminal funnel as an explicit terminated status.
 			if strings.Contains(err.Error(), "HTTP 404") {
 				log.Printf("pollProviderStatus: VM %s not found (404) for claw %s", c.providerID, c.id[:8])
-				go s.stopAgentWithReason(c.id, "Provider VM lost: replicated VM no longer exists", true)
+				s.goVMSync(func() {
+					s.stopAgentIfInstance(c.id, c.providerID, "Provider VM lost: replicated VM no longer exists", true)
+				})
 			} else {
 				log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			}
@@ -6768,14 +6798,16 @@ func (s *Server) syncReplicatedVMs() {
 					// starting an agent without its configured environment.
 					const reason = "Bootstrap failed: transient environment unavailable after hub restart; recreate the claw"
 					log.Printf("Claw %s (%s): %s", c.name, c.id[:8], reason)
-					go s.stopAgentWithReason(c.id, reason, false)
+					s.goVMSync(func() { s.stopAgentIfInstance(c.id, c.providerID, reason, false) })
 					continue
 				}
 				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg, env)
 			}
 		case "terminated", "error":
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
-			go s.stopAgentWithReason(c.id, "Provider VM lost: sandbox terminated (TTL expired or external shutdown)", true)
+			s.goVMSync(func() {
+				s.stopAgentIfInstance(c.id, c.providerID, "Provider VM lost: sandbox terminated (TTL expired or external shutdown)", true)
+			})
 			// Note: stopAgentWithReason handles disconnect, status, broadcast, VM cleanup
 			// Spawned in goroutine so slow issue-tracker APIs don't stall the poll loop.
 			// Skip the rest of the status update logic for this claw
@@ -7269,7 +7301,7 @@ func (s *Server) clawHasMessages(clawID string) bool {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig, env map[string]string) {
-	defer s.forgetReplicatedBootstrapEnv(clawID)
+	defer s.forgetReplicatedBootstrapEnvForVM(clawID, vmID)
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
 	// Bail immediately if claw was deleted while VM was spinning up
 	var checkStatus string
@@ -7289,13 +7321,13 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		clawID,
 	).Scan(&filesJSON, &templateName); err != nil {
 		log.Printf("[bootstrap] failed to load template_files for claw %s: %v", clawID[:8], err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
 		return
 	}
 	var files map[string]string
 	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
 		log.Printf("[bootstrap] failed to parse template_files for claw %s: %v", clawID[:8], err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
 		return
 	}
 	// Load github repos config for this claw
@@ -7335,7 +7367,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
-		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
+		s.stopAgentIfInstance(clawID, vmID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
@@ -7357,7 +7389,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	sshHome, err := sshHomeDir(sshUser)
 	if err != nil {
 		log.Printf("bootstrap: invalid SSH user %q: %v", sshUser, err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
 		return
 	}
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
@@ -7478,7 +7510,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 			},
 		}); err != nil {
 			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
 			return
 		}
 	}
@@ -7496,7 +7528,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 		},
 	}); err != nil {
 		log.Printf("Bootstrap failed for claw %s: %v", clawID, err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: %s", err), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Writing workspace files")
@@ -7522,7 +7554,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshWriteFiles(sshUser, sshHost, replicatedFinalWorkspaceDir(sshHome), files)
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
 			return
 		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
@@ -7534,7 +7566,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(replicatedFinalWorkspaceDir(sshHome), files))
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
 			return
 		}
 		log.Printf("Template files written for claw %s", clawName)
@@ -7542,7 +7574,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 
 	if err := s.restoreCheckpointToSSH(clawID, sshUser, sshHost); err != nil {
 		log.Printf("[bootstrap] restore checkpoint failed: %v", err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore checkpoint failed: %s", sanitizeBootstrapError(err)), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Restore checkpoint failed: %s", sanitizeBootstrapError(err)), false)
 		return
 	}
 
@@ -7555,7 +7587,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
 		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
 		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
 			return
 		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
@@ -7567,7 +7599,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshRun(sshUser, sshHost, credHelper)
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
 			return
 		}
 		log.Printf("[bootstrap] GitHub credential helper installed for claw %s workspace=%q", clawName, workspaceName)

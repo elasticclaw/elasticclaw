@@ -231,6 +231,9 @@ func (s *Server) firstSeen(key string, present bool, at time.Time) time.Time {
 	return at
 }
 
+// reaperClawKey is the firstSeen key the reaper ages a claw status under.
+func reaperClawKey(clawID, status string) string { return "claw:" + clawID + ":" + status }
+
 func (s *Server) replicatedVMTerminated(ctx context.Context, providerID string, at time.Time) (bool, error) {
 	if s.replicatedVMTerminatedOverride != nil {
 		return s.replicatedVMTerminatedOverride(ctx, providerID, at)
@@ -276,7 +279,7 @@ func (s *Server) reapOnce() {
 	seen := make(map[string]bool, len(claws))
 	var lookupBudget context.Context
 	for _, c := range claws {
-		key := "claw:" + c.id + ":" + c.status
+		key := reaperClawKey(c.id, c.status)
 		seen[key] = true
 		first := s.firstSeen(key, true, n)
 		age := n.Sub(first)

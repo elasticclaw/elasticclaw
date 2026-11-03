@@ -87,7 +87,7 @@ var agentFailureRules = []agentFailureRule{
 	{agentFailureWorkspaceSecrets, []string{"load workspace secrets", "secret_ref"}},
 	{agentFailureTriggerClaim, []string{"claim workflow trigger", "claim factory trigger", "complete workflow trigger", "complete factory trigger"}},
 	{agentFailureTaskRunAnalytics, []string{"task run analytics"}},
-	{agentFailureProvisioning, []string{"provisioning failed", "factory provision failed", "workflow provision failed", "restore provision failed", "provision failed"}},
+	{agentFailureProvisioning, []string{"provisioning failed", "provisioning timed out", "factory provision failed", "workflow provision failed", "restore provision failed", "provision failed"}},
 	{agentFailureBootstrap, []string{"bootstrap failed", "daytona bootstrap failed", "exedev bootstrap failed", "install openclaw failed", "start claw-bridge", "connector download"}},
 	{agentFailureWorkspaceReadiness, []string{"workspace readiness failed", "workspace incomplete", "workspace unresponsive", "agent unresponsive", "agent process unhealthy for", "no status updates for", "agent repeatedly stuck mid-turn"}},
 	{agentFailureWorkspaceFiles, []string{"could not write workspace files", "workspace files incomplete", "template file staging failed", "docker file copy failed", "invalid template file path", "path must stay inside workspace"}},
