@@ -1200,3 +1200,43 @@ func TestPRDiscoveryExpandsCloneFalsePatterns(t *testing.T) {
 		t.Fatalf("clone:false pattern made discovery incomplete: count=%d err=%v", count, err)
 	}
 }
+
+func TestPRDiscoveryConcurrentExplicitDeliveryKeepsWatcher(t *testing.T) {
+	s, mock := discoveryServer(t)
+	started := time.Now().Add(-time.Hour)
+	runA := discoveryRun(t, s, "claw-a", started)
+	runB := discoveryRun(t, s, "claw-b", started)
+	if _, err := s.db.Exec(`UPDATE task_runs SET issue_id='NEXT-9' WHERE id=?`, runB); err != nil {
+		t.Fatal(err)
+	}
+	mock.prs = []map[string]interface{}{discoveryPR(1, started.Add(time.Minute), time.Time{})}
+	s.discoverClawPRs("claw-a", runA)
+	var inferred int
+	if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=?`, runA).Scan(&inferred); err != nil || inferred != 1 {
+		t.Fatalf("setup inference=%d err=%v", inferred, err)
+	}
+	row := prMentionCandidate{repo: "owner/repo", number: 1, url: "https://github.com/owner/repo/pull/1"}
+	var once sync.Once
+	s.prCommittedHook = func(clawID string) {
+		if clawID == "claw-a" {
+			// B delivers explicitly between A's confirm commit and A's association.
+			once.Do(func() {
+				if failed := s.insertClawPRsAtomic("claw-b", []prMentionCandidate{row}, false); failed != "" {
+					t.Error(failed)
+				}
+			})
+		}
+	}
+	if failed := s.insertClawPRsAtomic("claw-a", []prMentionCandidate{row}, false); failed != "" {
+		t.Fatal(failed)
+	}
+	for _, claw := range []string{"claw-a", "claw-b"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND mention_only=0`, claw).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("%s watcher rows=%d err=%v", claw, n, err)
+		}
+	}
+	if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=?`, runA).Scan(&inferred); err != nil || inferred != 0 {
+		t.Fatalf("run A association inferred=%d err=%v", inferred, err)
+	}
+}

@@ -196,7 +196,8 @@ type Server struct {
 	nowFunc                        func() time.Time
 	terminateVMOverride            func(provider, id string) error // test seam for terminal cleanup
 	replicatedVMTerminatedOverride func(context.Context, string, time.Time) (bool, error)
-	vmSyncGo                       func(func()) // test seam for VM sync goroutines; nil spawns
+	vmSyncGo                       func(func())        // test seam for VM sync goroutines; nil spawns
+	prCommittedHook                func(clawID string) // test seam between claw_prs commit and task-run association
 
 	// Constructed notifiers are cached per notifier name so instances are
 	// genuinely reused across features (the lifecycle poller, the manual test

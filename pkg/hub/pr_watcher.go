@@ -387,6 +387,10 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 	}
 	committed = true
 
+	if s.prCommittedHook != nil {
+		s.prCommittedHook(clawID)
+	}
+
 	// Side effects only after the rows are durably present.
 	factory, issueID := s.findFactoryForClaw(clawID)
 	for _, row := range inserted {
@@ -412,11 +416,27 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 				State:        taskRunPRStateOpen,
 			}); err != nil {
 				log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", row.repo, row.number, clawID, err)
+			} else if !s.clawPRRowExists(clawID, row.url) {
+				// A concurrent explicit delivery displaced this claw's inferred
+				// row between the commit and the association. The association is
+				// explicit now, so re-arming cannot be displaced again.
+				if failed := s.insertClawPRsAtomic(clawID, []prMentionCandidate{row}, false); failed != "" {
+					return failed
+				}
 			}
 		}
 		log.Printf("[pr-watcher] detected PR %s#%d for claw %s", row.repo, row.number, shortID(clawID))
 	}
 	return ""
+}
+
+func (s *Server) clawPRRowExists(clawID, prURL string) bool {
+	var exists int
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_prs WHERE claw_id=? AND pr_url=?)`, clawID, prURL).Scan(&exists); err != nil {
+		log.Printf("[pr-watcher] failed to check PR %s for claw %s: %v", prURL, shortID(clawID), err)
+		return true
+	}
+	return exists == 1
 }
 
 const (
