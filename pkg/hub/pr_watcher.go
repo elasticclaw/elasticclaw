@@ -211,11 +211,17 @@ func (s *Server) scanMessageForPRs(clawID, content string, mentionOnly bool) {
 	}
 }
 
+// upgradeMentionOnlyPRSQL promotes a mention-only row to delivered. A row the
+// watcher already resolved silently (merged or closed while mention-only) is
+// re-armed so the next poll runs the delivered terminal handling: analytics,
+// pipeline transition and claw finalization.
+const upgradeMentionOnlyPRSQL = `UPDATE claw_prs SET mention_only=0, state=CASE WHEN state IN ('merged','closed') THEN 'open' ELSE state END WHERE claw_id=? AND pr_url=? AND mention_only=1`
+
 // upgradeMentionOnlyPR promotes a mention-only claw_prs row to delivered, so a
 // PR the agent mentioned mid-work and then delivered via [DONE] starts gating
 // finalization. No-op when the row is already delivered or does not exist.
 func (s *Server) upgradeMentionOnlyPR(clawID, prURL string) error {
-	res, err := s.db.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, prURL)
+	res, err := s.db.Exec(upgradeMentionOnlyPRSQL, clawID, prURL)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", prURL, shortID(clawID), err)
 		return err
@@ -337,7 +343,7 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 			// A concurrent writer (possibly the message scanner) got here first.
 			// A delivered call must still upgrade a mention-only row.
 			if !mentionOnly {
-				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, row.url); err != nil {
+				if _, err := tx.Exec(upgradeMentionOnlyPRSQL, clawID, row.url); err != nil {
 					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
 					return row.url
 				}
@@ -359,7 +365,7 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 		}
 		if affected, err := res.RowsAffected(); err == nil && affected == 0 {
 			if !mentionOnly {
-				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, row.url); err != nil {
+				if _, err := tx.Exec(upgradeMentionOnlyPRSQL, clawID, row.url); err != nil {
 					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
 					return row.url
 				}

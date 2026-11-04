@@ -1135,3 +1135,34 @@ func TestTaskRunPRRefreshKeepsHeadFields(t *testing.T) {
 		t.Fatalf("refresh blanked head fields: sha=%q head=%q base=%q", sha, head, base)
 	}
 }
+
+func TestPRDiscoveryPromotesSilentlyMergedMentionAndTerminates(t *testing.T) {
+	s, mock := discoveryServer(t)
+	started := time.Now().Add(-time.Hour).Truncate(time.Second)
+	run := discoveryRun(t, s, "claw-mention-merged", started)
+	merged := started.Add(20 * time.Minute)
+	mock.prs = []map[string]interface{}{discoveryPR(1281, started.Add(time.Minute), merged)}
+	// The agent linked the PR mid-work; the watcher resolved the merge silently.
+	if _, err := s.db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,mention_only,state,merged,created_at)
+		VALUES('mention-merged','claw-mention-merged','owner/repo',1281,'https://github.com/owner/repo/pull/1281',1,'merged',1,?)`, started); err != nil {
+		t.Fatal(err)
+	}
+	s.discoverClawPRs("claw-mention-merged", run)
+	var pr clawPR
+	var mention int
+	var state string
+	if err := s.db.QueryRow("SELECT id,claw_id,repo,pr_number,pr_url,mention_only,state FROM claw_prs WHERE claw_id=?", "claw-mention-merged").
+		Scan(&pr.id, &pr.clawID, &pr.repo, &pr.prNumber, &pr.prURL, &mention, &state); err != nil {
+		t.Fatal(err)
+	}
+	if mention != 0 || state != "open" {
+		t.Fatalf("promoted row not re-armed for polling: mention=%d state=%s", mention, state)
+	}
+	if resolved, terminated := s.checkPRMerged(pr, "repo-token"); !resolved || !terminated {
+		t.Fatalf("merge: resolved=%v terminated=%v", resolved, terminated)
+	}
+	var status string
+	if err := s.db.QueryRow("SELECT status FROM task_run_summaries WHERE run_id=?", run).Scan(&status); err != nil || status != taskRunStatusClean {
+		t.Fatalf("run status=%s err=%v", status, err)
+	}
+}
