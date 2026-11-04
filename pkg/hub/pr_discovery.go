@@ -71,6 +71,14 @@ func (s *Server) discoverRunPRsWithCompletion(r prDiscoveryRun) ([]prDiscoveryPR
 		repos = append(repos, ws.Repositories...)
 	}
 	if hasRepositoryGlob(repos) {
+		// clone:false patterns are kept verbatim for claw creation; discovery
+		// queries concrete repositories, so expand every pattern.
+		clone := true
+		for i := range repos {
+			if isRepositoryPattern(repos[i].Repo) {
+				repos[i].Clone = &clone
+			}
+		}
 		var err error
 		repos, err = s.expandWorkspaceRepositories(ctx, r.workspace, repos)
 		if err != nil {

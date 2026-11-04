@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 type prDiscoveryTransport struct {
 	failPath        string
 	requireDeadline bool
+	unscopedToken   bool
 
 	mu    sync.Mutex
 	calls int
@@ -42,6 +44,21 @@ func (m *prDiscoveryTransport) RoundTrip(r *http.Request) (*http.Response, error
 	}
 	if m.fail {
 		return nil, errors.New("temporary failure")
+	}
+	if r.URL.Path == "/installation/repositories" {
+		return githubAppTokenResponse(http.StatusOK, `{"total_count":2,"repositories":[{"name":"repo","full_name":"owner/repo"},{"name":"other","full_name":"owner/other"}]}`), nil
+	}
+	if m.unscopedToken && r.Method == http.MethodPost && r.URL.Path == "/app/installations/1/access_tokens" {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte("*")) {
+			// GitHub rejects repository patterns in token scopes.
+			return githubAppTokenResponse(http.StatusUnprocessableEntity, `{"message":"invalid repositories"}`), nil
+		}
+		token := "installation-token"
+		if bytes.Contains(body, []byte(`"repositories"`)) {
+			token = "repo-token"
+		}
+		return githubAppTokenResponse(http.StatusCreated, `{"token":"`+token+`","expires_at":"2030-01-01T00:00:00Z"}`), nil
 	}
 	if strings.HasPrefix(r.URL.Path, "/app/") {
 		return (githubAppTokenTransport{}).RoundTrip(r)
@@ -1164,5 +1181,22 @@ func TestPRDiscoveryPromotesSilentlyMergedMentionAndTerminates(t *testing.T) {
 	var status string
 	if err := s.db.QueryRow("SELECT status FROM task_run_summaries WHERE run_id=?", run).Scan(&status); err != nil || status != taskRunStatusClean {
 		t.Fatalf("run status=%s err=%v", status, err)
+	}
+}
+
+func TestPRDiscoveryExpandsCloneFalsePatterns(t *testing.T) {
+	s, mock := discoveryServer(t)
+	mock.unscopedToken = true
+	started := time.Now().Add(-time.Hour).Truncate(time.Second)
+	run := discoveryRun(t, s, "claw-glob", started)
+	if _, err := s.db.Exec(`UPDATE claws SET github_repos=? WHERE id='claw-glob'`,
+		`[{"repo":"owner/repo","permissions":"write"},{"repo":"owner/oth*","permissions":"read","clone":false}]`); err != nil {
+		t.Fatal(err)
+	}
+	mock.prs = []map[string]interface{}{discoveryPR(1281, started.Add(time.Minute), time.Time{})}
+	s.discoverClawPRs("claw-glob", run)
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id='claw-glob' AND mention_only=0`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("clone:false pattern made discovery incomplete: count=%d err=%v", count, err)
 	}
 }
