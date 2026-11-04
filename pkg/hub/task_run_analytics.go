@@ -394,15 +394,21 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("associate task run PR: missing server db")
 	}
-	if input.RunID == "" || input.Repo == "" || input.PRNumber <= 0 {
-		return fmt.Errorf("associate task run PR: missing run, repo, or PR number")
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := associateTaskRunPRTx(tx, input); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+func associateTaskRunPRTx(tx *sql.Tx, input TaskRunPR) error {
+	if input.RunID == "" || input.Repo == "" || input.PRNumber <= 0 {
+		return fmt.Errorf("associate task run PR: missing run, repo, or PR number")
+	}
 	runTenantID, err := loadTaskRunTenantTx(tx, input.RunID)
 	if err != nil {
 		return err
@@ -532,10 +538,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			return err
 		}
 	}
-	if err := materializeTaskRunTx(tx, input.RunID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return materializeTaskRunTx(tx, input.RunID)
 }
 
 // Explicit delivery supersedes guesses, including their watcher rows and events.

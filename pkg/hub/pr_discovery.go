@@ -314,25 +314,37 @@ func (s *Server) reconcileUnreportedPRs(after string) string {
 		if !complete {
 			continue
 		}
-		success := true
-		for _, p := range prs {
-			if err := s.associateTaskRunPR(p.TaskRunPR); err != nil {
-				success = false
-				log.Printf("[pr-discovery] backfill run %s: %v", id, err)
-				continue
-			}
-			log.Printf("[pr-discovery] backfilled PR %s#%d for run %s (issue %s)", p.Repo, p.PRNumber, id, r.issue)
+		// All-or-nothing: an open PR moves the run out of the terminal phase,
+		// so a partial backfill would never be selected for retry.
+		if err := s.backfillRunPRs(id, prs); err != nil {
+			log.Printf("[pr-discovery] backfill run %s: %v", id, err)
+			continue
 		}
-		if success {
-			if _, err := s.db.Exec(`UPDATE task_runs SET pr_discovery_scanned=1 WHERE id=?`, id); err != nil {
-				log.Printf("[pr-discovery] mark run %s: %v", id, err)
-			}
+		for _, p := range prs {
+			log.Printf("[pr-discovery] backfilled PR %s#%d for run %s (issue %s)", p.Repo, p.PRNumber, id, r.issue)
 		}
 	}
 	if len(ids) < prDiscoveryRunLimit {
 		return ""
 	}
 	return after
+}
+
+func (s *Server) backfillRunPRs(runID string, prs []prDiscoveryPR) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, p := range prs {
+		if err := associateTaskRunPRTx(tx, p.TaskRunPR); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE task_runs SET pr_discovery_scanned=1 WHERE id=?`, runID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Scope bot identity to the run's workspace; legacy runs use hub app settings.

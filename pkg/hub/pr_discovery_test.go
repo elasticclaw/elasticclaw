@@ -1240,3 +1240,35 @@ func TestPRDiscoveryConcurrentExplicitDeliveryKeepsWatcher(t *testing.T) {
 		t.Fatalf("run A association inferred=%d err=%v", inferred, err)
 	}
 }
+
+func TestPRDiscoveryTerminalBackfillIsAtomic(t *testing.T) {
+	s, mock := discoveryServer(t)
+	started := time.Now().Add(-time.Hour).Truncate(time.Second)
+	run := discoveryRun(t, s, "claw-atomic", started)
+	recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: run, EventKey: "stop", EventType: taskRunEventManualStopBeforeDelivery, OccurredAt: started.Add(30 * time.Minute)})
+	mock.prs = []map[string]interface{}{discoveryPR(1, started.Add(time.Minute), time.Time{}), discoveryPR(2, started.Add(2*time.Minute), time.Time{})}
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_second_pr BEFORE INSERT ON task_run_prs WHEN NEW.pr_number=2
+		BEGIN SELECT RAISE(ABORT, 'second association failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	s.reconcileUnreportedPRs("")
+	var scanned, count int
+	var phase string
+	if err := s.db.QueryRow(`SELECT tr.pr_discovery_scanned,ts.phase,(SELECT COUNT(*) FROM task_run_prs p WHERE p.run_id=tr.id)
+		FROM task_runs tr JOIN task_run_summaries ts ON ts.run_id=tr.id WHERE tr.id=?`, run).Scan(&scanned, &phase, &count); err != nil {
+		t.Fatal(err)
+	}
+	if scanned != 0 || count != 0 || phase != taskRunPhaseTerminal {
+		t.Fatalf("partial backfill left the run unretryable: scanned=%d count=%d phase=%s", scanned, count, phase)
+	}
+	if _, err := s.db.Exec(`DROP TRIGGER fail_second_pr`); err != nil {
+		t.Fatal(err)
+	}
+	s.reconcileUnreportedPRs("")
+	if err := s.db.QueryRow(`SELECT pr_discovery_scanned,(SELECT COUNT(*) FROM task_run_prs WHERE run_id=?) FROM task_runs WHERE id=?`, run, run).Scan(&scanned, &count); err != nil {
+		t.Fatal(err)
+	}
+	if scanned != 1 || count != 2 {
+		t.Fatalf("retry: scanned=%d count=%d", scanned, count)
+	}
+}
