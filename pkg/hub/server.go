@@ -155,15 +155,21 @@ type Server struct {
 	fireworksModelsCacheKey   string
 	fireworksModelsCache      []LLMModelOption
 	fireworksModelsCacheUntil time.Time
-	modelAuthJobsMu           sync.Mutex
-	modelAuthJobs             map[string]*modelAuthLoginJob
-	modelAuthRefreshMu        sync.Mutex
-	modelAuthPending          map[string]string // rotated auth state awaiting durable config persistence
-	grokTokenEndpoint         string            // test seam; defaults to the xAI OAuth token endpoint
-	pollWarningMu             sync.Mutex
-	pollWarnings              map[string]struct{}
-	noProgressMu              sync.Mutex // serializes pause/resume state across the DB and active connection
-	llmLimitMu                sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
+	// anthropicBaseURL and openAIBaseURL override the model-listing API bases
+	// for testing (defaults: https://api.anthropic.com, https://api.openai.com)
+	anthropicBaseURL    string
+	openAIBaseURL       string
+	providerModelsMu    sync.Mutex
+	providerModelsCache map[string]providerModelsCacheEntry
+	modelAuthJobsMu     sync.Mutex
+	modelAuthJobs       map[string]*modelAuthLoginJob
+	modelAuthRefreshMu  sync.Mutex
+	modelAuthPending    map[string]string // rotated auth state awaiting durable config persistence
+	grokTokenEndpoint   string            // test seam; defaults to the xAI OAuth token endpoint
+	pollWarningMu       sync.Mutex
+	pollWarnings        map[string]struct{}
+	noProgressMu        sync.Mutex // serializes pause/resume state across the DB and active connection
+	llmLimitMu          sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
 	// llmLimitProbing holds keys whose latch was released on a deadline and
 	// whose lift is not yet proven by a turn (see releaseLLMUsageLimit).
 	// Guarded by llmLimitMu.

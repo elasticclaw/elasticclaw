@@ -1267,6 +1267,8 @@ const PROVIDER_OPTIONS = [
   { value: "other",      label: "Other",      placeholder: "" },
 ]
 
+// Fallback for providers the hub cannot list live (settings.modelOptions):
+// Anthropic, OpenAI and Fireworks come from their APIs when a key is set.
 const PROVIDER_MODELS: Record<string, LLMModelOption[]> = {
   anthropic: [
     { id: "anthropic/claude-opus-5",     name: "Claude Opus 5" },
