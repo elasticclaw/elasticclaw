@@ -3,6 +3,8 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -128,5 +130,75 @@ func TestHasPendingInGroupIncludesLegacyGlobalRows(t *testing.T) {
 	insertQueueTestClaw(t, db, "named0001", "pending", "cruise-demo", time.Now().UTC())
 	if !s.hasPendingInGroup("cruise-demo") {
 		t.Fatal("named group's pending claw was not found")
+	}
+}
+
+func TestFactoryCreationQueuesBehindOlderPendingClaw(t *testing.T) {
+	shortcut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":1,"name":"Queue story"}`))
+	}))
+	defer shortcut.Close()
+	for _, tc := range []struct {
+		name        string
+		integration string
+		create      func(s *Server, factory *types.FactoryConfig) error
+	}{
+		{"factory", "", func(s *Server, factory *types.FactoryConfig) error {
+			_, pending, err := s.createClawFromFactory(factory, "", map[string]string{"task": "Queue"}, nil, "manual trigger")
+			if err == nil && !pending {
+				t.Error("createClawFromFactory reported the claw as not pending")
+			}
+			return err
+		}},
+		{"external", "", func(s *Server, factory *types.FactoryConfig) error {
+			_, err := s.createClawForExternalEvent(factory, externalWebhookPayload{EventType: "released"}, "trigger-1")
+			return err
+		}},
+		{"github-issue", "github-issues", func(s *Server, factory *types.FactoryConfig) error {
+			var payload githubIssuesWebhookPayload
+			payload.Repository.FullName = "acme/app"
+			payload.Issue.Number = 7
+			return s.createClawForGitHubIssue(factory, payload, "webhook")
+		}},
+		{"github-pr", "github", func(s *Server, factory *types.FactoryConfig) error {
+			var payload githubPRPayload
+			payload.Number = 8
+			payload.Repository.FullName = "acme/app"
+			payload.PullRequest.HTMLURL = "https://github.com/acme/app/pull/8"
+			return s.createClawForGitHubPR(factory, payload, "webhook")
+		}},
+		{"shortcut", "shortcut", func(s *Server, factory *types.FactoryConfig) error {
+			s.shortcutBaseURL = shortcut.URL
+			return s.createClawForShortcutStory(factory, shortcutAction{ID: 1, Name: "Queue story"}, "1", "token", "webhook")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+			t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+			factory := taskRunLifecycleFactoryConfig("queue-factory", tc.integration)
+			factory.ConcurrencyGroup = "cruise-demo"
+			// newReaperTestServer keeps the default connection pool: promotion
+			// nests queries, which deadlocks under the single-connection helper.
+			s, db := newReaperTestServer(t, &types.HubConfig{
+				ConcurrencyGroups: []*types.ConcurrencyGroup{{Name: "cruise-demo", Limit: 3}},
+				Providers:         map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+				Factories:         []*types.FactoryConfig{factory},
+			})
+			created := time.Now().UTC()
+			insertQueueTestClaw(t, db, "active001", "connected", "cruise-demo", created)
+			insertQueueTestClaw(t, db, "active002", "connected", "cruise-demo", created)
+			insertQueueTestClaw(t, db, "oldest001", "pending", "cruise-demo", created.Add(-time.Minute))
+			if err := tc.create(s, factory); err != nil {
+				t.Fatal(err)
+			}
+			var id string
+			if err := db.QueryRow(`SELECT id FROM claws WHERE id NOT IN ('active001','active002','oldest001')`).Scan(&id); err != nil {
+				t.Fatalf("find new claw: %v", err)
+			}
+			waitForQueueTestPromotion(t, db, "oldest001")
+			if got := queueTestStatus(t, db, id); got != "pending" {
+				t.Fatalf("new claw status=%q, want pending behind the older claw", got)
+			}
+		})
 	}
 }
