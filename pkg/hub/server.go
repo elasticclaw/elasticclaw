@@ -834,6 +834,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/feature-flags/{key}", s.withWebAdminAuth(s.handleFeatureFlag))
 	mux.HandleFunc("/api/settings/beta-testers", s.withWebAdminAuth(s.handleBetaTesters))
 	mux.HandleFunc("/api/settings/beta-testers/{login}", s.withWebAdminAuth(s.handleBetaTester))
+	mux.HandleFunc("/api/settings/api-tokens", s.withWebAdminAuth(s.handleAPITokens))
+	mux.HandleFunc("/api/settings/api-tokens/{id}", s.withWebAdminAuth(s.handleAPIToken))
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
