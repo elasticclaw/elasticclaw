@@ -1541,6 +1541,7 @@ func settingsStaticSection(section string) bool {
 		"models",
 		"github",
 		"authentication",
+		"api-tokens",
 		"issue-trackers",
 		"workspaces",
 		"workflows",
