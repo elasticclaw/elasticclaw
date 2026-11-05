@@ -910,6 +910,18 @@ func (s *Server) countActiveClawsInGroup(groupName string) int {
 	return count
 }
 
+// hasPendingInGroup reports whether a new claw must queue behind older work.
+// Legacy rows with an empty concurrency group belong to the global group.
+func (s *Server) hasPendingInGroup(groupName string) bool {
+	var pending bool
+	if groupName == "" || groupName == "global" {
+		_ = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claws WHERE status='pending' AND concurrency_group IN ('global',''))`).Scan(&pending)
+	} else {
+		_ = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claws WHERE status='pending' AND concurrency_group=?)`, groupName).Scan(&pending)
+	}
+	return pending
+}
+
 // resolveGroupLimit returns the concurrency group name and limit for a factory.
 // It checks the factory's ConcurrencyGroup, falls back to "global", and looks up
 // the limit from hub config. A limit of 0 means unlimited.

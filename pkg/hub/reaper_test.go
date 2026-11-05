@@ -131,18 +131,15 @@ func TestReaperProvisioningMaxAgeStartsWhenProvisioningIsObserved(t *testing.T) 
 }
 
 func TestStopAgentWithReasonPromotesPendingClaw(t *testing.T) {
+	// The promoted claw provisions asynchronously; the noop provider lets it
+	// finish deterministically instead of racing a provisioning failure.
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	s, db := newReaperTestServer(t, &types.HubConfig{MaxConcurrentClaws: 1})
 	tm := time.Now().UTC()
-	for _, c := range []struct{ id, status string }{{"active001", "connected"}, {"pending01", "pending"}} {
-		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,concurrency_group,created_at) VALUES(?,?,?,?,?,?)`, c.id, "tenant", c.id, c.status, "global", tm); err != nil {
-			t.Fatal(err)
-		}
-	}
+	insertQueueTestClaw(t, db, "active001", "connected", "global", tm)
+	insertQueueTestClaw(t, db, "pending01", "pending", "global", tm)
 	s.stopAgentWithReason("active001", "test failure", true)
-	var status string
-	if err := db.QueryRow(`SELECT status FROM claws WHERE id='pending01'`).Scan(&status); err != nil || status != "provisioning" {
-		t.Fatalf("pending status=%q err=%v, want provisioning", status, err)
-	}
+	waitForQueueTestPromotion(t, db, "pending01")
 }
 
 func TestReaperRedrivesVMAndCommentAfterClosingRows(t *testing.T) {

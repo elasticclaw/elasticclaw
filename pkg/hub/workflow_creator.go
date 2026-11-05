@@ -212,7 +212,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 	s.promoteMu.Lock()
 	activeCount := s.countActiveClawsInGroup(groupName)
-	isPending := groupLimit > 0 && activeCount >= groupLimit
+	isPending := groupLimit > 0 && (activeCount >= groupLimit || s.hasPendingInGroup(groupName))
 	initialStatus := "provisioning"
 	if isPending {
 		initialStatus = "pending"
@@ -300,6 +300,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	})
 
 	if isPending {
+		go s.promotePendingClaws()
 		return clawID, true, nil
 	}
 
