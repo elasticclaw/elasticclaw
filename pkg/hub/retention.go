@@ -87,6 +87,11 @@ func (s *Server) runRetention() {
 }
 
 func (s *Server) retainOnce(at time.Time, cfg retentionSettings) {
+	if !cfg.dryRun {
+		if _, err := s.db.Exec(`DELETE FROM api_token_audit WHERE created_at < ?`, at.Add(-90*24*time.Hour).Unix()); err != nil {
+			log.Printf("retention: API token audit expiry: %v", err)
+		}
+	}
 	unexpanded, err := s.backfillCheckpointTrees()
 	if err != nil {
 		log.Printf("retention: backfill: %v", err)

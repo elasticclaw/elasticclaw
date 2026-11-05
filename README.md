@@ -177,6 +177,25 @@ Create and inspect agents, manage workspaces and workflows, configure providers,
 
 Use webhooks and the ElasticClaw Server API to connect private queues, release events, internal systems, or scheduled work.
 
+## Factory MCP server
+
+The hub exposes a stateless Streamable HTTP MCP server at `/mcp`. Sign in as an admin and create a personal token in **Settings → API Tokens**, then configure Claude Code:
+
+```sh
+export FACTORY_API_TOKEN='ecf_...'
+claude mcp add --transport http factory https://your-hub.example/mcp \
+  --header "Authorization: Bearer $FACTORY_API_TOKEN"
+```
+
+Only `Authorization: Bearer` personal API tokens are accepted. Every request checks that the token is active and its owner is still an admin. Tokens do not authenticate existing REST or WebSocket routes. Tool calls use the owner's tenant and permissions and are recorded in `api_token_audit`; enabled retention jobs prune audit rows after 90 days.
+
+- Agents: `list_claws`, `get_claw`, `get_claw_timeline`, `get_claw_activity`, `get_claw_prs`, `get_gateway_diagnostics`.
+- Workflows: `list_workspaces`, `list_workflows`, `list_workflow_runs`, `get_workflow_run`, `get_workflow_run_logs`, `list_workflow_run_attempts`, `get_workflow_attempt_logs`.
+- Analytics: `analytics_summary`, `analytics_general_stats`, `analytics_effectiveness`, `analytics_runs`, `analytics_run`, `analytics_tickets`, `analytics_costs`, `analytics_cost_drivers`, `analytics_filter_options`.
+- Interactions: `send_message`, `trigger_workflow`, `update_claw`, `kill_claw` (irreversibly terminates the agent and its sandbox).
+
+`list_claws` defaults to 50 agents. Analytics tools expose the REST filters using their canonical names; multi-value filters accept comma-separated strings. Log tools support the same time and pagination filters as the dashboard. Captured diagnostics return newest files first with a total tail budget of 64 KiB by default (256 KiB maximum). Successful tool output is capped at 200 KiB; narrow filters or use `limit` when truncated. `trigger_workflow.input` is the entire trigger request body, for example `{"inputs":{"issue_number":"123"}}`.
+
 ## Architecture
 
 ElasticClaw has four main moving parts:
