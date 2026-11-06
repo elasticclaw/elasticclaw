@@ -241,7 +241,7 @@ func (s *Server) handleMCPGatewayDiagnostics(w http.ResponseWriter, r *http.Requ
 	if !s.canViewMessages(w, r, tenantFromCtx(r), clawID) {
 		return
 	}
-	limit := parsePositiveLimit(r, 65536, 262144)
+	limit := parsePositiveLimit(r, 65536, mcpDiagnosticsMaxBytes)
 	captures, err := readMCPGatewayDiagnostics(hubDataDir(), clawID, limit)
 	if err != nil {
 		jsonError(w, 500, "could not read captured diagnostics")
@@ -250,6 +250,10 @@ func (s *Server) handleMCPGatewayDiagnostics(w http.ResponseWriter, r *http.Requ
 	jsonOK(w, captures)
 }
 
+// mcpDiagnosticsMaxBytes keeps the JSON-escaped tails under the 200 KiB tool
+// result cap, so the response is never cut mid-JSON.
+const mcpDiagnosticsMaxBytes = 128 * 1024
+
 type mcpGatewayCapture struct {
 	Filename string `json:"filename"`
 	Tail     string `json:"tail"`
@@ -257,7 +261,7 @@ type mcpGatewayCapture struct {
 
 func readMCPGatewayDiagnostics(dataDir, clawID string, limit int) ([]mcpGatewayCapture, error) {
 	captures := []mcpGatewayCapture{}
-	if !mcpClawIDPattern.MatchString(clawID) || limit < 1 || limit > 262144 {
+	if !mcpClawIDPattern.MatchString(clawID) || limit < 1 || limit > mcpDiagnosticsMaxBytes {
 		return nil, fmt.Errorf("invalid diagnostics request")
 	}
 	directory := filepath.Join(dataDir, "diagnostics")

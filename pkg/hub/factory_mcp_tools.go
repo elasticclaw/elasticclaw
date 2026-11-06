@@ -40,7 +40,7 @@ type mcpActivityInput struct {
 }
 type mcpDiagnosticsInput struct {
 	mcpClawInput
-	MaxBytes int `json:"max_bytes,omitempty" jsonschema:"Total log tail bytes; default 65536 maximum 262144"`
+	MaxBytes int `json:"max_bytes,omitempty" jsonschema:"Total log tail bytes; default 65536 maximum 131072"`
 }
 type mcpWorkspaceInput struct {
 	Workspace string `json:"workspace" jsonschema:"Workspace name"`
