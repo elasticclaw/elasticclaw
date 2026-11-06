@@ -53,8 +53,11 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
-	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
-	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
+	prDiscoveryMu       sync.Mutex
+	prDiscoveryAttempts map[string]time.Time
+	prDiscoveryInFlight map[string]bool
+	branchSweepMu       sync.Mutex // serialize branch ownership checks and registration
+	branchRetryMu       sync.Mutex // keep pending-branch retry batches from overlapping
 
 	db        *sql.DB
 	addr      string
@@ -201,7 +204,8 @@ type Server struct {
 	nowFunc                        func() time.Time
 	terminateVMOverride            func(provider, id string) error // test seam for terminal cleanup
 	replicatedVMTerminatedOverride func(context.Context, string, time.Time) (bool, error)
-	vmSyncGo                       func(func()) // test seam for VM sync goroutines; nil spawns
+	vmSyncGo                       func(func())        // test seam for VM sync goroutines; nil spawns
+	prCommittedHook                func(clawID string) // test seam between claw_prs commit and task-run association
 
 	// Constructed notifiers are cached per notifier name so instances are
 	// genuinely reused across features (the lifecycle poller, the manual test

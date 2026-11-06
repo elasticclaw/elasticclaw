@@ -543,6 +543,7 @@ func TestTaskRunEventInsertDoesNotIgnoreInvalidConstraints(t *testing.T) {
 func TestTaskRunPRLifecycleDoesNotRegressMergedPRToOpen(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-pr-regress")
 	runID, attemptID := startTaskRunForTest(t, s, "claw-pr-regress", "pr-regress")
+	associatePRForTest(t, s, runID, "elastic/claw", 61, taskRunPRStateOpen)
 
 	recordTaskRunEventForTest(t, s, TaskRunEvent{
 		TenantID:  "test-tenant-id",
@@ -562,6 +563,7 @@ func TestTaskRunPRLifecycleDoesNotRegressMergedPRToOpen(t *testing.T) {
 func TestTaskRunPRLifecycleDoesNotRegressClosedPRToOpen(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-pr-closed-regress")
 	runID, attemptID := startTaskRunForTest(t, s, "claw-pr-closed-regress", "pr-closed-regress")
+	associatePRForTest(t, s, runID, "elastic/claw", 62, taskRunPRStateOpen)
 
 	recordTaskRunEventForTest(t, s, TaskRunEvent{
 		TenantID:  "test-tenant-id",

@@ -175,6 +175,12 @@ type TaskRunEvent struct {
 }
 
 type TaskRunPR struct {
+	// Exclusive marks inferred discovery candidates and rejects PRs owned by another run.
+	Exclusive bool
+	// PreserveInference is used by provider state refreshes, not delivery paths.
+	PreserveInference bool
+	// OpenedAt preserves provider creation time when recording a terminal PR.
+	OpenedAt      time.Time
 	TenantID      string
 	RunID         string
 	Repo          string
@@ -388,15 +394,21 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("associate task run PR: missing server db")
 	}
-	if input.RunID == "" || input.Repo == "" || input.PRNumber <= 0 {
-		return fmt.Errorf("associate task run PR: missing run, repo, or PR number")
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := associateTaskRunPRTx(tx, input); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+func associateTaskRunPRTx(tx *sql.Tx, input TaskRunPR) error {
+	if input.RunID == "" || input.Repo == "" || input.PRNumber <= 0 {
+		return fmt.Errorf("associate task run PR: missing run, repo, or PR number")
+	}
 	runTenantID, err := loadTaskRunTenantTx(tx, input.RunID)
 	if err != nil {
 		return err
@@ -406,13 +418,45 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	} else if input.TenantID != runTenantID {
 		return fmt.Errorf("associate task run PR: tenant mismatch for run %s", input.RunID)
 	}
+	if input.Exclusive {
+		var owned int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE lower(repo)=lower(?) AND pr_number=? AND run_id<>?)
+			OR EXISTS(SELECT 1 FROM claw_prs p JOIN claws c ON c.id=p.claw_id
+				WHERE lower(p.repo)=lower(?) AND p.pr_number=? AND c.task_run_id<>? AND c.task_run_id<>'')`, input.Repo, input.PRNumber, input.RunID, input.Repo, input.PRNumber, input.RunID).Scan(&owned); err != nil {
+			return err
+		}
+		if owned != 0 {
+			return fmt.Errorf("discover task run PR: %s#%d belongs to another run", input.Repo, input.PRNumber)
+		}
+	}
+	if input.PreserveInference {
+		// Provider refreshes may update shared PRs, but must not recreate displaced
+		// rows. A PR this run's own claw still tracks (delivered or registered)
+		// is not displaced, so a missing association is recreated.
+		var associated int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE run_id=? AND lower(repo)=lower(?) AND pr_number=?)
+			OR EXISTS(SELECT 1 FROM claw_prs p JOIN claws c ON c.id=p.claw_id WHERE c.task_run_id=? AND lower(p.repo)=lower(?) AND p.pr_number=?
+				AND (p.mention_only=0 OR p.source IN ('gh_create','branch_sweep')))`,
+			input.RunID, input.Repo, input.PRNumber, input.RunID, input.Repo, input.PRNumber).Scan(&associated); err != nil {
+			return err
+		}
+		if associated == 0 {
+			log.Printf("[task-run-analytics] skipping PR refresh for run %s, %s#%d: no associated PR", input.RunID, input.Repo, input.PRNumber)
+			return nil
+		}
+	}
+	if !input.Exclusive && !input.PreserveInference {
+		if err := removeInferredTaskRunPRsTx(tx, input.RunID, input.Repo, input.PRNumber); err != nil {
+			return err
+		}
+	}
 	if input.State == "" {
 		input.State = taskRunPRStateOpen
 	}
 	// A caller-supplied OccurredAt is an authoritative provider timestamp and
 	// may overwrite an earlier detection-time opened_at; the now() fallback is
 	// write-once so it never clobbers an authoritative value.
-	authoritativeOpen := input.State == taskRunPRStateOpen && !input.OccurredAt.IsZero()
+	authoritativeOpen := !input.OpenedAt.IsZero() || (input.State == taskRunPRStateOpen && !input.OccurredAt.IsZero())
 	if input.OccurredAt.IsZero() {
 		input.OccurredAt = now()
 	}
@@ -420,6 +464,9 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	openedAt, closedAt, mergedAt := int64(0), int64(0), int64(0)
 	if input.State == taskRunPRStateOpen {
 		openedAt = at
+	}
+	if !input.OpenedAt.IsZero() {
+		openedAt = epochMillis(input.OpenedAt)
 	}
 	if input.State == taskRunPRStateClosed {
 		closedAt = at
@@ -436,9 +483,10 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	if _, err := tx.Exec(`
 		INSERT INTO task_run_prs(
 			id, tenant_id, run_id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
-			state, merged, opened_at, closed_at, merged_at, ready_at, merged_by_login, created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			state, merged, opened_at, closed_at, merged_at, ready_at, merged_by_login, created_at, updated_at, inferred
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(tenant_id, run_id, repo, pr_number) DO UPDATE SET
+			inferred=CASE WHEN ? THEN task_run_prs.inferred ELSE MIN(task_run_prs.inferred, excluded.inferred) END,
 			pr_url=excluded.pr_url,
 			head_sha=CASE WHEN excluded.head_sha != '' THEN excluded.head_sha ELSE task_run_prs.head_sha END,
 			last_agent_head_sha=CASE WHEN excluded.last_agent_head_sha != '' THEN excluded.last_agent_head_sha ELSE task_run_prs.last_agent_head_sha END,
@@ -454,7 +502,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			updated_at=excluded.updated_at`,
 		uuid.New().String(), input.TenantID, input.RunID, input.Repo, input.PRNumber, input.URL,
 		input.HeadSHA, input.HeadBranch, agentHeadSHA, input.BaseBranch, input.State, boolInt(input.Merged),
-		openedAt, closedAt, mergedAt, readyAt, input.MergedByLogin, at, at,
+		openedAt, closedAt, mergedAt, readyAt, input.MergedByLogin, at, at, boolInt(input.Exclusive), boolInt(input.PreserveInference),
 		boolInt(authoritativeOpen), boolInt(input.AuthoritativeReadyAt),
 	); err != nil {
 		return err
@@ -495,10 +543,44 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			return err
 		}
 	}
-	if err := materializeTaskRunTx(tx, input.RunID); err != nil {
+	return materializeTaskRunTx(tx, input.RunID)
+}
+
+// Explicit delivery supersedes guesses, including their watcher rows and events.
+func removeInferredTaskRunPRsTx(tx *sql.Tx, run, repo string, number int) error {
+	rows, err := tx.Query(`SELECT run_id FROM task_run_prs WHERE run_id<>? AND lower(repo)=lower(?) AND pr_number=? AND inferred=1`, run, repo, number)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	var displaced []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		displaced = append(displaced, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range displaced {
+		if _, err := tx.Exec(`DELETE FROM claw_prs WHERE lower(repo)=lower(?) AND pr_number=? AND claw_id IN (SELECT id FROM claws WHERE task_run_id=?)`, repo, number, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM task_run_prs WHERE run_id=? AND lower(repo)=lower(?) AND pr_number=? AND inferred=1`, id, repo, number); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM task_run_events WHERE run_id=? AND event_type IN ('pr_associated','pr_opened') AND lower(json_extract(detail,'$.repo'))=lower(?) AND json_extract(detail,'$.prNumber')=?`, id, repo, number); err != nil {
+			return err
+		}
+		if err := materializeTaskRunTx(tx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) materializeTaskRun(runID string) error {
@@ -932,6 +1014,15 @@ func applyTaskRunPREventTx(tx *sql.Tx, input TaskRunEvent) error {
 	if repo == "" || prNumber <= 0 {
 		return nil
 	}
+	// A stale provider refresh must not resurrect a displaced inferred association.
+	var associated int
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE run_id=? AND lower(repo)=lower(?) AND pr_number=?)`, input.RunID, repo, prNumber).Scan(&associated); err != nil {
+		return err
+	}
+	if associated == 0 {
+		log.Printf("[task-run-analytics] skipping PR event %s for run %s, %s#%d: no associated PR", input.EventType, input.RunID, repo, prNumber)
+		return nil
+	}
 	eventTime := epochMillis(firstNonZeroTime(input.EventTime, input.OccurredAt, now()))
 	if input.EventType == taskRunEventPRMerged {
 		_, err := tx.Exec(`
@@ -976,11 +1067,19 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		return err
 	}
 
+	counts := taskRunPRCounts(prs)
 	warnings := map[string]bool{}
 	humanInteractions := 0
 	dashboardInteractions := 0
 	externalInteractions := 0
 	for _, event := range events {
+		// Stopping a workspace after delivery completed is cleanup, not a
+		// human intervention needed to deliver the task.
+		if counts.open == 0 && counts.merged > 0 && counts.latestMergedAt > 0 &&
+			event.eventTime >= counts.latestMergedAt &&
+			(event.eventType == taskRunEventManualStopBeforeDelivery || event.eventType == taskRunEventAgentStopped) {
+			continue
+		}
 		if warning := normalizeTaskRunWarningType(event.warningType); warning != "" {
 			warnings[warning] = true
 		}
@@ -996,7 +1095,6 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		}
 	}
 
-	counts := taskRunPRCounts(prs)
 	phaseTimes := taskRunPhaseTimes(events)
 	// task_run_prs.opened_at may carry GitHub's authoritative created_at
 	// (backfilled by the PR watcher or webhook), while pr_opened events are

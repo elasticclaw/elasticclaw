@@ -321,7 +321,9 @@ func (s *Server) trackPRMergedAt(factoryName, issueID, clawID, repo string, prNu
 
 // trackPRClosed logs a PR close (without merge) for analytics.
 func (s *Server) trackPRClosed(factoryName, issueID, clawID, repo string, prNumber int) {
-	s.logFactoryAnalytics(factoryName, issueID, clawID, "pr_closed", fmt.Sprintf("%s#%d", repo, prNumber), "failure")
+	if factoryName != "" {
+		s.logFactoryAnalytics(factoryName, issueID, clawID, "pr_closed", fmt.Sprintf("%s#%d", repo, prNumber), "failure")
+	}
 	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
 		EventKey:        fmt.Sprintf("pr_closed_unmerged:%s#%d", repo, prNumber),
 		Source:          taskRunSourceGitHub,

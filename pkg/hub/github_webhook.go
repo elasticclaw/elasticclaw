@@ -286,7 +286,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 					if !payload.PullRequest.Merged {
 						at = parseRFC3339Timestamp(payload.PullRequest.ClosedAt)
 					}
-					_ = s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at})
+					_ = s.associateTaskRunPR(TaskRunPR{PreserveInference: true, RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at})
 				}
 			}
 			switch payload.Action {
@@ -336,7 +336,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				if !payload.PullRequest.Merged {
 					at = parseRFC3339Timestamp(payload.PullRequest.ClosedAt)
 				}
-				if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at}); err != nil {
+				if err := s.associateTaskRunPR(TaskRunPR{PreserveInference: true, RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at}); err != nil {
 					log.Printf("[github-webhook] failed to record dead-claw PR outcome for run %s, %s#%d: %v", runID, repoFullName, payload.Number, err)
 				} else {
 					log.Printf("[github-webhook] recorded closed PR outcome for dead-claw run %s, %s#%d (merged=%v)", runID, repoFullName, payload.Number, payload.PullRequest.Merged)
@@ -381,7 +381,7 @@ func (s *Server) recordGitHubPRReadyForReview(payload githubPRPayload) {
 		}
 		runID = id
 	}
-	if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateOpen, ReadyAt: epochMillis(at), AuthoritativeReadyAt: true}); err != nil {
+	if err := s.associateTaskRunPR(TaskRunPR{PreserveInference: true, RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateOpen, ReadyAt: epochMillis(at), AuthoritativeReadyAt: true}); err != nil {
 		log.Printf("[github-webhook] failed to record PR ready time for run %s, %s#%d: %v", runID, repoFullName, payload.Number, err)
 	}
 }
