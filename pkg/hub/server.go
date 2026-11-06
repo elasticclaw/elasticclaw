@@ -8082,7 +8082,10 @@ output="$(mktemp 2>/dev/null)" || exec "$REAL_GH" "$@"
 if [ -t 1 ]; then
   "$REAL_GH" "$@"
   status=$?
-  if [ "$status" = 0 ]; then
+  # Only gh pr create can be resolved after the fact: gh api request bodies
+  # (--input, -f head=...) are not parsed, so a lookup could name another PR.
+  # The branch sweep covers interactive gh api calls.
+  if [ "$status" = 0 ] && [ "$report_kind" = "pr" ]; then
     (
       trap 'rm -f "$output"' EXIT
       if python3 - "$REAL_GH" "${head_args[@]}" "${repo_args[@]}" > "$output" << 'VIEWEOF'

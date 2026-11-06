@@ -156,6 +156,24 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 }
 
 func TestGitHubPRWrapperTTY(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantReport string
+		wantView   string
+	}{
+		{"pr create", []string{"pr", "create", "--repo", "org/repo", "--head", "feature-b"}, "https://github.com/org/repo/pull/42\n",
+			// The lookup must target the created head, not the checked-out branch.
+			"pr\nview\nfeature-b\n--repo\norg/repo\n--json\nurl\n-q\n.url\n"},
+		// The head of a gh api request lives in its body, which is not parsed,
+		// so a lookup could only name the checked-out branch's PR.
+		{"api", []string{"api", "repos/org/repo/pulls", "--input", "-"}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testGitHubPRWrapperTTY(t, tc.args, tc.wantReport, tc.wantView) })
+	}
+}
+
+func testGitHubPRWrapperTTY(t *testing.T, args []string, wantReport, wantView string) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required by the installed GitHub helper")
@@ -170,7 +188,7 @@ func TestGitHubPRWrapperTTY(t *testing.T) {
 		return path
 	}
 	fakeGH := write("real-gh", `#!/bin/bash
-if [ "$2" = "create" ]; then
+if [ "$2" = "create" ] || [ "$1" = "api" ]; then
   [ -t 1 ] || exit 91
   cat > "$TEST_DIR/stdin"
   printf 'interactive output\n'
@@ -188,12 +206,12 @@ fi
 	wrapperPath := write("gh", wrapper)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, python, "-c", `import errno, json, os, pty, select, subprocess, sys, termios
+	cmd := exec.CommandContext(ctx, python, append([]string{"-c", `import errno, json, os, pty, select, subprocess, sys, termios
 master, slave = pty.openpty()
 attrs = termios.tcgetattr(slave)
 attrs[1] = 0
 termios.tcsetattr(slave, termios.TCSANOW, attrs)
-p = subprocess.Popen(["bash", sys.argv[1], "pr", "create", "--repo", "org/repo", "--head", "feature-b"], stdin=subprocess.PIPE, stdout=slave, stderr=subprocess.PIPE)
+p = subprocess.Popen(["bash", sys.argv[1], *sys.argv[2:]], stdin=subprocess.PIPE, stdout=slave, stderr=subprocess.PIPE)
 _, stderr = p.communicate(b"interactive stdin\n")
 stdout = b""
 while select.select([master], [], [], 0.1)[0]:
@@ -209,7 +227,7 @@ while select.select([master], [], [], 0.1)[0]:
 os.close(slave)
 os.close(master)
 print(json.dumps({"status": p.returncode, "stdout": stdout.decode(), "stderr": stderr.decode()}))
-`, wrapperPath)
+`, wrapperPath}, args...)...)
 	cmd.Env = append(os.Environ(), "TEST_DIR="+dir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -226,10 +244,14 @@ print(json.dumps({"status": p.returncode, "stdout": stdout.decode(), "stderr": s
 	if result.Status != 0 || result.Stdout != "interactive output\n" || result.Stderr != "interactive stderr\n" {
 		t.Fatalf("TTY behavior changed: %+v", result)
 	}
+	if wantReport == "" {
+		// The reporter runs detached; give it time to (wrongly) fire.
+		time.Sleep(500 * time.Millisecond)
+	}
 	deadline := time.Now().Add(3 * time.Second)
-	for {
+	for wantReport != "" {
 		reported, err := os.ReadFile(filepath.Join(dir, "reported"))
-		if err == nil && string(reported) == "https://github.com/org/repo/pull/42\n" {
+		if err == nil && string(reported) == wantReport {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -237,10 +259,11 @@ print(json.dumps({"status": p.returncode, "stdout": stdout.decode(), "stderr": s
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	view, _ := os.ReadFile(filepath.Join(dir, "view"))
-	// The lookup must target the created head, not the checked-out branch.
-	if string(view) != "pr\nview\nfeature-b\n--repo\norg/repo\n--json\nurl\n-q\n.url\n" {
-		t.Fatalf("unexpected TTY fallback: %s", view)
+	if reported, _ := os.ReadFile(filepath.Join(dir, "reported")); string(reported) != wantReport {
+		t.Fatalf("TTY report = %q, want %q", reported, wantReport)
+	}
+	if view, _ := os.ReadFile(filepath.Join(dir, "view")); string(view) != wantView {
+		t.Fatalf("unexpected TTY fallback: %q", view)
 	}
 	input, _ := os.ReadFile(filepath.Join(dir, "stdin"))
 	if string(input) != "interactive stdin\n" {
