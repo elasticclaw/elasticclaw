@@ -313,7 +313,17 @@ func TestFactoryMCPGatewayDiagnosticsFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	stamp := time.Now().Add(-time.Hour)
-	for i, item := range []struct{ name, content string }{{"mcp-claw-old-gateway.log", "old-tail"}, {"mcp-claw-new-bridge.log", "new-tail"}, {"other-claw-new-gateway.log", "private"}} {
+	name := func(id string, i int, source string) string {
+		return id + "-" + stamp.Add(time.Duration(i)*time.Second).UTC().Format(time.RFC3339Nano) + "-" + source + ".log"
+	}
+	for i, item := range []struct{ name, content string }{
+		{name("mcp-claw", 0, "gateway"), "old-tail"},
+		{name("mcp-claw", 1, "bridge"), "new-tail"},
+		{name("other-claw", 2, "gateway"), "private"},
+		// Another tenant's claw whose ID extends the requested one.
+		{name("mcp-claw-private", 3, "gateway"), "private"},
+		{"mcp-claw-notes.log", "private"},
+	} {
 		path := filepath.Join(dir, item.name)
 		if err := os.WriteFile(path, []byte(item.content), 0600); err != nil {
 			t.Fatal(err)
@@ -327,7 +337,7 @@ func TestFactoryMCPGatewayDiagnosticsFiles(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("must not leak"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(dir, "mcp-claw-symlink.log")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(dir, name("mcp-claw", 4, "gateway"))); err != nil {
 		t.Fatal(err)
 	}
 	files, err := readMCPGatewayDiagnostics(dataDir, "mcp-claw", 12)
@@ -341,6 +351,14 @@ func TestFactoryMCPGatewayDiagnosticsFiles(t *testing.T) {
 		if _, err := readMCPGatewayDiagnostics(dataDir, id, 12); err == nil {
 			t.Errorf("accepted %q", id)
 		}
+	}
+	// The name filter must keep matching what the capture writer produces.
+	written := t.TempDir()
+	if err := writeGatewayLogCapture(written, "mcp-claw", "bridge", []byte("real-capture")); err != nil {
+		t.Fatal(err)
+	}
+	if files, err := readMCPGatewayDiagnostics(written, "mcp-claw", 100); err != nil || len(files) != 1 || files[0].Tail != "real-capture" {
+		t.Fatalf("writer format: %+v %v", files, err)
 	}
 }
 

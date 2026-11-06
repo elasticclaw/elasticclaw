@@ -268,9 +268,12 @@ func readMCPGatewayDiagnostics(dataDir, clawID string, limit int) ([]mcpGatewayC
 	}
 	// Capture names include UTC RFC3339Nano timestamps. Sort by modification
 	// time (with a deterministic name tie break), not lexical fractional seconds.
+	// Match writeGatewayLogCapture's full name format. A bare prefix check would
+	// also select captures of another claw whose ID extends this one.
+	captureName := regexp.MustCompile(`^` + regexp.QuoteMeta(clawID) + `-\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z-[a-z]+\.log$`)
 	files := []os.FileInfo{}
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), clawID+"-") || !entry.Type().IsRegular() {
+		if !captureName.MatchString(entry.Name()) || !entry.Type().IsRegular() {
 			continue
 		}
 		info, err := entry.Info()
