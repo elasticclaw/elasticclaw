@@ -57,10 +57,11 @@ export function ApiTokensSettings({ hubPublicUrl = "" }: { hubPublicUrl?: string
     setCreating(true)
     setCreateError("")
     try {
-      const origin = new URL(hubPublicUrl || getHubUrl() || window.location.origin, window.location.origin).origin
+      const hub = new URL(hubPublicUrl || getHubUrl() || window.location.origin, window.location.origin)
+      const mcpUrl = `${hub.origin}${hub.pathname.replace(/\/+$/, "")}/mcp`
       const { token, ...metadata } = await createApiToken(name.trim(), expiration === "never" ? null : Number(expiration) as ApiTokenExpirationDays)
       setTokens((current) => [metadata, ...(current ?? [])])
-      setCommand(`claude mcp add --transport http factory ${origin}/mcp --header "Authorization: Bearer ${token}"`)
+      setCommand(`claude mcp add --transport http factory ${mcpUrl} --header "Authorization: Bearer ${token}"`)
       setCopyMessage("")
       setRevealedToken(token)
       setCreateOpen(false)
