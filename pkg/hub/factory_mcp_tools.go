@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -340,7 +341,8 @@ func (s *Server) registerFactoryMCPTools(server *mcp.Server) {
 			if errors.Is(err, sql.ErrNoRows) {
 				return mcpText("Agent not found: claw_id must be the exact full agent ID; prefixes are not accepted.", true)
 			}
-			return mcpText("Could not look up agent: "+err.Error(), true)
+			log.Printf("[mcp] kill_claw lookup failed: %v", err)
+			return mcpText("Could not look up agent. Try again later.", true)
 		}
 		return s.mcpCallHandler(ctx, s.handleClawDetail, http.MethodDelete, path, clawValues(in.ClawID), nil, nil)
 	})
