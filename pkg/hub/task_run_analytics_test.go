@@ -578,6 +578,40 @@ func TestTaskRunPRLifecycleDoesNotRegressClosedPRToOpen(t *testing.T) {
 	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
 }
 
+// A later association without provider details (e.g. a gh_create
+// registration) must not wipe the head SHA or branches recorded earlier.
+func TestTaskRunPRAssociationKeepsHeadDetailsWhenEmpty(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "claw-pr-head-keep")
+	runID, _ := startTaskRunForTest(t, s, "claw-pr-head-keep", "pr-head-keep")
+	pr := TaskRunPR{TenantID: "test-tenant-id", RunID: runID, Repo: "elastic/claw", PRNumber: 63,
+		URL: "https://github.com/elastic/claw/pull/63", State: taskRunPRStateOpen}
+	assertHead := func(wantSHA, wantBranch, wantBase string) {
+		t.Helper()
+		var sha, branch, base string
+		if err := db.QueryRow(`SELECT head_sha, head_branch, base_branch FROM task_run_prs WHERE run_id=?`, runID).Scan(&sha, &branch, &base); err != nil {
+			t.Fatal(err)
+		}
+		if sha != wantSHA || branch != wantBranch || base != wantBase {
+			t.Fatalf("head=%q branch=%q base=%q, want %q %q %q", sha, branch, base, wantSHA, wantBranch, wantBase)
+		}
+	}
+	withHead := pr
+	withHead.HeadSHA, withHead.HeadBranch, withHead.BaseBranch = "sha-1", "feature", "main"
+	for _, step := range []struct {
+		input             TaskRunPR
+		sha, branch, base string
+	}{
+		{withHead, "sha-1", "feature", "main"},
+		{pr, "sha-1", "feature", "main"},
+		{TaskRunPR{TenantID: pr.TenantID, RunID: runID, Repo: pr.Repo, PRNumber: pr.PRNumber, URL: pr.URL, State: pr.State, HeadSHA: "sha-2"}, "sha-2", "feature", "main"},
+	} {
+		if err := s.associateTaskRunPR(step.input); err != nil {
+			t.Fatal(err)
+		}
+		assertHead(step.sha, step.branch, step.base)
+	}
+}
+
 func TestTaskRunDetailSanitizationRedactsNestedText(t *testing.T) {
 	detail, err := sanitizeTaskRunDetail(map[string]any{
 		"repo": "elastic/claw",
