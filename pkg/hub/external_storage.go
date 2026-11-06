@@ -110,6 +110,7 @@ var reservedWorkspaceNames = map[string]bool{
 	"models":              true,
 	"github":              true,
 	"authentication":      true,
+	"api-tokens":          true,
 	"issue-trackers":      true,
 	"workspaces":          true,
 	"workflows":           true,

@@ -1014,6 +1014,31 @@ func migrate(db *sql.DB) error {
 		added_by TEXT NOT NULL DEFAULT ''
 	);
 
+	CREATE TABLE IF NOT EXISTS api_token_audit (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		token_id TEXT NOT NULL,
+		owner_login TEXT NOT NULL,
+		tool TEXT NOT NULL,
+		args_summary TEXT NOT NULL,
+		status TEXT NOT NULL,
+		error TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_api_token_audit_created_at ON api_token_audit(created_at);
+
+	CREATE TABLE IF NOT EXISTS api_tokens (
+		id TEXT PRIMARY KEY,
+		owner_login TEXT NOT NULL,
+		name TEXT NOT NULL,
+		token_hash TEXT NOT NULL UNIQUE,
+		token_prefix TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER,
+		last_used_at INTEGER,
+		revoked_at INTEGER
+	);
+	CREATE INDEX IF NOT EXISTS idx_api_tokens_owner_login ON api_tokens(owner_login COLLATE NOCASE);
+
 	CREATE TABLE IF NOT EXISTS claw_prs (
 		id          TEXT PRIMARY KEY,
 		claw_id     TEXT NOT NULL REFERENCES claws(id),

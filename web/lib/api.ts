@@ -597,3 +597,31 @@ export async function addBetaTester(login: string): Promise<BetaTester> {
 export async function removeBetaTester(login: string): Promise<void> {
   return apiFetch<void>(`/api/settings/beta-testers/${encodeURIComponent(login)}`, { method: "DELETE" })
 }
+
+export interface PersonalApiToken {
+  id: string
+  name: string
+  prefix: string
+  created_at: string
+  expires_at: string | null
+  last_used_at: string | null
+  revoked_at: string | null
+  status: "active" | "expired" | "revoked"
+}
+
+export type ApiTokenExpirationDays = 7 | 30 | 90 | 180 | null
+
+export function fetchApiTokens(): Promise<{ tokens: PersonalApiToken[] }> {
+  return apiFetch("/api/settings/api-tokens")
+}
+
+export function createApiToken(name: string, expiresInDays: ApiTokenExpirationDays): Promise<PersonalApiToken & { token: string }> {
+  return apiFetch("/api/settings/api-tokens", {
+    method: "POST",
+    body: JSON.stringify({ name, expires_in_days: expiresInDays }),
+  })
+}
+
+export function revokeApiToken(id: string): Promise<void> {
+  return apiFetch(`/api/settings/api-tokens/${encodeURIComponent(id)}`, { method: "DELETE" })
+}

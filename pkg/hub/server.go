@@ -686,6 +686,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
 	go srv.runRetention()
+	go srv.runAPITokenAuditPruner()
 	if srv.livenessEnabled() {
 		go srv.runReaper()
 	}
@@ -840,6 +841,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/feature-flags/{key}", s.withWebAdminAuth(s.handleFeatureFlag))
 	mux.HandleFunc("/api/settings/beta-testers", s.withWebAdminAuth(s.handleBetaTesters))
 	mux.HandleFunc("/api/settings/beta-testers/{login}", s.withWebAdminAuth(s.handleBetaTester))
+	mux.HandleFunc("/api/settings/api-tokens", s.withWebAdminAuth(s.handleAPITokens))
+	mux.HandleFunc("/api/settings/api-tokens/{id}", s.withWebAdminAuth(s.handleAPIToken))
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
@@ -899,6 +902,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
+	mux.Handle("/mcp", s.withAPITokenAuth(s.factoryMCPHandler()))
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
 	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
@@ -1545,6 +1549,7 @@ func settingsStaticSection(section string) bool {
 		"models",
 		"github",
 		"authentication",
+		"api-tokens",
 		"issue-trackers",
 		"workspaces",
 		"workflows",
@@ -2043,9 +2048,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodDelete {
-		// Resolve short ID prefix to full UUID
+		// Resolve short ID prefix to full UUID; an exact match always wins.
 		var fullID string
-		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?)`, tenantID, clawID, clawID+"%").Scan(&fullID)
+		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?) ORDER BY id = ? DESC LIMIT 1`, tenantID, clawID, clawID+"%", clawID).Scan(&fullID)
 		if fullID != "" {
 			clawID = fullID
 		}
