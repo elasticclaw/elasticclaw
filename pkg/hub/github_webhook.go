@@ -280,7 +280,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 						payload.PullRequest.HTMLURL, payload.PullRequest.Head.SHA, s.resolveGitHubIssuesTokenForFactory(factory))
 				}
 			}
-			if payload.Action == "closed" {
+			if payload.Action == "closed" && !s.isScannedPRMention(existingClawID, payload.PullRequest.HTMLURL) {
 				if _, runID, _, ok, err := s.taskRunContextForClaw(existingClawID); err == nil && ok {
 					at := parseRFC3339Timestamp(payload.PullRequest.MergedAt)
 					if !payload.PullRequest.Merged {
@@ -369,7 +369,7 @@ func (s *Server) recordGitHubPRReadyForReview(payload githubPRPayload) {
 	}
 	repoFullName := payload.Repository.FullName
 	runID := ""
-	if clawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL); clawID != "" {
+	if clawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL); clawID != "" && !s.isScannedPRMention(clawID, payload.PullRequest.HTMLURL) {
 		if _, id, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
 			runID = id
 		}
@@ -968,6 +968,16 @@ func (s *Server) findClawForGitHubPR(prURL string) string {
 		prURL,
 	).Scan(&clawID)
 	return clawID
+}
+
+// isScannedPRMention reports whether the claw only knows this PR from a URL
+// scanned out of its messages. Such PRs must not be attached to its task run;
+// registered (gh_create, branch_sweep) and delivered rows still are.
+func (s *Server) isScannedPRMention(clawID, prURL string) bool {
+	var scanned bool
+	_ = s.db.QueryRow(`SELECT mention_only=1 AND source='mention' FROM claw_prs WHERE claw_id=? AND pr_url=?`,
+		clawID, prURL).Scan(&scanned)
+	return scanned
 }
 
 func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPRPayload, reason string) error {

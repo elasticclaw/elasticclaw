@@ -303,3 +303,55 @@ func TestFindOpenTaskRunPRPrefersMostRecentlyOpenedRow(t *testing.T) {
 		t.Fatalf("findOpenTaskRunPR = (%q, %v), want (%q, true)", got, ok, newerRunID)
 	}
 }
+
+// A PR the claw merely mentioned must not be attached to its task run by
+// close or ready-for-review webhooks; registered and delivered PRs still are.
+func TestGitHubWebhookSkipsTaskRunAssociationForScannedMentions(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mentionOnly int
+		source      string
+		want        int
+	}{
+		{"scanned mention", 1, "mention", 0},
+		{"gh_create registration", 1, "gh_create", 1},
+		{"branch sweep registration", 1, "branch_sweep", 1},
+		{"delivered", 0, "done", 1},
+	} {
+		for _, event := range []string{"closed", "ready_for_review"} {
+			t.Run(tc.name+"/"+event, func(t *testing.T) {
+				factory := taskRunLifecycleFactoryConfig("pr-factory", "github")
+				factory.Repos = []string{"elastic/claw"}
+				factory.Trigger = &types.GitHubTrigger{On: "pull_request"}
+				s, db := newTaskRunLifecycleTestServer(t, []*types.FactoryConfig{factory})
+				const clawID = "mention-claw"
+				if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at)
+					VALUES(?,?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "elasticclaw", "running", now()); err != nil {
+					t.Fatal(err)
+				}
+				runID, _ := startTaskRunForTest(t, s, clawID, "mention-"+event)
+				if _, err := db.Exec(`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, mention_only, source, created_at)
+					VALUES(?,?,?,?,?,?,?,?)`, clawID+"-pr", clawID, "elastic/claw", 21, "https://github.com/elastic/claw/pull/21",
+					tc.mentionOnly, tc.source, now()); err != nil {
+					t.Fatal(err)
+				}
+				if event == "closed" {
+					s.processGitHubPREvent(closedPRPayload(true))
+				} else {
+					payload := githubPRPayload{Action: "ready_for_review", Number: 21}
+					payload.Repository.FullName = "elastic/claw"
+					payload.PullRequest.HTMLURL = "https://github.com/elastic/claw/pull/21"
+					payload.PullRequest.UpdatedAt = "2026-01-01T00:00:00Z"
+					s.recordGitHubPRReadyForReview(payload)
+				}
+				var count int
+				if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_prs WHERE run_id=?`, runID).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				if count != tc.want {
+					t.Fatalf("task run PRs=%d, want %d", count, tc.want)
+				}
+			})
+		}
+	}
+}
