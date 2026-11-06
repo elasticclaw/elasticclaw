@@ -37,6 +37,10 @@ import (
 // which the agent carried on), so 1 would stop healthy claws; 2 costs at most
 // one wasted cycle and still catches a stuck sandbox on its second try. The
 // streak resets on any real turn, so an occasional error never accumulates.
+// The one exception is a definite malformed tool-call JSON error, which pauses
+// on the first occurrence: a lift resets the streak, so with 2 the failure
+// after an auto-resume never re-paused and the claw idled with budget left.
+// Pausing at 1 lets the bounded provider_transient recovery drive every retry.
 const bridgeErrorPauseThreshold = 2
 
 // Recovery from a transient gateway hang (NEXT-1293). The pause above assumed a
@@ -299,24 +303,31 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 		return true
 	}
 	short := truncateRunes(errText, bridgeErrorNoticeLimit)
-	// The WARNING is deliberately not gated on the pause threshold. Reaching the
-	// threshold needs a SECOND turn, and nothing here guarantees one: with the
+	providerTransient := bridgeErrorIsProviderTransient(errText)
+	// The WARNING is deliberately not gated on the pause threshold. For other
+	// error kinds it needs a SECOND turn, and nothing guarantees one: with the
 	// plan gate no longer answering, the next turn only exists if the idle
 	// auto-resume fires — which is off when liveness.idle_resume is disabled,
 	// when the claw is ineligible, or once its per-work-unit resume cap is spent. Tie
 	// the alarm to that and a claw whose transport is dead can sit silent
 	// forever, which is the failure this whole change exists to end. So: tell
-	// the operator on the first one, stop the loop on the second.
-	if streak == 1 {
+	// the operator on the first one, stop the loop at the applicable threshold.
+	// A definite malformed tool-call JSON error pauses (and auto-lifts) right
+	// away, so it alarms below only when automatic recovery fails.
+	threshold := bridgeErrorPauseThreshold
+	if definite && providerTransient {
+		threshold = 1
+	}
+	if streak == 1 && threshold > 1 {
 		s.notifyBridgeError(clawID, short)
 	}
-	if streak < bridgeErrorPauseThreshold {
+	if streak < threshold {
 		return false
 	}
 	kind := ""
 	if bridgeErrorIsModelTransport(errText) {
 		kind = bridgeErrorPauseKindModelTransport
-	} else if bridgeErrorIsProviderTransient(errText) {
+	} else if providerTransient {
 		kind = bridgeErrorPauseKindProviderTransient
 	} else if bridgeErrorIsGatewayConnectivity(errText) {
 		kind = bridgeErrorPauseKindGateway
@@ -331,8 +342,16 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 			notice = fmt.Sprintf("[hub] Automatic continuation paused after %d model transport failures. Last error: %s. The hub will retry after healthy gateway windows of 1, 3, and 10 minutes, once the agent is idle and while the per-work-unit retry budget remains.", streak, short)
 		}
 	}
+	pauseError := short
 	if kind == bridgeErrorPauseKindProviderTransient {
-		notice = fmt.Sprintf("[hub] Automatic continuation paused after %d provider-side malformed tool-call JSON failures. The tool calls did not run and the session is intact. Last error: %s. The hub will resume automatically while the per-work-unit retry budget remains.", streak, short)
+		var retries int
+		err := s.db.QueryRow(`SELECT bridge_error_auto_resumes FROM claws WHERE id=?`, clawID).Scan(&retries)
+		if err == nil && retries >= bridgeErrorProviderAutoResumeMax {
+			notice = fmt.Sprintf("[hub] Automatic continuation paused: automatic recovery budget for malformed tool-call JSON is exhausted (%d prior automatic recoveries for this unit of work). Last error: %s. A human must start a fresh session with /new and re-brief the agent.", retries, short)
+			pauseError = notice
+		} else {
+			notice = fmt.Sprintf("[hub] Automatic continuation paused after %d provider-side malformed tool-call JSON failures. The tool calls did not run and the session is intact. Last error: %s. The hub will resume automatically while the per-work-unit retry budget remains.", streak, short)
+		}
 	}
 	if !s.pauseAutomaticContinuation(clawID, notice, kind) {
 		// Someone else (or an earlier tick) already latched this claw. Still
@@ -349,7 +368,7 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 	if kind == bridgeErrorPauseKindProviderTransient && s.maybeLiftBridgeErrorPause(clawID) {
 		return true
 	}
-	s.notifyBridgeErrorPause(clawID, streak, short)
+	s.notifyBridgeErrorPause(clawID, streak, pauseError)
 	return true
 }
 

@@ -895,19 +895,41 @@ func (s *Server) countActiveClaws() int {
 // Legacy rows (created before the migration) have concurrency_group = ” and
 // are treated as belonging to the "global" group.
 func (s *Server) countActiveClawsInGroup(groupName string) int {
-	var count int
+	// A finished claw keeps its slot while it still holds a writable workflow
+	// volume lease (checkpoint and volume sync run after the terminal
+	// transition), so the next claw does not fail its attach on the held lease.
+	// The heartbeat bound stops a lease left behind by a failed sync from
+	// holding the slot until the lease expires.
+	now := time.Now().UTC()
+	query := `
+		SELECT COUNT(*) FROM claws c
+		WHERE (c.status IN ('provisioning','starting','connected','running','idle')
+		    OR EXISTS (SELECT 1 FROM volume_leases l
+		               WHERE l.claw_id = c.id AND l.mode = 'rw' AND l.released_at IS NULL
+		                 AND l.expires_at > ? AND l.heartbeat_at > ?))
+		  AND `
+	args := []any{now, now.Add(-volumeLeaseSlotGrace)}
 	if groupName == "global" {
-		_ = s.db.QueryRow(`
-			SELECT COUNT(*) FROM claws
-			WHERE status IN ('provisioning','starting','connected','running','idle')
-			  AND (concurrency_group = 'global' OR concurrency_group = '')`).Scan(&count)
+		query += `(c.concurrency_group = 'global' OR c.concurrency_group = '')`
 	} else {
-		_ = s.db.QueryRow(`
-			SELECT COUNT(*) FROM claws
-			WHERE status IN ('provisioning','starting','connected','running','idle')
-			  AND concurrency_group = ?`, groupName).Scan(&count)
+		query += `c.concurrency_group = ?`
+		args = append(args, groupName)
 	}
+	var count int
+	_ = s.db.QueryRow(query, args...).Scan(&count)
 	return count
+}
+
+// hasPendingInGroup reports whether a new claw must queue behind older work.
+// Legacy rows with an empty concurrency group belong to the global group.
+func (s *Server) hasPendingInGroup(groupName string) bool {
+	var pending bool
+	if groupName == "" || groupName == "global" {
+		_ = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claws WHERE status='pending' AND concurrency_group IN ('global',''))`).Scan(&pending)
+	} else {
+		_ = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claws WHERE status='pending' AND concurrency_group=?)`, groupName).Scan(&pending)
+	}
+	return pending
 }
 
 // resolveGroupLimit returns the concurrency group name and limit for a factory.

@@ -626,9 +626,13 @@ func TestMalformedJSONBridgeErrorPauseAutoLiftsWithOwnCap(t *testing.T) {
 		t.Fatal("malformed JSON provider failure was classified as gateway connectivity")
 	}
 
+	if s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, false) {
+		t.Fatal("a generic replay error paused the claw without a definite failure")
+	}
+
 	for episode := 1; episode <= bridgeErrorProviderAutoResumeMax; episode++ {
-		for i := 0; i < bridgeErrorPauseThreshold; i++ {
-			s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+		if !s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true) {
+			t.Fatal("a single definite malformed-JSON failure did not pause for recovery")
 		}
 		if clawPaused(t, s, id) {
 			t.Fatalf("provider-transient episode %d stayed paused", episode)
@@ -641,14 +645,37 @@ func TestMalformedJSONBridgeErrorPauseAutoLiftsWithOwnCap(t *testing.T) {
 		t.Fatalf("provider recovery messages = %d, want %d", got, bridgeErrorProviderAutoResumeMax)
 	}
 
-	for i := 0; i < bridgeErrorPauseThreshold; i++ {
-		s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
-	}
+	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
 	if !clawPaused(t, s, id) {
 		t.Fatal("provider-transient pause beyond its per-work-unit cap was auto-lifted")
 	}
 	if kind, resumes := bridgeErrorRow(t, s, id); kind != bridgeErrorPauseKindProviderTransient || resumes != bridgeErrorProviderAutoResumeMax {
 		t.Fatalf("capped pause: kind=%q resumes=%d", kind, resumes)
+	}
+	notices := pauseNotices(t, s, id)
+	if len(notices) != 1 || !strings.Contains(notices[0], "recovery budget for malformed tool-call JSON is exhausted") ||
+		!strings.Contains(notices[0], "/new") || !strings.Contains(notices[0], "re-brief") {
+		t.Fatalf("missing actionable budget-exhausted notice: %q", notices)
+	}
+}
+
+// Only malformed tool-call JSON pauses on the first error; every other kind
+// keeps the NEXT-725 threshold of two consecutive failures.
+func TestOtherBridgeErrorKindsStillNeedTwoFailures(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	for i, errText := range []string{
+		"gateway disconnected",
+		"LLM request failed: network connection was interrupted",
+		"⚠️ Agent run failed (model: anthropic/claude-sonnet-5): authentication rejected",
+	} {
+		id := "claw-threshold-" + string(rune('a'+i))
+		cc := bridgeErrorClaw(t, s, id)
+		if s.observeBridgeErrorTurn(cc, id, errText, true) || clawPaused(t, s, id) {
+			t.Fatalf("%q paused after a single failure", errText)
+		}
+		if !s.observeBridgeErrorTurn(cc, id, errText, true) || !clawPaused(t, s, id) {
+			t.Fatalf("%q did not pause after %d failures", errText, bridgeErrorPauseThreshold)
+		}
 	}
 }
 
@@ -681,9 +708,7 @@ func TestMalformedJSONPauseAlarmsOnlyWhenBudgetIsSpent(t *testing.T) {
 		return n
 	}
 
-	for i := 0; i < bridgeErrorPauseThreshold; i++ {
-		s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
-	}
+	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
 	if clawPaused(t, s, id) {
 		t.Fatal("provider-transient pause was not lifted")
 	}
@@ -694,14 +719,20 @@ func TestMalformedJSONPauseAlarmsOnlyWhenBudgetIsSpent(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET bridge_error_auto_resumes=? WHERE id=?`, bridgeErrorProviderAutoResumeMax, id); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < bridgeErrorPauseThreshold; i++ {
-		s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
-	}
+	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
 	if !clawPaused(t, s, id) {
 		t.Fatal("pause beyond the budget was lifted")
 	}
 	if got := pausedAlarms(); got != 1 {
 		t.Fatalf("paused alarms after the budget is spent = %d, want 1", got)
+	}
+	var alarmDetail string
+	if err := db.QueryRow(`SELECT detail FROM task_run_events WHERE run_id='run-provider-alarm' AND event_type=? AND detail LIKE '%"noProgressPaused":true%'`, taskRunEventAgentIdle).Scan(&alarmDetail); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(alarmDetail, "recovery budget for malformed tool-call JSON is exhausted") ||
+		!strings.Contains(alarmDetail, "/new") || !strings.Contains(alarmDetail, "re-brief") {
+		t.Fatalf("budget-exhausted operator alarm is not actionable: %s", alarmDetail)
 	}
 	cc.mu.RLock()
 	kind := cc.bridgeErrorPauseKind
@@ -724,8 +755,8 @@ func TestBridgeErrorAutoLiftKindsShareOneCounter(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	providerEpisode := func(cc *clawConn, id string) {
 		t.Helper()
-		for i := 0; i < bridgeErrorPauseThreshold; i++ {
-			s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+		if !s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true) {
+			t.Fatal("a single definite malformed-JSON failure did not pause for recovery")
 		}
 	}
 
