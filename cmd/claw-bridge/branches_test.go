@@ -160,3 +160,41 @@ func TestBranchReporterChangesAndRetries(t *testing.T) {
 		t.Fatalf("changed report not sent: %d calls", calls)
 	}
 }
+
+// A full clone mirrors every branch under refs/remotes; only the branch this
+// sandbox pushed may be reported, however many others were fetched.
+func TestCollectRepoBranchesIgnoresFetchedRemoteRefs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "repo")
+	sha := branchTestRepo(t, dir)
+	var refs strings.Builder
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&refs, "update refs/remotes/origin/fetched-%d %s\n", i, sha)
+	}
+	cmd := exec.Command("git", "-C", dir, "update-ref", "--stdin")
+	cmd.Stdin = strings.NewReader(refs.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("update-ref: %v: %s", err, out)
+	}
+	got, err := collectRepoBranches(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Branch != "feature" || got[1].Branch != "pushed-without-upstream" {
+		t.Fatalf("branches: %#v", got)
+	}
+}
+
+func TestSplitTrackingRefRejectsAmbiguousRemotes(t *testing.T) {
+	remotes := []string{"origin", "origin/fork", "upstream"}
+	for ref, want := range map[string][2]string{
+		"refs/remotes/upstream/topic":    {"upstream", "topic"},
+		"refs/remotes/origin/feature/x":  {"origin", "feature/x"},
+		"refs/remotes/origin/fork/topic": {"", ""},
+		"refs/remotes/other/topic":       {"", ""},
+		"":                               {"", ""},
+	} {
+		if remote, branch := splitTrackingRef(ref, remotes); remote != want[0] || branch != want[1] {
+			t.Errorf("%q: got (%q, %q), want %v", ref, remote, branch, want)
+		}
+	}
+}

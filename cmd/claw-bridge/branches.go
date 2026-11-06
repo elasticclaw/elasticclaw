@@ -161,41 +161,56 @@ func collectWorkspaceBranches(ctx context.Context, workspace string) ([]workspac
 }
 
 func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, error) {
-	remoteNames, err := branchGit(ctx, dir, "remote")
+	remoteList, err := branchGit(ctx, dir, "remote")
 	if err != nil {
 		return nil, err
 	}
-	// Remote-tracking refs, not upstreams: a plain "git push origin x" (no -u)
-	// records the push on refs/remotes/origin/x without setting an upstream.
-	out, err := branchGit(ctx, dir, "for-each-ref", "--count=257", "--format=%(refname)", "refs/remotes/")
+	remoteNames := strings.Fields(remoteList)
+	// Candidates come from local branches, which stay few in a sandbox, not
+	// from refs/remotes/*, which mirrors every branch of a full clone.
+	out, err := branchGit(ctx, dir, "for-each-ref", "--count=257", "--format=%(refname:short)%00%(upstream)", "refs/heads/")
 	if err != nil {
 		return nil, err
 	}
-	refs := strings.Split(out, "\n")
-	if len(refs) > 256 {
+	lines := strings.Split(out, "\n")
+	if len(lines) > 256 {
 		return nil, fmt.Errorf("repository branch limit exceeded")
 	}
+	type remoteInfo struct{ repo, defaultRef string }
+	remotes := make(map[string]remoteInfo)
+	seen := make(map[string]bool)
 	var branches []workspaceBranch
-	for _, name := range strings.Fields(remoteNames) {
-		prefix := "refs/remotes/" + name + "/"
-		var repo, defaultRef string
-		for _, ref := range refs {
-			branch, ok := strings.CutPrefix(ref, prefix)
-			if !ok || branch == "HEAD" || branch == "main" || branch == "master" {
+	for _, line := range lines {
+		local, upstream, ok := strings.Cut(line, "\x00")
+		if !ok || local == "" {
+			continue
+		}
+		// The upstream covers renamed pushes; refs/remotes/<remote>/<local>
+		// covers a plain "git push origin <local>" that set no upstream.
+		candidates := []string{upstream}
+		for _, name := range remoteNames {
+			candidates = append(candidates, "refs/remotes/"+name+"/"+local)
+		}
+		for _, ref := range candidates {
+			name, branch := splitTrackingRef(ref, remoteNames)
+			if name == "" || seen[ref] || branch == "HEAD" || branch == "main" || branch == "master" {
 				continue
 			}
-			if repo == "" {
+			seen[ref] = true
+			remote, ok := remotes[name]
+			if !ok {
 				remoteURL, err := branchGit(ctx, dir, "remote", "get-url", "--", name)
 				if err != nil {
 					return nil, err
 				}
-				if repo = githubRemoteRepo(remoteURL); repo == "" {
-					break
+				remote.repo = githubRemoteRepo(remoteURL)
+				if remote.repo != "" {
+					// Missing remote HEAD is normal for freshly added remotes.
+					remote.defaultRef, _ = branchGit(ctx, dir, "symbolic-ref", "refs/remotes/"+name+"/HEAD")
 				}
-				// Missing remote HEAD is normal for freshly added remotes.
-				defaultRef, _ = branchGit(ctx, dir, "symbolic-ref", prefix+"HEAD")
+				remotes[name] = remote
 			}
-			if ref == defaultRef {
+			if remote.repo == "" || ref == remote.defaultRef {
 				continue
 			}
 			// A tracking ref alone does not prove ownership: gh pr checkout and
@@ -205,10 +220,27 @@ func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, er
 			if pushed == "" {
 				continue
 			}
-			branches = append(branches, workspaceBranch{Repo: repo, Branch: branch, HeadSHA: pushed})
+			branches = append(branches, workspaceBranch{Repo: remote.repo, Branch: branch, HeadSHA: pushed})
 		}
 	}
 	return branches, ctx.Err()
+}
+
+// splitTrackingRef maps refs/remotes/<remote>/<branch> to its remote and
+// branch. Remote names may contain "/", so a ref that more than one remote
+// could own (origin and origin/fork) is ambiguous and rejected.
+func splitTrackingRef(ref string, remoteNames []string) (remote, branch string) {
+	for _, name := range remoteNames {
+		rest, ok := strings.CutPrefix(ref, "refs/remotes/"+name+"/")
+		if !ok || rest == "" {
+			continue
+		}
+		if remote != "" {
+			return "", ""
+		}
+		remote, branch = name, rest
+	}
+	return remote, branch
 }
 
 // lastPushedSHA returns the commit of the newest push git recorded for the
