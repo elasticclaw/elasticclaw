@@ -595,18 +595,25 @@ func TestPruneAPITokenAudit(t *testing.T) {
 	}
 }
 
-func TestFactoryMCPAuditErrorRedactsHiddenArgValues(t *testing.T) {
-	raw, _ := json.Marshal(map[string]any{"workspace": "ws-visible", "api_key": "sk-live-1",
-		"input": map[string]any{"inputs": map[string]any{"issue_number": "not-a-number", "note": `quote"d`}}})
-	detail := `HTTP 400: {"error":"validation error: input \"issue_number\": expected number, got \"not-a-number\""} key sk-live-1 note quote\"d in ws-visible`
-	got := mcpRedactHiddenArgValues(detail, raw)
-	for _, hidden := range []string{"not-a-number", "sk-live-1", `quote\"d`} {
-		if strings.Contains(got, hidden) {
-			t.Fatalf("audit error kept %q: %s", hidden, got)
-		}
+func TestFactoryMCPAuditErrorWithholdsDetailsForHiddenArgs(t *testing.T) {
+	secretInput, _ := json.Marshal(map[string]any{"workspace": "ws", "input": map[string]any{"inputs": map[string]any{"n": `sk-live-quote"secret`}}})
+	detail := `HTTP 400: {"error":"validation error: input \"n\": expected number, got \"sk-live-quote\\\"secret\""}`
+	if got := mcpAuditErrorDetail(detail, secretInput); got != "HTTP 400: [details withheld: arguments contain hidden values]" {
+		t.Fatalf("detail = %q", got)
 	}
-	if !strings.Contains(got, "ws-visible") || !strings.Contains(got, "HTTP 400") {
-		t.Fatalf("audit error lost visible context: %s", got)
+	apiKey, _ := json.Marshal(map[string]any{"claw_id": "c", "api_key": "abc"})
+	if got := mcpAuditErrorDetail("boom abc", apiKey); strings.Contains(got, "abc") {
+		t.Fatalf("detail kept short secret: %q", got)
+	}
+	plain, _ := json.Marshal(map[string]any{"claw_id": "missing"})
+	if got := mcpAuditErrorDetail("HTTP 404: claw not found", plain); got != "HTTP 404: claw not found" {
+		t.Fatalf("plain detail changed: %q", got)
+	}
+	for _, input := range []any{"secret-value", []any{"secret-value"}, 42} {
+		raw, _ := json.Marshal(map[string]any{"workspace": "ws", "input": input})
+		if summary := mcpArgsSummary(raw); strings.Contains(summary, "secret-value") || strings.Contains(summary, "42") {
+			t.Fatalf("summary kept non-object input %v: %s", input, summary)
+		}
 	}
 }
 
@@ -628,5 +635,18 @@ func TestAPITokenKeepsOwnerLoginCase(t *testing.T) {
 	}
 	if rec := apiTokenRequest(t, s, "alice", http.MethodGet, "/api/settings/api-tokens", ""); !strings.Contains(rec.Body.String(), token.ID) {
 		t.Fatalf("case-insensitive list missed token: %s", rec.Body.String())
+	}
+}
+
+func TestFactoryMCPAuditRowWithholdsTriggerErrorDetails(t *testing.T) {
+	s, token := factoryMCPFixture(t)
+	session, ctx := factoryMCPClient(t, s, token.Token)
+	factoryMCPCall(t, ctx, session, "trigger_workflow", map[string]any{"workspace": "ws", "workflow": "missing", "input": map[string]any{"inputs": map[string]any{"n": "sk-secret-value"}}}, true)
+	var args, detail string
+	if err := s.db.QueryRow(`SELECT args_summary, error FROM api_token_audit WHERE token_id=? AND tool='trigger_workflow'`, token.ID).Scan(&args, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(args+detail, "sk-secret-value") || !strings.HasPrefix(detail, "HTTP 404: [details withheld") {
+		t.Fatalf("audit row leaked or lost status: args=%s error=%s", args, detail)
 	}
 }

@@ -168,7 +168,7 @@ func (s *Server) auditFactoryMCP(next mcp.MethodHandler) mcp.MethodHandler {
 		// Cancellation must not discard the outcome after an action completed.
 		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		if _, auditErr := s.db.ExecContext(auditCtx, `UPDATE api_token_audit SET status=?, error=? WHERE id=?`, status, mcpTruncate(mcpRedactHiddenArgValues(detail, call.Params.Arguments), 2048), auditID); auditErr != nil {
+		if _, auditErr := s.db.ExecContext(auditCtx, `UPDATE api_token_audit SET status=?, error=? WHERE id=?`, status, mcpTruncate(mcpAuditErrorDetail(detail, call.Params.Arguments), 2048), auditID); auditErr != nil {
 			log.Printf("[mcp] audit outcome failed id=%d: %v", auditID, auditErr)
 		}
 		switch call.Params.Name {
@@ -241,6 +241,8 @@ func mcpArgsSummary(raw json.RawMessage) string {
 						v[key] = map[string]any{"keys": keys}
 						continue
 					}
+					v[key] = "[redacted]"
+					continue
 				}
 				if key == "content" {
 					if text, ok := item.(string); ok {
@@ -264,46 +266,45 @@ func mcpArgsSummary(raw json.RawMessage) string {
 	return mcpTruncate(string(data), 1024)
 }
 
-// mcpRedactHiddenArgValues removes from an error detail every argument value
-// that mcpArgsSummary keeps out of the audit row (workflow input values and
-// credential-like keys), since handlers may echo them in validation errors.
-func mcpRedactHiddenArgValues(detail string, raw json.RawMessage) string {
-	var value any
-	if detail == "" || json.Unmarshal(raw, &value) != nil {
+var mcpHTTPStatusPrefix = regexp.MustCompile(`^HTTP \d{3}`)
+
+// mcpAuditErrorDetail drops the error text when the call carried values the
+// audit summary hides (workflow input, credential-like keys): handlers echo
+// such values in validation errors, so only the HTTP status is kept.
+func mcpAuditErrorDetail(detail string, raw json.RawMessage) string {
+	if detail == "" || !mcpArgsHaveHiddenValues(raw) {
 		return detail
 	}
-	var hidden []string
-	var collect func(v any, hide bool)
-	collect = func(v any, hide bool) {
+	if status := mcpHTTPStatusPrefix.FindString(detail); status != "" {
+		return status + ": [details withheld: arguments contain hidden values]"
+	}
+	return "[details withheld: arguments contain hidden values]"
+}
+
+func mcpArgsHaveHiddenValues(raw json.RawMessage) bool {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return true
+	}
+	var hidden func(v any) bool
+	hidden = func(v any) bool {
 		switch v := v.(type) {
 		case map[string]any:
 			for key, item := range v {
-				collect(item, hide || key == "input" || mcpSensitiveArgPattern.MatchString(key))
+				if key == "input" || mcpSensitiveArgPattern.MatchString(key) || hidden(item) {
+					return true
+				}
 			}
 		case []any:
 			for _, item := range v {
-				collect(item, hide)
-			}
-		case string, float64, bool:
-			if !hide {
-				return
-			}
-			text := fmt.Sprint(v)
-			if len(text) >= 4 {
-				hidden = append(hidden, text)
-				if quoted, err := json.Marshal(text); err == nil {
-					hidden = append(hidden, string(quoted[1:len(quoted)-1]))
+				if hidden(item) {
+					return true
 				}
 			}
 		}
+		return false
 	}
-	collect(value, false)
-	// Longest first, so a value is never partially replaced by its substring.
-	sort.Slice(hidden, func(i, j int) bool { return len(hidden[i]) > len(hidden[j]) })
-	for _, text := range hidden {
-		detail = strings.ReplaceAll(detail, text, "[redacted]")
-	}
-	return detail
+	return hidden(value)
 }
 
 var mcpClawIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
