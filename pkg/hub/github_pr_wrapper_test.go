@@ -74,6 +74,11 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 		// Only a line that is exactly a PR URL names the created PR.
 		{"create_quoted_url", []string{"pr", "create"}, "warning: see https://github.com/org/repo/pull/7 first\nhttps://github.com/org/repo/pull/42\n", 0, true, false},
 		{"create_no_url_line", []string{"pr", "create"}, "see https://github.com/org/repo/pull/7\n", 0, false, false},
+		{"dry_run_equals", []string{"pr", "create", "--dry-run=true", "--body", "x"}, "https://github.com/org/repo/pull/7\n", 0, false, true},
+		{"help", []string{"pr", "create", "--help"}, "https://github.com/org/repo/pull/7\n", 0, false, true},
+		{"web", []string{"pr", "create", "-w"}, "https://github.com/org/repo/pull/7\n", 0, false, true},
+		// A flag value is not a flag: a title of "--help" still creates the PR.
+		{"flag_like_title", []string{"pr", "create", "--title", "--help"}, "https://github.com/org/repo/pull/42\n", 0, true, false},
 		{"non_create", []string{"pr", "view"}, "bytes\x00\n\n", 23, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,11 +175,10 @@ func TestGitHubPRWrapperTTY(t *testing.T) {
 		wantReport string
 		wantView   string
 	}{
-		{"pr create", []string{"pr", "create", "--repo", "org/repo", "--head", "feature-b"}, "https://github.com/org/repo/pull/42\n",
-			// The lookup must target the created head, not the checked-out branch.
-			"pr\nview\nfeature-b\n--repo\norg/repo\n--json\nurl\n-q\n.url\n"},
-		// The head of a gh api request lives in its body, which is not parsed,
-		// so a lookup could only name the checked-out branch's PR.
+		// Interactive creations pass straight through: capturing stdout would
+		// change gh's prompts, and a later lookup cannot prove what was created
+		// (--help, --web, a body-only head). The branch sweep covers them.
+		{"pr create", []string{"pr", "create", "--repo", "org/repo", "--head", "feature-b"}, "", ""},
 		{"api", []string{"api", "repos/org/repo/pulls", "--input", "-"}, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) { testGitHubPRWrapperTTY(t, tc.args, tc.wantReport, tc.wantView) })
@@ -276,25 +280,5 @@ print(json.dumps({"status": p.returncode, "stdout": stdout.decode(), "stderr": s
 	input, _ := os.ReadFile(filepath.Join(dir, "stdin"))
 	if string(input) != "interactive stdin\n" {
 		t.Fatalf("TTY stdin changed: %q", input)
-	}
-}
-
-func TestGitHubPRWrapperTTYLookupTimeout(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is required by the installed GitHub helper")
-	}
-	fakeGH := filepath.Join(t.TempDir(), "slow-gh")
-	if err := os.WriteFile(fakeGH, []byte("#!/bin/bash\nsleep 10\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	script := githubWrapperHeredoc(t, buildGitHubCLIWrapperInstallScript("https://hub.example.com", "claw", "token"), "VIEWEOF")
-	script = strings.ReplaceAll(script, "timeout=10", "timeout=0.05")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, python, "-c", script, fakeGH)
-	output, err := cmd.CombinedOutput()
-	if err == nil || ctx.Err() != nil || len(output) != 0 {
-		t.Fatalf("TTY lookup did not time out quietly: err=%v context=%v output=%q", err, ctx.Err(), output)
 	}
 }

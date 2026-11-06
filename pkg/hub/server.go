@@ -8004,41 +8004,31 @@ if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
 fi
 # Only creation commands need to return through the reporting path.
 report_kind=""
-repo_args=()
-head_args=()
 positional=()
-dry_run=0
+no_create=0
 prev=""
 for arg in "$@"; do
   # Flags may precede the subcommand (gh -R owner/repo pr create).
   case "$prev" in
-    --repo|-R) repo_args=(--repo "$arg"); prev=""; continue ;;
-    --head|-H) head_args=("$arg"); prev=""; continue ;;
+    --repo|-R|--head|-H|--body|-b|--title|-t|--base|-B) prev=""; continue ;;
   esac
   case "$arg" in
-    --repo|-R|--head|-H) prev="$arg"; continue ;;
-    --repo=*) repo_args=(--repo "${arg#--repo=}") ;;
-    -R?*) repo_args=(--repo "${arg#-R}") ;;
-    --head=*) head_args=("${arg#--head=}") ;;
-    -H?*) head_args=("${arg#-H}") ;;
-    --dry-run) dry_run=1 ;;
+    --repo|-R|--head|-H|--body|-b|--title|-t|--base|-B) prev="$arg"; continue ;;
+    # These finish without creating a PR, and may print text quoting other PRs.
+    --dry-run|--dry-run=*|--web|-w|--help|-h) no_create=1 ;;
     -*) ;;
     *) [ "${#positional[@]}" -lt 2 ] && positional+=("$arg") ;;
   esac
   prev=""
 done
 if [ "${positional[0]:-}" = "pr" ] && [ "${positional[1]:-}" = "create" ]; then
-  # --dry-run creates nothing and prints the body, which may quote other PRs.
-  [ "$dry_run" = 1 ] || report_kind="pr"
+  [ "$no_create" = 1 ] || report_kind="pr"
 elif [ "${positional[0]:-}" = "api" ]; then
-  # -H is --header for gh api; the TTY lookup takes the head from fields.
-  head_args=()
   api_path=""
   api_method=""
   api_fields=0
   api_transformed=0
   skip_value=0
-  field_value=0
   prev=""
   for arg in "$@"; do
     if [ "$prev" = "method" ]; then
@@ -8048,20 +8038,14 @@ elif [ "${positional[0]:-}" = "api" ]; then
     fi
     if [ "$skip_value" = 1 ]; then
       skip_value=0
-      if [ "$field_value" = 1 ] && [[ "$arg" == head=* ]]; then
-        head_args=("${arg#head=}")
-      fi
-      field_value=0
       continue
     fi
     case "$arg" in
       -X|--method) prev="method" ;;
       -X?*) api_method="${arg#-X}" ;;
       --method=*) api_method="${arg#--method=}" ;;
-      -f|-F|--field|--raw-field) api_fields=1; skip_value=1; field_value=1 ;;
+      -f|-F|--field|--raw-field) api_fields=1; skip_value=1 ;;
       --input) api_fields=1; skip_value=1 ;;
-      -fhead=*|-Fhead=*) api_fields=1; head_args=("${arg#-?head=}") ;;
-      --field=head=*|--raw-field=head=*) api_fields=1; head_args=("${arg#*=head=}") ;;
       -f?*|-F?*|--field=*|--raw-field=*|--input=*) api_fields=1 ;;
       # --jq/--template output is shaped by the caller (even {html_url: .body}
       # is valid JSON), so it cannot identify the created PR.
@@ -8077,60 +8061,27 @@ elif [ "${positional[0]:-}" = "api" ]; then
   done
   if [ -n "$api_path" ] && [ "$api_transformed" = 0 ] && { [ "$api_method" = "POST" ] || { [ -z "$api_method" ] && [ "$api_fields" = 1 ]; }; }; then
     report_kind="api"
-    api_repo="${api_path#/}"
-    api_repo="${api_repo#repos/}"
-    api_repo="${api_repo%/pulls}"
-    if [ "${#repo_args[@]}" = 0 ]; then
-      repo_args=(--repo "$api_repo")
-    fi
   fi
 fi
 if [ -z "$report_kind" ]; then
   exec "$REAL_GH" "$@"
 fi
-output="$(mktemp 2>/dev/null)" || exec "$REAL_GH" "$@"
+# With a TTY attached gh may prompt, and capturing stdout would change its
+# behavior; interactive creations are left to the branch sweep.
 if [ -t 1 ]; then
-  "$REAL_GH" "$@"
-  status=$?
-  # Only gh pr create can be resolved after the fact: gh api request bodies
-  # (--input, -f head=...) are not parsed, so a lookup could name another PR.
-  # The branch sweep covers interactive gh api calls.
-  if [ "$status" = 0 ] && [ "$report_kind" = "pr" ]; then
-    (
-      trap 'rm -f "$output"' EXIT
-      if python3 - "$REAL_GH" "${head_args[@]}" "${repo_args[@]}" > "$output" << 'VIEWEOF'
-import os, signal, subprocess, sys
-try:
-    process = subprocess.Popen([sys.argv[1], "pr", "view", *sys.argv[2:], "--json", "url", "-q", ".url"], start_new_session=True)
-    try:
-        sys.exit(process.wait(timeout=10))
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
-except OSError:
-    pass
-sys.exit(1)
-VIEWEOF
-      then
-        /usr/local/bin/elasticclaw-report-pr pr "$output"
-      fi
-    ) </dev/null >/dev/null 2>&1 &
-    disown 2>/dev/null || true
-  else
-    rm -f "$output" 2>/dev/null
-  fi
+  exec "$REAL_GH" "$@"
+fi
+output="$(mktemp 2>/dev/null)" || exec "$REAL_GH" "$@"
+"$REAL_GH" "$@" | tee "$output" 2>/dev/null
+status=${PIPESTATUS[0]}
+if [ "$status" = 0 ]; then
+  (
+    trap 'rm -f "$output"' EXIT
+    /usr/local/bin/elasticclaw-report-pr "$report_kind" "$output"
+  ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
 else
-  "$REAL_GH" "$@" | tee "$output" 2>/dev/null
-  status=${PIPESTATUS[0]}
-  if [ "$status" = 0 ]; then
-    (
-      trap 'rm -f "$output"' EXIT
-      /usr/local/bin/elasticclaw-report-pr "$report_kind" "$output"
-    ) </dev/null >/dev/null 2>&1 &
-    disown 2>/dev/null || true
-  else
-    rm -f "$output" 2>/dev/null
-  fi
+  rm -f "$output" 2>/dev/null
 fi
 exit "$status"
 GHEOF
