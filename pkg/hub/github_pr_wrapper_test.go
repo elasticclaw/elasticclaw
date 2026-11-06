@@ -57,8 +57,11 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 		{"api_get", []string{"api", "repos/org/repo/pulls"}, "unchanged", 0, false, true},
 		{"api_wrong_path", []string{"api", "repos/org/repo/issues", "-X", "POST"}, "unchanged", 0, false, true},
 		{"api_malformed_json", []string{"api", "repos/org/repo/pulls", "-X", "POST"}, "not-json", 0, false, false},
-		{"api_jq_url", []string{"api", "repos/org/repo/pulls", "-X", "POST", "--jq", ".html_url"}, "https://github.com/org/repo/pull/42\n", 0, true, false},
-		{"api_template_url", []string{"api", "repos/org/repo/pulls", "-f", "title=t", "-t", "{{.html_url}}"}, "https://github.com/org/repo/pull/42", 0, true, false},
+		// --jq/--template output is free text that may quote other PRs; the
+		// branch sweep covers these instead of the wrapper.
+		{"api_jq_url", []string{"api", "repos/org/repo/pulls", "-X", "POST", "--jq", ".html_url"}, "https://github.com/org/repo/pull/42\n", 0, false, false},
+		{"api_template_url", []string{"api", "repos/org/repo/pulls", "-f", "title=t", "-t", "{{.html_url}}"}, "https://github.com/org/repo/pull/42", 0, false, false},
+		{"api_jq_quoted_body", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-q", ".body"}, "see https://github.com/org/repo/pull/7\n", 0, false, false},
 		{"api_jq_other_repo", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-q", ".body"}, "see https://github.com/other/repo/pull/7\n", 0, false, false},
 		{"api_include", []string{"api", "-i", "repos/org/repo/pulls", "-X", "POST"}, "HTTP/2.0 201 Created\r\nLocation: https://api.github.com/repos/org/repo/pulls/42\r\n\r\n{\"body\":\"see https://github.com/org/repo/pull/7\",\"html_url\":\"https://github.com/org/repo/pull/42\"}", 0, true, false},
 		{"api_leading_repo_flag", []string{"-R", "org/repo", "api", "repos/org/repo/pulls", "-X", "POST"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 0, true, false},
@@ -84,6 +87,9 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 			wrapper = strings.ReplaceAll(wrapper, "__ELASTICCLAW_REAL_GH__", fakeGH)
 			wrapper = strings.ReplaceAll(wrapper, "/usr/local/bin/elasticclaw-report-pr", reporter)
 			wrapper = strings.ReplaceAll(wrapper, "/usr/local/bin/elasticclaw-git-credentials", filepath.Join(dir, "missing-credentials"))
+			// BSD mktemp (macOS) ignores TMPDIR; pin the capture file so its
+			// cleanup proves the background report finished.
+			wrapper = strings.Replace(wrapper, `output="$(mktemp 2>/dev/null)"`, `output="$(mktemp "$TEST_DIR/tmp.XXXXXX" 2>/dev/null)"`, 1)
 			wrapperPath := write("gh", wrapper)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -110,7 +116,6 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 				}
 			}
 			// Completion is observable from temp-file cleanup, even with no report.
-			// BSD mktemp (macOS) ignores TMPDIR, so also wait for the report itself.
 			deadline := time.Now().Add(3 * time.Second)
 			for {
 				files, _ := filepath.Glob(filepath.Join(dir, "tmp.*"))

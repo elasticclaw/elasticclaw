@@ -7914,12 +7914,9 @@ func buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken string) string
 	return `sudo tee /usr/local/bin/elasticclaw-report-pr > /dev/null << 'REPORTEOF'
 #!/bin/bash
 set +x
-url="$(python3 - "$1" "$2" "${3:-}" << 'PYEOF'
+url="$(python3 - "$1" "$2" << 'PYEOF'
 import json, re, sys
-PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/[0-9]+")
-def requested_repo(candidate):
-    match = PR_URL.fullmatch(candidate)
-    return bool(match) and match.group(1).lower() == sys.argv[3].lower()
+PR_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")
 try:
     text = open(sys.argv[2], errors="replace").read()
     if sys.argv[1] == "api":
@@ -7927,17 +7924,13 @@ try:
         if body.startswith("HTTP/"):
             # --include prefixes the JSON body with response headers.
             body = re.split(r"\r?\n\r?\n", body, maxsplit=1)[-1]
-        try:
-            data = json.loads(body)
-            candidates = [data.get("html_url") or ""] if isinstance(data, dict) else []
-        except ValueError:
-            # --jq/--template print selected fields; accept only a whole PR URL
-            # token for the repository the request was sent to.
-            candidates = [c for c in text.split() if requested_repo(c)]
-        for candidate in candidates:
-            if PR_URL.fullmatch(candidate):
-                print(candidate)
-                break
+        # Only the response object identifies the created PR. --jq/--template
+        # output is arbitrary text that may quote other PRs; the branch sweep
+        # covers those commands instead.
+        data = json.loads(body)
+        candidate = (data.get("html_url") or "") if isinstance(data, dict) else ""
+        if PR_URL.fullmatch(candidate):
+            print(candidate)
     else:
         match = PR_URL.search(text)
         if match:
@@ -8119,7 +8112,7 @@ else
   if [ "$status" = 0 ]; then
     (
       trap 'rm -f "$output"' EXIT
-      /usr/local/bin/elasticclaw-report-pr "$report_kind" "$output" "${api_repo:-}"
+      /usr/local/bin/elasticclaw-report-pr "$report_kind" "$output"
     ) </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
   else
