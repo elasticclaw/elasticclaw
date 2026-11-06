@@ -578,3 +578,21 @@ func TestFactoryMCPReadToolWiring(t *testing.T) {
 		}
 	}
 }
+
+func TestPruneAPITokenAuditRunsWithoutCheckpointRetention(t *testing.T) {
+	s := newAPITokenTestServer(t)
+	now := time.Now()
+	for _, age := range []time.Duration{apiTokenAuditMaxAge + time.Hour, time.Hour} {
+		if _, err := s.db.Exec(`INSERT INTO api_token_audit(token_id,owner_login,tool,args_summary,status,created_at) VALUES('t','alice','list_claws','{}','ok',?)`, now.Add(-age).Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.retentionSettings().enabled {
+		t.Fatal("test expects checkpoint retention disabled by default")
+	}
+	s.pruneAPITokenAudit(now)
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM api_token_audit`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("audit rows after prune = %d, %v; want 1", count, err)
+	}
+}

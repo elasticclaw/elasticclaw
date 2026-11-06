@@ -79,6 +79,9 @@ func (s *Server) runRetention() {
 			}()
 			cfg = s.retentionSettings()
 			ticker.Reset(cfg.interval)
+			// Audit rows are written on every MCP call, so prune them even when
+			// checkpoint retention is disabled.
+			s.pruneAPITokenAudit(s.reaperNow())
 			if cfg.enabled {
 				s.retainOnce(s.reaperNow(), cfg)
 			}
@@ -86,12 +89,16 @@ func (s *Server) runRetention() {
 	}
 }
 
-func (s *Server) retainOnce(at time.Time, cfg retentionSettings) {
-	if !cfg.dryRun {
-		if _, err := s.db.Exec(`DELETE FROM api_token_audit WHERE created_at < ?`, at.Add(-90*24*time.Hour).Unix()); err != nil {
-			log.Printf("retention: API token audit expiry: %v", err)
-		}
+// apiTokenAuditMaxAge is how long MCP tool-call audit rows are kept.
+const apiTokenAuditMaxAge = 90 * 24 * time.Hour
+
+func (s *Server) pruneAPITokenAudit(at time.Time) {
+	if _, err := s.db.Exec(`DELETE FROM api_token_audit WHERE created_at < ?`, at.Add(-apiTokenAuditMaxAge).Unix()); err != nil {
+		log.Printf("retention: API token audit expiry: %v", err)
 	}
+}
+
+func (s *Server) retainOnce(at time.Time, cfg retentionSettings) {
 	unexpanded, err := s.backfillCheckpointTrees()
 	if err != nil {
 		log.Printf("retention: backfill: %v", err)
