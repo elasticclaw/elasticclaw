@@ -469,9 +469,7 @@ func (s *Server) reapOnce() {
 
 	s.reapWorkflowV2RunTimeouts(n, take)
 
-	if actions > 0 {
-		s.promotePendingClaws()
-	}
+	s.promotePendingClaws()
 }
 
 // reapWorkflowV2RunTimeouts cancels v2 workflow runs whose explicit timeout_at

@@ -395,7 +395,7 @@ func TestPRDiscoveryExplicitAssociationWins(t *testing.T) {
 	if err := s.associateTaskRunPR(TaskRunPR{RunID: inferred, Repo: "owner/repo", PRNumber: 1, Exclusive: true}); err != nil {
 		t.Fatal(err)
 	}
-	if failed := s.insertClawPRsAtomic("claw-inferred", []prMentionCandidate{{repo: "owner/repo", number: 1, url: "https://github.com/owner/repo/pull/1", inferred: true}}, false); failed != "" {
+	if failed := s.insertClawPRsAtomic("claw-inferred", []prMentionCandidate{{repo: "owner/repo", number: 1, url: "https://github.com/owner/repo/pull/1", inferred: true}}, false, "done"); failed != "" {
 		t.Fatal(failed)
 	}
 	if err := s.associateTaskRunPR(TaskRunPR{RunID: explicit, Repo: "OWNER/REPO", PRNumber: 1}); err != nil {
@@ -671,14 +671,14 @@ func TestPRDiscoveryExplicitDeliveryPathsReplaceInference(t *testing.T) {
 			if err := s.associateTaskRunPR(TaskRunPR{RunID: inferred, Repo: "owner/repo", PRNumber: 1, URL: url, Exclusive: true}); err != nil {
 				t.Fatal(err)
 			}
-			if failed := s.insertClawPRsAtomic("claw-inferred-delivery", []prMentionCandidate{{repo: "owner/repo", number: 1, url: url, inferred: true}}, false); failed != "" {
+			if failed := s.insertClawPRsAtomic("claw-inferred-delivery", []prMentionCandidate{{repo: "owner/repo", number: 1, url: url, inferred: true}}, false, "done"); failed != "" {
 				t.Fatal(failed)
 			}
 			switch path {
 			case "message-scanner":
-				s.scanMessageForPRs("claw-explicit-delivery", url, false)
+				s.scanMessageForPRs("claw-explicit-delivery", url, false, "gate")
 			case "done-batch":
-				if failed := s.insertClawPRsAtomic("claw-explicit-delivery", []prMentionCandidate{{repo: "owner/repo", number: 1, url: url}}, false); failed != "" {
+				if failed := s.insertClawPRsAtomic("claw-explicit-delivery", []prMentionCandidate{{repo: "owner/repo", number: 1, url: url}}, false, "done"); failed != "" {
 					t.Fatal(failed)
 				}
 			}
@@ -782,7 +782,7 @@ func TestPRDiscoveryExplicitDonePromotesExistingAssociation(t *testing.T) {
 			}
 			row := prMentionCandidate{repo: "owner/repo", number: 1, url: "https://github.com/owner/repo/pull/1"}
 			// A mention alone is not explicit delivery.
-			if failed := s.insertClawPRsAtomic("late-done", []prMentionCandidate{row}, true); failed != "" {
+			if failed := s.insertClawPRsAtomic("late-done", []prMentionCandidate{row}, true, "done"); failed != "" {
 				t.Fatal(failed)
 			}
 			if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=?`, run).Scan(&inferred); err != nil || inferred != 1 {
@@ -804,7 +804,7 @@ func TestPRDiscoveryExplicitDonePromotesExistingAssociation(t *testing.T) {
 				}
 			}
 			for i := 0; i < 2; i++ {
-				if failed := s.insertClawPRsAtomic("late-done", []prMentionCandidate{row}, false); failed != "" {
+				if failed := s.insertClawPRsAtomic("late-done", []prMentionCandidate{row}, false, "done"); failed != "" {
 					t.Fatal(failed)
 				}
 				if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=?`, run).Scan(&inferred); err != nil || inferred != 0 {
@@ -1004,14 +1004,14 @@ func TestPRDiscoveryDeliveryConfirmsWithoutChangingAgentSHA(t *testing.T) {
 				urls = append(urls, "https://github.com/owner/repo/pull/2")
 			}
 			// Mentions must not confirm inferred delivery.
-			s.scanMessageForPRs("confirm-discovery", urls[0], true)
+			s.scanMessageForPRs("confirm-discovery", urls[0], true, "mention")
 			var inferred int
 			if err := s.db.QueryRow(`SELECT inferred FROM task_run_prs WHERE run_id=? AND pr_number=1`, run).Scan(&inferred); err != nil || inferred != 1 {
 				t.Fatalf("mention confirmed delivery: inferred=%d err=%v", inferred, err)
 			}
 			for i := 0; i < 2; i++ {
 				if path == "scanner" {
-					s.scanMessageForPRs("confirm-discovery", urls[0], false)
+					s.scanMessageForPRs("confirm-discovery", urls[0], false, "gate")
 				} else if failed := s.registerDonePRURLs("confirm-discovery", urls); failed != "" {
 					t.Fatal(failed)
 				}
@@ -1086,7 +1086,7 @@ func TestPRDiscoveryWebhookRefreshPreservesInference(t *testing.T) {
 			if err := s.associateTaskRunPR(TaskRunPR{RunID: run, Repo: "owner/repo", PRNumber: 1, URL: url, Exclusive: true}); err != nil {
 				t.Fatal(err)
 			}
-			if failed := s.insertClawPRsAtomic("webhook-inferred", []prMentionCandidate{{repo: "owner/repo", number: 1, url: url, inferred: true}}, false); failed != "" {
+			if failed := s.insertClawPRsAtomic("webhook-inferred", []prMentionCandidate{{repo: "owner/repo", number: 1, url: url, inferred: true}}, false, "done"); failed != "" {
 				t.Fatal(failed)
 			}
 			if path == "closed-dead" {
@@ -1221,13 +1221,13 @@ func TestPRDiscoveryConcurrentExplicitDeliveryKeepsWatcher(t *testing.T) {
 		if clawID == "claw-a" {
 			// B delivers explicitly between A's confirm commit and A's association.
 			once.Do(func() {
-				if failed := s.insertClawPRsAtomic("claw-b", []prMentionCandidate{row}, false); failed != "" {
+				if failed := s.insertClawPRsAtomic("claw-b", []prMentionCandidate{row}, false, "done"); failed != "" {
 					t.Error(failed)
 				}
 			})
 		}
 	}
-	if failed := s.insertClawPRsAtomic("claw-a", []prMentionCandidate{row}, false); failed != "" {
+	if failed := s.insertClawPRsAtomic("claw-a", []prMentionCandidate{row}, false, "done"); failed != "" {
 		t.Fatal(failed)
 	}
 	for _, claw := range []string{"claw-a", "claw-b"} {

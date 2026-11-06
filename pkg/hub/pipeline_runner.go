@@ -1649,7 +1649,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		// URLs, and for pipeline-driven claws this is often the only
 		// registration path — mention-only rows here would leave the
 		// finalization gate permanently empty.
-		s.scanMessageForPRs(clawID, runStdoutForPRScan, false)
+		s.scanMessageForPRs(clawID, runStdoutForPRScan, false, "gate")
 	}
 
 	if stage.OnEnter.Inject != "" {

@@ -430,9 +430,14 @@ func associateTaskRunPRTx(tx *sql.Tx, input TaskRunPR) error {
 		}
 	}
 	if input.PreserveInference {
-		// Provider refreshes may update shared PRs, but must not recreate displaced rows.
+		// Provider refreshes may update shared PRs, but must not recreate displaced
+		// rows. A PR this run's own claw still tracks (delivered or registered)
+		// is not displaced, so a missing association is recreated.
 		var associated int
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE run_id=? AND lower(repo)=lower(?) AND pr_number=?)`, input.RunID, input.Repo, input.PRNumber).Scan(&associated); err != nil {
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_run_prs WHERE run_id=? AND lower(repo)=lower(?) AND pr_number=?)
+			OR EXISTS(SELECT 1 FROM claw_prs p JOIN claws c ON c.id=p.claw_id WHERE c.task_run_id=? AND lower(p.repo)=lower(?) AND p.pr_number=?
+				AND (p.mention_only=0 OR p.source IN ('gh_create','branch_sweep')))`,
+			input.RunID, input.Repo, input.PRNumber, input.RunID, input.Repo, input.PRNumber).Scan(&associated); err != nil {
 			return err
 		}
 		if associated == 0 {

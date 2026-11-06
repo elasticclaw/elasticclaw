@@ -75,6 +75,8 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		log.Printf("[workflow-v2] failed to update task run summary %s for terminal run %s: %v", run.TaskRunID, runID, err)
 	}
 	s.syncWorkflowVolumes(clawID)
+	// The writable lease kept this claw's slot until the sync released it.
+	go s.promotePendingClaws()
 	if s.cronScheduler != nil {
 		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}

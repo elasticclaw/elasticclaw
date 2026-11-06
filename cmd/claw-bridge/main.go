@@ -1232,7 +1232,8 @@ func redactActivityPrefix(value, prefix, replacement string) string {
 // gatewaySession is a long-lived connection to the OpenClaw gateway that
 // maintains a single persistent agent session across all messages.
 type gatewaySession struct {
-	client *gatewayClient
+	branches *branchReporter
+	client   *gatewayClient
 
 	sessionMu              sync.RWMutex
 	sessionKey             string
@@ -3080,6 +3081,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 	// Serialise: only one message in flight at a time
 	gs.sendMu.Lock()
 	defer gs.sendMu.Unlock()
+	defer gs.branches.trigger()
 	gs.infMu.Lock()
 	gs.turnMessageID = messageID
 	gs.infMu.Unlock()
@@ -5268,6 +5270,7 @@ func main() {
 		break
 	}
 	log.Printf("[bridge] gateway session ready: %s", gwSession.getSessionKey())
+	gwSession.branches = newBranchReporter(ctx, hubURL, clawID, token)
 	setActiveGatewaySession(gwSession)
 	if control != nil {
 		control.setGatewaySession(gwSession)

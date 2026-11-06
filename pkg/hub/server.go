@@ -56,6 +56,8 @@ type Server struct {
 	prDiscoveryMu       sync.Mutex
 	prDiscoveryAttempts map[string]time.Time
 	prDiscoveryInFlight map[string]bool
+	branchSweepMu       sync.Mutex // serialize branch ownership checks and registration
+	branchRetryMu       sync.Mutex // keep pending-branch retry batches from overlapping
 
 	db        *sql.DB
 	addr      string
@@ -159,15 +161,21 @@ type Server struct {
 	fireworksModelsCacheKey   string
 	fireworksModelsCache      []LLMModelOption
 	fireworksModelsCacheUntil time.Time
-	modelAuthJobsMu           sync.Mutex
-	modelAuthJobs             map[string]*modelAuthLoginJob
-	modelAuthRefreshMu        sync.Mutex
-	modelAuthPending          map[string]string // rotated auth state awaiting durable config persistence
-	grokTokenEndpoint         string            // test seam; defaults to the xAI OAuth token endpoint
-	pollWarningMu             sync.Mutex
-	pollWarnings              map[string]struct{}
-	noProgressMu              sync.Mutex // serializes pause/resume state across the DB and active connection
-	llmLimitMu                sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
+	// anthropicBaseURL and openAIBaseURL override the model-listing API bases
+	// for testing (defaults: https://api.anthropic.com, https://api.openai.com)
+	anthropicBaseURL    string
+	openAIBaseURL       string
+	providerModelsMu    sync.Mutex
+	providerModelsCache map[string]providerModelsCacheEntry
+	modelAuthJobsMu     sync.Mutex
+	modelAuthJobs       map[string]*modelAuthLoginJob
+	modelAuthRefreshMu  sync.Mutex
+	modelAuthPending    map[string]string // rotated auth state awaiting durable config persistence
+	grokTokenEndpoint   string            // test seam; defaults to the xAI OAuth token endpoint
+	pollWarningMu       sync.Mutex
+	pollWarnings        map[string]struct{}
+	noProgressMu        sync.Mutex // serializes pause/resume state across the DB and active connection
+	llmLimitMu          sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
 	// llmLimitProbing holds keys whose latch was released on a deadline and
 	// whose lift is not yet proven by a turn (see releaseLLMUsageLimit).
 	// Guarded by llmLimitMu.
@@ -685,6 +693,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
 	go srv.runRetention()
+	go srv.runAPITokenAuditPruner()
 	if srv.livenessEnabled() {
 		go srv.runReaper()
 	}
@@ -839,6 +848,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/feature-flags/{key}", s.withWebAdminAuth(s.handleFeatureFlag))
 	mux.HandleFunc("/api/settings/beta-testers", s.withWebAdminAuth(s.handleBetaTesters))
 	mux.HandleFunc("/api/settings/beta-testers/{login}", s.withWebAdminAuth(s.handleBetaTester))
+	mux.HandleFunc("/api/settings/api-tokens", s.withWebAdminAuth(s.handleAPITokens))
+	mux.HandleFunc("/api/settings/api-tokens/{id}", s.withWebAdminAuth(s.handleAPIToken))
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
@@ -898,8 +909,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
+	mux.Handle("/mcp", s.withAPITokenAuth(s.factoryMCPHandler()))
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
+	mux.HandleFunc("POST /api/claws/{id}/branches", s.handleClawBranches)  // claw-token auth
+	mux.HandleFunc("POST /api/claws/{id}/prs", s.handleClawPRRegistration) // claw-token auth
 	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
 	mux.HandleFunc("/api/checkpoints/", s.handleCheckpointInternal)
 	mux.HandleFunc("/api/volumes/leases/{lease}/archive", s.handleVolumeArchive)
@@ -1544,6 +1558,7 @@ func settingsStaticSection(section string) bool {
 		"models",
 		"github",
 		"authentication",
+		"api-tokens",
 		"issue-trackers",
 		"workspaces",
 		"workflows",
@@ -2042,9 +2057,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodDelete {
-		// Resolve short ID prefix to full UUID
+		// Resolve short ID prefix to full UUID; an exact match always wins.
 		var fullID string
-		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?)`, tenantID, clawID, clawID+"%").Scan(&fullID)
+		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?) ORDER BY id = ? DESC LIMIT 1`, tenantID, clawID, clawID+"%", clawID).Scan(&fullID)
 		if fullID != "" {
 			clawID = fullID
 		}
@@ -3571,11 +3586,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if s.hasFailedRequiredGate(clawID) {
 					s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
 				} else {
-					prURLs := extractDonePRURLs(turnContent)
+					prURLs, fallback := s.donePRURLs(clawID, turnContent)
 					// Register before the stage transition so pr_merged/pr_closed
 					// monitoring is armed even if the agent only listed URLs next
 					// to [DONE] and never elsewhere in chat.
-					if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+					if fallback && s.rejectInvalidDoneFallback(clawID, prURLs) {
+						// Validation already sent the retry instructions.
+					} else if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
 						s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
 					} else {
 						s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
@@ -3637,7 +3654,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// A transport error can quote a repository URL (git and CI
 					// failures routinely do). Arming the PR watcher on text the
 					// agent never wrote would watch a PR nobody opened.
-					go s.scanMessageForPRs(clawID, turnContent, true)
+					go s.scanMessageForPRs(clawID, turnContent, true, "mention")
 				}
 			}
 			// Detect tool error loops and inject a corrective message
@@ -4766,7 +4783,7 @@ command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
 			configureGitHubTokenRefresh := `export HOME=/home/daytona
 set +x
 ` + buildGitHubTokenProfileInstallScript() + `
-` + buildGitHubCLIWrapperInstallScript() + `
+` + buildGitHubCLIWrapperInstallScript(s.clawHubURL(), clawID, clawToken) + `
 . /etc/profile.d/elasticclaw-github.sh
 command -v gh
 [ -n "${GH_TOKEN:-}" ]
@@ -7899,13 +7916,51 @@ sudo chmod +x /etc/profile.d/elasticclaw-github.sh
 [ -s /etc/profile.d/elasticclaw-github.sh ] || exit 1`
 }
 
-func buildGitHubCLIWrapperInstallScript() string {
-	return `if command -v gh >/dev/null 2>&1; then
+func buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken string) string {
+	// Bake the same bootstrap credentials as the git helper instead of parsing
+	// its shell source or relying on the agent's environment.
+	reportURL := strings.TrimRight(hubURL, "/") + "/api/claws/" + url.PathEscape(clawID) + "/prs?claw_token=" + url.QueryEscape(clawToken)
+	return `sudo tee /usr/local/bin/elasticclaw-report-pr > /dev/null << 'REPORTEOF'
+#!/bin/bash
+set +x
+url="$(python3 - "$1" "$2" << 'PYEOF'
+import json, re, sys
+PR_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")
+try:
+    text = open(sys.argv[2], errors="replace").read()
+    if sys.argv[1] == "api":
+        body = text
+        if body.startswith("HTTP/"):
+            # --include prefixes the JSON body with response headers.
+            body = re.split(r"\r?\n\r?\n", body, maxsplit=1)[-1]
+        # Only the response object identifies the created PR. --jq/--template
+        # output is arbitrary text that may quote other PRs; the branch sweep
+        # covers those commands instead.
+        data = json.loads(body)
+        candidate = (data.get("html_url") or "") if isinstance(data, dict) else ""
+        if PR_URL.fullmatch(candidate):
+            print(candidate)
+    else:
+        # gh pr create prints the URL of the new PR on its own line; other lines
+        # (warnings, forwarded output) may quote unrelated PRs.
+        urls = [line.strip() for line in text.splitlines() if PR_URL.fullmatch(line.strip())]
+        if urls:
+            print(urls[-1])
+except (OSError, ValueError, AttributeError, TypeError):
+    pass
+PYEOF
+)"
+[ -n "$url" ] || exit 0
+curl -sf --max-time 10 -H 'Content-Type: application/json' \
+  --data "{\"url\":\"$url\",\"source\":\"gh_create\"}" ` + shellQuote(reportURL) + ` >/dev/null 2>&1
+REPORTEOF
+sudo chmod +x /usr/local/bin/elasticclaw-report-pr
+if command -v gh >/dev/null 2>&1; then
   REAL_GH="$(command -v gh)"
   if [ "$REAL_GH" = "/usr/local/bin/gh" ]; then
     if grep -q "ElasticClaw GitHub App token refresh wrapper" /usr/local/bin/gh 2>/dev/null; then
-      echo "GitHub gh wrapper already configured"
-      REAL_GH=""
+      echo "GitHub gh wrapper already configured; refreshing"
+      REAL_GH="$(sed -n 's/^REAL_GH="\(.*\)"$/\1/p' /usr/local/bin/gh | head -n1)"
     elif [ -x /usr/local/bin/gh.elasticclaw-real ]; then
       REAL_GH="/usr/local/bin/gh.elasticclaw-real"
     else
@@ -7941,6 +7996,10 @@ if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
   if [ -n "$target_repo" ]; then
     target_repo="${target_repo%.git}"
     target_repo="${target_repo#/}"
+    if [[ "$target_repo" =~ ^repos/[^/]+/[^/]+/pulls$ ]]; then
+      target_repo="${target_repo#repos/}"
+      target_repo="${target_repo%/pulls}"
+    fi
   fi
   if [ -n "$target_repo" ]; then
     token="$(printf 'protocol=https\nhost=github.com\npath=%s.git\n\n' "$target_repo" | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
@@ -7952,7 +8011,90 @@ if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
   fi
   unset token target_repo prev arg
 fi
-exec "$REAL_GH" "$@"
+# Only creation commands need to return through the reporting path.
+report_kind=""
+positional=()
+no_create=0
+prev=""
+for arg in "$@"; do
+  # Flags may precede the subcommand (gh -R owner/repo pr create).
+  case "$prev" in
+    --repo|-R|--head|-H|--body|-b|--title|-t|--base|-B) prev=""; continue ;;
+  esac
+  case "$arg" in
+    --repo|-R|--head|-H|--body|-b|--title|-t|--base|-B) prev="$arg"; continue ;;
+    # These finish without creating a PR, and may print text quoting other PRs.
+    --dry-run|--dry-run=*|--web|-w|--help|-h) no_create=1 ;;
+    -*) ;;
+    *) [ "${#positional[@]}" -lt 2 ] && positional+=("$arg") ;;
+  esac
+  prev=""
+done
+if [ "${positional[0]:-}" = "pr" ] && [ "${positional[1]:-}" = "create" ]; then
+  [ "$no_create" = 1 ] || report_kind="pr"
+elif [ "${positional[0]:-}" = "api" ]; then
+  api_path=""
+  api_method=""
+  api_fields=0
+  api_transformed=0
+  skip_value=0
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "method" ]; then
+      api_method="$arg"
+      prev=""
+      continue
+    fi
+    if [ "$skip_value" = 1 ]; then
+      skip_value=0
+      continue
+    fi
+    case "$arg" in
+      -X|--method) prev="method" ;;
+      -X?*) api_method="${arg#-X}" ;;
+      --method=*) api_method="${arg#--method=}" ;;
+      -f|-F|--field|--raw-field) api_fields=1; skip_value=1 ;;
+      --input) api_fields=1; skip_value=1 ;;
+      -f?*|-F?*|--field=*|--raw-field=*|--input=*) api_fields=1 ;;
+      # --jq/--template output is shaped by the caller (even {html_url: .body}
+      # is valid JSON), so it cannot identify the created PR.
+      -q|--jq|-t|--template) api_transformed=1; skip_value=1 ;;
+      -q?*|--jq=*|-t?*|--template=*) api_transformed=1 ;;
+      # Grouped short flags (-iq, -it) can carry --jq/--template too.
+      -[!XfFH-]*) [[ "$arg" == *[qt]* ]] && api_transformed=1 ;;
+      -H|--header|--hostname|--cache|-R|--repo) skip_value=1 ;;
+      *)
+        if [[ "$arg" =~ ^/?repos/[^/]+/[^/]+/pulls$ ]]; then
+          api_path="$arg"
+        fi
+        ;;
+    esac
+  done
+  if [ -n "$api_path" ] && [ "$api_transformed" = 0 ] && { [ "$api_method" = "POST" ] || { [ -z "$api_method" ] && [ "$api_fields" = 1 ]; }; }; then
+    report_kind="api"
+  fi
+fi
+if [ -z "$report_kind" ]; then
+  exec "$REAL_GH" "$@"
+fi
+# With a TTY attached gh may prompt, and capturing stdout would change its
+# behavior; interactive creations are left to the branch sweep.
+if [ -t 1 ]; then
+  exec "$REAL_GH" "$@"
+fi
+output="$(mktemp 2>/dev/null)" || exec "$REAL_GH" "$@"
+"$REAL_GH" "$@" | tee "$output" 2>/dev/null
+status=${PIPESTATUS[0]}
+if [ "$status" = 0 ]; then
+  (
+    trap 'rm -f "$output"' EXIT
+    /usr/local/bin/elasticclaw-report-pr "$report_kind" "$output"
+  ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+else
+  rm -f "$output" 2>/dev/null
+fi
+exit "$status"
 GHEOF
     REAL_GH_ESCAPED="$(printf '%s' "$REAL_GH" | sed 's/[&\\|]/\\&/g')"
     sudo sed -i "s|__ELASTICCLAW_REAL_GH__|$REAL_GH_ESCAPED|g" /usr/local/bin/gh
@@ -8353,7 +8495,7 @@ if command -v git &>/dev/null && [ -d "$HOME/.openclaw/workspace" ]; then
     esac
   done
 fi
-%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
+%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.

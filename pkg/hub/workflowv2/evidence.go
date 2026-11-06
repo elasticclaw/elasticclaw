@@ -207,7 +207,7 @@ func (s *Store) recordEvidenceSet(ctx context.Context, scopes []EvidenceScope, i
 	var headGeneration int
 	if err := tx.QueryRowContext(ctx, `SELECT p.current_head_sha,COALESCE(MAX(h.generation),0)
 		FROM workflow_v2_delivery_prs p LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
-		WHERE p.id=? AND p.run_id=? AND p.active=1 GROUP BY p.id`, prID, runID).Scan(
+		WHERE p.id=? AND p.run_id=? AND p.active=1 AND p.registered_only=0 GROUP BY p.id`, prID, runID).Scan(
 		&currentHead, &headGeneration); err != nil {
 		return DeliveryPolicyResult{}, fmt.Errorf("load active delivery: %w", err)
 	}
@@ -530,7 +530,7 @@ func loadDeliveryPolicySubjects(ctx context.Context, queryer policyQueryer, runI
 	rows, err := queryer.QueryContext(ctx, `SELECT p.id,p.repository,p.pr_number,p.state,p.current_head_sha,
 		COALESCE(MAX(h.generation),0) FROM workflow_v2_delivery_prs p
 		LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
-		WHERE p.run_id=? AND p.active=1 GROUP BY p.id ORDER BY p.repository,p.pr_number`, runID)
+		WHERE p.run_id=? AND p.active=1 AND p.registered_only=0 GROUP BY p.id ORDER BY p.repository,p.pr_number`, runID)
 	if err != nil {
 		return nil, err
 	}

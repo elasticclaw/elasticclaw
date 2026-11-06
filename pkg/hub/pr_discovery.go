@@ -266,7 +266,7 @@ func (s *Server) discoverClawPRs(clawID, runID string) {
 		}
 		rows = append(rows, p.mention)
 	}
-	if failed := s.insertClawPRsAtomic(clawID, rows, false); failed != "" {
+	if failed := s.insertClawPRsAtomic(clawID, rows, false, "discovery"); failed != "" {
 		log.Printf("[pr-discovery] register claw %s failed at %s", shortID(clawID), failed)
 	}
 }
