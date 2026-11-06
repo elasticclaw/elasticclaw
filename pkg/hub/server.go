@@ -7932,9 +7932,11 @@ try:
         if PR_URL.fullmatch(candidate):
             print(candidate)
     else:
-        match = PR_URL.search(text)
-        if match:
-            print(match.group(0))
+        # gh pr create prints the URL of the new PR on its own line; other lines
+        # (warnings, forwarded output) may quote unrelated PRs.
+        urls = [line.strip() for line in text.splitlines() if PR_URL.fullmatch(line.strip())]
+        if urls:
+            print(urls[-1])
 except (OSError, ValueError, AttributeError, TypeError):
     pass
 PYEOF
@@ -8005,6 +8007,7 @@ report_kind=""
 repo_args=()
 head_args=()
 positional=()
+dry_run=0
 prev=""
 for arg in "$@"; do
   # Flags may precede the subcommand (gh -R owner/repo pr create).
@@ -8018,19 +8021,22 @@ for arg in "$@"; do
     -R?*) repo_args=(--repo "${arg#-R}") ;;
     --head=*) head_args=("${arg#--head=}") ;;
     -H?*) head_args=("${arg#-H}") ;;
+    --dry-run) dry_run=1 ;;
     -*) ;;
     *) [ "${#positional[@]}" -lt 2 ] && positional+=("$arg") ;;
   esac
   prev=""
 done
 if [ "${positional[0]:-}" = "pr" ] && [ "${positional[1]:-}" = "create" ]; then
-  report_kind="pr"
+  # --dry-run creates nothing and prints the body, which may quote other PRs.
+  [ "$dry_run" = 1 ] || report_kind="pr"
 elif [ "${positional[0]:-}" = "api" ]; then
   # -H is --header for gh api; the TTY lookup takes the head from fields.
   head_args=()
   api_path=""
   api_method=""
   api_fields=0
+  api_transformed=0
   skip_value=0
   field_value=0
   prev=""
@@ -8057,7 +8063,11 @@ elif [ "${positional[0]:-}" = "api" ]; then
       -fhead=*|-Fhead=*) api_fields=1; head_args=("${arg#-?head=}") ;;
       --field=head=*|--raw-field=head=*) api_fields=1; head_args=("${arg#*=head=}") ;;
       -f?*|-F?*|--field=*|--raw-field=*|--input=*) api_fields=1 ;;
-      -H|--header|--hostname|-q|--jq|-t|--template|--cache|-R|--repo) skip_value=1 ;;
+      # --jq/--template output is shaped by the caller (even {html_url: .body}
+      # is valid JSON), so it cannot identify the created PR.
+      -q|--jq|-t|--template) api_transformed=1; skip_value=1 ;;
+      -q?*|--jq=*|-t?*|--template=*) api_transformed=1 ;;
+      -H|--header|--hostname|--cache|-R|--repo) skip_value=1 ;;
       *)
         if [[ "$arg" =~ ^/?repos/[^/]+/[^/]+/pulls$ ]]; then
           api_path="$arg"
@@ -8065,7 +8075,7 @@ elif [ "${positional[0]:-}" = "api" ]; then
         ;;
     esac
   done
-  if [ -n "$api_path" ] && { [ "$api_method" = "POST" ] || { [ -z "$api_method" ] && [ "$api_fields" = 1 ]; }; }; then
+  if [ -n "$api_path" ] && [ "$api_transformed" = 0 ] && { [ "$api_method" = "POST" ] || { [ -z "$api_method" ] && [ "$api_fields" = 1 ]; }; }; then
     report_kind="api"
     api_repo="${api_path#/}"
     api_repo="${api_repo#repos/}"

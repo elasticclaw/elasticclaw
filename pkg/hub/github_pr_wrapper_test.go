@@ -59,13 +59,21 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 		{"api_malformed_json", []string{"api", "repos/org/repo/pulls", "-X", "POST"}, "not-json", 0, false, false},
 		// --jq/--template output is free text that may quote other PRs; the
 		// branch sweep covers these instead of the wrapper.
-		{"api_jq_url", []string{"api", "repos/org/repo/pulls", "-X", "POST", "--jq", ".html_url"}, "https://github.com/org/repo/pull/42\n", 0, false, false},
-		{"api_template_url", []string{"api", "repos/org/repo/pulls", "-f", "title=t", "-t", "{{.html_url}}"}, "https://github.com/org/repo/pull/42", 0, false, false},
-		{"api_jq_quoted_body", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-q", ".body"}, "see https://github.com/org/repo/pull/7\n", 0, false, false},
-		{"api_jq_other_repo", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-q", ".body"}, "see https://github.com/other/repo/pull/7\n", 0, false, false},
+		{"api_jq_url", []string{"api", "repos/org/repo/pulls", "-X", "POST", "--jq", ".html_url"}, "https://github.com/org/repo/pull/42\n", 0, false, true},
+		{"api_template_url", []string{"api", "repos/org/repo/pulls", "-f", "title=t", "-t", "{{.html_url}}"}, "https://github.com/org/repo/pull/42", 0, false, true},
+		{"api_jq_quoted_body", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-q", ".body"}, "see https://github.com/org/repo/pull/7\n", 0, false, true},
+		{"api_jq_other_repo", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-q", ".body"}, "see https://github.com/other/repo/pull/7\n", 0, false, true},
 		{"api_include", []string{"api", "-i", "repos/org/repo/pulls", "-X", "POST"}, "HTTP/2.0 201 Created\r\nLocation: https://api.github.com/repos/org/repo/pulls/42\r\n\r\n{\"body\":\"see https://github.com/org/repo/pull/7\",\"html_url\":\"https://github.com/org/repo/pull/42\"}", 0, true, false},
 		{"api_leading_repo_flag", []string{"-R", "org/repo", "api", "repos/org/repo/pulls", "-X", "POST"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 0, true, false},
 		{"api_failure", []string{"api", "repos/org/repo/pulls", "-X", "POST"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 9, false, false},
+		// Transformed output can be any JSON the caller shapes, so it is never parsed.
+		{"api_jq_json_object", []string{"api", "repos/org/repo/pulls", "-X", "POST", "--jq", "{html_url: .body}"}, `{"html_url":"https://github.com/org/repo/pull/7"}`, 0, false, true},
+		{"api_compact_jq", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-q.html_url"}, "https://github.com/org/repo/pull/42\n", 0, false, true},
+		// --dry-run creates nothing; its body echo may quote other PRs.
+		{"dry_run", []string{"pr", "create", "--dry-run", "--body", "see https://github.com/org/repo/pull/7"}, "body: see https://github.com/org/repo/pull/7\n", 0, false, true},
+		// Only a line that is exactly a PR URL names the created PR.
+		{"create_quoted_url", []string{"pr", "create"}, "warning: see https://github.com/org/repo/pull/7 first\nhttps://github.com/org/repo/pull/42\n", 0, true, false},
+		{"create_no_url_line", []string{"pr", "create"}, "see https://github.com/org/repo/pull/7\n", 0, false, false},
 		{"non_create", []string{"pr", "view"}, "bytes\x00\n\n", 23, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
