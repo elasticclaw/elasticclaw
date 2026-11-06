@@ -1752,13 +1752,15 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 
 // donePRURLs uses the claw's delivered or registered (created) open PRs only
 // when the signal omits URLs. The PR that triggered a PR-driven claw is not
-// the claw's delivery, so a bare [DONE] there keeps its previous meaning.
+// the claw's delivery, so a bare [DONE] there keeps its previous meaning; rows
+// stored before claw_prs.source existed cannot be told apart and are skipped.
 func (s *Server) donePRURLs(clawID, message string) ([]string, bool) {
 	urls := extractDonePRURLs(message)
 	if len(urls) > 0 {
 		return urls, false
 	}
-	rows, err := s.db.Query(`SELECT pr_url FROM claw_prs WHERE claw_id=? AND source != 'trigger' AND (mention_only=0 OR source IN ('gh_create','branch_sweep'))
+	rows, err := s.db.Query(`SELECT pr_url FROM claw_prs WHERE claw_id=? AND source IN ('done','gate','gh_create','branch_sweep')
+		AND (mention_only=0 OR source IN ('gh_create','branch_sweep'))
 		AND state NOT IN ('merged','closed') ORDER BY pr_url`, clawID)
 	if err != nil {
 		log.Printf("[factory] failed to load delivered PRs for claw %s: %v", shortID(clawID), err)

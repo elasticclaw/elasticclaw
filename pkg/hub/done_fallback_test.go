@@ -48,8 +48,13 @@ func TestDonePRURLsFallback(t *testing.T) {
 	if _, err := s.storePRMention(clawID, "owner/repo", 9, "https://github.com/owner/repo/pull/9", false, "trigger"); err != nil {
 		t.Fatal(err)
 	}
+	// Rows stored before the source column existed may be trigger PRs too.
+	if _, err := db.Exec(`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, mention_only, source, created_at)
+		VALUES('legacy-row', ?, 'owner/repo', 10, 'https://github.com/owner/repo/pull/10', 0, '', ?)`, clawID, now()); err != nil {
+		t.Fatal(err)
+	}
 	if urls, _ := s.donePRURLs(clawID, "[DONE]"); !reflect.DeepEqual(urls, []string{"https://github.com/owner/repo/pull/1"}) {
-		t.Fatalf("trigger PR in fallback: %v", urls)
+		t.Fatalf("trigger or pre-migration PR in fallback: %v", urls)
 	}
 	if _, err := db.Exec(`UPDATE claw_prs SET state='closed' WHERE pr_number=1`); err != nil {
 		t.Fatal(err)
