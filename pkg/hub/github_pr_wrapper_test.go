@@ -101,10 +101,13 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 				}
 			}
 			// Completion is observable from temp-file cleanup, even with no report.
+			// BSD mktemp (macOS) ignores TMPDIR, so also wait for the report itself.
 			deadline := time.Now().Add(3 * time.Second)
 			for {
 				files, _ := filepath.Glob(filepath.Join(dir, "tmp.*"))
-				if len(files) == 0 || time.Now().After(deadline) {
+				_, reportErr := os.Stat(filepath.Join(dir, "report"))
+				done := len(files) == 0 && (!tc.report || reportErr == nil)
+				if done || time.Now().After(deadline) {
 					break
 				}
 				time.Sleep(10 * time.Millisecond)
