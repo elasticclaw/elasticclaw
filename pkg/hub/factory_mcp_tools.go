@@ -2,7 +2,9 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +15,7 @@ import (
 )
 
 type mcpClawInput struct {
-	ClawID string `json:"claw_id" jsonschema:"Agent ID"`
+	ClawID string `json:"claw_id" jsonschema:"Exact full agent ID"`
 }
 type mcpListClawsInput struct {
 	Status string `json:"status,omitempty" jsonschema:"Filter by displayed agent status"`
@@ -248,10 +250,10 @@ func (s *Server) registerFactoryMCPTools(server *mcp.Server) {
 	mcpAddTool(server, "list_workflows", "List workflows in a workspace.", func(ctx context.Context, in mcpWorkspaceInput) *mcp.CallToolResult {
 		return get(ctx, s.handleWorkspaceWorkflowsList, mcpPath("api", "workspaces", in.Workspace, "workflows"), map[string]string{"name": in.Workspace}, nil)
 	})
-	mcpAddTool(server, "list_workflow_runs", "List workflow runs.", func(ctx context.Context, in mcpWorkflowRunsInput) *mcp.CallToolResult {
+	mcpAddTool(server, "list_workflow_runs", "List runs of a v2 workflow, one row per attempt; v1 manual or cron workflow runs are not included.", func(ctx context.Context, in mcpWorkflowRunsInput) *mcp.CallToolResult {
 		return get(ctx, s.handleWorkflowV2Runs, mcpPath("api", "v2", "workspaces", in.Workspace, "workflows", in.Workflow, "runs"), workflowValues(in.mcpWorkflowInput), mcpQuery(in, "status", "limit"))
 	})
-	mcpAddTool(server, "get_workflow_run", "Get a workflow run.", func(ctx context.Context, in mcpRunInput) *mcp.CallToolResult {
+	mcpAddTool(server, "get_workflow_run", "Get a v2 workflow run.", func(ctx context.Context, in mcpRunInput) *mcp.CallToolResult {
 		return get(ctx, s.handleWorkflowV2Run, mcpPath("api", "v2", "workflow-runs", in.RunID), runValues(in.RunID), nil)
 	})
 	mcpAddTool(server, "get_workflow_run_logs", "Read workflow run activity logs.", func(ctx context.Context, in mcpRunLogsInput) *mcp.CallToolResult {
@@ -325,10 +327,20 @@ func (s *Server) registerFactoryMCPTools(server *mcp.Server) {
 		}
 		return s.mcpCallHandler(ctx, s.handleClawDetail, http.MethodPatch, path, clawValues(in.ClawID), nil, body)
 	})
-	mcpAddTool(server, "kill_claw", "Irreversibly terminates the agent and its sandbox.", func(ctx context.Context, in mcpClawInput) *mcp.CallToolResult {
+	mcpAddTool(server, "kill_claw", "Irreversibly terminates the agent and its sandbox. Requires the exact full agent ID.", func(ctx context.Context, in mcpClawInput) *mcp.CallToolResult {
 		path := mcpPath("api", "claws", in.ClawID)
 		if path == "" {
 			return mcpText("Invalid claw_id", true)
+		}
+		// The REST delete handler also resolves ID prefixes for the CLI. A model
+		// that shortens an ID must not kill whichever agent happens to match.
+		tenant, _ := ctx.Value(ctxTenantKey{}).(string)
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM claws WHERE tenant_id = ? AND id = ?`, tenant, in.ClawID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return mcpText("Agent not found: claw_id must be the exact full agent ID; prefixes are not accepted.", true)
+			}
+			return mcpText("Could not look up agent: "+err.Error(), true)
 		}
 		return s.mcpCallHandler(ctx, s.handleClawDetail, http.MethodDelete, path, clawValues(in.ClawID), nil, nil)
 	})

@@ -2041,9 +2041,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodDelete {
-		// Resolve short ID prefix to full UUID
+		// Resolve short ID prefix to full UUID; an exact match always wins.
 		var fullID string
-		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?)`, tenantID, clawID, clawID+"%").Scan(&fullID)
+		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?) ORDER BY id = ? DESC LIMIT 1`, tenantID, clawID, clawID+"%", clawID).Scan(&fullID)
 		if fullID != "" {
 			clawID = fullID
 		}

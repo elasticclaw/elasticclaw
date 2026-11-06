@@ -413,3 +413,38 @@ func TestFactoryMCPAuditsInvalidArguments(t *testing.T) {
 		t.Fatalf("audit count=%d error=%v", count, err)
 	}
 }
+
+func TestFactoryMCPKillClawRequiresExactID(t *testing.T) {
+	s, token := factoryMCPFixture(t)
+	// Recreate the target after a prefix-sharing claw so table order cannot
+	// accidentally select the exact match first.
+	if _, err := s.db.Exec(`DELETE FROM claws WHERE id='mcp-claw'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"mcp-claw-sibling", "mcp-claw"} {
+		if _, err := s.db.Exec(`INSERT INTO claws(id,tenant_id,name,status,tags,created_at) VALUES(?,?,?,'offline','[]',datetime('now'))`, id, "test-tenant-id", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session, ctx := factoryMCPClient(t, s, token.Token)
+	statusOf := func(id string) string {
+		var status string
+		if err := s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, id).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+	for _, prefix := range []string{"mcp", "mcp-cl", "other"} {
+		result := factoryMCPCall(t, ctx, session, "kill_claw", map[string]any{"claw_id": prefix}, true)
+		if !strings.Contains(factoryMCPText(t, result), "exact full agent ID") {
+			t.Fatalf("prefix %q: %s", prefix, factoryMCPText(t, result))
+		}
+	}
+	if statusOf("mcp-claw") == "deleted" || statusOf("mcp-claw-sibling") == "deleted" {
+		t.Fatal("prefix killed a claw")
+	}
+	factoryMCPCall(t, ctx, session, "kill_claw", map[string]any{"claw_id": "mcp-claw"}, false)
+	if statusOf("mcp-claw") != "deleted" || statusOf("mcp-claw-sibling") == "deleted" {
+		t.Fatalf("exact kill: target=%q sibling=%q", statusOf("mcp-claw"), statusOf("mcp-claw-sibling"))
+	}
+}
