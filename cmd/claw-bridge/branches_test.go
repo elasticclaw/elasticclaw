@@ -36,12 +36,16 @@ func branchTestRepo(t *testing.T, dir string) string {
 	bare := filepath.Join(t.TempDir(), "remote.git")
 	branchTestGit(t, dir, "init", "--bare", bare)
 	branchTestGit(t, dir, "config", "url."+bare+".pushInsteadOf", "git@github.com:owner/repo.git")
-	for _, branch := range []string{"main", "master", "trunk", "feature", "checked-out", "unpublished"} {
+	for _, branch := range []string{"main", "master", "trunk", "feature", "checked-out", "unpublished", "pushed-without-upstream"} {
 		if branch != "main" {
 			branchTestGit(t, dir, "branch", branch)
 		}
 		switch branch {
 		case "unpublished":
+			continue
+		case "pushed-without-upstream":
+			// A plain "git push origin x" records the push but sets no upstream.
+			branchTestGit(t, dir, "push", "-q", "origin", branch)
 			continue
 		case "checked-out":
 			// Fetched like gh pr checkout does: tracked, but never pushed from here.
@@ -77,7 +81,8 @@ func TestCollectWorkspaceBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != (workspaceBranch{Repo: "owner/repo", Branch: "feature", HeadSHA: sha}) {
+	if len(got) != 2 || got[0] != (workspaceBranch{Repo: "owner/repo", Branch: "feature", HeadSHA: sha}) ||
+		got[1] != (workspaceBranch{Repo: "owner/repo", Branch: "pushed-without-upstream", HeadSHA: sha}) {
 		t.Fatalf("branches: %#v", got)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,7 +126,7 @@ func TestBranchReporterChangesAndRetries(t *testing.T) {
 		var report struct {
 			Branches []workspaceBranch `json:"branches"`
 		}
-		if err := json.NewDecoder(req.Body).Decode(&report); err != nil || len(report.Branches) != 1 {
+		if err := json.NewDecoder(req.Body).Decode(&report); err != nil || len(report.Branches) != 2 {
 			t.Errorf("report: %#v, %v", report, err)
 		}
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil

@@ -161,48 +161,52 @@ func collectWorkspaceBranches(ctx context.Context, workspace string) ([]workspac
 }
 
 func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, error) {
-	out, err := branchGit(ctx, dir, "for-each-ref", "--count=257", "--format=%(refname:short)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(objectname)%00%(upstream)", "refs/heads/")
+	remoteNames, err := branchGit(ctx, dir, "remote")
 	if err != nil {
 		return nil, err
 	}
-	type remoteInfo struct{ repo, defaultRef string }
-	remotes := make(map[string]remoteInfo)
-	var branches []workspaceBranch
-	lines := strings.Split(out, "\n")
-	if len(lines) > 256 {
+	// Remote-tracking refs, not upstreams: a plain "git push origin x" (no -u)
+	// records the push on refs/remotes/origin/x without setting an upstream.
+	out, err := branchGit(ctx, dir, "for-each-ref", "--count=257", "--format=%(refname)", "refs/remotes/")
+	if err != nil {
+		return nil, err
+	}
+	refs := strings.Split(out, "\n")
+	if len(refs) > 256 {
 		return nil, fmt.Errorf("repository branch limit exceeded")
 	}
-	for _, line := range lines {
-		fields := strings.Split(line, "\x00")
-		if len(fields) != 5 || fields[1] == "" || fields[1] == "." || fields[0] == "main" || fields[0] == "master" {
-			continue
-		}
-		remote, ok := remotes[fields[1]]
-		if !ok {
-			remoteURL, err := branchGit(ctx, dir, "remote", "get-url", "--", fields[1])
-			if err != nil {
-				return nil, err
+	var branches []workspaceBranch
+	for _, name := range strings.Fields(remoteNames) {
+		prefix := "refs/remotes/" + name + "/"
+		var repo, defaultRef string
+		for _, ref := range refs {
+			branch, ok := strings.CutPrefix(ref, prefix)
+			if !ok || branch == "HEAD" || branch == "main" || branch == "master" {
+				continue
 			}
-			remote.repo = githubRemoteRepo(remoteURL)
-			if remote.repo != "" {
+			if repo == "" {
+				remoteURL, err := branchGit(ctx, dir, "remote", "get-url", "--", name)
+				if err != nil {
+					return nil, err
+				}
+				if repo = githubRemoteRepo(remoteURL); repo == "" {
+					break
+				}
 				// Missing remote HEAD is normal for freshly added remotes.
-				remote.defaultRef, _ = branchGit(ctx, dir, "symbolic-ref", "refs/remotes/"+fields[1]+"/HEAD")
+				defaultRef, _ = branchGit(ctx, dir, "symbolic-ref", prefix+"HEAD")
 			}
-			remotes[fields[1]] = remote
+			if ref == defaultRef {
+				continue
+			}
+			// A tracking ref alone does not prove ownership: gh pr checkout and
+			// fetches create them too. Report only branches this sandbox pushed,
+			// with the pushed SHA, which is what a PR of this claw points at.
+			pushed := lastPushedSHA(ctx, dir, ref)
+			if pushed == "" {
+				continue
+			}
+			branches = append(branches, workspaceBranch{Repo: repo, Branch: branch, HeadSHA: pushed})
 		}
-		branch := strings.TrimPrefix(fields[2], "refs/heads/")
-		if remote.repo == "" || !strings.HasPrefix(fields[2], "refs/heads/") || branch == "main" || branch == "master" || fields[4] == remote.defaultRef {
-			continue
-		}
-		// An upstream alone does not prove ownership: gh pr checkout tracks other
-		// authors' branches too. Report only branches this sandbox pushed.
-		pushed := lastPushedSHA(ctx, dir, fields[4])
-		if pushed == "" {
-			continue
-		}
-		// GitHub knows the upstream branch name, which can differ from the local name.
-		// The pushed SHA, not the local head, is what a PR of this claw points at.
-		branches = append(branches, workspaceBranch{Repo: remote.repo, Branch: branch, HeadSHA: pushed})
 	}
 	return branches, ctx.Err()
 }
