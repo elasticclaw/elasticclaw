@@ -535,6 +535,11 @@ func TestFactoryMCPHubFailuresAreNotUnauthorized(t *testing.T) {
 // dropped path value or query field fails the suite. REST handlers answer a
 // missing path value with 400, so lookups of unknown IDs must reach their 404.
 func TestFactoryMCPReadToolWiring(t *testing.T) {
+	// Workspaces are read from the hub config dir; isolate it from the host.
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	if err := saveExternalWorkspace(&types.WorkspaceConfig{Name: "elasticclaw-test"}); err != nil {
+		t.Fatal(err)
+	}
 	s, token := factoryMCPFixture(t)
 	session, ctx := factoryMCPClient(t, s, token.Token)
 	run := map[string]any{"run_id": "missing-run"}
