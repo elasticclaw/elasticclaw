@@ -1,15 +1,18 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
 func TestClawPRRegistrationValidation(t *testing.T) {
@@ -171,40 +174,110 @@ func TestClawPRRegistrationAssociatesWithoutCompletion(t *testing.T) {
 	}
 }
 
-func TestClawPRRegistrationV2NotImplemented(t *testing.T) {
-	for _, connected := range []bool{false, true} {
-		name := "durable"
-		if connected {
-			name = "connection"
-		}
-		t.Run(name, func(t *testing.T) {
-			s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+func TestClawPRRegistrationV2RegisterOnly(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	for _, mode := range []string{"durable", "connection", "control"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
 			const clawID = "claw-pr-v2"
-			if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,github_repos,created_at) VALUES(?,'test-tenant-id','test','','running','[{"repo":"owner/repo"}]',datetime('now'))`, clawID); err != nil {
+			const url = "https://github.com/owner/repo/pull/1"
+			s, db := newTaskRunAnalyticsTestServer(t, clawID)
+			s.hubCfg.ClawToken = "claw-token"
+			if _, err := db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"}]' WHERE id=?`, clawID); err != nil {
 				t.Fatal(err)
 			}
-			if connected {
+			taskRunID, _ := startTaskRunForTest(t, s, clawID, "pr-v2-registration")
+			if mode == "connection" {
 				s.claws[clawID] = &clawConn{id: clawID, tenantID: "test-tenant-id", workflowV2Controlled: true}
-			} else {
-				insertWorkflowV2Run(t, db, "pr-v2", "attempt-pr-v2", time.Time{}, now())
-				if _, err := db.Exec(`UPDATE workflow_v2_runs SET tenant_id='test-tenant-id' WHERE id='pr-v2'`); err != nil {
-					t.Fatal(err)
+			}
+			store := workflowv2.NewStore(db)
+			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+				ID: "pr-v2", TenantID: "test-tenant-id", InitialClawID: clawID,
+				WorkspaceYAML: []byte("schema_version: 2\nname: test\nrepositories:\n  repo:\n    provider: github\n    repository: owner/repo\n"),
+				WorkflowYAML:  []byte(workflowV2APIWorkflow),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldClient := defaultGitHubClient
+			defaultGitHubClient = newGitHubClient()
+			t.Cleanup(func() { defaultGitHubClient = oldClient })
+			defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/repos/owner/repo/pulls/1" {
+					t.Fatalf("unexpected GitHub request: %s", r.URL)
+				}
+				if _, ok := r.Context().Deadline(); !ok && mode != "control" {
+					t.Error("verification has no deadline")
+				}
+				return githubAppTokenResponse(http.StatusOK, `{"html_url":"`+url+`","state":"open","head":{"sha":"head-v2","ref":"feature"},"base":{"ref":"main"}}`), nil
+			})}
+			for i := 0; i < 2; i++ {
+				if mode == "control" {
+					receipt, err := s.applyWorkflowV2ClawControl(ctx, store, typesv2.ControlEnvelope{
+						ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "claim-v2", Kind: typesv2.MessagePullRequestClaimed,
+						RunID: run.ID, AttemptID: run.CurrentAttemptID, ExpectedStateVersion: &run.StateVersion,
+						Payload: []byte(`{"pull_requests":[{"url":"` + url + `"}]}`),
+					})
+					want := typesv2.DispositionAccepted
+					if i == 1 {
+						want = typesv2.DispositionDuplicate
+					}
+					if err != nil || receipt.Disposition != want {
+						t.Fatalf("claim: %#v, %v", receipt, err)
+					}
+					continue
+				}
+				req := httptest.NewRequest(http.MethodPost, "/api/claws/"+clawID+"/prs?claw_token=claw-token", strings.NewReader(`{"url":"`+url+`","source":"gh_create"}`))
+				rec := httptest.NewRecorder()
+				s.mux.ServeHTTP(rec, req)
+				if rec.Code != 200 || !strings.Contains(rec.Body.String(), fmt.Sprintf(`"registered":%t`, i == 0)) {
+					t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
 				}
 			}
-			req := httptest.NewRequest(http.MethodPost, "/api/claws/"+clawID+"/prs?claw_token=claw-token", strings.NewReader(`{"url":"https://github.com/owner/repo/pull/1","source":"gh_create"}`))
-			rec := httptest.NewRecorder()
-			s.mux.ServeHTTP(rec, req)
-			if rec.Code != 501 {
-				t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
-			}
-			var count int
+			var count, registered int
 			if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs`).Scan(&count); err != nil {
 				t.Fatal(err)
 			}
 			if count != 0 {
-				t.Fatalf("V2 registered a legacy PR")
+				t.Fatal("V2 registered a legacy PR")
+			}
+			if err := db.QueryRow(`SELECT COUNT(*),registered_only FROM workflow_v2_delivery_prs WHERE run_id=?`, run.ID).Scan(&count, &registered); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 || registered != 1 {
+				t.Fatalf("PR count=%d registered=%d", count, registered)
+			}
+			assertTaskRunPR(t, db, taskRunID, "owner/repo", 1, taskRunPRStateOpen, false)
+			updated, err := store.GetRun(ctx, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.StateVersion != run.StateVersion || updated.State != run.State {
+				t.Fatalf("registration changed workflow: %#v", updated)
+			}
+			if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE kind LIKE 'delivery.%'`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatal("registration emitted delivery events")
 			}
 		})
+	}
+}
+
+func TestClawPRRegistrationV2RequiresActiveBinding(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "claw-no-v2-attempt"
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,github_repos,created_at) VALUES(?,'test-tenant-id','test','','running','[{"repo":"owner/repo"}]',datetime('now'))`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	s.claws[clawID] = &clawConn{id: clawID, tenantID: "test-tenant-id", workflowV2Controlled: true}
+	req := httptest.NewRequest(http.MethodPost, "/api/claws/"+clawID+"/prs?claw_token=claw-token", strings.NewReader(`{"url":"https://github.com/owner/repo/pull/1","source":"gh_create"}`))
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("missing binding: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

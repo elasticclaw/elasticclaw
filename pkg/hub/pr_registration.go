@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
 // handleClawPRRegistration records creation without signaling completion.
@@ -73,16 +78,48 @@ func (s *Server) handleClawPRRegistration(w http.ResponseWriter, r *http.Request
 	if cc == nil {
 		cc = &clawConn{id: clawID, tenantID: tenantID}
 	}
+	var registered bool
 	if s.workflowV2OwnsExecution(cc) {
-		// TODO(Part 2): register against the active V2 attempt without delivery facts or events.
-		http.Error(w, "workflow V2 PR registration is not implemented", http.StatusNotImplemented)
-		return
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		store := workflowv2.NewStore(s.db)
+		binding, found, bindingErr := store.ActiveControlBinding(ctx, tenantID, clawID)
+		if bindingErr != nil {
+			http.Error(w, "failed to resolve workflow V2 attempt", http.StatusInternalServerError)
+			return
+		}
+		if !found {
+			http.Error(w, "no active workflow V2 attempt", http.StatusConflict)
+			return
+		}
+		var pr typesv2.VerifiedPullRequest
+		pr, registered, err = store.RegisterPullRequest(ctx, binding.RunID, binding.AttemptID,
+			typesv2.PullRequestClaim{URL: report.URL}, s.workflowV2PullRequestVerifier())
+		if err == nil {
+			err = s.associateWorkflowV2TaskRunPR(clawID, pr)
+		}
+	} else {
+		registered, err = s.storePRMention(clawID, match[1], number, report.URL, false, report.Source)
 	}
-	registered, err := s.storePRMention(clawID, match[1], number, report.URL, false, report.Source)
 	if err != nil {
 		http.Error(w, "failed to register PR", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"registered": registered})
+}
+
+func (s *Server) associateWorkflowV2TaskRunPR(clawID string, pr typesv2.VerifiedPullRequest) error {
+	_, runID, _, ok, err := s.taskRunContextForClaw(clawID)
+	if err != nil || !ok {
+		return err
+	}
+	state := pr.State
+	if state == "merged" {
+		state = taskRunPRStateClosed
+	}
+	return s.associateTaskRunPR(TaskRunPR{
+		RunID: runID, Repo: pr.Repository, PRNumber: pr.Number, URL: pr.URL,
+		HeadSHA: pr.HeadSHA, AgentHeadSHA: true, State: state, Merged: pr.State == "merged",
+	})
 }
