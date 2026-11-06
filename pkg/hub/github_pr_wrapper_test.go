@@ -79,6 +79,9 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 		{"web", []string{"pr", "create", "-w"}, "https://github.com/org/repo/pull/7\n", 0, false, true},
 		// A flag value is not a flag: a title of "--help" still creates the PR.
 		{"flag_like_title", []string{"pr", "create", "--title", "--help"}, "https://github.com/org/repo/pull/42\n", 0, true, false},
+		{"api_grouped_jq", []string{"api", "repos/org/repo/pulls", "-f", "title=t", "-iq", "{html_url: .body}"}, `{"html_url":"https://github.com/org/repo/pull/7"}`, 0, false, true},
+		{"api_grouped_template", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-it", "{{.body}}"}, `{"html_url":"https://github.com/org/repo/pull/7"}`, 0, false, true},
+		{"api_grouped_include", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-ip"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 0, true, false},
 		{"non_create", []string{"pr", "view"}, "bytes\x00\n\n", 23, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

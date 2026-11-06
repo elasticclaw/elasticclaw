@@ -8051,6 +8051,8 @@ elif [ "${positional[0]:-}" = "api" ]; then
       # is valid JSON), so it cannot identify the created PR.
       -q|--jq|-t|--template) api_transformed=1; skip_value=1 ;;
       -q?*|--jq=*|-t?*|--template=*) api_transformed=1 ;;
+      # Grouped short flags (-iq, -it) can carry --jq/--template too.
+      -[!XfFH-]*) [[ "$arg" == *[qt]* ]] && api_transformed=1 ;;
       -H|--header|--hostname|--cache|-R|--repo) skip_value=1 ;;
       *)
         if [[ "$arg" =~ ^/?repos/[^/]+/[^/]+/pulls$ ]]; then
