@@ -112,7 +112,7 @@ func scanAPIToken(row interface{ Scan(...any) error }, timestamp time.Time) (api
 
 func (s *Server) handleAPITokens(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	login := strings.ToLower(githubLoginFromContext(r.Context()))
+	login := githubLoginFromContext(r.Context())
 	if login == "" {
 		jsonError(w, http.StatusForbidden, "API tokens require GitHub sign-in")
 		return
@@ -209,7 +209,7 @@ func (s *Server) createAPIToken(w http.ResponseWriter, r *http.Request, login st
 
 func (s *Server) handleAPIToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	login := strings.ToLower(githubLoginFromContext(r.Context()))
+	login := githubLoginFromContext(r.Context())
 	if login == "" {
 		jsonError(w, http.StatusForbidden, "API tokens require GitHub sign-in")
 		return

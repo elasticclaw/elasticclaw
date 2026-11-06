@@ -108,7 +108,7 @@ func TestAPITokensCreateListRevoke(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT owner_login, token_hash, token_prefix FROM api_tokens WHERE id = ?`, item.ID).Scan(&owner, &hash, &prefix); err != nil {
 		t.Fatal(err)
 	}
-	if owner != "alice" || hash != apiTokenHash(item.Token) || prefix != item.Prefix || strings.Contains(hash, item.Token) {
+	if owner != "ALICE" || hash != apiTokenHash(item.Token) || prefix != item.Prefix || strings.Contains(hash, item.Token) {
 		t.Fatal("unexpected stored token")
 	}
 	newest := createAPITokenForTest(t, s, "alice", `{"name":"Never expires","expires_in_days":null}`)
