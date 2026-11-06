@@ -7914,15 +7914,34 @@ func buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken string) string
 	return `sudo tee /usr/local/bin/elasticclaw-report-pr > /dev/null << 'REPORTEOF'
 #!/bin/bash
 set +x
-url="$(python3 - "$1" "$2" << 'PYEOF'
+url="$(python3 - "$1" "$2" "${3:-}" << 'PYEOF'
 import json, re, sys
+PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/[0-9]+")
+def requested_repo(candidate):
+    match = PR_URL.fullmatch(candidate)
+    return bool(match) and match.group(1).lower() == sys.argv[3].lower()
 try:
     text = open(sys.argv[2], errors="replace").read()
     if sys.argv[1] == "api":
-        text = json.loads(text).get("html_url", "")
-    match = re.search(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+", text)
-    if match:
-        print(match.group(0))
+        body = text
+        if body.startswith("HTTP/"):
+            # --include prefixes the JSON body with response headers.
+            body = re.split(r"\r?\n\r?\n", body, maxsplit=1)[-1]
+        try:
+            data = json.loads(body)
+            candidates = [data.get("html_url") or ""] if isinstance(data, dict) else []
+        except ValueError:
+            # --jq/--template print selected fields; accept only a whole PR URL
+            # token for the repository the request was sent to.
+            candidates = [c for c in text.split() if requested_repo(c)]
+        for candidate in candidates:
+            if PR_URL.fullmatch(candidate):
+                print(candidate)
+                break
+    else:
+        match = PR_URL.search(text)
+        if match:
+            print(match.group(0))
 except (OSError, ValueError, AttributeError, TypeError):
     pass
 PYEOF
@@ -7991,26 +8010,38 @@ fi
 # Only creation commands need to return through the reporting path.
 report_kind=""
 repo_args=()
+head_args=()
+positional=()
 prev=""
 for arg in "$@"; do
-  if [ "$prev" = "--repo" ] || [ "$prev" = "-R" ]; then
-    repo_args=(--repo "$arg")
-  fi
+  # Flags may precede the subcommand (gh -R owner/repo pr create).
+  case "$prev" in
+    --repo|-R) repo_args=(--repo "$arg"); prev=""; continue ;;
+    --head|-H) head_args=("$arg"); prev=""; continue ;;
+  esac
   case "$arg" in
+    --repo|-R|--head|-H) prev="$arg"; continue ;;
     --repo=*) repo_args=(--repo "${arg#--repo=}") ;;
     -R?*) repo_args=(--repo "${arg#-R}") ;;
+    --head=*) head_args=("${arg#--head=}") ;;
+    -H?*) head_args=("${arg#-H}") ;;
+    -*) ;;
+    *) [ "${#positional[@]}" -lt 2 ] && positional+=("$arg") ;;
   esac
-  prev="$arg"
+  prev=""
 done
-if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then
+if [ "${positional[0]:-}" = "pr" ] && [ "${positional[1]:-}" = "create" ]; then
   report_kind="pr"
-elif [ "${1:-}" = "api" ]; then
+elif [ "${positional[0]:-}" = "api" ]; then
+  # -H is --header for gh api; the TTY lookup takes the head from fields.
+  head_args=()
   api_path=""
   api_method=""
   api_fields=0
   skip_value=0
+  field_value=0
   prev=""
-  for arg in "${@:2}"; do
+  for arg in "$@"; do
     if [ "$prev" = "method" ]; then
       api_method="$arg"
       prev=""
@@ -8018,15 +8049,22 @@ elif [ "${1:-}" = "api" ]; then
     fi
     if [ "$skip_value" = 1 ]; then
       skip_value=0
+      if [ "$field_value" = 1 ] && [[ "$arg" == head=* ]]; then
+        head_args=("${arg#head=}")
+      fi
+      field_value=0
       continue
     fi
     case "$arg" in
       -X|--method) prev="method" ;;
       -X?*) api_method="${arg#-X}" ;;
       --method=*) api_method="${arg#--method=}" ;;
-      -f|-F|--field|--raw-field|--input) api_fields=1; skip_value=1 ;;
+      -f|-F|--field|--raw-field) api_fields=1; skip_value=1; field_value=1 ;;
+      --input) api_fields=1; skip_value=1 ;;
+      -fhead=*|-Fhead=*) api_fields=1; head_args=("${arg#-?head=}") ;;
+      --field=head=*|--raw-field=head=*) api_fields=1; head_args=("${arg#*=head=}") ;;
       -f?*|-F?*|--field=*|--raw-field=*|--input=*) api_fields=1 ;;
-      -H|--header|--hostname|-q|--jq|-t|--template|--cache) skip_value=1 ;;
+      -H|--header|--hostname|-q|--jq|-t|--template|--cache|-R|--repo) skip_value=1 ;;
       *)
         if [[ "$arg" =~ ^/?repos/[^/]+/[^/]+/pulls$ ]]; then
           api_path="$arg"
@@ -8036,10 +8074,11 @@ elif [ "${1:-}" = "api" ]; then
   done
   if [ -n "$api_path" ] && { [ "$api_method" = "POST" ] || { [ -z "$api_method" ] && [ "$api_fields" = 1 ]; }; }; then
     report_kind="api"
+    api_repo="${api_path#/}"
+    api_repo="${api_repo#repos/}"
+    api_repo="${api_repo%/pulls}"
     if [ "${#repo_args[@]}" = 0 ]; then
-      api_repo="${api_path#/}"
-      api_repo="${api_repo#repos/}"
-      repo_args=(--repo "${api_repo%/pulls}")
+      repo_args=(--repo "$api_repo")
     fi
   fi
 fi
@@ -8053,7 +8092,7 @@ if [ -t 1 ]; then
   if [ "$status" = 0 ]; then
     (
       trap 'rm -f "$output"' EXIT
-      if python3 - "$REAL_GH" "${repo_args[@]}" > "$output" << 'VIEWEOF'
+      if python3 - "$REAL_GH" "${head_args[@]}" "${repo_args[@]}" > "$output" << 'VIEWEOF'
 import os, signal, subprocess, sys
 try:
     process = subprocess.Popen([sys.argv[1], "pr", "view", *sys.argv[2:], "--json", "url", "-q", ".url"], start_new_session=True)
@@ -8080,7 +8119,7 @@ else
   if [ "$status" = 0 ]; then
     (
       trap 'rm -f "$output"' EXIT
-      /usr/local/bin/elasticclaw-report-pr "$report_kind" "$output"
+      /usr/local/bin/elasticclaw-report-pr "$report_kind" "$output" "${api_repo:-}"
     ) </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
   else

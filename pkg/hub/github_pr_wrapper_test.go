@@ -40,6 +40,10 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 	}{
 		{"create", []string{"pr", "create", "--title", "a title"}, "created\x00\xff\nhttps://github.com/org/repo/pull/42\n\n", 0, true, false},
 		{"failure", []string{"pr", "create"}, "https://github.com/org/repo/pull/42\n", 17, false, false},
+		{"leading_repo_flag", []string{"-R", "org/repo", "pr", "create", "--fill"}, "https://github.com/org/repo/pull/42\n", 0, true, false},
+		{"leading_repo_equals", []string{"--repo=org/repo", "pr", "create"}, "https://github.com/org/repo/pull/42\n", 0, true, false},
+		{"interleaved_repo_flag", []string{"pr", "-R", "org/repo", "create"}, "https://github.com/org/repo/pull/42\n", 0, true, false},
+		{"leading_repo_non_create", []string{"-R", "org/repo", "pr", "view"}, "unchanged", 0, false, true},
 		{"api_method", []string{"api", "repos/org/repo/pulls", "-X", "POST"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 0, true, false},
 		{"api_long_method", []string{"api", "--method", "POST", "/repos/org/repo/pulls"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 0, true, false},
 		{"api_compact_method", []string{"api", "-XPOST", "repos/org/repo/pulls"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 0, true, false},
@@ -53,6 +57,11 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 		{"api_get", []string{"api", "repos/org/repo/pulls"}, "unchanged", 0, false, true},
 		{"api_wrong_path", []string{"api", "repos/org/repo/issues", "-X", "POST"}, "unchanged", 0, false, true},
 		{"api_malformed_json", []string{"api", "repos/org/repo/pulls", "-X", "POST"}, "not-json", 0, false, false},
+		{"api_jq_url", []string{"api", "repos/org/repo/pulls", "-X", "POST", "--jq", ".html_url"}, "https://github.com/org/repo/pull/42\n", 0, true, false},
+		{"api_template_url", []string{"api", "repos/org/repo/pulls", "-f", "title=t", "-t", "{{.html_url}}"}, "https://github.com/org/repo/pull/42", 0, true, false},
+		{"api_jq_other_repo", []string{"api", "repos/org/repo/pulls", "-X", "POST", "-q", ".body"}, "see https://github.com/other/repo/pull/7\n", 0, false, false},
+		{"api_include", []string{"api", "-i", "repos/org/repo/pulls", "-X", "POST"}, "HTTP/2.0 201 Created\r\nLocation: https://api.github.com/repos/org/repo/pulls/42\r\n\r\n{\"body\":\"see https://github.com/org/repo/pull/7\",\"html_url\":\"https://github.com/org/repo/pull/42\"}", 0, true, false},
+		{"api_leading_repo_flag", []string{"-R", "org/repo", "api", "repos/org/repo/pulls", "-X", "POST"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 0, true, false},
 		{"api_failure", []string{"api", "repos/org/repo/pulls", "-X", "POST"}, `{"html_url":"https://github.com/org/repo/pull/42"}`, 9, false, false},
 		{"non_create", []string{"pr", "view"}, "bytes\x00\n\n", 23, false, true},
 	} {
@@ -179,7 +188,7 @@ master, slave = pty.openpty()
 attrs = termios.tcgetattr(slave)
 attrs[1] = 0
 termios.tcsetattr(slave, termios.TCSANOW, attrs)
-p = subprocess.Popen(["bash", sys.argv[1], "pr", "create", "--repo", "org/repo"], stdin=subprocess.PIPE, stdout=slave, stderr=subprocess.PIPE)
+p = subprocess.Popen(["bash", sys.argv[1], "pr", "create", "--repo", "org/repo", "--head", "feature-b"], stdin=subprocess.PIPE, stdout=slave, stderr=subprocess.PIPE)
 _, stderr = p.communicate(b"interactive stdin\n")
 stdout = b""
 while select.select([master], [], [], 0.1)[0]:
@@ -224,7 +233,8 @@ print(json.dumps({"status": p.returncode, "stdout": stdout.decode(), "stderr": s
 		time.Sleep(10 * time.Millisecond)
 	}
 	view, _ := os.ReadFile(filepath.Join(dir, "view"))
-	if string(view) != "pr\nview\n--repo\norg/repo\n--json\nurl\n-q\n.url\n" {
+	// The lookup must target the created head, not the checked-out branch.
+	if string(view) != "pr\nview\nfeature-b\n--repo\norg/repo\n--json\nurl\n-q\n.url\n" {
 		t.Fatalf("unexpected TTY fallback: %s", view)
 	}
 	input, _ := os.ReadFile(filepath.Join(dir, "stdin"))
