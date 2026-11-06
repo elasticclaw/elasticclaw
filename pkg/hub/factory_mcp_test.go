@@ -579,16 +579,14 @@ func TestFactoryMCPReadToolWiring(t *testing.T) {
 	}
 }
 
-func TestPruneAPITokenAuditRunsWithoutCheckpointRetention(t *testing.T) {
+func TestPruneAPITokenAuditIfDue(t *testing.T) {
 	s := newAPITokenTestServer(t)
 	now := time.Now()
-	for _, age := range []time.Duration{apiTokenAuditMaxAge + time.Hour, time.Hour} {
+	insert := func(age time.Duration) {
+		t.Helper()
 		if _, err := s.db.Exec(`INSERT INTO api_token_audit(token_id,owner_login,tool,args_summary,status,created_at) VALUES('t','alice','list_claws','{}','ok',?)`, now.Add(-age).Unix()); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if s.retentionSettings().enabled {
-		t.Fatal("test expects checkpoint retention disabled by default")
 	}
 	countRows := func() int {
 		var count int
@@ -597,12 +595,19 @@ func TestPruneAPITokenAuditRunsWithoutCheckpointRetention(t *testing.T) {
 		}
 		return count
 	}
-	s.retentionTick(now, retentionSettings{dryRun: true})
-	if got := countRows(); got != 2 {
-		t.Fatalf("audit rows after dry-run tick = %d; want 2", got)
-	}
-	s.retentionTick(now, s.retentionSettings())
+	insert(apiTokenAuditMaxAge + time.Hour)
+	insert(time.Hour)
+	s.pruneAPITokenAuditIfDue(now)
 	if got := countRows(); got != 1 {
-		t.Fatalf("audit rows after tick = %d; want 1", got)
+		t.Fatalf("audit rows after prune = %d; want 1", got)
+	}
+	insert(apiTokenAuditMaxAge + time.Hour)
+	s.pruneAPITokenAuditIfDue(now.Add(30 * time.Minute))
+	if got := countRows(); got != 2 {
+		t.Fatalf("prune ran again within the hour: %d rows; want 2", got)
+	}
+	s.pruneAPITokenAuditIfDue(now.Add(61 * time.Minute))
+	if got := countRows(); got != 1 {
+		t.Fatalf("audit rows after next hourly prune = %d; want 1", got)
 	}
 }

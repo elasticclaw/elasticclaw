@@ -152,6 +152,7 @@ func (s *Server) auditFactoryMCP(next mcp.MethodHandler) mcp.MethodHandler {
 			log.Printf("[mcp] audit failed, refusing tool=%s: %v", call.Params.Name, err)
 			return mcpText("Call refused: the hub could not record the audit entry. Try again later.", true), nil
 		}
+		s.pruneAPITokenAuditIfDue(now())
 		result, err := next(ctx, method, req)
 		status, detail := "ok", ""
 		if err != nil {
@@ -185,6 +186,21 @@ func (s *Server) auditFactoryMCP(next mcp.MethodHandler) mcp.MethodHandler {
 			}, args.ClawID), 200), status)
 		}
 		return result, err
+	}
+}
+
+// apiTokenAuditMaxAge is how long MCP tool-call audit rows are kept. Pruning is
+// independent of checkpoint retention settings and runs at most hourly from the
+// audit write path, so the table is bounded whenever it grows.
+const apiTokenAuditMaxAge = 90 * 24 * time.Hour
+
+func (s *Server) pruneAPITokenAuditIfDue(at time.Time) {
+	last := s.mcpAuditPrunedAt.Load()
+	if at.Unix()-last < int64(time.Hour/time.Second) || !s.mcpAuditPrunedAt.CompareAndSwap(last, at.Unix()) {
+		return
+	}
+	if _, err := s.db.Exec(`DELETE FROM api_token_audit WHERE created_at < ?`, at.Add(-apiTokenAuditMaxAge).Unix()); err != nil {
+		log.Printf("[mcp] audit prune failed: %v", err)
 	}
 }
 
