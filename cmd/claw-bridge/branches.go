@@ -168,7 +168,7 @@ func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, er
 	remoteNames := strings.Fields(remoteList)
 	// Candidates come from local branches, which stay few in a sandbox, not
 	// from refs/remotes/*, which mirrors every branch of a full clone.
-	out, err := branchGit(ctx, dir, "for-each-ref", "--count=257", "--format=%(refname:short)%00%(upstream)", "refs/heads/")
+	out, err := branchGit(ctx, dir, "for-each-ref", "--count=257", "--format=%(refname:lstrip=2)%00%(upstream)", "refs/heads/")
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +180,9 @@ func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, er
 	remotes := make(map[string]remoteInfo)
 	seen := make(map[string]bool)
 	var branches []workspaceBranch
+	// Pushed tracking refs read straight from the reflog files cover pushes
+	// under another remote name without -u (git push origin HEAD:other).
+	candidateSets := [][]string{pushedTrackingRefs(ctx, dir)}
 	for _, line := range lines {
 		local, upstream, ok := strings.Cut(line, "\x00")
 		if !ok || local == "" {
@@ -191,6 +194,9 @@ func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, er
 		for _, name := range remoteNames {
 			candidates = append(candidates, "refs/remotes/"+name+"/"+local)
 		}
+		candidateSets = append(candidateSets, candidates)
+	}
+	for _, candidates := range candidateSets {
 		for _, ref := range candidates {
 			name, branch := splitTrackingRef(ref, remoteNames)
 			if name == "" || seen[ref] || branch == "HEAD" || branch == "main" || branch == "master" {
@@ -224,6 +230,39 @@ func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, er
 		}
 	}
 	return branches, ctx.Err()
+}
+
+// pushedTrackingRefs lists remote-tracking refs whose reflog file records a
+// push, without a git process per ref: a full clone has a reflog for every
+// remote branch. Repositories without reflog files (reftable) yield nothing
+// here and rely on the local-branch candidates.
+func pushedTrackingRefs(ctx context.Context, dir string) []string {
+	logs, err := branchGit(ctx, dir, "rev-parse", "--git-path", "logs/refs/remotes")
+	if err != nil {
+		return nil
+	}
+	if !filepath.IsAbs(logs) {
+		logs = filepath.Join(dir, logs)
+	}
+	var refs []string
+	_ = filepath.WalkDir(logs, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		if ctx.Err() != nil || len(refs) >= 256 {
+			return filepath.SkipAll
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || !bytes.Contains(data, []byte("\tupdate by push\n")) {
+			return nil
+		}
+		rel, err := filepath.Rel(logs, path)
+		if err == nil {
+			refs = append(refs, "refs/remotes/"+filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return refs
 }
 
 // splitTrackingRef maps refs/remotes/<remote>/<branch> to its remote and
