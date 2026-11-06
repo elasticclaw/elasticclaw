@@ -39,6 +39,11 @@ type terminalTxOpts struct {
 	// would leave a crash window in which the reaper re-terminates the VM the
 	// caller meant to spare.
 	clearProviderID bool
+	// deferPromote skips the pending-claw promotion after commit, for callers
+	// that still sync workflow volumes afterwards: a claw promoted first could
+	// find the writable lease held and fail its attach. Those callers promote
+	// once the sync is done.
+	deferPromote bool
 }
 
 // finishClawTerminalTx atomically changes a claw's terminal-ish state and its
@@ -103,7 +108,9 @@ func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus,
 				reason += ": " + diagnostic
 			}
 			s.cancelWorkflowV2RunForClaw(context.Background(), clawID, reason)
-			go s.promotePendingClaws()
+			if !opts.deferPromote {
+				go s.promotePendingClaws()
+			}
 			return true, nil
 		}
 		last = err

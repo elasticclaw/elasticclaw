@@ -202,3 +202,23 @@ func TestFactoryCreationQueuesBehindOlderPendingClaw(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalTxDeferPromoteLeavesPromotionToCaller(t *testing.T) {
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := newReaperTestServer(t, &types.HubConfig{ConcurrencyGroups: []*types.ConcurrencyGroup{{Name: "cruise-demo", Limit: 1}}})
+	created := time.Now().UTC()
+	insertQueueTestClaw(t, db, "active001", "connected", "cruise-demo", created)
+	insertQueueTestClaw(t, db, "pending01", "pending", "cruise-demo", created.Add(-time.Minute))
+
+	// Callers that sync workflow volumes after the transition must keep the
+	// slot closed until the writable lease is released.
+	if applied, err := s.finishClawTerminalTx("active001", "deleted", "", "completed", "success", terminalTxOpts{deferPromote: true}); err != nil || !applied {
+		t.Fatalf("terminal transition applied=%v err=%v", applied, err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := queueTestStatus(t, db, "pending01"); got != "pending" {
+		t.Fatalf("pending claw status=%q, want pending until the caller promotes", got)
+	}
+	s.promotePendingClaws()
+	waitForQueueTestPromotion(t, db, "pending01")
+}

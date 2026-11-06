@@ -1603,7 +1603,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	if err := s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID); err != nil {
 		return
 	}
-	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "success", terminalTxOpts{})
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "success", terminalTxOpts{deferPromote: true})
 	if err != nil || !applied {
 		return
 	}
