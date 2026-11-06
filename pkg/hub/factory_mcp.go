@@ -206,18 +206,6 @@ func mcpArgsSummary(raw json.RawMessage) string {
 					v[key] = "[redacted]"
 					continue
 				}
-				if key == "input" {
-					// Workflow inputs can carry arbitrary data; keep only their keys.
-					if fields, ok := item.(map[string]any); ok {
-						keys := make([]string, 0, len(fields))
-						for field := range fields {
-							keys = append(keys, field)
-						}
-						sort.Strings(keys)
-						v[key] = map[string]any{"keys": keys}
-						continue
-					}
-				}
 				if key == "content" {
 					if text, ok := item.(string); ok {
 						chars := []rune(text)
