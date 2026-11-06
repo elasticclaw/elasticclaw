@@ -594,3 +594,18 @@ func TestPruneAPITokenAudit(t *testing.T) {
 		t.Fatalf("audit rows after prune = %d, %v; want 1", count, err)
 	}
 }
+
+func TestFactoryMCPAuditErrorRedactsHiddenArgValues(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{"workspace": "ws-visible", "api_key": "sk-live-1",
+		"input": map[string]any{"inputs": map[string]any{"issue_number": "not-a-number", "note": `quote"d`}}})
+	detail := `HTTP 400: {"error":"validation error: input \"issue_number\": expected number, got \"not-a-number\""} key sk-live-1 note quote\"d in ws-visible`
+	got := mcpRedactHiddenArgValues(detail, raw)
+	for _, hidden := range []string{"not-a-number", "sk-live-1", `quote\"d`} {
+		if strings.Contains(got, hidden) {
+			t.Fatalf("audit error kept %q: %s", hidden, got)
+		}
+	}
+	if !strings.Contains(got, "ws-visible") || !strings.Contains(got, "HTTP 400") {
+		t.Fatalf("audit error lost visible context: %s", got)
+	}
+}

@@ -168,7 +168,7 @@ func (s *Server) auditFactoryMCP(next mcp.MethodHandler) mcp.MethodHandler {
 		// Cancellation must not discard the outcome after an action completed.
 		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		if _, auditErr := s.db.ExecContext(auditCtx, `UPDATE api_token_audit SET status=?, error=? WHERE id=?`, status, mcpTruncate(detail, 2048), auditID); auditErr != nil {
+		if _, auditErr := s.db.ExecContext(auditCtx, `UPDATE api_token_audit SET status=?, error=? WHERE id=?`, status, mcpTruncate(mcpRedactHiddenArgValues(detail, call.Params.Arguments), 2048), auditID); auditErr != nil {
 			log.Printf("[mcp] audit outcome failed id=%d: %v", auditID, auditErr)
 		}
 		switch call.Params.Name {
@@ -257,6 +257,48 @@ func mcpArgsSummary(raw json.RawMessage) string {
 	shorten(value)
 	data, _ := json.Marshal(value)
 	return mcpTruncate(string(data), 1024)
+}
+
+// mcpRedactHiddenArgValues removes from an error detail every argument value
+// that mcpArgsSummary keeps out of the audit row (workflow input values and
+// credential-like keys), since handlers may echo them in validation errors.
+func mcpRedactHiddenArgValues(detail string, raw json.RawMessage) string {
+	var value any
+	if detail == "" || json.Unmarshal(raw, &value) != nil {
+		return detail
+	}
+	var hidden []string
+	var collect func(v any, hide bool)
+	collect = func(v any, hide bool) {
+		switch v := v.(type) {
+		case map[string]any:
+			for key, item := range v {
+				collect(item, hide || key == "input" || mcpSensitiveArgPattern.MatchString(key))
+			}
+		case []any:
+			for _, item := range v {
+				collect(item, hide)
+			}
+		case string, float64, bool:
+			if !hide {
+				return
+			}
+			text := fmt.Sprint(v)
+			if len(text) >= 4 {
+				hidden = append(hidden, text)
+				if quoted, err := json.Marshal(text); err == nil {
+					hidden = append(hidden, string(quoted[1:len(quoted)-1]))
+				}
+			}
+		}
+	}
+	collect(value, false)
+	// Longest first, so a value is never partially replaced by its substring.
+	sort.Slice(hidden, func(i, j int) bool { return len(hidden[i]) > len(hidden[j]) })
+	for _, text := range hidden {
+		detail = strings.ReplaceAll(detail, text, "[redacted]")
+	}
+	return detail
 }
 
 var mcpClawIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
