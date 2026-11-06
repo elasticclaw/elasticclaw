@@ -179,7 +179,7 @@ Use webhooks and the ElasticClaw Server API to connect private queues, release e
 
 ## Factory MCP server
 
-The hub exposes a stateless Streamable HTTP MCP server at `/mcp`. Sign in as an admin and create a personal token in **Settings → API Tokens**, then configure Claude Code:
+The hub exposes a stateless Streamable HTTP MCP server at `/mcp`. Sign in with GitHub as an admin (password sessions cannot manage tokens) and create a personal token in **Settings → API Tokens**, then configure Claude Code:
 
 ```sh
 export FACTORY_API_TOKEN='ecf_...'
@@ -187,7 +187,7 @@ claude mcp add --transport http factory https://your-hub.example/mcp \
   --header "Authorization: Bearer $FACTORY_API_TOKEN"
 ```
 
-Only `Authorization: Bearer` personal API tokens are accepted. Every request checks that the token is active and its owner is still an admin. Tokens do not authenticate existing REST or WebSocket routes. Tool calls use the owner's tenant and permissions and are recorded in `api_token_audit` before they run (a call is refused if its audit row cannot be written). Audit rows store the tool arguments, truncated to 1 KiB, with `content` shortened and values of credential-like keys (token, secret, password, API key) redacted; enabled retention jobs prune them after 90 days.
+Only `Authorization: Bearer` personal API tokens are accepted. Every request checks that the token is active and its owner is still an admin. Tokens do not authenticate existing REST or WebSocket routes. Tool calls use the owner's tenant and permissions and are recorded in `api_token_audit` before they run (a call is refused if its audit row cannot be written). Audit rows store the tool arguments, truncated to 1 KiB, with `content` shortened and values of credential-like keys (token, secret, password, API key) redacted; the hub prunes them after 90 days.
 
 - Agents: `list_claws`, `get_claw`, `get_claw_timeline`, `get_claw_activity`, `get_claw_prs`, `get_gateway_diagnostics`.
 - Workflows: `list_workspaces`, `list_workflows`, `list_workflow_runs`, `get_workflow_run`, `get_workflow_run_logs`, `list_workflow_run_attempts`, `get_workflow_attempt_logs` (run and attempt tools cover v2 workflows only).
