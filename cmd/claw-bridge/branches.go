@@ -196,28 +196,31 @@ func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, er
 		}
 		// An upstream alone does not prove ownership: gh pr checkout tracks other
 		// authors' branches too. Report only branches this sandbox pushed.
-		if !pushedFromHere(ctx, dir, fields[4]) {
+		pushed := lastPushedSHA(ctx, dir, fields[4])
+		if pushed == "" {
 			continue
 		}
 		// GitHub knows the upstream branch name, which can differ from the local name.
-		branches = append(branches, workspaceBranch{Repo: remote.repo, Branch: branch, HeadSHA: fields[3]})
+		// The pushed SHA, not the local head, is what a PR of this claw points at.
+		branches = append(branches, workspaceBranch{Repo: remote.repo, Branch: branch, HeadSHA: pushed})
 	}
 	return branches, ctx.Err()
 }
 
-// pushedFromHere reports whether git recorded a push to the remote-tracking ref.
-// Fetches and clones log other reasons, so only a local push leaves this entry.
-func pushedFromHere(ctx context.Context, dir, trackingRef string) bool {
-	out, err := branchGit(ctx, dir, "reflog", "show", "--format=%gs", trackingRef, "--")
+// lastPushedSHA returns the commit of the newest push git recorded for the
+// remote-tracking ref, or "". Fetches and clones log other reasons, so only a
+// local push leaves this entry.
+func lastPushedSHA(ctx context.Context, dir, trackingRef string) string {
+	out, err := branchGit(ctx, dir, "reflog", "show", "--format=%H%x00%gs", trackingRef, "--")
 	if err != nil {
-		return false
+		return ""
 	}
 	for _, line := range strings.Split(out, "\n") {
-		if line == "update by push" {
-			return true
+		if sha, subject, ok := strings.Cut(line, "\x00"); ok && subject == "update by push" {
+			return sha
 		}
 	}
-	return false
+	return ""
 }
 
 func githubRemoteRepo(remote string) string {

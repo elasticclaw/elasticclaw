@@ -182,6 +182,7 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 		} `json:"user"`
 		Head struct {
 			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
 			Repo struct {
 				FullName string `json:"full_name"`
 			} `json:"repo"`
@@ -191,7 +192,10 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 		return err
 	}
 	for _, pr := range prs {
-		if pr.State != "open" || !s.isClawAppAuthor(pr.User.Login, pr.User.Type) || !strings.EqualFold(pr.Head.Repo.FullName, branch.Repo) || pr.Head.Ref != branch.Branch || pr.Number <= 0 {
+		if pr.State != "open" || !s.isClawAppAuthor(pr.User.Login, pr.User.Type) || !strings.EqualFold(pr.Head.Repo.FullName, branch.Repo) || pr.Head.Ref != branch.Branch || pr.Number <= 0 ||
+			// Branch names get reused; only a PR whose head is the commit this
+			// sandbox last pushed is the claw's own.
+			!strings.EqualFold(pr.Head.SHA, branch.HeadSHA) {
 			continue
 		}
 		expectedURL := fmt.Sprintf("https://github.com/%s/pull/%d", branch.Repo, pr.Number)

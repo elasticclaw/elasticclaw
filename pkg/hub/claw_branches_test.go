@@ -105,8 +105,8 @@ func TestStoreClawBranchesChanges(t *testing.T) {
 func TestClawBranchSweepFiltering(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	for _, tc := range []struct {
-		name, author, login, headRepo, headRef, state, otherStatus, otherKind string
-		noApp, v2, want                                                       bool
+		name, author, login, headRepo, headRef, headSHA, state, otherStatus, otherKind string
+		noApp, v2, want                                                                bool
 	}{
 		{name: "own app bot", author: "Bot", headRepo: "owner/repo", want: true},
 		// Without the App's identity any Bot would qualify: fail closed.
@@ -128,6 +128,8 @@ func TestClawBranchSweepFiltering(t *testing.T) {
 		{name: "V2 delivery by other", author: "Bot", headRepo: "owner/repo", otherStatus: "running", otherKind: "v2_delivered"},
 		{name: "V2 delivery by offline", author: "Bot", headRepo: "owner/repo", otherStatus: "offline", otherKind: "v2_delivered"},
 		{name: "V2 register only", author: "Bot", headRepo: "owner/repo", v2: true, want: true},
+		// A reused branch name: another sandbox pushed the PR head, not this one.
+		{name: "head pushed elsewhere", author: "Bot", headRepo: "owner/repo", headSHA: strings.Repeat("b", 40)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const clawID = "branch-claw"
@@ -193,7 +195,11 @@ func TestClawBranchSweepFiltering(t *testing.T) {
 				if state == "" {
 					state = "open"
 				}
-				return githubAppTokenResponse(200, fmt.Sprintf(`[{"number":1,"html_url":%q,"state":%q,"user":{"login":%q,"type":%q},"head":{"ref":%q,"repo":{"full_name":%q}}}]`, prURL, state, login, tc.author, headRef, tc.headRepo)), nil
+				headSHA := tc.headSHA
+				if headSHA == "" {
+					headSHA = strings.Repeat("a", 40)
+				}
+				return githubAppTokenResponse(200, fmt.Sprintf(`[{"number":1,"html_url":%q,"state":%q,"user":{"login":%q,"type":%q},"head":{"ref":%q,"sha":%q,"repo":{"full_name":%q}}}]`, prURL, state, login, tc.author, headRef, headSHA, tc.headRepo)), nil
 			})}
 			if tc.otherStatus != "" {
 				if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES('other-claw','test-tenant-id','other','',?,?)`, tc.otherStatus, now()); err != nil {
@@ -313,7 +319,7 @@ func TestClawBranchSweepRetriesUnchangedHead(t *testing.T) {
 				if calls == 1 {
 					return githubAppTokenResponse(initialStatus, `[]`), nil
 				}
-				return githubAppTokenResponse(200, `[{"number":1,"html_url":"https://github.com/owner/repo/pull/1","state":"open","user":{"login":"factory-app[bot]","type":"Bot"},"head":{"ref":"feature","repo":{"full_name":"owner/repo"}}}]`), nil
+				return githubAppTokenResponse(200, `[{"number":1,"html_url":"https://github.com/owner/repo/pull/1","state":"open","user":{"login":"factory-app[bot]","type":"Bot"},"head":{"ref":"feature","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repo":{"full_name":"owner/repo"}}}]`), nil
 			})}
 			branch := clawBranch{Repo: "owner/repo", Branch: "feature", HeadSHA: strings.Repeat("a", 40)}
 			pending, err := s.storeClawBranches(clawID, []clawBranch{branch})
@@ -357,7 +363,7 @@ func TestClawBranchesEndpointQueuesRegistration(t *testing.T) {
 	defaultGitHubClient = newGitHubClient()
 	t.Cleanup(func() { defaultGitHubClient = oldClient })
 	defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return githubAppTokenResponse(200, `[{"number":1,"html_url":"https://github.com/owner/repo/pull/1","state":"open","user":{"login":"factory-app[bot]","type":"Bot"},"head":{"ref":"feature","repo":{"full_name":"owner/repo"}}}]`), nil
+		return githubAppTokenResponse(200, `[{"number":1,"html_url":"https://github.com/owner/repo/pull/1","state":"open","user":{"login":"factory-app[bot]","type":"Bot"},"head":{"ref":"feature","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repo":{"full_name":"owner/repo"}}}]`), nil
 	})}
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/api/claws/"+clawID+"/branches?claw_token=claw-token", strings.NewReader(`{"branches":[{"repo":"owner/repo","branch":"feature","head_sha":"`+strings.Repeat("a", 40)+`"},{"repo":"other/lib","branch":"feature","head_sha":"`+strings.Repeat("b", 40)+`"}]}`))

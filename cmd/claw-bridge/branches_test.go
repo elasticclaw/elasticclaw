@@ -140,6 +140,14 @@ func TestBranchReporterChangesAndRetries(t *testing.T) {
 	}
 	branchTestGit(t, repo, "checkout", "feature")
 	branchTestGit(t, repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Changed")
+	// The report carries the last pushed SHA, so an unpushed commit changes nothing.
+	if err := r.report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("unpushed commit resent the report: %d calls", calls)
+	}
+	branchTestGit(t, repo, "push", "-q", "origin", "feature")
 	if err := r.report(context.Background()); err != nil {
 		t.Fatal(err)
 	}
