@@ -492,17 +492,18 @@ func TestFactoryMCPRefusesCallsWhenAuditFails(t *testing.T) {
 }
 
 func TestFactoryMCPAuditRedactsSensitiveArguments(t *testing.T) {
-	raw, _ := json.Marshal(map[string]any{"workspace": "ws", "input": map[string]any{"inputs": map[string]any{
-		"api_key": "sk-live-1", "GITHUB_TOKEN": "ghp_2", "db_password": "pw-3", "credentials": map[string]any{"user": "u-4"}, "ticket": "T-123",
-	}}})
+	raw, _ := json.Marshal(map[string]any{"workspace": "ws", "api_key": "sk-live-1", "options": map[string]any{"GITHUB_TOKEN": "ghp_2", "ticket": "T-123"},
+		"input": map[string]any{"ticket": "T-9", "notes": "pw-3", "credentials": map[string]any{"user": "u-4"}}})
 	summary := mcpArgsSummary(raw)
-	for _, secret := range []string{"sk-live-1", "ghp_2", "pw-3", "u-4"} {
+	for _, secret := range []string{"sk-live-1", "ghp_2", "pw-3", "u-4", "T-9"} {
 		if strings.Contains(summary, secret) {
 			t.Fatalf("audit kept %q: %s", secret, summary)
 		}
 	}
-	if !strings.Contains(summary, "T-123") || !strings.Contains(summary, `"api_key":"[redacted]"`) {
-		t.Fatalf("audit summary: %s", summary)
+	for _, want := range []string{`"api_key":"[redacted]"`, "T-123", `"input":{"keys":["credentials","notes","ticket"]}`} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("audit summary missing %s: %s", want, summary)
+		}
 	}
 }
 
