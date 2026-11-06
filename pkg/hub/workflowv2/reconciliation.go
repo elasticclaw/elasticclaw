@@ -50,7 +50,7 @@ func (s *Store) ActiveDeliveryTargets(ctx context.Context, repository string, nu
 			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
-		WHERE p.repository=? AND p.pr_number=? AND p.active=1 AND r.status='active'
+		WHERE p.repository=? AND p.pr_number=? AND p.active=1 AND p.registered_only=0 AND r.status='active'
 		AND a.status='active' ORDER BY r.id`, repository, number)
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func (s *Store) ActiveDeliveryTargetsByHead(ctx context.Context, headSHA string)
 			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
-		WHERE p.current_head_sha=? AND p.active=1 AND r.status='active' AND a.status='active'
+		WHERE p.current_head_sha=? AND p.active=1 AND p.registered_only=0 AND r.status='active' AND a.status='active'
 		ORDER BY r.id,p.repository,p.pr_number`, headSHA)
 	if err != nil {
 		return nil, err
@@ -98,7 +98,7 @@ func (s *Store) ActiveDeliveryTargetsAll(ctx context.Context) ([]DeliveryTarget,
 			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
-		WHERE p.active=1 AND r.status='active' AND a.status='active'
+		WHERE p.active=1 AND p.registered_only=0 AND r.status='active' AND a.status='active'
 		ORDER BY r.updated_at,p.repository,p.pr_number,r.id`)
 	if err != nil {
 		return nil, err
@@ -161,7 +161,7 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 		var currentHead string
 		var currentState string
 		if err := tx.QueryRowContext(ctx, `SELECT current_head_sha,state FROM workflow_v2_delivery_prs
-			WHERE id=? AND run_id=? AND repository=? AND pr_number=? AND active=1`, target.PRID,
+			WHERE id=? AND run_id=? AND repository=? AND pr_number=? AND active=1 AND registered_only=0`, target.PRID,
 			target.RunID, target.Repository, target.Number).Scan(&currentHead, &currentState); err != nil {
 			return err
 		}
@@ -174,7 +174,7 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET url=?,source_branch=?,base_branch=?,
 			current_head_sha=?,state=?,provenance_json=?,verified_at=?,updated_at=?
-			WHERE id=? AND run_id=? AND active=1`, verified.URL, verified.SourceBranch, verified.BaseBranch,
+			WHERE id=? AND run_id=? AND active=1 AND registered_only=0`, verified.URL, verified.SourceBranch, verified.BaseBranch,
 			verified.HeadSHA, verified.State, provenanceJSON, verified.VerifiedAt.UnixMilli(), observed.UnixMilli(),
 			target.PRID, target.RunID)
 		if err != nil {
@@ -332,7 +332,7 @@ func (s *Store) applyReviewFeedbackEvent(ctx context.Context, target DeliveryTar
 		}
 		var headSHA string
 		if err := tx.QueryRowContext(ctx, `SELECT current_head_sha FROM workflow_v2_delivery_prs
-			WHERE id=? AND run_id=? AND repository=? AND pr_number=? AND active=1`, target.PRID,
+			WHERE id=? AND run_id=? AND repository=? AND pr_number=? AND active=1 AND registered_only=0`, target.PRID,
 			target.RunID, target.Repository, target.Number).Scan(&headSHA); err != nil {
 			return fmt.Errorf("load review delivery target: %w", err)
 		}
