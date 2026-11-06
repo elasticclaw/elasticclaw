@@ -605,6 +605,9 @@ func TestFactoryMCPAuditErrorWithholdsDetailsForHiddenArgs(t *testing.T) {
 	if got := mcpAuditErrorDetail("boom abc", apiKey); strings.Contains(got, "abc") {
 		t.Fatalf("detail kept short secret: %q", got)
 	}
+	if got := mcpAuditErrorDetail("HTTP 404: not found", nil); got != "HTTP 404: not found" {
+		t.Fatalf("argument-less call detail changed: %q", got)
+	}
 	plain, _ := json.Marshal(map[string]any{"claw_id": "missing"})
 	if got := mcpAuditErrorDetail("HTTP 404: claw not found", plain); got != "HTTP 404: claw not found" {
 		t.Fatalf("plain detail changed: %q", got)
@@ -648,5 +651,24 @@ func TestFactoryMCPAuditRowWithholdsTriggerErrorDetails(t *testing.T) {
 	}
 	if strings.Contains(args+detail, "sk-secret-value") || !strings.HasPrefix(detail, "HTTP 404: [details withheld") {
 		t.Fatalf("audit row leaked or lost status: args=%s error=%s", args, detail)
+	}
+}
+
+func TestFactoryMCPAuditOmitsUndecodableArguments(t *testing.T) {
+	raw := json.RawMessage(`{"workspace":"ws","workflow":"wf","input":{"api_key":"sk-overflow-secret","n":1e400}}`)
+	if summary := mcpArgsSummary(raw); strings.Contains(summary, "sk-overflow-secret") || strings.Contains(summary, "1e400") {
+		t.Fatalf("summary kept secret: %s", summary)
+	}
+	if summary := mcpArgsSummary(json.RawMessage(`{"api_key":"sk-trailing"} {"x":1}`)); strings.Contains(summary, "sk-trailing") {
+		t.Fatalf("summary kept secret from trailing data: %s", summary)
+	}
+	s, token := factoryMCPFixture(t)
+	session, ctx := factoryMCPClient(t, s, token.Token)
+	_, _ = session.CallTool(ctx, &mcp.CallToolParams{Name: "trigger_workflow", Arguments: raw})
+	// The SDK may reject the request before the audit middleware; either way no
+	// audit row may contain the secret.
+	var leaked int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM api_token_audit WHERE token_id=? AND (args_summary LIKE '%sk-overflow-secret%' OR error LIKE '%sk-overflow-secret%')`, token.ID).Scan(&leaked); err != nil || leaked != 0 {
+		t.Fatalf("audit rows leaking secret = %d, %v", leaked, err)
 	}
 }

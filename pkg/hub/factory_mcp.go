@@ -143,7 +143,7 @@ func (s *Server) auditFactoryMCP(next mcp.MethodHandler) mcp.MethodHandler {
 			return next(ctx, method, req)
 		}
 		inserted, err := s.db.ExecContext(ctx, `INSERT INTO api_token_audit(token_id,owner_login,tool,args_summary,status,created_at) VALUES(?,?,?,?,'pending',?)`,
-			identity.TokenID, identity.OwnerLogin, call.Params.Name, mcpArgsSummary(call.Params.Arguments), now().Unix())
+			identity.TokenID, identity.OwnerLogin, mcpTruncate(call.Params.Name, 200), mcpArgsSummary(call.Params.Arguments), now().Unix())
 		var auditID int64
 		if err == nil {
 			auditID, err = inserted.LastInsertId()
@@ -212,9 +212,10 @@ func (s *Server) pruneAPITokenAudit(at time.Time) {
 var mcpSensitiveArgPattern = regexp.MustCompile(`(?i)token|secret|passw|credential|api[_-]?key|private[_-]?key|access[_-]?key|authorization|cookie`)
 
 func mcpArgsSummary(raw json.RawMessage) string {
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return mcpTruncate(string(raw), 1024)
+	value, ok := mcpDecodeArgs(raw)
+	if !ok {
+		// Never persist arguments that cannot be inspected for hidden values.
+		return `"[unparseable arguments omitted]"`
 	}
 	var shorten func(any)
 	shorten = func(v any) {
@@ -281,9 +282,24 @@ func mcpAuditErrorDetail(detail string, raw json.RawMessage) string {
 	return "[details withheld: arguments contain hidden values]"
 }
 
-func mcpArgsHaveHiddenValues(raw json.RawMessage) bool {
+// mcpDecodeArgs decodes tool arguments with json.Number so large numbers
+// (e.g. 1e400) do not fail decoding and bypass redaction.
+func mcpDecodeArgs(raw json.RawMessage) (any, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	var value any
-	if json.Unmarshal(raw, &value) != nil {
+	if decoder.Decode(&value) != nil || decoder.More() {
+		return nil, false
+	}
+	return value, true
+}
+
+func mcpArgsHaveHiddenValues(raw json.RawMessage) bool {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false
+	}
+	value, ok := mcpDecodeArgs(raw)
+	if !ok {
 		return true
 	}
 	var hidden func(v any) bool
