@@ -210,6 +210,12 @@ func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, er
 					return nil, err
 				}
 				remote.repo = githubRemoteRepo(remoteURL)
+				// The tracking-ref suffix is the remote branch name only under the
+				// default refspec; a custom mapping (refs/remotes/origin/cache/*)
+				// would report the wrong branch, so such remotes are skipped.
+				if fetch, _ := branchGit(ctx, dir, "config", "--get-all", "remote."+name+".fetch"); fetch != "+refs/heads/*:refs/remotes/"+name+"/*" {
+					remote.repo = ""
+				}
 				if remote.repo != "" {
 					// Missing remote HEAD is normal for freshly added remotes.
 					remote.defaultRef, _ = branchGit(ctx, dir, "symbolic-ref", "refs/remotes/"+name+"/HEAD")

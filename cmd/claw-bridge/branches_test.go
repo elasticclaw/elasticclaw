@@ -203,3 +203,18 @@ func TestSplitTrackingRefRejectsAmbiguousRemotes(t *testing.T) {
 		}
 	}
 }
+
+// Under a custom fetch refspec the tracking-ref suffix is not the remote
+// branch name, so the remote reports nothing rather than a wrong branch.
+func TestCollectRepoBranchesSkipsCustomRefspecRemotes(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "repo")
+	branchTestRepo(t, dir)
+	branchTestGit(t, dir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/cache/*")
+	got, err := collectRepoBranches(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("branches: %#v", got)
+	}
+}
