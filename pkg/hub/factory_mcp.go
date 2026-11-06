@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -31,14 +32,25 @@ func (s *Server) withAPITokenAuth(next http.Handler) http.Handler {
 			reject()
 			return
 		}
+		// Hub failures are not credential failures: a 401 would make a valid
+		// token look revoked and stop MCP clients from retrying.
+		unavailable := func(err error) {
+			log.Printf("[mcp] authentication unavailable: %v", err)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		}
 		identity, err := s.authenticateAPIToken(r.Context(), fields[1])
+		if errors.Is(err, errAPITokenUnavailable) {
+			unavailable(err)
+			return
+		}
 		if err != nil {
 			reject()
 			return
 		}
 		tenant, err := s.githubTenantIDContext(r.Context())
 		if err != nil {
-			reject()
+			unavailable(err)
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenant)
@@ -83,6 +95,10 @@ func mcpHTTPResult(status int, body []byte) *mcp.CallToolResult {
 		return mcpText(fmt.Sprintf("HTTP %d: %s", status, mcpTruncate(string(body), 2*1024)), true)
 	}
 	text := string(body)
+	if strings.TrimSpace(text) == "" {
+		// 204 responses (update_claw, kill_claw) would otherwise look like no result.
+		return mcpText(fmt.Sprintf("HTTP %d: success", status), false)
+	}
 	if len(text) > 200*1024 {
 		text = mcpTruncate(text, 200*1024) + "\n[Truncated: narrow filters or use limit to request less data.]"
 	}

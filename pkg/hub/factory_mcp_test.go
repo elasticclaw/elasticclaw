@@ -219,7 +219,10 @@ func TestFactoryMCPToolsAndCalls(t *testing.T) {
 	}
 	// Match existing delete-handler tests: an offline claw without a provider ID
 	// exercises deletion without provisioning or contacting a real sandbox.
-	factoryMCPCall(t, ctx, session, "kill_claw", map[string]any{"claw_id": "mcp-claw"}, false)
+	result = factoryMCPCall(t, ctx, session, "kill_claw", map[string]any{"claw_id": "mcp-claw"}, false)
+	if text := factoryMCPText(t, result); text != "HTTP 204: success" {
+		t.Fatalf("empty success result: %q", text)
+	}
 	var status string
 	if err := s.db.QueryRow(`SELECT status FROM claws WHERE id='mcp-claw'`).Scan(&status); err != nil || status != "deleted" {
 		t.Fatalf("delete handler: %q %v", status, err)
@@ -500,5 +503,30 @@ func TestFactoryMCPAuditRedactsSensitiveArguments(t *testing.T) {
 	}
 	if !strings.Contains(summary, "T-123") || !strings.Contains(summary, `"api_key":"[redacted]"`) {
 		t.Fatalf("audit summary: %s", summary)
+	}
+}
+
+func TestFactoryMCPHubFailuresAreNotUnauthorized(t *testing.T) {
+	for _, scenario := range []string{"token-store", "tenant"} {
+		t.Run(scenario, func(t *testing.T) {
+			s, token := factoryMCPFixture(t)
+			statement := `ALTER TABLE api_tokens RENAME TO api_tokens_unavailable`
+			if scenario == "tenant" {
+				s.mu.Lock()
+				s.hubCfg.Token = ""
+				s.mu.Unlock()
+				statement = `ALTER TABLE tenants RENAME TO tenants_unavailable`
+			}
+			if _, err := s.db.Exec(statement); err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+			r.Header.Set("Authorization", "Bearer "+token.Token)
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, r)
+			if w.Code != http.StatusServiceUnavailable || w.Header().Get("WWW-Authenticate") != "" {
+				t.Fatalf("hub failure: %d %v", w.Code, w.Header())
+			}
+		})
 	}
 }

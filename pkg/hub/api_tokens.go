@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -32,7 +33,10 @@ type apiTokenView struct {
 	Status     string     `json:"status"`
 }
 
-var errInvalidAPIToken = errors.New("invalid API token")
+var (
+	errInvalidAPIToken     = errors.New("invalid API token")
+	errAPITokenUnavailable = errors.New("API token store unavailable")
+)
 
 func apiTokenHash(raw string) string {
 	hash := sha256.Sum256([]byte(raw))
@@ -41,7 +45,8 @@ func apiTokenHash(raw string) string {
 
 // authenticateAPIToken validates a plaintext `ecf_` token and returns its owner.
 // Every use checks revocation, expiration, and the current admin configuration.
-// All failures return the same error; callers should respond with HTTP 401.
+// Every credential failure returns errInvalidAPIToken (respond with HTTP 401);
+// database failures wrap errAPITokenUnavailable (respond with HTTP 503).
 // Successful use updates last_used_at at most once per 60 seconds per token.
 func (s *Server) authenticateAPIToken(ctx context.Context, raw string) (apiTokenIdentity, error) {
 	if !strings.HasPrefix(raw, "ecf_") {
@@ -57,6 +62,9 @@ func (s *Server) authenticateAPIToken(ctx context.Context, raw string) (apiToken
 		FROM api_tokens WHERE token_hash = ?`, apiTokenHash(raw)).Scan(
 		&identity.TokenID, &identity.OwnerLogin, &expiresAt, &revokedAt, &lastUsedAt)
 	usedAt := now().Unix()
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return apiTokenIdentity{}, fmt.Errorf("%w: %v", errAPITokenUnavailable, err)
+	}
 	if err != nil || revokedAt.Valid || (expiresAt.Valid && expiresAt.Int64 <= usedAt) {
 		return apiTokenIdentity{}, errInvalidAPIToken
 	}
@@ -70,7 +78,7 @@ func (s *Server) authenticateAPIToken(ctx context.Context, raw string) (apiToken
 		// The predicate also prevents concurrent requests from repeatedly writing.
 		if _, err := s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ?
 			WHERE id = ? AND (last_used_at IS NULL OR last_used_at <= ?)`, usedAt, identity.TokenID, usedAt-60); err != nil {
-			return apiTokenIdentity{}, errInvalidAPIToken
+			return apiTokenIdentity{}, fmt.Errorf("%w: %v", errAPITokenUnavailable, err)
 		}
 	}
 	return identity, nil
