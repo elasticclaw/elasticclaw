@@ -314,6 +314,7 @@ func TestGitHubWebhookSkipsTaskRunAssociationForScannedMentions(t *testing.T) {
 		want        int
 	}{
 		{"scanned mention", 1, "mention", 0},
+		{"mention stored before the source column", 1, "", 0},
 		{"gh_create registration", 1, "gh_create", 1},
 		{"branch sweep registration", 1, "branch_sweep", 1},
 		{"delivered", 0, "done", 1},
@@ -353,5 +354,32 @@ func TestGitHubWebhookSkipsTaskRunAssociationForScannedMentions(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A webhook for a PR that one claw delivered and another merely mentioned must
+// resolve to the deliverer, whatever order the rows were inserted in.
+func TestFindClawForGitHubPRPrefersDeliveringClaw(t *testing.T) {
+	s, db := newTaskRunLifecycleTestServer(t, nil)
+	const prURL = "https://github.com/elastic/claw/pull/21"
+	for _, row := range []struct {
+		clawID, source string
+		mentionOnly    int
+	}{
+		{"mentioning-claw", "mention", 1},
+		{"legacy-mentioning-claw", "", 1},
+		{"z-creating-claw", "gh_create", 1},
+	} {
+		if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at)
+			VALUES(?,?,?,?,?,?)`, row.clawID, "test-tenant-id", row.clawID, "elasticclaw", "running", now()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, mention_only, source, created_at)
+			VALUES(?,?,?,?,?,?,?,?)`, row.clawID+"-pr", row.clawID, "elastic/claw", 21, prURL, row.mentionOnly, row.source, now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := s.findClawForGitHubPR(prURL); got != "z-creating-claw" {
+		t.Fatalf("findClawForGitHubPR = %q, want z-creating-claw", got)
 	}
 }

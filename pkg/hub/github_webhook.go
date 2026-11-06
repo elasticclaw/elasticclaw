@@ -958,12 +958,14 @@ func (s *Server) resetReopenedClawPR(clawID, prURL string) {
 }
 
 // findClawForGitHubPR returns the claw ID that is already tracking this PR URL, or "".
+// Claws that delivered or created the PR win over claws that merely mentioned it.
 func (s *Server) findClawForGitHubPR(prURL string) string {
 	var clawID string
 	_ = s.db.QueryRow(
 		`SELECT cp.claw_id FROM claw_prs cp
 		 JOIN claws cl ON cl.id = cp.claw_id
 		 WHERE cp.pr_url = ? AND cl.status NOT IN ('deleted','error','offline')
+		 ORDER BY (cp.mention_only=1 AND cp.source IN ('mention','')) ASC
 		 LIMIT 1`,
 		prURL,
 	).Scan(&clawID)
@@ -971,11 +973,12 @@ func (s *Server) findClawForGitHubPR(prURL string) string {
 }
 
 // isScannedPRMention reports whether the claw only knows this PR from a URL
-// scanned out of its messages. Such PRs must not be attached to its task run;
+// scanned out of its messages (source=” covers mention rows stored before the
+// source column existed). Such PRs must not be attached to its task run;
 // registered (gh_create, branch_sweep) and delivered rows still are.
 func (s *Server) isScannedPRMention(clawID, prURL string) bool {
 	var scanned bool
-	_ = s.db.QueryRow(`SELECT mention_only=1 AND source='mention' FROM claw_prs WHERE claw_id=? AND pr_url=?`,
+	_ = s.db.QueryRow(`SELECT mention_only=1 AND source IN ('mention','') FROM claw_prs WHERE claw_id=? AND pr_url=?`,
 		clawID, prURL).Scan(&scanned)
 	return scanned
 }
