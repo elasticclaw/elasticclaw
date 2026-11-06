@@ -80,12 +80,12 @@ func extractPRs(content string) []struct {
 // message; only delivered rows (mentionOnly=false) gate claw finalization. A
 // delivered call for an already-tracked URL upgrades a mention-only row to
 // delivered, so a PR mentioned mid-work and then listed in [DONE] blocks.
-func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string, mentionOnly bool) (inserted bool, err error) {
+func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string, mentionOnly bool, source string) (inserted bool, err error) {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
 		if !mentionOnly {
-			if err := s.upgradeMentionOnlyPR(clawID, prURL); err != nil {
+			if err := s.upgradeMentionOnlyPR(clawID, prURL, source); err != nil {
 				return false, err
 			}
 		}
@@ -100,7 +100,12 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 
 	// Get the current max comment ID and head SHA to avoid flooding with historical data.
 	// Prefer a repo-scoped installation token so multi-org workspace apps work.
-	token := s.tokenForRepo(repo)
+	// Creation reports arrive before there is historical feedback to suppress.
+	// Let the watcher fetch provider state so ingestion never waits on GitHub.
+	var token string
+	if source != "gh_create" {
+		token = s.tokenForRepo(repo)
+	}
 	var maxCommentID int64
 	var maxReviewID int64
 	var lastCommentAt string
@@ -153,8 +158,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 	// hitting the (claw_id, pr_url) unique index means the PR is already
 	// tracked — idempotent success, not a persistence failure.
 	res, err := s.db.Exec(
-		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,last_mergeable_state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		prID, clawID, repo, prNumber, prURL, title, maxCommentID, lastCommentAt, maxReviewID, headSHA, boolInt(mentionOnly), mergeableState, now(),
+		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,last_mergeable_state,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		prID, clawID, repo, prNumber, prURL, title, maxCommentID, lastCommentAt, maxReviewID, headSHA, boolInt(mentionOnly), mergeableState, source, now(),
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
@@ -164,7 +169,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 		// A concurrent writer already registered this PR. If it was the message
 		// scanner, its row may be mention-only while this call is a delivery.
 		if !mentionOnly {
-			if err := s.upgradeMentionOnlyPR(clawID, prURL); err != nil {
+			if err := s.upgradeMentionOnlyPR(clawID, prURL, source); err != nil {
 				return false, err
 			}
 		}
@@ -203,9 +208,9 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 //     pipeline gate script such as verify-github-pr-links, whose whole job is
 //     to emit the claw's OWN delivered PR URLs. Those rows must block
 //     finalization exactly like PRs registered via [DONE].
-func (s *Server) scanMessageForPRs(clawID, content string, mentionOnly bool) {
+func (s *Server) scanMessageForPRs(clawID, content string, mentionOnly bool, source string) {
 	for _, pr := range extractPRs(content) {
-		if _, err := s.storePRMention(clawID, pr.repo, pr.number, pr.url, mentionOnly); err != nil {
+		if _, err := s.storePRMention(clawID, pr.repo, pr.number, pr.url, mentionOnly, source); err != nil {
 			log.Printf("[pr-watcher] failed to store PR mention: %v", err)
 		}
 	}
@@ -214,14 +219,25 @@ func (s *Server) scanMessageForPRs(clawID, content string, mentionOnly bool) {
 // upgradeMentionOnlyPR promotes a mention-only claw_prs row to delivered, so a
 // PR the agent mentioned mid-work and then delivered via [DONE] starts gating
 // finalization. No-op when the row is already delivered or does not exist.
-func (s *Server) upgradeMentionOnlyPR(clawID, prURL string) error {
-	res, err := s.db.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, prURL)
+func (s *Server) upgradeMentionOnlyPR(clawID, prURL, source string) error {
+	res, err := s.db.Exec(`UPDATE claw_prs SET mention_only=0, source=? WHERE claw_id=? AND pr_url=? AND mention_only=1`, source, clawID, prURL)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", prURL, shortID(clawID), err)
 		return err
 	}
 	if affected, err := res.RowsAffected(); err == nil && affected > 0 {
 		log.Printf("[pr-watcher] PR %s upgraded from mention-only to delivered for claw %s", prURL, shortID(clawID))
+		// The task run may have started after the original mention was recorded.
+		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
+			log.Printf("[task-run-analytics] failed to resolve task run for PR upgrade claw %s: %v", clawID, err)
+		} else if ok {
+			pr := TaskRunPR{RunID: runID, URL: prURL, State: taskRunPRStateOpen, AgentHeadSHA: true}
+			if err := s.db.QueryRow(`SELECT repo, pr_number, last_ci_sha FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&pr.Repo, &pr.PRNumber, &pr.HeadSHA); err != nil {
+				log.Printf("[task-run-analytics] failed to load upgraded PR %s: %v", prURL, err)
+			} else if err := s.associateTaskRunPR(pr); err != nil {
+				log.Printf("[task-run-analytics] failed to associate upgraded PR %s: %v", prURL, err)
+			}
+		}
 	}
 	return nil
 }
@@ -243,12 +259,12 @@ type prMentionCandidate struct {
 // true when claw_prs already has this URL (no insert needed) — though a
 // delivered (mentionOnly=false) call still upgrades a mention-only row so the
 // PR starts gating finalization.
-func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL string, mentionOnly bool) (alreadyTracked bool, row prMentionCandidate, err error) {
+func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL string, mentionOnly bool, source string) (alreadyTracked bool, row prMentionCandidate, err error) {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
 		if !mentionOnly {
-			if err := s.upgradeMentionOnlyPR(clawID, prURL); err != nil {
+			if err := s.upgradeMentionOnlyPR(clawID, prURL, source); err != nil {
 				return true, prMentionCandidate{}, err
 			}
 		}
@@ -304,7 +320,7 @@ func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL strin
 // never leave the PR watcher partially armed when one URL fails.
 // Returns the URL that failed, or "" on full success.
 // mentionOnly is stamped onto every inserted row; see storePRMention.
-func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, mentionOnly bool) string {
+func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, mentionOnly bool, source string) string {
 	if len(rows) == 0 {
 		return ""
 	}
@@ -330,7 +346,7 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 			// A concurrent writer (possibly the message scanner) got here first.
 			// A delivered call must still upgrade a mention-only row.
 			if !mentionOnly {
-				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, row.url); err != nil {
+				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0, source=? WHERE claw_id=? AND pr_url=? AND mention_only=1`, source, clawID, row.url); err != nil {
 					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
 					return row.url
 				}
@@ -339,8 +355,8 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 		}
 		prID := uuid.New().String()
 		res, err := tx.Exec(
-			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,last_mergeable_state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			prID, clawID, row.repo, row.number, row.url, row.title, row.comment, row.commentAt, row.review, row.headSHA, boolInt(mentionOnly), row.mergeableState, now(),
+			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,last_mergeable_state,source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			prID, clawID, row.repo, row.number, row.url, row.title, row.comment, row.commentAt, row.review, row.headSHA, boolInt(mentionOnly), row.mergeableState, source, now(),
 		)
 		if err != nil {
 			log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", row.repo, row.number, shortID(clawID), err)
@@ -348,7 +364,7 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 		}
 		if affected, err := res.RowsAffected(); err == nil && affected == 0 {
 			if !mentionOnly {
-				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, row.url); err != nil {
+				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0, source=? WHERE claw_id=? AND pr_url=? AND mention_only=1`, source, clawID, row.url); err != nil {
 					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
 					return row.url
 				}

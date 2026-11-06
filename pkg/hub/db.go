@@ -229,6 +229,9 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claw_prs", "mention_only", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := addColumn(db, "claw_prs", "source", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	// token_miss_count bounds how long a row whose repo has NO resolvable
 	// GitHub App token keeps blocking finalization. It is deliberately separate
 	// from permanent_failure_count: that counter belongs to checkPRMerged's
@@ -1032,6 +1035,7 @@ func migrate(db *sql.DB) error {
 		last_review_id INTEGER NOT NULL DEFAULT 0, -- last top-level PR review ID seen
 		pr_conditions_fired INTEGER NOT NULL DEFAULT 0,
 		permanent_failure_count INTEGER NOT NULL DEFAULT 0,
+		source      TEXT NOT NULL DEFAULT '',
 		mention_only INTEGER NOT NULL DEFAULT 0, -- 1 = URL scanned from a message, not delivered via [DONE]; never gates finalization
 		token_miss_count INTEGER NOT NULL DEFAULT 0, -- consecutive polls with no resolvable GitHub token for the repo; separate from permanent_failure_count (see migrate)
 		last_mergeable_state TEXT NOT NULL DEFAULT '', -- last GitHub mergeable_state observed (e.g. "dirty"); used for one-shot conflict notifications

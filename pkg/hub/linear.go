@@ -1818,7 +1818,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 
 	// Single URL: reuse the normal path (no multi-row partial-write risk).
 	if len(prs) == 1 {
-		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url, false); err != nil {
+		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url, false, "done"); err != nil {
 			log.Printf("[factory] failed to register PR %s for claw %s: %v", prs[0].url, shortID(clawID), err)
 			return prs[0].url
 		}
@@ -1827,7 +1827,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 
 	var toInsert []prMentionCandidate
 	for _, pr := range prs {
-		already, row, err := s.preparePRMention(clawID, pr.repo, pr.number, pr.url, false)
+		already, row, err := s.preparePRMention(clawID, pr.repo, pr.number, pr.url, false, "done")
 		if err != nil {
 			log.Printf("[factory] failed to prepare PR %s for claw %s: %v", pr.url, shortID(clawID), err)
 			return pr.url
@@ -1837,7 +1837,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 		}
 		toInsert = append(toInsert, row)
 	}
-	if failURL := s.insertClawPRsAtomic(clawID, toInsert, false); failURL != "" {
+	if failURL := s.insertClawPRsAtomic(clawID, toInsert, false, "done"); failURL != "" {
 		log.Printf("[factory] failed to register PR set for claw %s (first failure %s)", shortID(clawID), failURL)
 		return failURL
 	}

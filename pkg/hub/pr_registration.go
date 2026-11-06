@@ -1,0 +1,88 @@
+package hub
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+)
+
+// handleClawPRRegistration records creation without signaling completion.
+func (s *Server) handleClawPRRegistration(w http.ResponseWriter, r *http.Request) {
+	clawToken := r.URL.Query().Get("claw_token")
+	if clawToken == "" {
+		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	s.mu.RLock()
+	hubClawToken := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	if clawToken == "" || clawToken != hubClawToken {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	clawID := r.PathValue("id")
+	var tenantID, status, reposJSON string
+	err := s.db.QueryRow(`SELECT tenant_id, status, COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&tenantID, &status, &reposJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "claw not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	var report struct {
+		URL    string `json:"url"`
+		Source string `json:"source"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	if err := decoder.Decode(&report); err != nil || decoder.Decode(new(any)) != io.EOF {
+		http.Error(w, "invalid PR report", http.StatusBadRequest)
+		return
+	}
+	match := prURLRegex.FindStringSubmatch(report.URL)
+	if len(match) == 0 || match[0] != report.URL || report.Source != "gh_create" {
+		http.Error(w, "invalid PR URL or source", http.StatusBadRequest)
+		return
+	}
+	number, err := strconv.Atoi(match[2])
+	if err != nil || number <= 0 {
+		http.Error(w, "invalid PR number", http.StatusBadRequest)
+		return
+	}
+	// JSON field matching accepts both legacy capitalized and current keys.
+	var repos []RepoAccess
+	if json.Unmarshal([]byte(reposJSON), &repos) != nil || effectiveRepoAccess(match[1], repos) == nil {
+		http.Error(w, "requested repo is not configured on this claw", http.StatusForbidden)
+		return
+	}
+	if status == "deleted" || status == "error" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"registered": false})
+		return
+	}
+
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		cc = &clawConn{id: clawID, tenantID: tenantID}
+	}
+	if s.workflowV2OwnsExecution(cc) {
+		// TODO(Part 2): register against the active V2 attempt without delivery facts or events.
+		http.Error(w, "workflow V2 PR registration is not implemented", http.StatusNotImplemented)
+		return
+	}
+	registered, err := s.storePRMention(clawID, match[1], number, report.URL, false, report.Source)
+	if err != nil {
+		http.Error(w, "failed to register PR", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"registered": registered})
+}

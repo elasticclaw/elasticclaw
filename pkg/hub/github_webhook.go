@@ -1232,7 +1232,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// can retry.
 	// mentionOnly=false: this PR is the claw's reason to exist, so it must
 	// gate finalization like a delivered PR.
-	if _, err := s.storePRMention(clawID, repoFullName, prNumber, prURL, false); err != nil {
+	if _, err := s.storePRMention(clawID, repoFullName, prNumber, prURL, false, "trigger"); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		if s.cronScheduler != nil {
 			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
