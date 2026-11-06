@@ -115,7 +115,7 @@ func (s *Server) registerClawPR(ctx context.Context, clawID, tenantID, repo stri
 			err = s.associateWorkflowV2TaskRunPR(clawID, pr)
 		}
 	} else {
-		registered, err = s.storePRMention(clawID, repo, number, prURL, false, source)
+		registered, err = s.storePRRegistration(clawID, repo, number, prURL, source)
 	}
 	return registered, err
 }

@@ -136,7 +136,8 @@ func TestClawPRRegistrationAssociatesWithoutCompletion(t *testing.T) {
 				if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
 					t.Fatal(err)
 				}
-				if result.Registered != (i == 0 && !upgrade) {
+				// A scanned mention is re-sourced once; repeats are no-ops.
+				if result.Registered != (i == 0) {
 					t.Fatalf("unexpected inserted flag: %s", rec.Body.String())
 				}
 			}
@@ -145,7 +146,8 @@ func TestClawPRRegistrationAssociatesWithoutCompletion(t *testing.T) {
 			if err := db.QueryRow(`SELECT COUNT(*),mention_only,source FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count, &mentionOnly, &source); err != nil {
 				t.Fatal(err)
 			}
-			if count != 1 || mentionOnly != 0 || source != "gh_create" {
+			// Registered, not delivered: only [DONE] authorizes finalization.
+			if count != 1 || mentionOnly != 1 || source != "gh_create" {
 				t.Fatalf("row: %d %d %q", count, mentionOnly, source)
 			}
 			assertTaskRunPR(t, db, runID, "owner/repo", 17, taskRunPRStateOpen, false)
@@ -169,6 +171,46 @@ func TestClawPRRegistrationAssociatesWithoutCompletion(t *testing.T) {
 			s.mux.ServeHTTP(rec, req)
 			if rec.Code != 200 {
 				t.Fatalf("GET PRs: %d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// A registered PR is a polling target until [DONE]: a human merging or
+// closing it mid-work must not finalize the claw.
+func TestRegisteredPRResolutionBeforeDoneDoesNotFinalize(t *testing.T) {
+	for _, state := range []string{"merged", "closed"} {
+		t.Run(state, func(t *testing.T) {
+			const clawID = "claw-registered-resolution"
+			s, db, stub, _ := multiPRFixture(t, clawID)
+			for _, n := range []int{1, 2} {
+				if _, err := s.storePRRegistration(clawID, "owner/repo", n, fmt.Sprintf("https://github.com/owner/repo/pull/%d", n), "gh_create"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var prID string
+			if err := db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_number=1`, clawID).Scan(&prID); err != nil {
+				t.Fatal(err)
+			}
+			stub.set(1, state)
+			pr := clawPR{id: prID, clawID: clawID, repo: "owner/repo", prNumber: 1, prURL: "https://github.com/owner/repo/pull/1", mentionOnly: true}
+			if resolved, terminated := s.checkPRMerged(pr, "token"); !resolved || terminated {
+				t.Fatalf("checkPRMerged = (%v, %v), want (true, false) before [DONE]", resolved, terminated)
+			}
+			assertClawStatusStays(t, db, clawID, "connected")
+			if delivered, err := s.clawHasDeliveredPR(clawID); err != nil || delivered {
+				t.Fatalf("registration authorized finalization: %v, %v", delivered, err)
+			}
+			// [DONE] without URLs delivers the remaining open registered PR.
+			urls, fallback := s.donePRURLs(clawID, "[DONE]")
+			if !fallback || len(urls) != 1 || urls[0] != "https://github.com/owner/repo/pull/2" {
+				t.Fatalf("fallback URLs = %v, %t", urls, fallback)
+			}
+			if failURL := s.registerDonePRURLs(clawID, urls); failURL != "" {
+				t.Fatalf("register [DONE] PRs failed at %s", failURL)
+			}
+			if open, err := s.clawOpenPRCount(clawID); err != nil || open != 1 {
+				t.Fatalf("delivered open PRs = %d, %v", open, err)
 			}
 		})
 	}

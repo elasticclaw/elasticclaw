@@ -229,6 +229,9 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claw_prs", "mention_only", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// source records how the row was found. gh_create/branch_sweep rows are
+	// PRs the claw created but has not delivered yet: they stay mention_only=1
+	// until [DONE] promotes them, so creation alone never finalizes a claw.
 	if err := addColumn(db, "claw_prs", "source", `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -1036,7 +1039,7 @@ func migrate(db *sql.DB) error {
 		pr_conditions_fired INTEGER NOT NULL DEFAULT 0,
 		permanent_failure_count INTEGER NOT NULL DEFAULT 0,
 		source      TEXT NOT NULL DEFAULT '',
-		mention_only INTEGER NOT NULL DEFAULT 0, -- 1 = URL scanned from a message, not delivered via [DONE]; never gates finalization
+		mention_only INTEGER NOT NULL DEFAULT 0, -- 1 = not delivered via [DONE]/gate/trigger (a mention, or a gh_create/branch_sweep registration); never gates finalization
 		token_miss_count INTEGER NOT NULL DEFAULT 0, -- consecutive polls with no resolvable GitHub token for the repo; separate from permanent_failure_count (see migrate)
 		last_mergeable_state TEXT NOT NULL DEFAULT '', -- last GitHub mergeable_state observed (e.g. "dirty"); used for one-shot conflict notifications
 		created_at  DATETIME NOT NULL,

@@ -175,7 +175,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 		}
 		return false, nil
 	}
-	if !mentionOnly {
+	if !mentionOnly || isPRRegistrationSource(source) {
 		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 			log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
 		} else if ok {
@@ -230,18 +230,57 @@ func (s *Server) upgradeMentionOnlyPR(clawID, prURL, source string) error {
 	if affected, err := res.RowsAffected(); err == nil && affected > 0 {
 		log.Printf("[pr-watcher] PR %s upgraded from mention-only to delivered for claw %s", prURL, shortID(clawID))
 		// The task run may have started after the original mention was recorded.
-		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
-			log.Printf("[task-run-analytics] failed to resolve task run for PR upgrade claw %s: %v", clawID, err)
-		} else if ok {
-			pr := TaskRunPR{RunID: runID, URL: prURL, State: taskRunPRStateOpen, AgentHeadSHA: true}
-			if err := s.db.QueryRow(`SELECT repo, pr_number, last_ci_sha FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&pr.Repo, &pr.PRNumber, &pr.HeadSHA); err != nil {
-				log.Printf("[task-run-analytics] failed to load upgraded PR %s: %v", prURL, err)
-			} else if err := s.associateTaskRunPR(pr); err != nil {
-				log.Printf("[task-run-analytics] failed to associate upgraded PR %s: %v", prURL, err)
-			}
-		}
+		s.associateTrackedPRWithTaskRun(clawID, prURL)
 	}
 	return nil
+}
+
+// isPRRegistrationSource reports sources that saw the claw create the PR.
+// Their rows stay mention_only=1 until [DONE] (or a gate) delivers them: a
+// registered PR is the claw's PR for analytics and the URL-less [DONE]
+// fallback, but merging, closing or green CI on it must never finalize the
+// claw or fire pr_conditions while the agent is still working.
+func isPRRegistrationSource(source string) bool {
+	return source == "gh_create" || source == "branch_sweep"
+}
+
+// storePRRegistration associates a PR the claw created without authorizing
+// finalization (see isPRRegistrationSource). A row the scanner recorded as a
+// plain mention is re-sourced so it counts as the claw's own PR.
+func (s *Server) storePRRegistration(clawID, repo string, prNumber int, prURL, source string) (bool, error) {
+	inserted, err := s.storePRMention(clawID, repo, prNumber, prURL, true, source)
+	if err != nil || inserted {
+		return inserted, err
+	}
+	res, err := s.db.Exec(`UPDATE claw_prs SET source=? WHERE claw_id=? AND pr_url=? AND mention_only=1
+		AND source NOT IN ('gh_create','branch_sweep')`, source, clawID, prURL)
+	if err != nil {
+		return false, err
+	}
+	if affected, err := res.RowsAffected(); err != nil || affected == 0 {
+		return false, err
+	}
+	s.associateTrackedPRWithTaskRun(clawID, prURL)
+	return true, nil
+}
+
+// associateTrackedPRWithTaskRun links an existing claw_prs row to the claw's
+// task run, if it has one.
+func (s *Server) associateTrackedPRWithTaskRun(clawID, prURL string) {
+	_, runID, _, ok, err := s.taskRunContextForClaw(clawID)
+	if err != nil {
+		log.Printf("[task-run-analytics] failed to resolve task run for PR %s claw %s: %v", prURL, clawID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	pr := TaskRunPR{RunID: runID, URL: prURL, State: taskRunPRStateOpen, AgentHeadSHA: true}
+	if err := s.db.QueryRow(`SELECT repo, pr_number, last_ci_sha FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&pr.Repo, &pr.PRNumber, &pr.HeadSHA); err != nil {
+		log.Printf("[task-run-analytics] failed to load tracked PR %s: %v", prURL, err)
+	} else if err := s.associateTaskRunPR(pr); err != nil {
+		log.Printf("[task-run-analytics] failed to associate tracked PR %s: %v", prURL, err)
+	}
 }
 
 // prMentionCandidate is a PR URL pending claw_prs registration.

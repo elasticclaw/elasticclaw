@@ -1750,13 +1750,15 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	log.Printf("[terminate] claw %s terminated successfully", clawID[:8])
 }
 
-// donePRURLs uses registered deliveries only when the signal omits URLs.
+// donePRURLs uses the claw's delivered or registered (created) open PRs only
+// when the signal omits URLs.
 func (s *Server) donePRURLs(clawID, message string) ([]string, bool) {
 	urls := extractDonePRURLs(message)
 	if len(urls) > 0 {
 		return urls, false
 	}
-	rows, err := s.db.Query(`SELECT pr_url FROM claw_prs WHERE claw_id=? AND mention_only=0 AND state NOT IN ('merged','closed') ORDER BY pr_url`, clawID)
+	rows, err := s.db.Query(`SELECT pr_url FROM claw_prs WHERE claw_id=? AND (mention_only=0 OR source IN ('gh_create','branch_sweep'))
+		AND state NOT IN ('merged','closed') ORDER BY pr_url`, clawID)
 	if err != nil {
 		log.Printf("[factory] failed to load delivered PRs for claw %s: %v", shortID(clawID), err)
 		return nil, false

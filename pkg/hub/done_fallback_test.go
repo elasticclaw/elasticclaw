@@ -15,7 +15,16 @@ func TestDonePRURLsFallback(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, clawID)
 	for i, state := range []string{"open", "open", "closed", "merged"} {
 		url := fmt.Sprintf("https://github.com/owner/repo/pull/%d", i+1)
-		if _, err := s.storePRMention(clawID, "owner/repo", i+1, url, i == 1, "gh_create"); err != nil {
+		var err error
+		switch i {
+		case 0: // created by the claw, not yet delivered
+			_, err = s.storePRRegistration(clawID, "owner/repo", i+1, url, "gh_create")
+		case 1:
+			_, err = s.storePRMention(clawID, "owner/repo", i+1, url, true, "mention")
+		default:
+			_, err = s.storePRMention(clawID, "owner/repo", i+1, url, false, "done")
+		}
+		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.Exec(`UPDATE claw_prs SET state=? WHERE pr_url=?`, state, url); err != nil {
@@ -67,7 +76,7 @@ stages:
       inject: "Review started"
 `}}
 				}
-				if _, err := s.storePRMention(clawID, "owner/repo", 1, "https://github.com/owner/repo/pull/1", false, "gh_create"); err != nil {
+				if _, err := s.storePRRegistration(clawID, "owner/repo", 1, "https://github.com/owner/repo/pull/1", "gh_create"); err != nil {
 					t.Fatal(err)
 				}
 				branchSweepTestToken(s)
@@ -104,6 +113,15 @@ stages:
 					}
 				} else if status != "idle" {
 					t.Fatalf("status=%s", status)
+				}
+				var mentionOnly int
+				var source string
+				if err := db.QueryRow(`SELECT mention_only,source FROM claw_prs WHERE claw_id=?`, clawID).Scan(&mentionOnly, &source); err != nil {
+					t.Fatal(err)
+				}
+				// [DONE] is what delivers a registered PR; a rejected one must not.
+				if wantDelivered := state == "open"; (mentionOnly == 0) != wantDelivered || (source == "done") != wantDelivered {
+					t.Fatalf("row after [DONE]: mention_only=%d source=%q", mentionOnly, source)
 				}
 				var count int
 				if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_type=?`, runID, taskRunEventDoneWithoutPR).Scan(&count); err != nil || count != 0 {
