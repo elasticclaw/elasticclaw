@@ -102,8 +102,9 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 	// Prefer a repo-scoped installation token so multi-org workspace apps work.
 	// Creation reports arrive before there is historical feedback to suppress.
 	// Let the watcher fetch provider state so ingestion never waits on GitHub.
+	// A swept PR may be older and carry history, and is registered async anyway.
 	var token string
-	if source != "gh_create" && source != "branch_sweep" {
+	if source != "gh_create" {
 		token = s.tokenForRepo(repo)
 	}
 	var maxCommentID int64

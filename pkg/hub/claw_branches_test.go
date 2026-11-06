@@ -167,12 +167,18 @@ func TestClawBranchSweepFiltering(t *testing.T) {
 					if r.Header.Get("Authorization") != "Bearer repo-token" {
 						t.Error("missing repo token")
 					}
-					if _, ok := r.Context().Deadline(); !ok {
-						t.Error("missing deadline")
-					}
 				}
-				if (setup || tc.v2) && r.URL.Path == "/repos/owner/repo/pulls/1" {
+				// Watermarks keep a swept PR's existing history from replaying.
+				switch r.URL.Path {
+				case "/repos/owner/repo/pulls/1":
 					return githubAppTokenResponse(200, `{"html_url":"`+prURL+`","state":"open","head":{"sha":"head","ref":"feature/x"},"base":{"ref":"main"}}`), nil
+				case "/repos/owner/repo/issues/1/comments":
+					return githubAppTokenResponse(200, `[{"id":5,"created_at":"2026-01-01T00:00:00Z"}]`), nil
+				case "/repos/owner/repo/pulls/1/reviews":
+					return githubAppTokenResponse(200, `[{"id":9}]`), nil
+				}
+				if _, ok := r.Context().Deadline(); !ok {
+					t.Error("missing deadline")
 				}
 				if r.URL.Path != "/repos/owner/repo/pulls" || r.URL.Query().Get("head") != "owner:feature/x" || r.URL.Query().Get("state") != "open" {
 					t.Fatalf("unexpected request %s", r.URL)
@@ -250,11 +256,12 @@ func TestClawBranchSweepFiltering(t *testing.T) {
 			}
 			if tc.want && !tc.v2 {
 				var source string
-				if err := db.QueryRow(`SELECT source FROM claw_prs WHERE claw_id=?`, clawID).Scan(&source); err != nil {
+				var lastComment, lastReview int64
+				if err := db.QueryRow(`SELECT source,last_comment_id,last_review_id FROM claw_prs WHERE claw_id=?`, clawID).Scan(&source, &lastComment, &lastReview); err != nil {
 					t.Fatal(err)
 				}
-				if source != "branch_sweep" {
-					t.Fatalf("source=%q", source)
+				if source != "branch_sweep" || lastComment != 5 || lastReview != 9 {
+					t.Fatalf("source=%q watermarks=%d/%d", source, lastComment, lastReview)
 				}
 			}
 			if tc.v2 {
@@ -299,6 +306,9 @@ func TestClawBranchSweepRetriesUnchangedHead(t *testing.T) {
 			t.Cleanup(func() { defaultGitHubClient = oldClient })
 			calls := 0
 			defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/repos/owner/repo/pulls" {
+					return githubAppTokenResponse(200, `[]`), nil // registration watermarks
+				}
 				calls++
 				if calls == 1 {
 					return githubAppTokenResponse(initialStatus, `[]`), nil
