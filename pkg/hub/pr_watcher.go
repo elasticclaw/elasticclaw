@@ -103,7 +103,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 	// Creation reports arrive before there is historical feedback to suppress.
 	// Let the watcher fetch provider state so ingestion never waits on GitHub.
 	var token string
-	if source != "gh_create" {
+	if source != "gh_create" && source != "branch_sweep" {
 		token = s.tokenForRepo(repo)
 	}
 	var maxCommentID int64
@@ -175,22 +175,24 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 		}
 		return false, nil
 	}
-	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
-		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
-	} else if ok {
-		// OccurredAt is intentionally left zero: this is a detection time, so
-		// associateTaskRunPR treats it as a write-once fallback rather than an
-		// authoritative provider timestamp.
-		if err := s.associateTaskRunPR(TaskRunPR{
-			RunID:        runID,
-			Repo:         repo,
-			PRNumber:     prNumber,
-			URL:          prURL,
-			HeadSHA:      headSHA,
-			AgentHeadSHA: true,
-			State:        taskRunPRStateOpen,
-		}); err != nil {
-			log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
+	if !mentionOnly {
+		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
+			log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
+		} else if ok {
+			// OccurredAt is intentionally left zero: this is a detection time, so
+			// associateTaskRunPR treats it as a write-once fallback rather than an
+			// authoritative provider timestamp.
+			if err := s.associateTaskRunPR(TaskRunPR{
+				RunID:        runID,
+				Repo:         repo,
+				PRNumber:     prNumber,
+				URL:          prURL,
+				HeadSHA:      headSHA,
+				AgentHeadSHA: true,
+				State:        taskRunPRStateOpen,
+			}); err != nil {
+				log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", repo, prNumber, clawID, err)
+			}
 		}
 	}
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
@@ -336,7 +338,7 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 		}
 	}()
 
-	var inserted []prMentionCandidate
+	var inserted, upgraded []prMentionCandidate
 	for _, row := range rows {
 		// Re-check inside the transaction so a concurrent writer is handled
 		// via INSERT OR IGNORE rather than a hard failure.
@@ -346,9 +348,16 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 			// A concurrent writer (possibly the message scanner) got here first.
 			// A delivered call must still upgrade a mention-only row.
 			if !mentionOnly {
-				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0, source=? WHERE claw_id=? AND pr_url=? AND mention_only=1`, source, clawID, row.url); err != nil {
+				res, err := tx.Exec(`UPDATE claw_prs SET mention_only=0, source=? WHERE claw_id=? AND pr_url=? AND mention_only=1`, source, clawID, row.url)
+				if err != nil {
 					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
 					return row.url
+				}
+				if n, _ := res.RowsAffected(); n > 0 {
+					if err := tx.QueryRow(`SELECT repo, pr_number, last_ci_sha FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, row.url).Scan(&row.repo, &row.number, &row.headSHA); err != nil {
+						return row.url
+					}
+					upgraded = append(upgraded, row)
 				}
 			}
 			continue
@@ -364,9 +373,16 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 		}
 		if affected, err := res.RowsAffected(); err == nil && affected == 0 {
 			if !mentionOnly {
-				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0, source=? WHERE claw_id=? AND pr_url=? AND mention_only=1`, source, clawID, row.url); err != nil {
+				res, err := tx.Exec(`UPDATE claw_prs SET mention_only=0, source=? WHERE claw_id=? AND pr_url=? AND mention_only=1`, source, clawID, row.url)
+				if err != nil {
 					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
 					return row.url
+				}
+				if n, _ := res.RowsAffected(); n > 0 {
+					if err := tx.QueryRow(`SELECT repo, pr_number, last_ci_sha FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, row.url).Scan(&row.repo, &row.number, &row.headSHA); err != nil {
+						return row.url
+					}
+					upgraded = append(upgraded, row)
 				}
 			}
 			continue // concurrent insert won the race
@@ -388,6 +404,12 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 		if factory != nil {
 			s.trackPROpened(factory.Name, issueID, clawID, row.repo, row.number)
 		}
+		log.Printf("[pr-watcher] detected PR %s#%d for claw %s", row.repo, row.number, shortID(clawID))
+	}
+	if mentionOnly {
+		return ""
+	}
+	for _, row := range append(inserted, upgraded...) {
 		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 			log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
 		} else if ok {
@@ -403,7 +425,6 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 				log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", row.repo, row.number, clawID, err)
 			}
 		}
-		log.Printf("[pr-watcher] detected PR %s#%d for claw %s", row.repo, row.number, shortID(clawID))
 	}
 	return ""
 }
@@ -478,6 +499,7 @@ func (s *Server) startPRWatcher() {
 				s.pollAllPRs()
 				timer.Reset(s.nextPollDelay())
 			case <-reconcileTicker.C:
+				s.safeGo("retry claw branches", s.retryClawBranches)
 				s.reconcileDeadClawPRs()
 			}
 		}

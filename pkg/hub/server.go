@@ -53,6 +53,9 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
+	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
+	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
+
 	db        *sql.DB
 	addr      string
 	hubCfg    *types.HubConfig
@@ -901,6 +904,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
+	mux.HandleFunc("POST /api/claws/{id}/branches", s.handleClawBranches)  // claw-token auth
 	mux.HandleFunc("POST /api/claws/{id}/prs", s.handleClawPRRegistration) // claw-token auth
 	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
 	mux.HandleFunc("/api/checkpoints/", s.handleCheckpointInternal)
@@ -3573,11 +3577,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if s.hasFailedRequiredGate(clawID) {
 					s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
 				} else {
-					prURLs := extractDonePRURLs(turnContent)
+					prURLs, fallback := s.donePRURLs(clawID, turnContent)
 					// Register before the stage transition so pr_merged/pr_closed
 					// monitoring is armed even if the agent only listed URLs next
 					// to [DONE] and never elsewhere in chat.
-					if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+					if fallback && s.rejectInvalidDoneFallback(clawID, prURLs) {
+						// Validation already sent the retry instructions.
+					} else if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
 						s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
 					} else {
 						s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))

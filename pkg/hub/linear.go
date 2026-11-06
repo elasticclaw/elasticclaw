@@ -1313,7 +1313,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 
 	// Extract PR URLs from the [DONE] line.
 	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
-	prURLs := extractDonePRURLs(rawMessage)
+	prURLs, fallback := s.donePRURLs(clawID, rawMessage)
 
 	if pipelineCtx, stage, ok := s.pipelineStageForMessageContains(clawID, rawMessage); ok {
 		// Match the legacy [DONE] path: a failed required gate must block both
@@ -1323,6 +1323,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			msg := "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry."
 			log.Printf("[factory] claw %s pipeline [DONE] blocked by failed required gate", shortID(clawID))
 			s.injectUserMessage(clawID, msg)
+			return
+		}
+		if fallback && s.rejectInvalidDoneFallback(clawID, prURLs) {
 			return
 		}
 		// Pipeline stages that match [DONE] return before the legacy store path
@@ -1745,6 +1748,41 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	go s.promotePendingClaws()
 
 	log.Printf("[terminate] claw %s terminated successfully", clawID[:8])
+}
+
+// donePRURLs uses registered deliveries only when the signal omits URLs.
+func (s *Server) donePRURLs(clawID, message string) ([]string, bool) {
+	urls := extractDonePRURLs(message)
+	if len(urls) > 0 {
+		return urls, false
+	}
+	rows, err := s.db.Query(`SELECT pr_url FROM claw_prs WHERE claw_id=? AND mention_only=0 AND state NOT IN ('merged','closed') ORDER BY pr_url`, clawID)
+	if err != nil {
+		log.Printf("[factory] failed to load delivered PRs for claw %s: %v", shortID(clawID), err)
+		return nil, false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var prURL string
+		if err := rows.Scan(&prURL); err != nil {
+			return nil, false
+		}
+		urls = append(urls, prURL)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false
+	}
+	return urls, len(urls) > 0
+}
+
+func (s *Server) rejectInvalidDoneFallback(clawID string, urls []string) bool {
+	if token := s.resolveGitHubToken(); token != "" {
+		if rejected, reason := s.validateDonePRs(clawID, urls, token); rejected {
+			s.injectUserMessage(clawID, reason)
+			return true
+		}
+	}
+	return false
 }
 
 // extractDonePRURLs parses PR URLs from a [DONE] message.

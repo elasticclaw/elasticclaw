@@ -72,6 +72,24 @@ func (s *Server) handleClawPRRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	registered, err := s.registerClawPR(r.Context(), clawID, tenantID, match[1], number, report.URL, report.Source)
+	if errors.Is(err, errNoActivePRAttempt) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if err != nil {
+		http.Error(w, "failed to register PR", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"registered": registered})
+}
+
+var errNoActivePRAttempt = errors.New("no active workflow V2 attempt")
+
+// registerClawPR associates a PR without emitting a completion signal.
+func (s *Server) registerClawPR(ctx context.Context, clawID, tenantID, repo string, number int, prURL, source string) (bool, error) {
+	var err error
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
@@ -80,33 +98,26 @@ func (s *Server) handleClawPRRegistration(w http.ResponseWriter, r *http.Request
 	}
 	var registered bool
 	if s.workflowV2OwnsExecution(cc) {
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		store := workflowv2.NewStore(s.db)
 		binding, found, bindingErr := store.ActiveControlBinding(ctx, tenantID, clawID)
 		if bindingErr != nil {
-			http.Error(w, "failed to resolve workflow V2 attempt", http.StatusInternalServerError)
-			return
+			return false, bindingErr
 		}
 		if !found {
-			http.Error(w, "no active workflow V2 attempt", http.StatusConflict)
-			return
+			return false, errNoActivePRAttempt
 		}
 		var pr typesv2.VerifiedPullRequest
 		pr, registered, err = store.RegisterPullRequest(ctx, binding.RunID, binding.AttemptID,
-			typesv2.PullRequestClaim{URL: report.URL}, s.workflowV2PullRequestVerifier())
+			typesv2.PullRequestClaim{URL: prURL}, s.workflowV2PullRequestVerifier())
 		if err == nil {
 			err = s.associateWorkflowV2TaskRunPR(clawID, pr)
 		}
 	} else {
-		registered, err = s.storePRMention(clawID, match[1], number, report.URL, false, report.Source)
+		registered, err = s.storePRMention(clawID, repo, number, prURL, false, source)
 	}
-	if err != nil {
-		http.Error(w, "failed to register PR", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"registered": registered})
+	return registered, err
 }
 
 func (s *Server) associateWorkflowV2TaskRunPR(clawID string, pr typesv2.VerifiedPullRequest) error {

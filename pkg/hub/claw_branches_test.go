@@ -1,0 +1,320 @@
+package hub
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+)
+
+func branchSweepTestToken(s *Server) {
+	s.hubCfg.GitHubApps = []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: "cached-test-key"}}
+	s.ghTokenCache = map[string]cachedGitHubToken{
+		"owner/repo:read": {token: "repo-token", expiresAt: time.Now().Add(time.Hour)},
+		"":                {token: "repo-token", expiresAt: time.Now().Add(time.Hour)},
+	}
+}
+
+func TestClawBranchesEndpoint(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	for _, tc := range []struct {
+		name, auth, token, claw, status, body string
+		code                                  int
+	}{
+		{name: "missing auth", code: 401}, {name: "wrong auth", auth: "Bearer wrong", code: 401},
+		{name: "query precedence", token: "wrong", auth: "Bearer claw-token", code: 401},
+		{name: "unknown claw", token: "claw-token", claw: "unknown", code: 404},
+		{name: "invalid JSON", token: "claw-token", body: "{", code: 400},
+		{name: "trailing JSON", token: "claw-token", body: `{"branches":[]} {}`, code: 400},
+		{name: "invalid SHA", token: "claw-token", body: `{"branches":[{"repo":"owner/repo","branch":"feature","head_sha":"nope"}]}`, code: 400},
+		{name: "invalid repo", token: "claw-token", body: `{"branches":[{"repo":"owner/repo/extra","branch":"feature","head_sha":"` + strings.Repeat("a", 40) + `"}]}`, code: 400},
+		{name: "forbidden", token: "claw-token", body: `{"branches":[{"repo":"other/repo","branch":"feature","head_sha":"` + strings.Repeat("a", 40) + `"}]}`, code: 403},
+		{name: "query auth", token: "claw-token", body: `{"branches":[]}`, code: 200},
+		{name: "bearer auth", auth: "Bearer claw-token", body: `{"branches":[]}`, code: 200},
+		{name: "deleted", token: "claw-token", status: "deleted", code: 200},
+		{name: "error", token: "claw-token", status: "error", code: 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := newTaskRunAnalyticsTestServer(t, "branch-claw")
+			s.hubCfg.ClawToken = "claw-token"
+			status := tc.status
+			if status == "" {
+				status = "running"
+			}
+			if _, err := db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"}]',status=? WHERE id='branch-claw'`, status); err != nil {
+				t.Fatal(err)
+			}
+			claw := tc.claw
+			if claw == "" {
+				claw = "branch-claw"
+			}
+			body := tc.body
+			if body == "" {
+				body = `{"branches":[{"repo":"owner/repo","branch":"feature","head_sha":"` + strings.Repeat("a", 40) + `"}]}`
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/claws/"+claw+"/branches?claw_token="+tc.token, strings.NewReader(body))
+			req.Header.Set("Authorization", tc.auth)
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, req)
+			if rec.Code != tc.code {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM claw_branches`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("unexpected persisted branches: %d", count)
+			}
+		})
+	}
+}
+
+func TestStoreClawBranchesChanges(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	s, db := newTaskRunAnalyticsTestServer(t, "branch-claw")
+	branch := clawBranch{Repo: "owner/repo", Branch: "feature", HeadSHA: strings.Repeat("a", 40)}
+	for i, want := range []int{1, 0, 1, 0} {
+		if i == 2 {
+			branch.HeadSHA = strings.Repeat("b", 40)
+		}
+		if i == 3 {
+			if _, err := db.Exec(`UPDATE claw_branches SET pr_url='https://github.com/owner/repo/pull/1'`); err != nil {
+				t.Fatal(err)
+			}
+			branch.HeadSHA = strings.Repeat("c", 40)
+		}
+		pending, err := s.storeClawBranches("branch-claw", []clawBranch{branch})
+		if err != nil || len(pending) != want {
+			t.Fatalf("pass %d: pending=%v err=%v", i, pending, err)
+		}
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_branches`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("rows=%d err=%v", count, err)
+	}
+}
+
+func TestClawBranchSweepFiltering(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	for _, tc := range []struct {
+		name, author, headRepo, headRef, otherStatus string
+		otherMention, v2, want                       bool
+	}{
+		{name: "bot", author: "Bot", headRepo: "owner/repo", want: true},
+		{name: "human", author: "User", headRepo: "owner/repo"},
+		{name: "fork", author: "Bot", headRepo: "other/repo"},
+		{name: "wrong branch", author: "Bot", headRepo: "owner/repo", headRef: "unrelated"},
+		{name: "active owner", author: "Bot", headRepo: "owner/repo", otherStatus: "running"},
+		{name: "terminal owner", author: "Bot", headRepo: "owner/repo", otherStatus: "deleted", want: true},
+		{name: "mention by other", author: "Bot", headRepo: "owner/repo", otherStatus: "running", otherMention: true, want: true},
+		{name: "V2 register only", author: "Bot", headRepo: "owner/repo", v2: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const clawID = "branch-claw"
+			const prURL = "https://github.com/owner/repo/pull/1"
+			s, db := newTaskRunAnalyticsTestServer(t, clawID)
+			if _, err := db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"}]' WHERE id=?`, clawID); err != nil {
+				t.Fatal(err)
+			}
+			runID, _ := startTaskRunForTest(t, s, clawID, "sweep")
+			var v2run workflowv2.Run
+			if tc.v2 {
+				var err error
+				v2run, err = workflowv2.NewStore(db).CreateRun(context.Background(), workflowv2.CreateRunRequest{
+					ID: "branch-v2", TenantID: "test-tenant-id", InitialClawID: clawID,
+					WorkspaceYAML: []byte("schema_version: 2\nname: test\nrepositories:\n  repo:\n    provider: github\n    repository: owner/repo\n"),
+					WorkflowYAML:  []byte(workflowV2APIWorkflow),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.otherStatus != "" {
+				if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES('other-claw','test-tenant-id','other','',?,?)`, tc.otherStatus, now()); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.storePRMention("other-claw", "owner/repo", 1, prURL, tc.otherMention, "gh_create"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			branchSweepTestToken(s)
+			oldClient := defaultGitHubClient
+			defaultGitHubClient = newGitHubClient()
+			t.Cleanup(func() { defaultGitHubClient = oldClient })
+			calls := 0
+			defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.Header.Get("Authorization") != "Bearer repo-token" {
+					t.Error("missing repo token")
+				}
+				if _, ok := r.Context().Deadline(); !ok {
+					t.Error("missing deadline")
+				}
+				if tc.v2 && r.URL.Path == "/repos/owner/repo/pulls/1" {
+					return githubAppTokenResponse(200, `{"html_url":"`+prURL+`","state":"open","head":{"sha":"head","ref":"feature/x"},"base":{"ref":"main"}}`), nil
+				}
+				if r.URL.Path != "/repos/owner/repo/pulls" || r.URL.Query().Get("head") != "owner:feature/x" || r.URL.Query().Get("state") != "all" {
+					t.Fatalf("unexpected request %s", r.URL)
+				}
+				headRef := tc.headRef
+				if headRef == "" {
+					headRef = "feature/x"
+				}
+				return githubAppTokenResponse(200, fmt.Sprintf(`[{"number":1,"html_url":%q,"user":{"type":%q},"head":{"ref":%q,"repo":{"full_name":%q}}}]`, prURL, tc.author, headRef, tc.headRepo)), nil
+			})}
+			branch := clawBranch{Repo: "owner/repo", Branch: "feature/x", HeadSHA: strings.Repeat("a", 40)}
+			pending, err := s.storeClawBranches(clawID, []clawBranch{branch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.sweepClawBranches(clawID, pending)
+			var registeredURL string
+			var checked bool
+			if err := db.QueryRow(`SELECT pr_url,checked_at IS NOT NULL FROM claw_branches`).Scan(&registeredURL, &checked); err != nil {
+				t.Fatal(err)
+			}
+			if (registeredURL == prURL) != tc.want || !checked {
+				t.Fatalf("URL=%q checked=%t", registeredURL, checked)
+			}
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_prs WHERE run_id=?`, runID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != boolInt(tc.want) {
+				t.Fatalf("task run PR count=%d", count)
+			}
+			if tc.want && !tc.v2 {
+				var source string
+				if err := db.QueryRow(`SELECT source FROM claw_prs WHERE claw_id=?`, clawID).Scan(&source); err != nil {
+					t.Fatal(err)
+				}
+				if source != "branch_sweep" {
+					t.Fatalf("source=%q", source)
+				}
+			}
+			if tc.v2 {
+				if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_delivery_prs WHERE run_id=? AND registered_only=1`, v2run.ID).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("V2 registration=%d, %v", count, err)
+				}
+				if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE kind LIKE 'delivery.%'`).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("delivery events=%d, %v", count, err)
+				}
+				loaded, err := workflowv2.NewStore(db).GetRun(context.Background(), v2run.ID)
+				if err != nil || loaded.StateVersion != v2run.StateVersion {
+					t.Fatalf("V2 advanced: %#v, %v", loaded, err)
+				}
+			}
+			var status string
+			if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil || status != "running" {
+				t.Fatalf("claw advanced: %q, %v", status, err)
+			}
+			if tc.want {
+				previousCalls := calls
+				s.sweepClawBranches(clawID, []clawBranch{branch})
+				if calls != previousCalls {
+					t.Fatal("registered branch queried again")
+				}
+			}
+		})
+	}
+}
+
+func TestClawBranchSweepRetriesUnchangedHead(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	for _, initialStatus := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprint(initialStatus), func(t *testing.T) {
+			const clawID = "branch-retry-claw"
+			s, db := newTaskRunAnalyticsTestServer(t, clawID)
+			if _, err := db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"}]' WHERE id=?`, clawID); err != nil {
+				t.Fatal(err)
+			}
+			branchSweepTestToken(s)
+			oldClient := defaultGitHubClient
+			defaultGitHubClient = newGitHubClient()
+			t.Cleanup(func() { defaultGitHubClient = oldClient })
+			calls := 0
+			defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return githubAppTokenResponse(initialStatus, `[]`), nil
+				}
+				return githubAppTokenResponse(200, `[{"number":1,"html_url":"https://github.com/owner/repo/pull/1","user":{"type":"Bot"},"head":{"ref":"feature","repo":{"full_name":"owner/repo"}}}]`), nil
+			})}
+			branch := clawBranch{Repo: "owner/repo", Branch: "feature", HeadSHA: strings.Repeat("a", 40)}
+			pending, err := s.storeClawBranches(clawID, []clawBranch{branch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.sweepClawBranches(clawID, pending)
+			s.retryClawBranches()
+			if calls != 1 {
+				t.Fatal("retry was not throttled")
+			}
+			if _, err := db.Exec(`UPDATE claw_branches SET checked_at=?`, now().Add(-6*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			s.retryClawBranches()
+			if calls != 2 {
+				t.Fatalf("retry calls=%d", calls)
+			}
+			var prURL string
+			if err := db.QueryRow(`SELECT pr_url FROM claw_branches`).Scan(&prURL); err != nil || prURL == "" {
+				t.Fatalf("retry did not register PR: %q, %v", prURL, err)
+			}
+			s.retryClawBranches()
+			if calls != 2 {
+				t.Fatal("registered branch retried")
+			}
+		})
+	}
+}
+
+func TestClawBranchesEndpointQueuesRegistration(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	const clawID = "branch-endpoint-claw"
+	s, db := newTaskRunAnalyticsTestServer(t, clawID)
+	s.hubCfg.ClawToken = "claw-token"
+	if _, err := db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"}]' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	branchSweepTestToken(s)
+	oldClient := defaultGitHubClient
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() { defaultGitHubClient = oldClient })
+	defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return githubAppTokenResponse(200, `[{"number":1,"html_url":"https://github.com/owner/repo/pull/1","user":{"type":"Bot"},"head":{"ref":"feature","repo":{"full_name":"owner/repo"}}}]`), nil
+	})}
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/claws/"+clawID+"/branches?claw_token=claw-token", strings.NewReader(`{"branches":[{"repo":"owner/repo","branch":"feature","head_sha":"`+strings.Repeat("a", 40)+`"}]}`))
+		rec := httptest.NewRecorder()
+		s.mux.ServeHTTP(rec, req)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), fmt.Sprintf(`"queued":%d`, 1-i)) {
+			t.Fatalf("report %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var prURL string
+		if err := db.QueryRow(`SELECT pr_url FROM claw_branches WHERE claw_id=?`, clawID).Scan(&prURL); err != nil {
+			t.Fatal(err)
+		}
+		if prURL != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("async branch registration did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	var source string
+	if err := db.QueryRow(`SELECT source FROM claw_prs WHERE claw_id=?`, clawID).Scan(&source); err != nil || source != "branch_sweep" {
+		t.Fatalf("source=%q, %v", source, err)
+	}
+}

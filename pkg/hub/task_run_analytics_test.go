@@ -2,6 +2,7 @@ package hub
 
 import (
 	"database/sql"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -1225,15 +1226,52 @@ func TestTaskRunCreationInstrumentationSurfacesStartAnalyticsFailure(t *testing.
 	assertNoTaskRunOrphanClaws(t, db2)
 }
 
-func TestTaskRunPRMentionInstrumentationAssociatesPROpenedEvent(t *testing.T) {
-	s, db := newTaskRunAnalyticsTestServer(t, "claw-pr-mention")
-	runID, _ := startTaskRunForTest(t, s, "claw-pr-mention", "mention")
-
-	s.storePRMention("claw-pr-mention", "elastic/claw", 71, "https://github.com/elastic/claw/pull/71", true, "mention")
-
-	assertTaskRunPR(t, db, runID, "elastic/claw", 71, taskRunPRStateOpen, false)
-	assertTaskRunEventExists(t, db, runID, taskRunEventPRAssociated, taskRunInteractionNeutral)
-	assertTaskRunEventExists(t, db, runID, taskRunEventPROpened, taskRunInteractionNeutral)
+func TestTaskRunPRMentionAssociatesOnlyAfterDelivery(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	for _, atomic := range []bool{false, true} {
+		t.Run(fmt.Sprintf("atomic=%t", atomic), func(t *testing.T) {
+			const clawID = "claw-pr-mention"
+			const prURL = "https://github.com/elastic/claw/pull/71"
+			s, db := newTaskRunAnalyticsTestServer(t, clawID)
+			runID, _ := startTaskRunForTest(t, s, clawID, "mention")
+			store := func(mention bool, source string) {
+				t.Helper()
+				if atomic {
+					if failed := s.insertClawPRsAtomic(clawID, []prMentionCandidate{{repo: "elastic/claw", number: 71, url: prURL}}, mention, source); failed != "" {
+						t.Fatal(failed)
+					}
+				} else if _, err := s.storePRMention(clawID, "elastic/claw", 71, prURL, mention, source); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store(true, "mention")
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_prs WHERE run_id=?`, runID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatal("mention associated with task run")
+			}
+			if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_type IN (?,?)`, runID, taskRunEventPRAssociated, taskRunEventPROpened).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatal("mention emitted task-run PR events")
+			}
+			store(false, "gh_create")
+			store(false, "done")
+			assertTaskRunPR(t, db, runID, "elastic/claw", 71, taskRunPRStateOpen, false)
+			assertTaskRunEventExists(t, db, runID, taskRunEventPRAssociated, taskRunInteractionNeutral)
+			assertTaskRunEventExists(t, db, runID, taskRunEventPROpened, taskRunInteractionNeutral)
+			var source string
+			if err := db.QueryRow(`SELECT source FROM claw_prs WHERE claw_id=?`, clawID).Scan(&source); err != nil {
+				t.Fatal(err)
+			}
+			if source != "gh_create" {
+				t.Fatalf("source = %q", source)
+			}
+		})
+	}
 }
 
 func TestTaskRunPRMentionAnalyticsFailureDoesNotRollbackPRTracking(t *testing.T) {
@@ -1243,7 +1281,7 @@ func TestTaskRunPRMentionAnalyticsFailureDoesNotRollbackPRTracking(t *testing.T)
 		t.Fatalf("drop task_run_prs: %v", err)
 	}
 
-	s.storePRMention("claw-pr-mention-failure", "elastic/claw", 76, "https://github.com/elastic/claw/pull/76", true, "mention")
+	s.storePRMention("claw-pr-mention-failure", "elastic/claw", 76, "https://github.com/elastic/claw/pull/76", false, "gh_create")
 
 	var count int
 	if err := db.QueryRow(`

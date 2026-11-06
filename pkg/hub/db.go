@@ -1043,6 +1043,16 @@ func migrate(db *sql.DB) error {
 		UNIQUE(claw_id, pr_url)
 	);
 
+	CREATE TABLE IF NOT EXISTS claw_branches (
+		claw_id TEXT NOT NULL REFERENCES claws(id),
+		repo TEXT NOT NULL,
+		branch TEXT NOT NULL,
+		head_sha TEXT NOT NULL,
+		checked_at DATETIME,
+		pr_url TEXT NOT NULL DEFAULT '',
+		UNIQUE(claw_id, repo, branch)
+	);
+
 	CREATE TABLE IF NOT EXISTS claw_pr_feedback_deliveries (
 		claw_id       TEXT NOT NULL,
 		feedback_type TEXT NOT NULL,
