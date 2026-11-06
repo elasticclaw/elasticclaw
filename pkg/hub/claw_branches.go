@@ -56,6 +56,10 @@ func (s *Server) handleClawBranches(w http.ResponseWriter, r *http.Request) {
 	}
 	var repos []RepoAccess
 	_ = json.Unmarshal([]byte(reposJSON), &repos)
+	// Agents may clone extra repositories; skip those branches instead of
+	// rejecting the whole report. sweepClawBranch re-checks access per branch.
+	configured := make([]clawBranch, 0, len(report.Branches))
+	var skipped []string
 	for _, branch := range report.Branches {
 		prURL := "https://github.com/" + branch.Repo + "/pull/1"
 		match := prURLRegex.FindStringSubmatch(prURL)
@@ -65,15 +69,20 @@ func (s *Server) handleClawBranches(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if effectiveRepoAccess(branch.Repo, repos) == nil {
-			http.Error(w, "requested repo is not configured on this claw", http.StatusForbidden)
-			return
+			skipped = append(skipped, branch.Repo)
+			continue
 		}
+		configured = append(configured, branch)
+	}
+	if len(skipped) > 0 {
+		log.Printf("[branch-sweep] claw %s: ignoring %d branch(es) in repos not configured on the claw: %s",
+			shortID(clawID), len(skipped), strings.Join(skipped, ", "))
 	}
 	if status == "deleted" || status == "error" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	pending, err := s.storeClawBranches(clawID, report.Branches)
+	pending, err := s.storeClawBranches(clawID, configured)
 	if err != nil {
 		http.Error(w, "failed to store branches", http.StatusInternalServerError)
 		return
@@ -159,7 +168,8 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 		Number  int    `json:"number"`
 		HTMLURL string `json:"html_url"`
 		User    struct {
-			Type string `json:"type"`
+			Login string `json:"login"`
+			Type  string `json:"type"`
 		} `json:"user"`
 		Head struct {
 			Ref  string `json:"ref"`
@@ -172,7 +182,7 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 		return err
 	}
 	for _, pr := range prs {
-		if pr.User.Type != "Bot" || !strings.EqualFold(pr.Head.Repo.FullName, branch.Repo) || pr.Head.Ref != branch.Branch || pr.Number <= 0 {
+		if !s.isClawAppAuthor(pr.User.Login, pr.User.Type) || !strings.EqualFold(pr.Head.Repo.FullName, branch.Repo) || pr.Head.Ref != branch.Branch || pr.Number <= 0 {
 			continue
 		}
 		expectedURL := fmt.Sprintf("https://github.com/%s/pull/%d", branch.Repo, pr.Number)
@@ -194,6 +204,22 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 	return err
 }
 
+// isClawAppAuthor reports whether a PR author can be the hub's own GitHub App,
+// which opens every claw PR. Other Apps (Dependabot, Renovate) are Bots too,
+// so the login must match a configured App slug; only when no App URL is
+// configured to derive a slug from does any Bot author qualify.
+func (s *Server) isClawAppAuthor(login, userType string) bool {
+	if userType != "Bot" {
+		return false
+	}
+	for _, app := range s.githubAppConfigsForTokens() {
+		if app.URL != "" {
+			return s.isOwnAppBot(login)
+		}
+	}
+	return true
+}
+
 // Serialize ownership checks and registration, leaving branch lookups independent.
 func (s *Server) registerSweptPR(ctx context.Context, clawID, tenantID, repo string, number int, prURL string) (bool, error) {
 	s.branchSweepMu.Lock()
@@ -205,15 +231,24 @@ func (s *Server) registerSweptPR(ctx context.Context, clawID, tenantID, repo str
 	if status == "deleted" || status == "error" {
 		return false, nil
 	}
+	// Ownership spans both stores: legacy delivered or created rows, and V2
+	// delivered or registered PRs of runs whose current attempt is another claw.
 	var otherClaw string
 	err := s.db.QueryRow(`SELECT cp.claw_id FROM claw_prs cp JOIN claws c ON c.id=cp.claw_id
-		WHERE cp.repo=? COLLATE NOCASE AND cp.pr_number=? AND cp.mention_only=0 AND cp.claw_id<>?
-		AND c.status NOT IN ('deleted','error','offline') LIMIT 1`, repo, number, clawID).Scan(&otherClaw)
+		WHERE cp.repo=? COLLATE NOCASE AND cp.pr_number=? AND cp.claw_id<>?
+		AND (cp.mention_only=0 OR cp.source IN ('gh_create','branch_sweep'))
+		AND c.status NOT IN ('deleted','error','offline')
+		UNION ALL
+		SELECT a.claw_id FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
+		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
+		WHERE p.repository=? COLLATE NOCASE AND p.pr_number=? AND p.active=1 AND a.claw_id<>?
+		AND r.status IN ('active','suspended') AND a.status='active'
+		LIMIT 1`, repo, number, clawID, repo, number, clawID).Scan(&otherClaw)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	if otherClaw != "" {
-		log.Printf("[branch-sweep] skipping %s for claw %s: delivered by active claw %s", prURL, shortID(clawID), shortID(otherClaw))
+		log.Printf("[branch-sweep] skipping %s for claw %s: owned by active claw %s", prURL, shortID(clawID), shortID(otherClaw))
 		return false, nil
 	}
 	_, err = s.registerClawPR(ctx, clawID, tenantID, repo, number, prURL, "branch_sweep")

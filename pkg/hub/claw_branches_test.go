@@ -11,6 +11,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
 func branchSweepTestToken(s *Server) {
@@ -34,7 +35,7 @@ func TestClawBranchesEndpoint(t *testing.T) {
 		{name: "trailing JSON", token: "claw-token", body: `{"branches":[]} {}`, code: 400},
 		{name: "invalid SHA", token: "claw-token", body: `{"branches":[{"repo":"owner/repo","branch":"feature","head_sha":"nope"}]}`, code: 400},
 		{name: "invalid repo", token: "claw-token", body: `{"branches":[{"repo":"owner/repo/extra","branch":"feature","head_sha":"` + strings.Repeat("a", 40) + `"}]}`, code: 400},
-		{name: "forbidden", token: "claw-token", body: `{"branches":[{"repo":"other/repo","branch":"feature","head_sha":"` + strings.Repeat("a", 40) + `"}]}`, code: 403},
+		{name: "unconfigured repo skipped", token: "claw-token", body: `{"branches":[{"repo":"other/repo","branch":"feature","head_sha":"` + strings.Repeat("a", 40) + `"}]}`, code: 200},
 		{name: "query auth", token: "claw-token", body: `{"branches":[]}`, code: 200},
 		{name: "bearer auth", auth: "Bearer claw-token", body: `{"branches":[]}`, code: 200},
 		{name: "deleted", token: "claw-token", status: "deleted", code: 200},
@@ -104,16 +105,21 @@ func TestStoreClawBranchesChanges(t *testing.T) {
 func TestClawBranchSweepFiltering(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	for _, tc := range []struct {
-		name, author, headRepo, headRef, otherStatus string
-		otherMention, v2, want                       bool
+		name, author, login, appURL, headRepo, headRef, otherStatus, otherKind string
+		v2, want                                                               bool
 	}{
 		{name: "bot", author: "Bot", headRepo: "owner/repo", want: true},
+		{name: "own app bot", author: "Bot", login: "factory-app[bot]", appURL: "https://github.com/apps/factory-app", headRepo: "owner/repo", want: true},
+		{name: "other app bot", author: "Bot", login: "dependabot[bot]", appURL: "https://github.com/apps/factory-app", headRepo: "owner/repo"},
 		{name: "human", author: "User", headRepo: "owner/repo"},
 		{name: "fork", author: "Bot", headRepo: "other/repo"},
 		{name: "wrong branch", author: "Bot", headRepo: "owner/repo", headRef: "unrelated"},
-		{name: "active owner", author: "Bot", headRepo: "owner/repo", otherStatus: "running"},
-		{name: "terminal owner", author: "Bot", headRepo: "owner/repo", otherStatus: "deleted", want: true},
-		{name: "mention by other", author: "Bot", headRepo: "owner/repo", otherStatus: "running", otherMention: true, want: true},
+		{name: "active owner", author: "Bot", headRepo: "owner/repo", otherStatus: "running", otherKind: "delivered"},
+		{name: "terminal owner", author: "Bot", headRepo: "owner/repo", otherStatus: "deleted", otherKind: "delivered", want: true},
+		{name: "mention by other", author: "Bot", headRepo: "owner/repo", otherStatus: "running", otherKind: "mention", want: true},
+		{name: "registered by other", author: "Bot", headRepo: "owner/repo", otherStatus: "running", otherKind: "registered"},
+		{name: "V2 registration by other", author: "Bot", headRepo: "owner/repo", otherStatus: "running", otherKind: "v2_registered"},
+		{name: "V2 delivery by other", author: "Bot", headRepo: "owner/repo", otherStatus: "running", otherKind: "v2_delivered"},
 		{name: "V2 register only", author: "Bot", headRepo: "owner/repo", v2: true, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,28 +142,27 @@ func TestClawBranchSweepFiltering(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tc.otherStatus != "" {
-				if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES('other-claw','test-tenant-id','other','',?,?)`, tc.otherStatus, now()); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := s.storePRMention("other-claw", "owner/repo", 1, prURL, tc.otherMention, "gh_create"); err != nil {
-					t.Fatal(err)
-				}
-			}
 			branchSweepTestToken(s)
+			s.hubCfg.GitHubApps[0].URL = tc.appURL
 			oldClient := defaultGitHubClient
 			defaultGitHubClient = newGitHubClient()
 			t.Cleanup(func() { defaultGitHubClient = oldClient })
 			calls := 0
+			setup := true // other-claw ownership fixtures fetch PR state too
 			defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				calls++
-				if r.Header.Get("Authorization") != "Bearer repo-token" {
-					t.Error("missing repo token")
+				if setup && r.URL.Path != "/repos/owner/repo/pulls/1" {
+					return githubAppTokenResponse(200, `[]`), nil
 				}
-				if _, ok := r.Context().Deadline(); !ok {
-					t.Error("missing deadline")
+				if !setup {
+					calls++
+					if r.Header.Get("Authorization") != "Bearer repo-token" {
+						t.Error("missing repo token")
+					}
+					if _, ok := r.Context().Deadline(); !ok {
+						t.Error("missing deadline")
+					}
 				}
-				if tc.v2 && r.URL.Path == "/repos/owner/repo/pulls/1" {
+				if (setup || tc.v2) && r.URL.Path == "/repos/owner/repo/pulls/1" {
 					return githubAppTokenResponse(200, `{"html_url":"`+prURL+`","state":"open","head":{"sha":"head","ref":"feature/x"},"base":{"ref":"main"}}`), nil
 				}
 				if r.URL.Path != "/repos/owner/repo/pulls" || r.URL.Query().Get("head") != "owner:feature/x" || r.URL.Query().Get("state") != "all" {
@@ -167,8 +172,43 @@ func TestClawBranchSweepFiltering(t *testing.T) {
 				if headRef == "" {
 					headRef = "feature/x"
 				}
-				return githubAppTokenResponse(200, fmt.Sprintf(`[{"number":1,"html_url":%q,"user":{"type":%q},"head":{"ref":%q,"repo":{"full_name":%q}}}]`, prURL, tc.author, headRef, tc.headRepo)), nil
+				return githubAppTokenResponse(200, fmt.Sprintf(`[{"number":1,"html_url":%q,"user":{"login":%q,"type":%q},"head":{"ref":%q,"repo":{"full_name":%q}}}]`, prURL, tc.login, tc.author, headRef, tc.headRepo)), nil
 			})}
+			if tc.otherStatus != "" {
+				if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES('other-claw','test-tenant-id','other','',?,?)`, tc.otherStatus, now()); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				switch tc.otherKind {
+				case "delivered":
+					_, err = s.storePRMention("other-claw", "owner/repo", 1, prURL, false, "done")
+				case "mention":
+					_, err = s.storePRMention("other-claw", "owner/repo", 1, prURL, true, "mention")
+				case "registered":
+					_, err = s.storePRRegistration("other-claw", "owner/repo", 1, prURL, "gh_create")
+				case "v2_registered", "v2_delivered":
+					store := workflowv2.NewStore(db)
+					other, createErr := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+						ID: "other-v2", TenantID: "test-tenant-id", InitialClawID: "other-claw",
+						WorkspaceYAML: []byte("schema_version: 2\nname: test\nrepositories:\n  repo:\n    provider: github\n    repository: owner/repo\n"),
+						WorkflowYAML:  []byte(workflowV2APIWorkflow),
+					})
+					if createErr != nil {
+						t.Fatal(createErr)
+					}
+					claim := typesv2.PullRequestClaim{URL: prURL}
+					if tc.otherKind == "v2_registered" {
+						_, _, err = store.RegisterPullRequest(context.Background(), other.ID, other.CurrentAttemptID, claim, s.workflowV2PullRequestVerifier())
+					} else {
+						_, err = store.SubmitDelivery(context.Background(), other.ID, other.CurrentAttemptID,
+							typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{claim}}, s.workflowV2PullRequestVerifier())
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			setup = false
 			branch := clawBranch{Repo: "owner/repo", Branch: "feature/x", HeadSHA: strings.Repeat("a", 40)}
 			pending, err := s.storeClawBranches(clawID, []clawBranch{branch})
 			if err != nil {
@@ -292,7 +332,7 @@ func TestClawBranchesEndpointQueuesRegistration(t *testing.T) {
 		return githubAppTokenResponse(200, `[{"number":1,"html_url":"https://github.com/owner/repo/pull/1","user":{"type":"Bot"},"head":{"ref":"feature","repo":{"full_name":"owner/repo"}}}]`), nil
 	})}
 	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/api/claws/"+clawID+"/branches?claw_token=claw-token", strings.NewReader(`{"branches":[{"repo":"owner/repo","branch":"feature","head_sha":"`+strings.Repeat("a", 40)+`"}]}`))
+		req := httptest.NewRequest(http.MethodPost, "/api/claws/"+clawID+"/branches?claw_token=claw-token", strings.NewReader(`{"branches":[{"repo":"owner/repo","branch":"feature","head_sha":"`+strings.Repeat("a", 40)+`"},{"repo":"other/lib","branch":"feature","head_sha":"`+strings.Repeat("b", 40)+`"}]}`))
 		rec := httptest.NewRecorder()
 		s.mux.ServeHTTP(rec, req)
 		if rec.Code != 200 || !strings.Contains(rec.Body.String(), fmt.Sprintf(`"queued":%d`, 1-i)) {
@@ -316,5 +356,9 @@ func TestClawBranchesEndpointQueuesRegistration(t *testing.T) {
 	var source string
 	if err := db.QueryRow(`SELECT source FROM claw_prs WHERE claw_id=?`, clawID).Scan(&source); err != nil || source != "branch_sweep" {
 		t.Fatalf("source=%q, %v", source, err)
+	}
+	var stored int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_branches WHERE claw_id=?`, clawID).Scan(&stored); err != nil || stored != 1 {
+		t.Fatalf("unconfigured repo branch was stored: rows=%d, %v", stored, err)
 	}
 }
