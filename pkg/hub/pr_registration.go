@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -78,6 +79,7 @@ func (s *Server) handleClawPRRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
+		log.Printf("[pr-registration] failed to register %s for claw %s: %v", report.URL, shortID(clawID), err)
 		http.Error(w, "failed to register PR", http.StatusInternalServerError)
 		return
 	}
