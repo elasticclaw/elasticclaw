@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -31,7 +32,7 @@ func (s *Server) handleClawBranches(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	hubClawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
-	if clawToken == "" || clawToken != hubClawToken {
+	if clawToken == "" || subtle.ConstantTimeCompare([]byte(clawToken), []byte(hubClawToken)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
