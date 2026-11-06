@@ -117,18 +117,26 @@ func (s *Server) mcpCallHandler(ctx context.Context, handler http.HandlerFunc, m
 }
 
 // Receiving middleware also audits calls rejected by SDK schema validation or
-// unknown tool names, which never reach a typed tool handler.
+// unknown tool names, which never reach a typed tool handler. The audit row is
+// written before the call runs, so no action can complete unaudited.
 func (s *Server) auditFactoryMCP(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-		result, err := next(ctx, method, req)
 		call, ok := req.(*mcp.CallToolRequest)
-		if method != "tools/call" || !ok || call.Params == nil {
-			return result, err
+		identity, authenticated := ctx.Value(ctxAPITokenKey{}).(apiTokenIdentity)
+		if method != "tools/call" || !ok || call.Params == nil || !authenticated {
+			return next(ctx, method, req)
 		}
-		identity, ok := ctx.Value(ctxAPITokenKey{}).(apiTokenIdentity)
-		if !ok {
-			return result, err
+		inserted, err := s.db.ExecContext(ctx, `INSERT INTO api_token_audit(token_id,owner_login,tool,args_summary,status,created_at) VALUES(?,?,?,?,'pending',?)`,
+			identity.TokenID, identity.OwnerLogin, call.Params.Name, mcpArgsSummary(call.Params.Arguments), now().Unix())
+		var auditID int64
+		if err == nil {
+			auditID, err = inserted.LastInsertId()
 		}
+		if err != nil {
+			log.Printf("[mcp] audit failed, refusing tool=%s: %v", call.Params.Name, err)
+			return mcpText("Call refused: the hub could not record the audit entry. Try again later.", true), nil
+		}
+		result, err := next(ctx, method, req)
 		status, detail := "ok", ""
 		if err != nil {
 			status, detail = "error", err.Error()
@@ -141,13 +149,11 @@ func (s *Server) auditFactoryMCP(next mcp.MethodHandler) mcp.MethodHandler {
 				}
 			}
 		}
-		// Cancellation must not discard the audit record after an action completed.
+		// Cancellation must not discard the outcome after an action completed.
 		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_, auditErr := s.db.ExecContext(auditCtx, `INSERT INTO api_token_audit(token_id,owner_login,tool,args_summary,status,error,created_at) VALUES(?,?,?,?,?,?,?)`,
-			identity.TokenID, identity.OwnerLogin, call.Params.Name, mcpArgsSummary(call.Params.Arguments), status, mcpTruncate(detail, 2048), now().Unix())
-		if auditErr != nil {
-			log.Printf("[mcp] audit failed: %v", auditErr)
+		if _, auditErr := s.db.ExecContext(auditCtx, `UPDATE api_token_audit SET status=?, error=? WHERE id=?`, status, mcpTruncate(detail, 2048), auditID); auditErr != nil {
+			log.Printf("[mcp] audit outcome failed id=%d: %v", auditID, auditErr)
 		}
 		switch call.Params.Name {
 		case "send_message", "trigger_workflow", "update_claw", "kill_claw":
@@ -166,6 +172,10 @@ func (s *Server) auditFactoryMCP(next mcp.MethodHandler) mcp.MethodHandler {
 	}
 }
 
+// Argument names that commonly carry credentials. Their values are never
+// persisted in the audit table.
+var mcpSensitiveArgPattern = regexp.MustCompile(`(?i)token|secret|passw|credential|api[_-]?key|private[_-]?key|access[_-]?key|authorization|cookie`)
+
 func mcpArgsSummary(raw json.RawMessage) string {
 	var value any
 	if json.Unmarshal(raw, &value) != nil {
@@ -176,6 +186,10 @@ func mcpArgsSummary(raw json.RawMessage) string {
 		switch v := v.(type) {
 		case map[string]any:
 			for key, item := range v {
+				if mcpSensitiveArgPattern.MatchString(key) {
+					v[key] = "[redacted]"
+					continue
+				}
 				if key == "content" {
 					if text, ok := item.(string); ok {
 						chars := []rune(text)

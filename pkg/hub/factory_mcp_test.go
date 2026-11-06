@@ -466,3 +466,39 @@ func TestFactoryMCPKillClawRequiresExactID(t *testing.T) {
 		t.Fatalf("exact kill: target=%q sibling=%q", statusOf("mcp-claw"), statusOf("mcp-claw-sibling"))
 	}
 }
+
+func TestFactoryMCPRefusesCallsWhenAuditFails(t *testing.T) {
+	s, token := factoryMCPFixture(t)
+	session, ctx := factoryMCPClient(t, s, token.Token)
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_audit BEFORE INSERT ON api_token_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	result := factoryMCPCall(t, ctx, session, "kill_claw", map[string]any{"claw_id": "mcp-claw"}, true)
+	if !strings.Contains(factoryMCPText(t, result), "audit") {
+		t.Fatalf("refusal: %s", factoryMCPText(t, result))
+	}
+	factoryMCPCall(t, ctx, session, "send_message", map[string]any{"claw_id": "mcp-claw", "content": "hello"}, true)
+	var status string
+	var messages int
+	if err := s.db.QueryRow(`SELECT status FROM claws WHERE id='mcp-claw'`).Scan(&status); err != nil || status == "deleted" {
+		t.Fatalf("claw killed without audit: %q %v", status, err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id='mcp-claw'`).Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("message sent without audit: %d %v", messages, err)
+	}
+}
+
+func TestFactoryMCPAuditRedactsSensitiveArguments(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{"workspace": "ws", "input": map[string]any{"inputs": map[string]any{
+		"api_key": "sk-live-1", "GITHUB_TOKEN": "ghp_2", "db_password": "pw-3", "credentials": map[string]any{"user": "u-4"}, "ticket": "T-123",
+	}}})
+	summary := mcpArgsSummary(raw)
+	for _, secret := range []string{"sk-live-1", "ghp_2", "pw-3", "u-4"} {
+		if strings.Contains(summary, secret) {
+			t.Fatalf("audit kept %q: %s", secret, summary)
+		}
+	}
+	if !strings.Contains(summary, "T-123") || !strings.Contains(summary, `"api_key":"[redacted]"`) {
+		t.Fatalf("audit summary: %s", summary)
+	}
+}
