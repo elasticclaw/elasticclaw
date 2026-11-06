@@ -203,22 +203,30 @@ func TestFactoryCreationQueuesBehindOlderPendingClaw(t *testing.T) {
 	}
 }
 
-func TestTerminalTxDeferPromoteLeavesPromotionToCaller(t *testing.T) {
+func TestWritableVolumeLeaseHoldsSlotUntilReleased(t *testing.T) {
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	s, db := newReaperTestServer(t, &types.HubConfig{ConcurrencyGroups: []*types.ConcurrencyGroup{{Name: "cruise-demo", Limit: 1}}})
-	created := time.Now().UTC()
-	insertQueueTestClaw(t, db, "active001", "connected", "cruise-demo", created)
-	insertQueueTestClaw(t, db, "pending01", "pending", "cruise-demo", created.Add(-time.Minute))
+	now := time.Now().UTC()
+	insertQueueTestClaw(t, db, "syncing01", "deleted", "cruise-demo", now)
+	insertQueueTestClaw(t, db, "stale0001", "deleted", "cruise-demo", now)
+	insertQueueTestClaw(t, db, "pending01", "pending", "cruise-demo", now.Add(-time.Minute))
+	insertLease := func(id, clawID string, heartbeat time.Time) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO volume_leases(id, volume_id, repo, tag, claw_id, access_token, mode, mount, manifest_digest, acquired_at, expires_at, heartbeat_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			id, "volumes/tenant/"+id, "volumes/tenant/"+id, "latest", clawID, "token", volumeModeRW, "/data", "sha256:x", heartbeat, now.Add(volumeLeaseTTL), heartbeat); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A lease whose holder stopped heartbeating long ago must not hold the slot.
+	insertLease("stale", "stale0001", now.Add(-time.Hour))
+	insertLease("live", "syncing01", now)
 
-	// Callers that sync workflow volumes after the transition must keep the
-	// slot closed until the writable lease is released.
-	if applied, err := s.finishClawTerminalTx("active001", "deleted", "", "completed", "success", terminalTxOpts{deferPromote: true}); err != nil || !applied {
-		t.Fatalf("terminal transition applied=%v err=%v", applied, err)
-	}
-	time.Sleep(200 * time.Millisecond)
+	// The deleted claw is still syncing its writable volume: the slot stays taken.
+	s.promotePendingClaws()
 	if got := queueTestStatus(t, db, "pending01"); got != "pending" {
-		t.Fatalf("pending claw status=%q, want pending until the caller promotes", got)
+		t.Fatalf("pending claw status=%q, want pending while the writable lease is held", got)
 	}
+	s.releaseWorkflowVolumeLeases("syncing01")
 	s.promotePendingClaws()
 	waitForQueueTestPromotion(t, db, "pending01")
 }
