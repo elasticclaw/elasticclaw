@@ -79,13 +79,19 @@ func (s *Server) runRetention() {
 			}()
 			cfg = s.retentionSettings()
 			ticker.Reset(cfg.interval)
-			// Audit rows are written on every MCP call, so prune them even when
-			// checkpoint retention is disabled.
-			s.pruneAPITokenAudit(s.reaperNow())
-			if cfg.enabled {
-				s.retainOnce(s.reaperNow(), cfg)
-			}
+			s.retentionTick(s.reaperNow(), cfg)
 		}()
+	}
+}
+
+func (s *Server) retentionTick(at time.Time, cfg retentionSettings) {
+	// Audit rows are written on every MCP call, so prune them even when
+	// checkpoint retention is disabled. A dry run must not delete anything.
+	if !cfg.dryRun {
+		s.pruneAPITokenAudit(at)
+	}
+	if cfg.enabled {
+		s.retainOnce(at, cfg)
 	}
 }
 

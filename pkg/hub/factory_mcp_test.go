@@ -590,9 +590,19 @@ func TestPruneAPITokenAuditRunsWithoutCheckpointRetention(t *testing.T) {
 	if s.retentionSettings().enabled {
 		t.Fatal("test expects checkpoint retention disabled by default")
 	}
-	s.pruneAPITokenAudit(now)
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM api_token_audit`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("audit rows after prune = %d, %v; want 1", count, err)
+	countRows := func() int {
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM api_token_audit`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	s.retentionTick(now, retentionSettings{dryRun: true})
+	if got := countRows(); got != 2 {
+		t.Fatalf("audit rows after dry-run tick = %d; want 2", got)
+	}
+	s.retentionTick(now, s.retentionSettings())
+	if got := countRows(); got != 1 {
+		t.Fatalf("audit rows after tick = %d; want 1", got)
 	}
 }
