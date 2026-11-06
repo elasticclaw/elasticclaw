@@ -189,6 +189,7 @@ func TestGitHubPRWrapperTTY(t *testing.T) {
 }
 
 func testGitHubPRWrapperTTY(t *testing.T, args []string, wantReport, wantView string) {
+	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required by the installed GitHub helper")

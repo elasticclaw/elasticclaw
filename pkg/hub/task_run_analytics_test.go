@@ -1293,10 +1293,11 @@ func TestTaskRunPRMentionAssociatesOnlyAfterDelivery(t *testing.T) {
 				t.Fatal("mention emitted task-run PR events")
 			}
 			store(false, "gh_create")
-			store(false, "done")
+			// The registration alone must link the run, before any [DONE].
 			assertTaskRunPR(t, db, runID, "elastic/claw", 71, taskRunPRStateOpen, false)
 			assertTaskRunEventExists(t, db, runID, taskRunEventPRAssociated, taskRunInteractionNeutral)
 			assertTaskRunEventExists(t, db, runID, taskRunEventPROpened, taskRunInteractionNeutral)
+			store(false, "done")
 			var source string
 			if err := db.QueryRow(`SELECT source FROM claw_prs WHERE claw_id=?`, clawID).Scan(&source); err != nil {
 				t.Fatal(err)
