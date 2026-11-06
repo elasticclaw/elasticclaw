@@ -103,8 +103,10 @@ func (s *Server) storeClawBranches(clawID string, branches []clawBranch) ([]claw
 	var pending []clawBranch
 	for _, branch := range branches {
 		var prURL string
+		// A new push re-opens the lookup: the branch may now carry a replacement
+		// PR, and re-registering the same open PR is idempotent.
 		err := tx.QueryRow(`INSERT INTO claw_branches(claw_id,repo,branch,head_sha) VALUES(?,?,?,?)
-			ON CONFLICT(claw_id,repo,branch) DO UPDATE SET head_sha=excluded.head_sha, checked_at=NULL
+			ON CONFLICT(claw_id,repo,branch) DO UPDATE SET head_sha=excluded.head_sha, checked_at=NULL, pr_url=''
 			WHERE claw_branches.head_sha<>excluded.head_sha RETURNING pr_url`,
 			clawID, branch.Repo, branch.Branch, branch.HeadSHA).Scan(&prURL)
 		if errors.Is(err, sql.ErrNoRows) {

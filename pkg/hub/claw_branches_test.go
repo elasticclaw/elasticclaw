@@ -81,7 +81,9 @@ func TestStoreClawBranchesChanges(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	s, db := newTaskRunAnalyticsTestServer(t, "branch-claw")
 	branch := clawBranch{Repo: "owner/repo", Branch: "feature", HeadSHA: strings.Repeat("a", 40)}
-	for i, want := range []int{1, 0, 1, 0} {
+	// A new push re-opens the lookup even after a PR was found: the branch may
+	// now carry a replacement PR.
+	for i, want := range []int{1, 0, 1, 1} {
 		if i == 2 {
 			branch.HeadSHA = strings.Repeat("b", 40)
 		}
@@ -97,7 +99,7 @@ func TestStoreClawBranchesChanges(t *testing.T) {
 		}
 	}
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_branches`).Scan(&count); err != nil || count != 1 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_branches WHERE pr_url=''`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("rows=%d err=%v", count, err)
 	}
 }
