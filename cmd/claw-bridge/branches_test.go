@@ -32,14 +32,23 @@ func branchTestRepo(t *testing.T, dir string) string {
 	branchTestGit(t, dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Initial")
 	sha := branchTestGit(t, dir, "rev-parse", "HEAD")
 	branchTestGit(t, dir, "remote", "add", "origin", "git@github.com:owner/repo.git")
-	for _, branch := range []string{"main", "master", "trunk", "feature", "unpublished"} {
+	// Pushes go to a local bare repository while the fetch URL stays on GitHub.
+	bare := filepath.Join(t.TempDir(), "remote.git")
+	branchTestGit(t, dir, "init", "--bare", bare)
+	branchTestGit(t, dir, "config", "url."+bare+".pushInsteadOf", "git@github.com:owner/repo.git")
+	for _, branch := range []string{"main", "master", "trunk", "feature", "checked-out", "unpublished"} {
 		if branch != "main" {
 			branchTestGit(t, dir, "branch", branch)
 		}
-		if branch == "unpublished" {
+		switch branch {
+		case "unpublished":
 			continue
+		case "checked-out":
+			// Fetched like gh pr checkout does: tracked, but never pushed from here.
+			branchTestGit(t, dir, "update-ref", "-m", "fetch: storing head", "refs/remotes/origin/"+branch, sha)
+		default:
+			branchTestGit(t, dir, "push", "-q", "origin", branch)
 		}
-		branchTestGit(t, dir, "update-ref", "refs/remotes/origin/"+branch, sha)
 		branchTestGit(t, dir, "branch", "--set-upstream-to=origin/"+branch, branch)
 	}
 	branchTestGit(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")

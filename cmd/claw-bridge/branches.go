@@ -194,10 +194,30 @@ func collectRepoBranches(ctx context.Context, dir string) ([]workspaceBranch, er
 		if remote.repo == "" || !strings.HasPrefix(fields[2], "refs/heads/") || branch == "main" || branch == "master" || fields[4] == remote.defaultRef {
 			continue
 		}
+		// An upstream alone does not prove ownership: gh pr checkout tracks other
+		// authors' branches too. Report only branches this sandbox pushed.
+		if !pushedFromHere(ctx, dir, fields[4]) {
+			continue
+		}
 		// GitHub knows the upstream branch name, which can differ from the local name.
 		branches = append(branches, workspaceBranch{Repo: remote.repo, Branch: branch, HeadSHA: fields[3]})
 	}
 	return branches, ctx.Err()
+}
+
+// pushedFromHere reports whether git recorded a push to the remote-tracking ref.
+// Fetches and clones log other reasons, so only a local push leaves this entry.
+func pushedFromHere(ctx context.Context, dir, trackingRef string) bool {
+	out, err := branchGit(ctx, dir, "reflog", "show", "--format=%gs", trackingRef, "--")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if line == "update by push" {
+			return true
+		}
+	}
+	return false
 }
 
 func githubRemoteRepo(remote string) string {
