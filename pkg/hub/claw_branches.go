@@ -121,6 +121,13 @@ func (s *Server) storeClawBranches(clawID string, branches []clawBranch) ([]claw
 }
 
 func (s *Server) sweepClawBranches(clawID string, branches []clawBranch) {
+	// Every claw PR is opened by the hub's own App; without its identity any
+	// Bot (Dependabot, Renovate) would qualify, so fail closed.
+	if len(branches) > 0 && !s.hasOwnAppIdentity() {
+		log.Printf("[branch-sweep] claw %s: no GitHub App URL configured to identify the hub's bot; skipping %d branch(es)",
+			shortID(clawID), len(branches))
+		return
+	}
 	for _, branch := range branches {
 		if err := s.sweepClawBranch(clawID, branch); err != nil {
 			log.Printf("[branch-sweep] claw %s %s:%s: %v", shortID(clawID), branch.Repo, branch.Branch, err)
@@ -156,7 +163,8 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 		base = "https://api.github.com"
 	}
 	owner := strings.SplitN(branch.Repo, "/", 2)[0]
-	query := url.Values{"head": {owner + ":" + branch.Branch}, "state": {"all"}, "per_page": {"100"}}
+	// Only open PRs: a reused branch name must not claim an earlier, closed PR.
+	query := url.Values{"head": {owner + ":" + branch.Branch}, "state": {"open"}, "per_page": {"100"}}
 	resp, err := defaultGitHubClient.getContext(ctx, base+"/repos/"+branch.Repo+"/pulls?"+query.Encode(), token)
 	if err != nil {
 		return err
@@ -167,6 +175,7 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 	var prs []struct {
 		Number  int    `json:"number"`
 		HTMLURL string `json:"html_url"`
+		State   string `json:"state"`
 		User    struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
@@ -182,7 +191,7 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 		return err
 	}
 	for _, pr := range prs {
-		if !s.isClawAppAuthor(pr.User.Login, pr.User.Type) || !strings.EqualFold(pr.Head.Repo.FullName, branch.Repo) || pr.Head.Ref != branch.Branch || pr.Number <= 0 {
+		if pr.State != "open" || !s.isClawAppAuthor(pr.User.Login, pr.User.Type) || !strings.EqualFold(pr.Head.Repo.FullName, branch.Repo) || pr.Head.Ref != branch.Branch || pr.Number <= 0 {
 			continue
 		}
 		expectedURL := fmt.Sprintf("https://github.com/%s/pull/%d", branch.Repo, pr.Number)
@@ -204,20 +213,22 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 	return err
 }
 
-// isClawAppAuthor reports whether a PR author can be the hub's own GitHub App,
+// isClawAppAuthor reports whether a PR author is the hub's own GitHub App,
 // which opens every claw PR. Other Apps (Dependabot, Renovate) are Bots too,
-// so the login must match a configured App slug; only when no App URL is
-// configured to derive a slug from does any Bot author qualify.
+// so the login must match a configured App slug.
 func (s *Server) isClawAppAuthor(login, userType string) bool {
-	if userType != "Bot" {
-		return false
-	}
+	return userType == "Bot" && s.isOwnAppBot(login)
+}
+
+// hasOwnAppIdentity reports whether any configured App has a URL to derive
+// its bot login from.
+func (s *Server) hasOwnAppIdentity() bool {
 	for _, app := range s.githubAppConfigsForTokens() {
 		if app.URL != "" {
-			return s.isOwnAppBot(login)
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // Serialize ownership checks and registration, leaving branch lookups independent.
@@ -233,11 +244,12 @@ func (s *Server) registerSweptPR(ctx context.Context, clawID, tenantID, repo str
 	}
 	// Ownership spans both stores: legacy delivered or created rows, and V2
 	// delivered or registered PRs of runs whose current attempt is another claw.
+	// An offline claw may reconnect, so only deleted/error claws release.
 	var otherClaw string
 	err := s.db.QueryRow(`SELECT cp.claw_id FROM claw_prs cp JOIN claws c ON c.id=cp.claw_id
 		WHERE cp.repo=? COLLATE NOCASE AND cp.pr_number=? AND cp.claw_id<>?
 		AND (cp.mention_only=0 OR cp.source IN ('gh_create','branch_sweep'))
-		AND c.status NOT IN ('deleted','error','offline')
+		AND c.status NOT IN ('deleted','error')
 		UNION ALL
 		SELECT a.claw_id FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
@@ -287,7 +299,11 @@ func (s *Server) retryClawBranches() {
 	}
 	err = rows.Err()
 	rows.Close()
-	if err != nil {
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	if !s.hasOwnAppIdentity() {
+		log.Printf("[branch-sweep] no GitHub App URL configured to identify the hub's bot; skipping %d pending branch(es)", len(pending))
 		return
 	}
 	for _, p := range pending {
