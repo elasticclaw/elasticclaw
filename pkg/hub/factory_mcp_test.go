@@ -530,3 +530,46 @@ func TestFactoryMCPHubFailuresAreNotUnauthorized(t *testing.T) {
 		})
 	}
 }
+
+// Calls every tool not exercised elsewhere so a renamed route placeholder or a
+// dropped path value or query field fails the suite. REST handlers answer a
+// missing path value with 400, so lookups of unknown IDs must reach their 404.
+func TestFactoryMCPReadToolWiring(t *testing.T) {
+	s, token := factoryMCPFixture(t)
+	session, ctx := factoryMCPClient(t, s, token.Token)
+	run := map[string]any{"run_id": "missing-run"}
+	for _, call := range []struct {
+		tool      string
+		args      map[string]any
+		wantError bool
+		want      string
+	}{
+		{"get_claw_timeline", map[string]any{"claw_id": "mcp-claw"}, false, "[]"},
+		{"get_claw_activity", map[string]any{"claw_id": "mcp-claw"}, false, "[]"},
+		{"get_claw_prs", map[string]any{"claw_id": "mcp-claw"}, false, "[]"},
+		{"get_gateway_diagnostics", map[string]any{"claw_id": "mcp-claw"}, false, "[]"},
+		{"list_workspaces", map[string]any{}, false, `"name":"elasticclaw-test"`},
+		{"list_workflows", map[string]any{"workspace": "elasticclaw-test"}, false, "["},
+		{"list_workflows", map[string]any{"workspace": "missing-workspace"}, true, "HTTP 404: workspace not found"},
+		{"list_workflow_runs", map[string]any{"workspace": "elasticclaw-test", "workflow": "missing-workflow", "limit": 5}, false, `"count":0`},
+		{"get_workflow_run", run, true, "HTTP 404: {\"error\":\"workflow run not found\"}"},
+		{"get_workflow_run_logs", run, true, "workflow run not found or has no current attempt"},
+		{"list_workflow_run_attempts", run, true, "HTTP 404: {\"error\":\"workflow run not found\"}"},
+		{"get_workflow_attempt_logs", map[string]any{"run_id": "missing-run", "attempt_id": "missing-attempt"}, true, "workflow attempt not found"},
+		{"trigger_workflow", map[string]any{"workspace": "elasticclaw-test", "workflow": "missing-workflow"}, true, "HTTP 404: {\"error\":\"workflow not found\"}"},
+		{"analytics_summary", map[string]any{"status": "failed"}, false, `"totalRuns":0`},
+		{"analytics_general_stats", map[string]any{"tz": "UTC"}, false, `"ticketToPrMs"`},
+		{"analytics_effectiveness", map[string]any{}, false, `"funnel"`},
+		{"analytics_runs", map[string]any{"limit": 5}, false, `"limit":5`},
+		{"analytics_run", run, true, "HTTP 404"},
+		{"analytics_tickets", map[string]any{"limit": 7}, false, `"limit":7`},
+		{"analytics_costs", map[string]any{"days": 7}, false, `"dailySeries"`},
+		{"analytics_cost_drivers", map[string]any{"groupBy": "workflow"}, false, "[]"},
+		{"analytics_filter_options", map[string]any{}, false, `"workspaces"`},
+	} {
+		result := factoryMCPCall(t, ctx, session, call.tool, call.args, call.wantError)
+		if text := factoryMCPText(t, result); !strings.Contains(text, call.want) || strings.HasPrefix(text, "HTTP 400") {
+			t.Errorf("%s %v: %s", call.tool, call.args, mcpTruncate(text, 300))
+		}
+	}
+}
