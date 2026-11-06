@@ -28,7 +28,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -54,14 +53,12 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
-	db *sql.DB
-	// mcpAuditPrunedAt is the unix time of the last api_token_audit prune.
-	mcpAuditPrunedAt atomic.Int64
-	addr             string
-	hubCfg           *types.HubConfig
-	identity         *HubIdentity
-	mux              *http.ServeMux
-	artifacts        artifact.Store
+	db        *sql.DB
+	addr      string
+	hubCfg    *types.HubConfig
+	identity  *HubIdentity
+	mux       *http.ServeMux
+	artifacts artifact.Store
 
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
@@ -683,6 +680,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
 	go srv.runRetention()
+	go srv.runAPITokenAuditPruner()
 	if srv.livenessEnabled() {
 		go srv.runReaper()
 	}

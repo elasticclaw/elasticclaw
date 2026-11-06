@@ -580,35 +580,17 @@ func TestFactoryMCPReadToolWiring(t *testing.T) {
 	}
 }
 
-func TestPruneAPITokenAuditIfDue(t *testing.T) {
+func TestPruneAPITokenAudit(t *testing.T) {
 	s := newAPITokenTestServer(t)
 	now := time.Now()
-	insert := func(age time.Duration) {
-		t.Helper()
+	for _, age := range []time.Duration{apiTokenAuditMaxAge + time.Hour, time.Hour} {
 		if _, err := s.db.Exec(`INSERT INTO api_token_audit(token_id,owner_login,tool,args_summary,status,created_at) VALUES('t','alice','list_claws','{}','ok',?)`, now.Add(-age).Unix()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	countRows := func() int {
-		var count int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM api_token_audit`).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		return count
-	}
-	insert(apiTokenAuditMaxAge + time.Hour)
-	insert(time.Hour)
-	s.pruneAPITokenAuditIfDue(now)
-	if got := countRows(); got != 1 {
-		t.Fatalf("audit rows after prune = %d; want 1", got)
-	}
-	insert(apiTokenAuditMaxAge + time.Hour)
-	s.pruneAPITokenAuditIfDue(now.Add(30 * time.Minute))
-	if got := countRows(); got != 2 {
-		t.Fatalf("prune ran again within the hour: %d rows; want 2", got)
-	}
-	s.pruneAPITokenAuditIfDue(now.Add(61 * time.Minute))
-	if got := countRows(); got != 1 {
-		t.Fatalf("audit rows after next hourly prune = %d; want 1", got)
+	s.pruneAPITokenAudit(now)
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM api_token_audit`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("audit rows after prune = %d, %v; want 1", count, err)
 	}
 }
