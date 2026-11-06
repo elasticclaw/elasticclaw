@@ -21,7 +21,9 @@ function formatDate(value: string | null): string {
   return new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
 }
 
-export function ApiTokensSettings() {
+// hubPublicUrl is the hub's configured public URL. Without it, fall back to the
+// build-time hub URL or this origin, which is only right when the hub serves the UI.
+export function ApiTokensSettings({ hubPublicUrl = "" }: { hubPublicUrl?: string }) {
   const [tokens, setTokens] = useState<PersonalApiToken[] | null>(null)
   const [error, setError] = useState("")
   const [githubRequired, setGithubRequired] = useState(false)
@@ -55,7 +57,7 @@ export function ApiTokensSettings() {
     setCreating(true)
     setCreateError("")
     try {
-      const origin = new URL(getHubUrl() || window.location.origin, window.location.origin).origin
+      const origin = new URL(hubPublicUrl || getHubUrl() || window.location.origin, window.location.origin).origin
       const { token, ...metadata } = await createApiToken(name.trim(), expiration === "never" ? null : Number(expiration) as ApiTokenExpirationDays)
       setTokens((current) => [metadata, ...(current ?? [])])
       setCommand(`claude mcp add --transport http factory ${origin}/mcp --header "Authorization: Bearer ${token}"`)
@@ -166,7 +168,7 @@ export function ApiTokensSettings() {
       </Dialog>
 
       <Dialog open={revealedToken !== null} onOpenChange={(open) => { if (!open) closeReveal() }}>
-        <DialogContent onInteractOutside={(event) => event.preventDefault()}>
+        <DialogContent onInteractOutside={(event) => event.preventDefault()} onEscapeKeyDown={(event) => event.preventDefault()}>
           <DialogHeader><DialogTitle>Save your API token</DialogTitle><DialogDescription>Copy this token now and store it securely. It won’t be shown again.</DialogDescription></DialogHeader>
           <div className="space-y-2"><Label htmlFor="created-api-token">Token</Label><Input id="created-api-token" readOnly value={revealedToken ?? ""} className="font-mono text-xs" onFocus={(event) => event.target.select()} /><Button variant="outline" size="sm" onClick={() => copy(revealedToken ?? "", "Token")}><Copy className="size-4" />Copy token</Button></div>
           <div className="space-y-2"><p className="text-sm font-medium">Connect Claude Code</p><pre className="rounded-md bg-muted p-3 text-xs font-mono whitespace-pre-wrap break-all select-all">{command}</pre><Button variant="outline" size="sm" onClick={() => copy(command, "Command")}><Copy className="size-4" />Copy command</Button></div>

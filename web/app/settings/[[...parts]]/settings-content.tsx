@@ -596,7 +596,7 @@ export default function SettingsSectionPage() {
           {settings && section === "authentication" && (
             <AuthenticationSection settings={settings} onSave={save} saving={saving} />
           )}
-          {section === "api-tokens" && <ApiTokensSettings />}
+          {section === "api-tokens" && <ApiTokensSettings hubPublicUrl={hubPublicUrl} />}
           {settings && section === "issue-trackers" && (
             <IntegrationsSection settings={settings} onSave={save} saving={saving} selectedWorkspace={selectedWorkspace} hubPublicUrl={hubPublicUrl} />
           )}
