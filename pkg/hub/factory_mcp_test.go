@@ -609,3 +609,24 @@ func TestFactoryMCPAuditErrorRedactsHiddenArgValues(t *testing.T) {
 		t.Fatalf("audit error lost visible context: %s", got)
 	}
 }
+
+func TestFactoryMCPAuditKeepsNestedWorkflowInputKeys(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{"workspace": "ws", "workflow": "wf",
+		"input": map[string]any{"inputs": map[string]any{"issue_number": "123", "repo": "secret-repo"}}})
+	summary := mcpArgsSummary(raw)
+	if !strings.Contains(summary, `"input":{"keys":["issue_number","repo"]}`) || strings.Contains(summary, "secret-repo") {
+		t.Fatalf("audit summary: %s", summary)
+	}
+}
+
+func TestAPITokenKeepsOwnerLoginCase(t *testing.T) {
+	s := newAPITokenTestServer(t)
+	token := createAPITokenForTest(t, s, "Alice", `{"name":"case"}`)
+	identity, err := s.authenticateAPIToken(context.Background(), token.Token)
+	if err != nil || identity.OwnerLogin != "Alice" {
+		t.Fatalf("identity = %+v, %v; want owner Alice", identity, err)
+	}
+	if rec := apiTokenRequest(t, s, "alice", http.MethodGet, "/api/settings/api-tokens", ""); !strings.Contains(rec.Body.String(), token.ID) {
+		t.Fatalf("case-insensitive list missed token: %s", rec.Body.String())
+	}
+}

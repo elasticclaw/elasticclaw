@@ -227,7 +227,12 @@ func mcpArgsSummary(raw json.RawMessage) string {
 				}
 				if key == "input" {
 					// Workflow inputs can carry arbitrary data; keep only their keys.
-					if fields, ok := item.(map[string]any); ok {
+					fields, ok := item.(map[string]any)
+					// trigger_workflow wraps the workflow inputs as {"inputs": {...}}.
+					if inner, nested := fields["inputs"].(map[string]any); ok && nested && len(fields) == 1 {
+						fields = inner
+					}
+					if ok {
 						keys := make([]string, 0, len(fields))
 						for field := range fields {
 							keys = append(keys, field)
