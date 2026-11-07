@@ -192,3 +192,30 @@ func TestAdoptionRollbackAndLookupFailure(t *testing.T) {
 		t.Fatalf("payload=%s err=%v", payload, err)
 	}
 }
+
+func TestBranchRegistrationSkipsPROwnedByActiveRun(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	owner := createDeliveryRun(t, store, "owner")
+	url := "https://github.example/org/api/pull/10"
+	verifier := deliveryVerifier(map[string]string{url: "head"})
+	if _, err := store.SubmitDelivery(ctx, owner.RunID, owner.ID, typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: url}}}, verifier); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "blocked", TenantID: "tenant-1", InitialClawID: "claw", WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(deliveryTransitionWorkflowYAML + branchDeliveryYAML)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RegisterPullRequest(ctx, run.ID, run.CurrentAttemptID, typesv2.PullRequestClaim{URL: url}, verifier); err != nil {
+		t.Fatal(err)
+	}
+	var registeredOnly bool
+	if err := db.QueryRow(`SELECT registered_only FROM workflow_v2_delivery_prs WHERE run_id=?`, run.ID).Scan(&registeredOnly); err != nil || !registeredOnly {
+		t.Fatalf("registered_only=%t err=%v", registeredOnly, err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND kind='delivery.verified'`, run.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("events=%d err=%v", count, err)
+	}
+}

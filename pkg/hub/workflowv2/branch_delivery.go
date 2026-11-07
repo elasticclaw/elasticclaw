@@ -181,13 +181,11 @@ func (s *Store) registerBranchPullRequests(ctx context.Context, runID, attemptID
 		}
 		for i := range verified {
 			pr := &verified[i]
-			if matchesDeliveryBranch(wf, *pr) {
-				allowed, err := claimBranchDelivery(ctx, tx, run, pr)
-				if err != nil {
+			// A PR owned by another run stays registration-only here.
+			promote := matchesDeliveryBranch(wf, *pr)
+			if promote {
+				if promote, err = claimBranchDelivery(ctx, tx, run, pr); err != nil {
 					return err
-				}
-				if !allowed {
-					return fmt.Errorf("pull request %s is owned by another run", pr.URL)
 				}
 			}
 			added, err := upsertDeliveryPR(ctx, tx, runID, pr, true, now)
@@ -195,7 +193,7 @@ func (s *Store) registerBranchPullRequests(ctx context.Context, runID, attemptID
 				return err
 			}
 			inserted = inserted || added
-			if matchesDeliveryBranch(wf, *pr) {
+			if promote {
 				result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET registered_only=0 WHERE id=? AND active=1 AND registered_only=1`, pr.ID)
 				if err != nil {
 					return err
