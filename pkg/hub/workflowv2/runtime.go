@@ -169,7 +169,7 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 		triggerType = "manual"
 	}
 	if initial.Terminal {
-		status = terminalRunStatus(rwf.Workflow.InitialState)
+		status = terminalRunStatus(rwf.Workflow.InitialState, initial.Outcome)
 		finishedAt = now.UnixMilli()
 	} else if req.ActivationPending {
 		status = RunSuspended
@@ -542,7 +542,7 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	status := RunActive
 	finishedAt := int64(0)
 	if destination.Terminal {
-		status = terminalRunStatus(transitionDef.To)
+		status = terminalRunStatus(transitionDef.To, destination.Outcome)
 		finishedAt = now.UnixMilli()
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET state=?,display_phase=?,state_version=?,status=?,waiting_reason='',updated_at=?,finished_at=?
@@ -1156,7 +1156,13 @@ func finishRunScan(run *Run, phase, status string, created, updated, finished in
 	}
 }
 
-func terminalRunStatus(state string) RunStatus {
+func terminalRunStatus(state string, outcome typesv2.TerminalOutcome) RunStatus {
+	if outcome == typesv2.OutcomeCancelled {
+		return RunCancelled
+	}
+	if outcome != "" {
+		return RunCompleted
+	}
 	lower := strings.ToLower(state)
 	if strings.Contains(lower, "cancel") {
 		return RunCancelled
