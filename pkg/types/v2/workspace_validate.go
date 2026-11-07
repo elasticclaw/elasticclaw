@@ -134,6 +134,19 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 			resolvedCI[name] = ResolveCapabilities(conn.Provider, conn.CapabilityRestrictions)
 		}
 		for name, pipe := range ws.CI.Pipelines {
+			if pipe.CheckName != "" {
+				if strings.TrimSpace(pipe.CheckName) == "" {
+					return nil, fmt.Errorf("ci.pipelines.%s.check_name must not be blank", name)
+				}
+				if pipe.Workflow != "" {
+					return nil, fmt.Errorf("ci.pipelines.%s: check_name and workflow are mutually exclusive", name)
+				}
+				if _, err := pathpkg.Match(pipe.CheckName, ""); err != nil {
+					return nil, fmt.Errorf("ci.pipelines.%s.check_name: invalid glob: %w", name, err)
+				}
+			} else if pipe.AppSlug != "" {
+				return nil, fmt.Errorf("ci.pipelines.%s.app_slug requires check_name", name)
+			}
 			if err := validateResourceName("ci.pipelines", name); err != nil {
 				return nil, err
 			}

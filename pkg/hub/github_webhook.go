@@ -139,6 +139,23 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
 			s.safeGo("github issue comment webhook", func() { s.processGitHubIssueComment(payload) })
 		}
+	case "status":
+		var payload struct {
+			SHA        string `json:"sha"`
+			Repository struct {
+				FullName string `json:"full_name"`
+			} `json:"repository"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		s.safeGo("github status webhook", func() {
+			check := githubCheckPayload{Action: "completed"}
+			check.Repository.FullName = payload.Repository.FullName
+			check.CheckRun.HeadSHA = payload.SHA
+			s.processWorkflowV2GitHubCheckEvent("check_run", check)
+		})
 	case "check_run", "check_suite":
 		var payload githubCheckPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
