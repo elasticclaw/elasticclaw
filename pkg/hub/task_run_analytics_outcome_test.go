@@ -1,0 +1,241 @@
+package hub
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
+)
+
+const analyticsOutcomeWorkspace = `schema_version: 2
+name: analytics
+repositories:
+  primary: {provider: github, repository: org/repo}
+`
+
+func TestWorkflowV2AnalyticsLoaderOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		analytics, kind     string
+		enabled, requiresPR bool
+	}{
+		{"", "code_task", true, true},
+		{"analytics: {}", "code_task", true, true},
+		{"analytics: {run_kind: maintenance, requires_pr: false}", "maintenance", true, false},
+		{"analytics: {enabled: false}", "code_task", false, true},
+		{"analytics: {run_kind: code_task, enabled: false, requires_pr: false}", "code_task", false, false},
+	} {
+		t.Run(tc.analytics, func(t *testing.T) {
+			doc := "schema_version: 2\nname: analytics\nenabled: true\ninitial_state: working\nstates:\n  working: {phase: build}\n" + tc.analytics
+			workflow, err := loadExternalWorkflowDocument("analytics.yaml", []byte(doc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			enabled, requiresPR, _ := taskRunAnalyticsContractForWorkflow(workflow)
+			if !*workflow.Enabled || taskRunKindForWorkflow(workflow) != tc.kind || enabled != tc.enabled || requiresPR != tc.requiresPR {
+				t.Fatalf("unexpected analytics contract: %+v, enabled=%t requiresPR=%t", workflow, enabled, requiresPR)
+			}
+		})
+	}
+}
+
+func TestWorkflowV2AnalyticsTerminalOutcomesSurviveMaterialization(t *testing.T) {
+	for _, tc := range []struct{ state, outcome, status, warning string }{
+		{"unchanged", "no_changes", taskRunStatusClean, ""},
+		{"cancelled", "delivered", taskRunStatusClean, ""},
+		{"done", "closed", taskRunStatusClean, taskRunWarningPRClosedUnmerged},
+		{"failed", "failed", taskRunStatusFailed, ""},
+		{"done", "cancelled", taskRunStatusCancelled, ""},
+		{"failed", "", taskRunStatusRunning, ""},
+	} {
+		t.Run(tc.state+"/"+tc.outcome, func(t *testing.T) {
+			s, db := newTaskRunAnalyticsTestServer(t, "outcome-claw")
+			runID, _ := startTaskRunForTest(t, s, "outcome-claw", "outcome")
+			doc := fmt.Sprintf(`schema_version: 2
+name: outcomes
+enabled: true
+initial_state: working
+states:
+  working: {phase: build}
+  %s: {phase: done, terminal: true, outcome: %q}
+transitions:
+  finish: {from: working, on: workflow.finished, to: %s}
+`, tc.state, tc.outcome, tc.state)
+			store := workflowv2.NewStore(db)
+			run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+				TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace), WorkflowYAML: []byte(doc),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.materializeTaskRun(runID); err != nil {
+				t.Fatal(err)
+			}
+			var status string
+			if err := db.QueryRow(`SELECT status FROM task_run_summaries WHERE run_id=?`, runID).Scan(&status); err != nil || status != taskRunStatusRunning {
+				t.Fatalf("active run status=%s, err=%v", status, err)
+			}
+			if _, err := store.ApplyEvent(context.Background(), run.ID, workflowv2.EventInput{ID: "finish", MessageID: "finish", Kind: "workflow.finished", Producer: workflowv2.ProducerHub}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.outcome != "" && tc.outcome != "no_changes" {
+				associatePRForTest(t, s, runID, "org/repo", 1, "open")
+			}
+			// A deleted claw must not prevent terminal classification or replay.
+			assertExecSucceeds(t, db, `UPDATE claws SET status='deleted' WHERE id='outcome-claw'`)
+			if tc.outcome != "" {
+				s.closeOrphanedTaskRunSummaries()
+				if err := db.QueryRow(`SELECT status FROM task_run_summaries WHERE run_id=?`, runID).Scan(&status); err != nil || status != tc.status {
+					t.Fatalf("recovered status=%s err=%v", status, err)
+				}
+			}
+			s.maybeFinishWorkflowV2Parent(context.Background(), run.ID)
+			for i := 0; i < 2; i++ {
+				if err := s.materializeTaskRun(runID); err != nil {
+					t.Fatal(err)
+				}
+				if tc.outcome != "" {
+					s.closeOrphanedTaskRunSummaries()
+				}
+				var outcome, phase, warnings string
+				var finishedAt int64
+				if err := db.QueryRow(`SELECT status, phase, outcome, warning_types, finished_at FROM task_run_summaries WHERE run_id=?`, runID).Scan(&status, &phase, &outcome, &warnings, &finishedAt); err != nil {
+					t.Fatal(err)
+				}
+				if status != tc.status || outcome != tc.outcome {
+					t.Fatalf("status/outcome=%s/%s, want %s/%s", status, outcome, tc.status, tc.outcome)
+				}
+				if tc.outcome != "" && (phase != taskRunPhaseTerminal || finishedAt == 0) {
+					t.Fatalf("terminal phase/time: %s/%d", phase, finishedAt)
+				}
+				if tc.warning != "" && !strings.Contains(warnings, tc.warning) {
+					t.Fatalf("missing warning in %s", warnings)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkflowV2AnalyticsNonPRCompletionAndOrphans(t *testing.T) {
+	for _, completed := range []bool{false, true} {
+		t.Run(fmt.Sprint(completed), func(t *testing.T) {
+			s, db := newTaskRunAnalyticsTestServer(t, "non-pr-claw")
+			runID, attemptID := startTaskRunWithRequiresPRForTest(t, s, "non-pr-claw", "non-pr", false)
+			recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: runID, AttemptID: attemptID, EventKey: "no-pr", EventType: taskRunEventDoneWithoutPR, FailureType: taskRunFailureDoneWithoutPR, Source: taskRunSourceHub, ActorType: taskRunActorSystem})
+			if completed {
+				recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: runID, AttemptID: attemptID, EventKey: "completed", EventType: taskRunEventTaskCompleted, Source: taskRunSourceHub, ActorType: taskRunActorSystem})
+			}
+			assertExecSucceeds(t, db, `UPDATE claws SET status='deleted' WHERE id='non-pr-claw'`)
+			for i := 0; i < 2; i++ {
+				if err := s.materializeTaskRun(runID); err != nil {
+					t.Fatal(err)
+				}
+				s.closeOrphanedTaskRunSummaries()
+				var status string
+				if err := db.QueryRow(`SELECT status FROM task_run_summaries WHERE run_id=?`, runID).Scan(&status); err != nil {
+					t.Fatal(err)
+				}
+				want := taskRunStatusRunning
+				if completed {
+					want = taskRunStatusClean
+				}
+				if status != want {
+					t.Fatalf("status=%s, want %s", status, want)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkflowV2AnalyticsNonPRTerminalRecoversWithoutCompletionEvent(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "non-pr-terminal")
+	runID, _ := startTaskRunWithRequiresPRForTest(t, s, "non-pr-terminal", "terminal", false)
+	_, err := workflowv2.NewStore(db).CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace),
+		WorkflowYAML: []byte("schema_version: 2\nname: terminal\nenabled: true\ninitial_state: done\nstates:\n  done: {phase: done, terminal: true}\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertExecSucceeds(t, db, `UPDATE claws SET status='deleted' WHERE id='non-pr-terminal'`)
+	s.closeOrphanedTaskRunSummaries()
+	var status string
+	if err := db.QueryRow(`SELECT status FROM task_run_summaries WHERE run_id=?`, runID).Scan(&status); err != nil || status != taskRunStatusClean {
+		t.Fatalf("status=%s err=%v", status, err)
+	}
+}
+
+func TestWorkflowV2AnalyticsMaintenanceFiltersAndTicketExclusion(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	for _, id := range []string{"maintenance", "code"} {
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: id, AttemptID: id + "-attempt", ClawID: id + "-claw", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, StartedAt: 1760000000000, FinishedAt: 1760000001000, RequiresPR: boolPtr(false)})
+		kind := "code_task"
+		if id == "maintenance" {
+			kind = "maintenance"
+		}
+		assertExecSucceeds(t, db, `UPDATE task_run_summaries SET run_kind=?, outcome='no_changes', issue_id=?, estimated_cost_usd=10 WHERE run_id=?`, kind, id, id)
+	}
+	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
+	for _, aggregates := range []bool{true, false} {
+		effect, err := s.readTaskRunAnalyticsEffectivenessWithTicketAggregates(filters, aggregates)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if effect.SuccessRate != 1 || effect.UniqueTickets != 1 || effect.TicketSuccessRate != 1 || effect.TicketCostUSD != 10 {
+			t.Fatalf("effectiveness: %+v", effect)
+		}
+	}
+	for _, alias := range []string{"run_kind", "runKind"} {
+		r := httptest.NewRequest(http.MethodGet, "/?"+alias+"=maintenance", nil)
+		parsed, err := parseTaskRunAnalyticsFilters(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed.TenantID = filters.TenantID
+		if !taskRunAnalyticsCostsUseRunFilters(parsed) {
+			t.Fatal("costs ignore run_kind")
+		}
+		where, args := taskRunAnalyticsSummaryWhere(parsed)
+		rows, err := db.Query(`SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+where, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs, err := scanTaskRunAnalyticsRuns(rows)
+		rows.Close()
+		if err != nil || len(runs) != 1 || runs[0].RunID != "maintenance" || runs[0].Outcome != "no_changes" {
+			t.Fatalf("runs=%+v, err=%v", runs, err)
+		}
+		groups, total, _, _, err := s.readTaskRunAnalyticsTicketGroupsPage(parsed, 0, "", 10)
+		if err != nil || total != 0 || len(groups) != 0 {
+			t.Fatalf("maintenance tickets: groups=%+v total=%d err=%v", groups, total, err)
+		}
+	}
+}
+
+func TestWorkflowV2AnalyticsTicketOutcomesOverridePRs(t *testing.T) {
+	for _, tc := range []struct{ outcome, status, prState, want string }{
+		{"no_changes", taskRunStatusClean, "", "delivered"},
+		{"delivered", taskRunStatusClean, "open", "delivered"},
+		{"closed", taskRunStatusClean, "open", "delivered"},
+		{"failed", taskRunStatusFailed, "closed", "failed"},
+		{"failed", taskRunStatusFailed, "open", "failed"},
+		{"cancelled", taskRunStatusCancelled, "closed", "failed"},
+		{"", taskRunStatusFailed, "closed", "delivered"},
+	} {
+		t.Run(tc.outcome+"/"+tc.prState, func(t *testing.T) {
+			runs := []taskRunAnalyticsTicketRunSummary{{RunID: "run", Outcome: tc.outcome, Status: tc.status}}
+			prs := []taskRunAnalyticsTicketPRView{{RunID: "run", taskRunAnalyticsPRView: taskRunAnalyticsPRView{State: tc.prState}}}
+			if got := deriveTaskRunAnalyticsTicketStatus(runs, prs); got != tc.want {
+				t.Fatalf("status=%s, want %s", got, tc.want)
+			}
+		})
+	}
+	runs := []taskRunAnalyticsTicketRunSummary{{RunID: "failed", Outcome: "failed", Status: taskRunStatusFailed}, {RunID: "legacy", Status: taskRunStatusClean}}
+	prs := []taskRunAnalyticsTicketPRView{{RunID: "legacy", taskRunAnalyticsPRView: taskRunAnalyticsPRView{State: "closed"}}}
+	if got := deriveTaskRunAnalyticsTicketStatus(runs, prs); got != "delivered" {
+		t.Fatalf("independent successful run lost: %s", got)
+	}
+}

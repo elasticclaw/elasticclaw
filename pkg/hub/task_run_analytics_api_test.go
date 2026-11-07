@@ -135,7 +135,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	allSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", "test-token")
 	var allSummary taskRunAnalyticsSummaryResponse
 	decodeTaskRunAnalyticsAPI(t, allSummaryRR, &allSummary)
-	if allSummary.TotalRuns != 4 || allSummary.ByStatus[taskRunStatusClean] != 1 || allSummary.ByStatus[taskRunStatusHumanInTheLoop] != 1 || allSummary.ByStatus[taskRunStatusRunning] != 1 || allSummary.ByStatus[taskRunStatusFailed] != 1 {
+	if allSummary.TotalRuns != 5 || allSummary.ByStatus[taskRunStatusClean] != 2 || allSummary.ByStatus[taskRunStatusHumanInTheLoop] != 1 || allSummary.ByStatus[taskRunStatusRunning] != 1 || allSummary.ByStatus[taskRunStatusFailed] != 1 {
 		t.Fatalf("summary should include only authenticated tenant runs, got %#v", allSummary)
 	}
 	if allSummary.WarningBreakdown[taskRunWarningHumanPRComment] != 1 || allSummary.HumanInteractions != 3 {
@@ -151,14 +151,14 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	if page1.Limit != 2 || len(page1.Runs) != 2 || page1.NextCursor == "" {
 		t.Fatalf("unexpected first page: %#v", page1)
 	}
-	if page1.Runs[0].RunID != "run-clean" || page1.Runs[1].RunID != "run-warning" {
+	if page1.Runs[0].RunID != "run-non-pr" || page1.Runs[1].RunID != "run-clean" {
 		t.Fatalf("runs are not ordered by started_at desc, run_id desc: %#v", page1.Runs)
 	}
 	if strings.Contains(page1RR.Body.String(), "run-other-tenant") {
 		t.Fatalf("runs response leaked another tenant: %s", page1RR.Body.String())
 	}
-	if strings.Contains(page1RR.Body.String(), "run-disabled") || strings.Contains(page1RR.Body.String(), "run-non-pr") {
-		t.Fatalf("runs response included excluded/non-PR run by default: %s", page1RR.Body.String())
+	if strings.Contains(page1RR.Body.String(), "run-disabled") {
+		t.Fatalf("runs response included analytics-disabled run by default: %s", page1RR.Body.String())
 	}
 
 	trailingSlashRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/?limit=1", "test-token")
@@ -174,8 +174,15 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	page2RR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?limit=2&cursor="+page1.NextCursor, "test-token")
 	var page2 taskRunAnalyticsRunsResponse
 	decodeTaskRunAnalyticsAPI(t, page2RR, &page2)
-	if len(page2.Runs) != 2 || page2.NextCursor != "" || page2.Runs[0].RunID != "run-failed" || page2.Runs[1].RunID != "run-running" {
+	if len(page2.Runs) != 2 || page2.NextCursor == "" || page2.Runs[0].RunID != "run-warning" || page2.Runs[1].RunID != "run-failed" {
 		t.Fatalf("unexpected second page: %#v", page2)
+	}
+
+	page3RR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?limit=2&cursor="+page2.NextCursor, "test-token")
+	var page3 taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, page3RR, &page3)
+	if len(page3.Runs) != 1 || page3.NextCursor != "" || page3.Runs[0].RunID != "run-running" {
+		t.Fatalf("unexpected third page: %#v", page3)
 	}
 
 	warningRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?warning_type=human_pr_comment", "test-token")

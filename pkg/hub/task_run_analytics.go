@@ -11,18 +11,21 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
 )
 
 const (
-	taskRunKindCodeTask = "code_task"
-	taskRunKindPRTask   = "pr_task"
+	taskRunKindCodeTask    = "code_task"
+	taskRunKindPRTask      = "pr_task"
+	taskRunKindMaintenance = "maintenance"
 
 	taskRunStatusRunning        = "running"
 	taskRunStatusClean          = "clean"
 	taskRunStatusHumanInTheLoop = "human_in_the_loop"
 	taskRunStatusWarning        = "warning"
 	taskRunStatusFailed         = "failed"
+	taskRunStatusCancelled      = "cancelled"
 
 	taskRunPhaseClaimed         = "claimed"
 	taskRunPhaseQueued          = "queued"
@@ -1051,8 +1054,8 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type,
 			human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at,
 			pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at,
-			analytics_enabled, requires_pr, excluded_reason
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			analytics_enabled, requires_pr, excluded_reason, outcome
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(run_id) DO UPDATE SET
 			initial_attempt_id=excluded.initial_attempt_id,
 			current_attempt_id=excluded.current_attempt_id,
@@ -1096,14 +1099,15 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			updated_at=excluded.updated_at,
 			analytics_enabled=excluded.analytics_enabled,
 			requires_pr=excluded.requires_pr,
-			excluded_reason=excluded.excluded_reason`,
+			excluded_reason=excluded.excluded_reason,
+			outcome=excluded.outcome`,
 		uuid.New().String(), meta.tenantID, runID, meta.initialAttemptID, meta.currentAttemptID, status, phase, meta.attemptCount, meta.ownerType,
 		meta.workspaceName, meta.workflowName, meta.factoryName, meta.ownerID, meta.ownerDisplayName,
 		meta.runKind, meta.integration, meta.integrationWorkspace, meta.issueID, meta.issueTitle, meta.issueCreatedAt, meta.clawID,
 		meta.model, meta.llmKey, counts.primaryRepo, primaryPRURL, counts.total, counts.open, counts.merged, counts.closed,
 		warningTypes, failureType, humanInteractions, meta.createdAt, phaseTimes.queuedAt, phaseTimes.provisionStartedAt,
 		phaseTimes.agentStartedAt, phaseTimes.prOpenedAt, counts.earliestReadyAt, counts.latestMergedAt, finishedAt, meta.timeoutAt,
-		lastEventAt, materializedAt, updatedAt, meta.analyticsEnabled, meta.requiresPR, meta.excludedReason,
+		lastEventAt, materializedAt, updatedAt, meta.analyticsEnabled, meta.requiresPR, meta.excludedReason, meta.outcome,
 	)
 	if err != nil {
 		return err
@@ -1111,7 +1115,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	attemptStatus := "running"
 	if phase == taskRunPhaseTerminal {
 		attemptStatus = "succeeded"
-		if status == taskRunStatusFailed {
+		if status == taskRunStatusFailed || status == taskRunStatusCancelled {
 			attemptStatus = "failed"
 		}
 	}
@@ -1179,6 +1183,20 @@ func computeTaskRunStatus(
 		}
 		return taskRunStatusClean
 	}
+	// Explicit v2 outcomes are authoritative, including when PRs are absent or still open.
+	switch meta.outcome {
+	case typesv2.OutcomeDelivered, typesv2.OutcomeNoChanges:
+		return successStatus(), taskRunPhaseTerminal, "", "", meta.outcomeAt
+	case typesv2.OutcomeClosed:
+		return successStatus(), taskRunPhaseTerminal, "", taskRunWarningPRClosedUnmerged, meta.outcomeAt
+	case typesv2.OutcomeFailed:
+		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.outcomeAt
+	case typesv2.OutcomeCancelled:
+		return taskRunStatusCancelled, taskRunPhaseTerminal, "", "", meta.outcomeAt
+	}
+	if meta.requiresPR == 0 && taskCompletedAt == 0 {
+		taskCompletedAt = meta.outcomeAt
+	}
 	status, phase = taskRunStatusRunning, initialTaskRunPhase(meta, phaseTimes)
 	if meta.analyticsEnabled == 0 {
 		// Excluded runs are not part of PR-scoped analytics; failed/unknown is a sentinel summary state.
@@ -1194,7 +1212,7 @@ func computeTaskRunStatus(
 		return successStatus(), taskRunPhaseTerminal, "", extraWarning, counts.latestTerminalAt
 	} else if definitiveFailure != "" {
 		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, definitiveFailure, definitiveFailureAt
-	} else if prePRFailure != "" {
+	} else if prePRFailure != "" && meta.requiresPR != 0 {
 		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, prePRFailure, prePRFailureAt
 	}
 	return status, phase, failureType, extraWarning, finishedAt
@@ -1223,6 +1241,8 @@ func initialTaskRunPhase(meta taskRunMeta, phaseTimes taskRunPhaseTimeSummary) s
 }
 
 type taskRunMeta struct {
+	outcome              typesv2.TerminalOutcome
+	outcomeAt            int64
 	tenantID             string
 	clawID               string
 	clawStatus           string
@@ -1271,6 +1291,9 @@ func readTaskRunMetaTx(tx *sql.Tx, runID string) (taskRunMeta, error) {
 		&meta.analyticsEnabled, &meta.requiresPR, &meta.excludedReason,
 		&meta.timeoutAt, &meta.createdAt, &meta.updatedAt,
 	)
+	if err == nil {
+		meta.outcome, meta.outcomeAt, err = readWorkflowV2TaskRunOutcome(tx, runID)
+	}
 	return meta, err
 }
 
@@ -1770,12 +1793,18 @@ func maxInt64(a, b int64) int64 {
 // (reaper, webhook and pipeline teardowns), so their ticket clock stops
 // instead of running forever. Runs waiting on an open PR stay open.
 func (s *Server) closeOrphanedTaskRunSummaries() {
+	// Recover a terminal outcome committed just before a hub restart, before
+	// treating a deleted claw with a stale summary as an orphan failure.
+	if err := s.materializeTerminalWorkflowV2TaskRuns(); err != nil {
+		log.Printf("[task-run-analytics] recover terminal workflow summaries: %v", err)
+		return
+	}
 	nowMS := epochMillis(now())
 	res, err := s.db.Exec(`
 		UPDATE task_run_summaries
 		   SET status=?, phase=?, failure_type=?,
 		       finished_at=CASE WHEN last_event_at > 0 THEN last_event_at ELSE ? END, updated_at=?
-		 WHERE status=? AND phase<>?
+		 WHERE status=? AND phase<>? AND requires_pr=1 AND outcome=''
 		   AND EXISTS (SELECT 1 FROM task_runs tr JOIN claws c ON c.id=tr.claw_id
 		                WHERE tr.id=task_run_summaries.run_id AND c.status='deleted')
 		   AND NOT EXISTS (SELECT 1 FROM claws c WHERE c.task_run_id=task_run_summaries.run_id AND c.status<>'deleted')
