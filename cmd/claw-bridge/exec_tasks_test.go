@@ -30,6 +30,8 @@ func TestBridgeExecRunCommandEmitsCompleted(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec", AttemptID: "attempt-exec"}
 	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	reporter := &branchReporter{wake: make(chan struct{}, 1)}
+	supervisor.setGatewaySession(&gatewaySession{branches: reporter})
 	supervisor.binding = &binding
 	version := uint64(1)
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: version}
@@ -69,6 +71,11 @@ func TestBridgeExecRunCommandEmitsCompleted(t *testing.T) {
 	}
 	if completed == nil {
 		t.Fatal("exec.run.completed event was not queued")
+	}
+	select {
+	case <-reporter.wake:
+	case <-time.After(time.Second):
+		t.Fatal("exec completion did not trigger branch report")
 	}
 	if completed.TaskID != "task-exec" {
 		t.Fatalf("task id = %q", completed.TaskID)
@@ -282,5 +289,46 @@ func TestRunExecCommandResolvesWorkspaceRelativePaths(t *testing.T) {
 	}
 	if out, _ := receipt["stdout"].(string); strings.TrimSpace(out) != "staged-ok" {
 		t.Fatalf("stdout = %q receipt = %#v", out, receipt)
+	}
+}
+
+func TestCommandTaskCompletionReportsBranches(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		kind, completed typesv2.ControlMessageKind
+		payload         string
+	}{
+		{"exec failure", typesv2.MessageExecRunAssign, typesv2.MessageExecRunFailed, `{"command":"exit 1"}`},
+		{"dependency update", typesv2.MessageDependencyUpdateAssign, typesv2.MessageDependencyUpdateCompleted, `{"ecosystems":["npm"],"timeout":"5s"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setBridgeTestWorkspaceHome(t)
+			store := openTestBridgeControlStore(t)
+			binding := workflowControlBinding{RunID: "run", AttemptID: "attempt"}
+			supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+			reporter := &branchReporter{wake: make(chan struct{}, 1)}
+			supervisor.setGatewaySession(&gatewaySession{branches: reporter})
+			envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "assign", Kind: tc.kind, RunID: binding.RunID, AttemptID: binding.AttemptID, TaskID: "task", Payload: json.RawMessage(tc.payload)}
+			if _, err := store.recordIncoming(envelope); err != nil {
+				t.Fatal(err)
+			}
+			supervisor.executeCommandTask(context.Background(), binding, envelope.MessageID, tc.kind, envelope.TaskID, envelope.Payload)
+			select {
+			case <-reporter.wake:
+			default:
+				t.Fatal("completion did not trigger branch report")
+			}
+			ready, err := store.ready(binding, 10)
+			if err != nil || len(ready) != 1 || ready[0].Kind != tc.completed {
+				t.Fatalf("completion=%+v err=%v", ready, err)
+			}
+			// An already completed assignment must not execute or report again.
+			supervisor.executeCommandTask(context.Background(), binding, envelope.MessageID, tc.kind, envelope.TaskID, envelope.Payload)
+			select {
+			case <-reporter.wake:
+				t.Fatal("duplicate assignment triggered report")
+			default:
+			}
+		})
 	}
 }
