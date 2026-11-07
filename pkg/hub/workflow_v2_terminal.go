@@ -44,33 +44,46 @@ func readWorkflowV2TaskRunOutcome(db interface{ QueryRow(string, ...any) *sql.Ro
 // materialized after its v2 run finished has already seen the outcome, so it
 // is not selected again on later reaper ticks.
 func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT s.run_id FROM task_run_summaries s
+	// <= catches a summary materialized in the same millisecond the run
+	// finished; recovery then moves materialized_at past finished_at so each
+	// terminal run is recovered once.
+	rows, err := s.db.Query(`SELECT s.run_id, MAX(r.finished_at) FROM task_run_summaries s
   JOIN workflow_v2_runs r ON r.task_run_id=s.run_id
-  WHERE s.status='running' AND s.outcome='' AND s.materialized_at < r.finished_at
-    AND r.status IN ('completed','cancelled')`)
+  WHERE s.status='running' AND s.outcome='' AND s.materialized_at <= r.finished_at
+    AND r.status IN ('completed','cancelled')
+  GROUP BY s.run_id`)
 	if err != nil {
 		return 0, err
 	}
-	var runIDs []string
+	type terminalRun struct {
+		runID      string
+		finishedAt int64
+	}
+	var runs []terminalRun
 	for rows.Next() {
-		var runID string
-		if err := rows.Scan(&runID); err != nil {
+		var run terminalRun
+		if err := rows.Scan(&run.runID, &run.finishedAt); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		runIDs = append(runIDs, runID)
+		runs = append(runs, run)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
 		return 0, err
 	}
-	for _, runID := range runIDs {
-		if err := s.materializeTaskRun(runID); err != nil {
-			log.Printf("[task-run-analytics] recover terminal workflow summary %s: %v", runID, err)
+	for _, run := range runs {
+		if err := s.materializeTaskRun(run.runID); err != nil {
+			log.Printf("[task-run-analytics] recover terminal workflow summary %s: %v", run.runID, err)
+			continue
+		}
+		if _, err := s.db.Exec(`UPDATE task_run_summaries SET materialized_at=? WHERE run_id=? AND materialized_at<=?`,
+			run.finishedAt+1, run.runID, run.finishedAt); err != nil {
+			log.Printf("[task-run-analytics] mark terminal workflow summary %s recovered: %v", run.runID, err)
 		}
 	}
-	return len(runIDs), nil
+	return len(runs), nil
 }
 
 // maybeFinishWorkflowV2Parent checks whether a v2 workflow run has reached a
