@@ -28,19 +28,19 @@ var writableNamespaces = []string{
 }
 
 var knownWorkflowKeys = map[string]bool{
-	"schema_version":  true,
-	"name":            true,
-	"enabled":         true,
-	"manual_trigger":  true,
-	"initial_state":   true,
-	"states":          true,
-	"transitions":     true,
-	"commands":        true,
-	"ci":              true,
-	"review":          true,
-	"delivery":        true,
-	"events":          true,
-	"trigger":         true,
+	"schema_version": true,
+	"name":           true,
+	"enabled":        true,
+	"manual_trigger": true,
+	"initial_state":  true,
+	"states":         true,
+	"transitions":    true,
+	"commands":       true,
+	"ci":             true,
+	"review":         true,
+	"delivery":       true,
+	"events":         true,
+	"trigger":        true,
 }
 
 // ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
@@ -388,8 +388,8 @@ func validateTrigger(wf *Workflow) error {
 	if _, err := parseCronSchedule(ct.Schedule); err != nil {
 		return fmt.Errorf("trigger.cron.schedule %q is invalid: %w", ct.Schedule, err)
 	}
-	if ct.OverlapPolicy != "" && ct.OverlapPolicy != "skip" && ct.OverlapPolicy != "parallel" {
-		return fmt.Errorf("trigger.cron.overlap_policy %q is invalid (must be skip or parallel)", ct.OverlapPolicy)
+	if ct.OverlapPolicy != "" && ct.OverlapPolicy != "skip" && ct.OverlapPolicy != "parallel" && ct.OverlapPolicy != "signal" {
+		return fmt.Errorf("trigger.cron.overlap_policy %q is invalid (must be skip, parallel, or signal)", ct.OverlapPolicy)
 	}
 	if ct.Timezone != "" {
 		if _, err := time.LoadLocation(ct.Timezone); err != nil {

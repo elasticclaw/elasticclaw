@@ -745,6 +745,9 @@ func authorizeEvent(input EventInput) (typesv2.ControlDisposition, string) {
 		return typesv2.DispositionUnauthorized, fmt.Sprintf("producer %q cannot emit event %q", input.Producer, input.Kind)
 	}
 	for key := range input.Payload {
+		if input.Producer == ProducerHub && input.Kind == "cron.tick" && (key == "scheduled_at" || key == "slot_id") {
+			continue
+		}
 		if !producerMaySupplyPayload(input.Producer, key) {
 			return typesv2.DispositionUnauthorized, fmt.Sprintf("producer %q cannot supply payload namespace %q", input.Producer, key)
 		}
@@ -803,7 +806,12 @@ func producerMayEmit(producer Producer, kind string) bool {
 		return prefix == "context"
 	case ProducerCustom:
 		return prefix == "custom"
-	case ProducerHub, ProducerEngine:
+	case ProducerHub:
+		if kind == "cron.tick" {
+			return true
+		}
+		fallthrough
+	case ProducerEngine:
 		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task" || prefix == "exec" || prefix == "dependency"
 	default:
 		return false

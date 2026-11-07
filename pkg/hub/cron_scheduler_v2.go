@@ -18,6 +18,8 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+const workflowRunSignaled workflowRunStartStatus = "signaled"
+
 // cronSchedulerV2 manages scheduled workflow v2 runs using cron expressions.
 // It mirrors the behavior of v1 cronScheduler while using the v2 runtime.
 type cronSchedulerV2 struct {
@@ -29,8 +31,9 @@ type cronSchedulerV2 struct {
 
 	// running tracks in-flight runs per workflow key to serialize overlap
 	// checks and admissions within a single process, matching the v1 scheduler.
-	runningMu sync.Mutex
-	running   map[string]int // workflow key -> in-flight run count
+	runningMu   sync.Mutex
+	running     map[string]int // workflow key -> in-flight run count
+	signalLocks sync.Map       // workflow key -> *sync.Mutex
 }
 
 type scheduledWorkflowV2 struct {
@@ -236,6 +239,22 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 		overlapPolicy = "skip"
 	}
 
+	if overlapPolicy == "signal" {
+		// Hold a separate per-workflow lock through activation so a concurrent
+		// tick cannot miss a run that is still being provisioned. Cleanup may
+		// acquire runningMu, so it must not be held across activation/events.
+		lock, _ := cs.signalLocks.LoadOrStore(key, &sync.Mutex{})
+		lock.(*sync.Mutex).Lock()
+		defer lock.(*sync.Mutex).Unlock()
+		runIDs, err := cs.openV2RunIDs(tenantID, sw.workspace.Name, sw.workflow.Name)
+		if err != nil {
+			return workflowRunFailed, err
+		}
+		if len(runIDs) > 0 {
+			return cs.signalRuns(store, sw, tenantID, runIDs, now)
+		}
+	}
+
 	// Serialize overlap admission. The in-memory lock prevents concurrent ticks
 	// and manual triggers from racing; the DB count catches runs that were active
 	// before a restart.
@@ -252,7 +271,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 		return workflowRunFailed, dbErr
 	}
 	active := inMemActive + dbActive
-	if active > 0 && overlapPolicy != "parallel" {
+	if active > 0 && overlapPolicy != "parallel" && overlapPolicy != "signal" {
 		cs.runningMu.Unlock()
 		reason := fmt.Sprintf("%d run(s) still active", active)
 		_, _ = store.RecordCronRunSkipped(context.Background(), tenantID, sw.workspace.Name, sw.workflow.Name, "cron", map[string]interface{}{
@@ -341,6 +360,72 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 
 	log.Printf("[cron-v2] started run %s for %s (claw %s)", cronRunID, key, clawID)
 	return workflowRunStarted, nil
+}
+
+// openV2RunIDs includes suspended runs and orders targets for stable delivery.
+func (cs *cronSchedulerV2) openV2RunIDs(tenantID, workspaceName, workflowName string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := cs.srv.db.QueryContext(ctx, `
+		SELECT id FROM workflow_v2_runs
+		WHERE tenant_id=? AND workspace_name=? AND workflow_name=? AND status IN ('active','suspended')
+		ORDER BY id`, tenantID, workspaceName, workflowName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWorkflowV2, tenantID string, runIDs []string, scheduledAt time.Time) (workflowRunStartStatus, error) {
+	ctx := context.Background()
+	slotID := uuid.NewString()
+	payload := map[string]interface{}{
+		"scheduled_at": scheduledAt.Format(time.RFC3339),
+		"slot_id":      slotID,
+	}
+	cronRunID, err := store.RecordCronRunStarted(ctx, tenantID, sw.workspace.Name, sw.workflow.Name, "cron", map[string]interface{}{
+		"scheduled_at":   payload["scheduled_at"],
+		"slot_id":        slotID,
+		"target_run_ids": runIDs,
+	})
+	if err != nil {
+		return workflowRunFailed, err
+	}
+	var signalErr error
+	for _, runID := range runIDs {
+		result, err := store.ApplyEvent(ctx, runID, workflowv2.EventInput{
+			ID:   "cron.tick:" + slotID + ":" + runID,
+			Kind: "cron.tick", Producer: workflowv2.ProducerHub,
+			Payload: payload,
+			Provenance: v2.EvidenceProvenance{
+				Producer: string(workflowv2.ProducerHub), Principal: "cron_scheduler", ObservedAt: scheduledAt,
+			},
+		})
+		if err == nil && result.Disposition != v2.DispositionAccepted {
+			err = fmt.Errorf("event disposition %s: %s", result.Disposition, result.Reason)
+		}
+		if err != nil {
+			signalErr = errors.Join(signalErr, fmt.Errorf("signal run %s: %w", runID, err))
+			continue
+		}
+		cs.srv.maybeFinishWorkflowV2Parent(ctx, runID)
+	}
+	if signalErr != nil {
+		return workflowRunFailed, errors.Join(signalErr, store.FailCronRun(ctx, cronRunID, signalErr.Error()))
+	}
+	if err := store.FinishCronRunSignaled(ctx, cronRunID); err != nil {
+		return workflowRunFailed, err
+	}
+	return workflowRunSignaled, nil
 }
 
 func (cs *cronSchedulerV2) decrementRunning(key string) {
