@@ -140,8 +140,12 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			s.safeGo("github issue comment webhook", func() { s.processGitHubIssueComment(payload) })
 		}
 	case "status":
+		// Requires the GitHub App to subscribe to the status event (commit
+		// statuses: read). Pending statuses are skipped: policy already treats
+		// missing evidence as pending and the reconciler covers re-runs.
 		var payload struct {
 			SHA        string `json:"sha"`
+			State      string `json:"state"`
 			Repository struct {
 				FullName string `json:"full_name"`
 			} `json:"repository"`
@@ -149,6 +153,9 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
+		}
+		if payload.State == "pending" {
+			break
 		}
 		s.safeGo("github status webhook", func() {
 			check := githubCheckPayload{Action: "completed"}
