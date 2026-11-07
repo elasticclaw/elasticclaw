@@ -53,7 +53,7 @@ func TestWorkflowV2ActivationAdoption(t *testing.T) {
 		{name: "human", login: "contributor", userType: "User"},
 		{name: "other bot", login: "dependabot[bot]"},
 		{name: "wrong branch", branch: "deps/ts-major-1"},
-		{name: "own bot on fork", headRepo: "someone/repo", want: 1},
+		{name: "own bot on fork", headRepo: "someone/repo"},
 		{name: "closed", state: "closed"},
 		{name: "GitHub unavailable", fail: true},
 		{name: "no App identity", noApp: true},

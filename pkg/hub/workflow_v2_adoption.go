@@ -120,8 +120,11 @@ func (s *Server) workflowV2AdoptionCandidates(ctx context.Context, workspace *ty
 					Type  string `json:"type"`
 				} `json:"user"`
 				Head struct {
-					Ref string `json:"ref"`
-					SHA string `json:"sha"`
+					Ref  string `json:"ref"`
+					SHA  string `json:"sha"`
+					Repo *struct {
+						FullName string `json:"full_name"`
+					} `json:"repo"`
 				} `json:"head"`
 				Base struct {
 					Ref string `json:"ref"`
@@ -132,6 +135,10 @@ func (s *Server) workflowV2AdoptionCandidates(ctx context.Context, workspace *ty
 			}
 			if pr.State != "open" || !s.isClawAppAuthor(pr.User.Login, pr.User.Type) ||
 				!delivery.MatchesBranch(rule.Repository, pr.Head.Ref) {
+				continue
+			}
+			// Branch patterns only identify branches pushed to the target repository.
+			if pr.Head.Repo == nil || !strings.EqualFold(pr.Head.Repo.FullName, repo.Repository) {
 				continue
 			}
 			expectedURL := fmt.Sprintf("https://github.com/%s/pull/%d", repo.Repository, pr.Number)
