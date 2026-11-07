@@ -308,9 +308,9 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 				}
 				_, err = store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(sw.workspace.Files))
 				if err == nil {
-					err = store.CompleteActivation(ctx, run.ID)
+					err = cs.srv.completeWorkflowV2Activation(ctx, store, run.ID)
 				}
-				if err != nil {
+				if err != nil && !errors.Is(err, errWorkflowV2FinishedAtActivation) {
 					cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
 					if cleanupErr := store.CancelActivation(cleanupCtx, run.ID, err.Error()); cleanupErr != nil {
@@ -320,9 +320,8 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 					// immediately; the terminal cleanup hook will not run because
 					// cancelWorkflowV2RunForClaw only looks for active/suspended runs.
 					cs.srv.releaseWorkflowV2CronSlot(cleanupCtx, run.ID)
-					return err
 				}
-				return nil
+				return err
 			},
 		},
 	)

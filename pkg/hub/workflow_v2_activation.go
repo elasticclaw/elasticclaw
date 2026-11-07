@@ -61,6 +61,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 	workspaceYAML := []byte(workspace.Files["elasticclaw-config.yaml"])
 	workflowYAML := []byte(workflow.RawConfig)
 	runID := uuid.NewString()
+	finishedAtActivation := false
 	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
 		ctx: r.Context(), inputs: inputs, reason: "manual workflow v2 trigger",
 		beforeProvision: func(ctx context.Context, clawID, tenantID string) error {
@@ -82,10 +83,11 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			}
 			_, err = store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(workspace.Files))
 			if err == nil {
-				err = store.CompleteActivation(ctx, run.ID)
+				err = s.completeWorkflowV2Activation(ctx, store, run.ID)
 			}
-			if err == nil {
-				return nil
+			finishedAtActivation = errors.Is(err, errWorkflowV2FinishedAtActivation)
+			if err == nil || finishedAtActivation {
+				return err
 			}
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -103,7 +105,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		jsonError(w, http.StatusInternalServerError, "failed to create workflow v2 run: "+err.Error())
 		return
 	}
-	if startCommand := v2WorkflowStartCommand(workflow.RawConfig); startCommand != "" {
+	if startCommand := v2WorkflowStartCommand(workflow.RawConfig); startCommand != "" && !finishedAtActivation {
 		store := workflowv2.NewStore(s.db)
 		if _, err := store.ApplyCommand(r.Context(), runID, startCommand, workflowv2.CommandInput{
 			ID:        uuid.NewString(),

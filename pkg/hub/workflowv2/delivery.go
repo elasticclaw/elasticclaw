@@ -27,8 +27,8 @@ func (f PullRequestVerifierFunc) VerifyPullRequest(ctx context.Context, run Run,
 }
 
 // SubmitDelivery verifies every untrusted PR claim before atomically amending
-// the run-owned delivery collection. Workflows never declare repository lists;
-// authority comes solely from the pinned workspace repository map.
+// the run-owned delivery collection. Repository authority comes solely from
+// the pinned workspace repository map.
 func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, manifest typesv2.DeliveryManifest,
 	verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, error) {
 	verified, eventResult, err := s.submitDelivery(ctx, runID, attemptID, uuid.NewString(), "", nil, manifest, verifier)
@@ -153,16 +153,7 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 				return err
 			}
 		}
-		summary, err := deliveryFactsFrom(ctx, tx, runID)
-		if err != nil {
-			return err
-		}
-		input.Payload = map[string]interface{}{"delivery": summary}
-		input.Facts = map[string]interface{}{
-			"delivery.count": summary["count"], "delivery.open": summary["open"],
-			"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
-		}
-		return nil
+		return deliveryEventFacts(ctx, tx, runID, input)
 	})
 	if err != nil {
 		return nil, EventResult{}, err
@@ -271,7 +262,7 @@ func upsertDeliveryPR(ctx context.Context, tx *sql.Tx, runID string, pr *typesv2
 		active,supersedes_id,provenance_json,verified_at,updated_at,registered_only) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)
 		ON CONFLICT(run_id,repository,pr_number) DO UPDATE SET url=excluded.url,repository_name=excluded.repository_name,
 		source_branch=excluded.source_branch,base_branch=excluded.base_branch,current_head_sha=excluded.current_head_sha,
-		state=excluded.state,active=1,supersedes_id=excluded.supersedes_id,provenance_json=excluded.provenance_json,
+		state=excluded.state,active=1,supersedes_id=COALESCE(NULLIF(excluded.supersedes_id,''),workflow_v2_delivery_prs.supersedes_id),provenance_json=excluded.provenance_json,
 		verified_at=excluded.verified_at,updated_at=excluded.updated_at,registered_only=excluded.registered_only`,
 		pr.ID, runID, pr.URL, pr.RepositoryName, pr.Repository, pr.Number, pr.SourceBranch, pr.BaseBranch,
 		pr.HeadSHA, pr.State, pr.Supersedes, provenanceJSON, pr.VerifiedAt.UnixMilli(), now.UnixMilli(), registeredOnly)

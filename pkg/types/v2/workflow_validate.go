@@ -3,6 +3,7 @@ package v2
 import (
 	"bytes"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -28,19 +29,19 @@ var writableNamespaces = []string{
 }
 
 var knownWorkflowKeys = map[string]bool{
-	"schema_version":  true,
-	"name":            true,
-	"enabled":         true,
-	"manual_trigger":  true,
-	"initial_state":   true,
-	"states":          true,
-	"transitions":     true,
-	"commands":        true,
-	"ci":              true,
-	"review":          true,
-	"delivery":        true,
-	"events":          true,
-	"trigger":         true,
+	"schema_version": true,
+	"name":           true,
+	"enabled":        true,
+	"manual_trigger": true,
+	"initial_state":  true,
+	"states":         true,
+	"transitions":    true,
+	"commands":       true,
+	"ci":             true,
+	"review":         true,
+	"delivery":       true,
+	"events":         true,
+	"trigger":        true,
 }
 
 // ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
@@ -490,6 +491,14 @@ func validateDelivery(wf *Workflow) error {
 		return nil
 	}
 	pr := wf.Delivery.PullRequests
+	for i, branch := range pr.Branches {
+		if strings.TrimSpace(branch.Repository) == "" || strings.TrimSpace(branch.Pattern) == "" {
+			return fmt.Errorf("delivery.pull_requests.branches[%d]: repository and pattern are required", i)
+		}
+		if _, err := path.Match(branch.Pattern, ""); err != nil {
+			return fmt.Errorf("delivery.pull_requests.branches[%d].pattern: %w", i, err)
+		}
+	}
 	if pr.Minimum < 0 {
 		return fmt.Errorf("delivery.pull_requests.minimum cannot be negative")
 	}
@@ -528,6 +537,13 @@ func ValidateWorkflowAgainstWorkspace(wf *Workflow, rws *ResolvedWorkspace) (*Re
 		return nil, fmt.Errorf("workflow %q: workspace is required for pair validation", wf.Name)
 	}
 	ws := rws.Workspace
+	if wf.Delivery != nil && wf.Delivery.PullRequests != nil {
+		for i, branch := range wf.Delivery.PullRequests.Branches {
+			if _, ok := ws.Repositories[branch.Repository]; !ok {
+				return nil, fmt.Errorf("delivery.pull_requests.branches[%d].repository %q is not a workspace repository key", i, branch.Repository)
+			}
+		}
+	}
 
 	// CI policies must reference known pipelines.
 	if wf.CI != nil {

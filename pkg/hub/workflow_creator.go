@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -284,7 +285,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if callbackCtx == nil {
 			callbackCtx = context.Background()
 		}
-		if err := opts.beforeProvision(callbackCtx, clawID, tenantID); err != nil {
+		if err := opts.beforeProvision(callbackCtx, clawID, tenantID); errors.Is(err, errWorkflowV2FinishedAtActivation) {
+			log.Printf("[workflow] run for claw %s finished during activation; skipping provisioning", clawID[:8])
+			go s.promotePendingClaws()
+			return clawID, false, nil
+		} else if err != nil {
 			_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed",
 				"workflow v2 activation failed: "+err.Error(), terminalTxOpts{})
 			s.cancelWorkflowV2RunForClaw(callbackCtx, clawID, "workflow v2 activation failed")
