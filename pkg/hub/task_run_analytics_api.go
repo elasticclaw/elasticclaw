@@ -1270,7 +1270,7 @@ func (s *Server) readDistinctTaskRunAnalyticsValues(tenantID, column string) ([]
 	rows, err := s.db.Query(fmt.Sprintf(`
 		SELECT DISTINCT %s
 		  FROM task_run_summaries
-		 WHERE tenant_id=? AND analytics_enabled=1 AND %s != ''
+		 WHERE tenant_id=? AND analytics_enabled=1 AND (requires_pr=1 OR run_kind='maintenance') AND %s != ''
 		 ORDER BY %s`, column, column, column), tenantID)
 	if err != nil {
 		return nil, err
@@ -1294,7 +1294,7 @@ func (s *Server) readDistinctTaskRunAnalyticsJSONValues(tenantID, column string)
 	rows, err := s.db.Query(fmt.Sprintf(`
 		SELECT DISTINCT je.value
 		  FROM task_run_summaries s, json_each(s.%s) je
-		 WHERE s.tenant_id=? AND s.analytics_enabled=1 AND je.value != ''
+		 WHERE s.tenant_id=? AND s.analytics_enabled=1 AND (s.requires_pr=1 OR s.run_kind='maintenance') AND je.value != ''
 		 ORDER BY je.value`, column), tenantID)
 	if err != nil {
 		return nil, err
@@ -1357,14 +1357,19 @@ func taskRunAnalyticsSummaryWhere(filters taskRunAnalyticsFilters) (string, []an
 		where = append(where, `started_at <= ?`)
 		args = append(args, filters.ToStartedAt)
 	}
+	// Default scope is PR-producing runs plus maintenance runs; other
+	// requires_pr=0 runs stay excluded (excluded_reason=non_pr_producing).
+	eligibilityFilterProvided := filters.RequiresPR != nil || filters.AnalyticsEnabled != nil
 	if filters.RequiresPR != nil {
 		where = append(where, `requires_pr=?`)
 		args = append(args, boolInt(*filters.RequiresPR))
+	} else if !eligibilityFilterProvided {
+		where = append(where, `(requires_pr=1 OR run_kind='maintenance')`)
 	}
 	if filters.AnalyticsEnabled != nil {
 		where = append(where, `analytics_enabled=?`)
 		args = append(args, boolInt(*filters.AnalyticsEnabled))
-	} else {
+	} else if !eligibilityFilterProvided {
 		where = append(where, `analytics_enabled=1`)
 	}
 	return "WHERE " + strings.Join(where, " AND "), args

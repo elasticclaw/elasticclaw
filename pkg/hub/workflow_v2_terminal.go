@@ -28,7 +28,10 @@ func readWorkflowV2TaskRunOutcome(db interface{ QueryRow(string, ...any) *sql.Ro
 	}
 	workflow, err := typesv2.ParseWorkflow([]byte(workflowYAML))
 	if err != nil {
-		return "", 0, err
+		// A pinned document the current parser rejects must not block event
+		// recording or claw teardown; classify the run as having no outcome.
+		log.Printf("[workflow-v2] cannot parse pinned workflow for task run %s; ignoring outcome: %v", taskRunID, err)
+		return "", 0, nil
 	}
 	definition := workflow.States[state]
 	if !definition.Terminal {
@@ -37,33 +40,37 @@ func readWorkflowV2TaskRunOutcome(db interface{ QueryRow(string, ...any) *sql.Ro
 	return definition.Outcome, finishedAt, nil
 }
 
-func (s *Server) materializeTerminalWorkflowV2TaskRuns() error {
+// materializeTerminalWorkflowV2TaskRuns is one-shot per run: a summary
+// materialized after its v2 run finished has already seen the outcome, so it
+// is not selected again on later reaper ticks.
+func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT s.run_id FROM task_run_summaries s
   JOIN workflow_v2_runs r ON r.task_run_id=s.run_id
-  WHERE s.status='running' AND r.status IN ('completed','cancelled')`)
+  WHERE s.status='running' AND s.outcome='' AND s.materialized_at < r.finished_at
+    AND r.status IN ('completed','cancelled')`)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var runIDs []string
 	for rows.Next() {
 		var runID string
 		if err := rows.Scan(&runID); err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
 		runIDs = append(runIDs, runID)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for _, runID := range runIDs {
 		if err := s.materializeTaskRun(runID); err != nil {
-			return err
+			log.Printf("[task-run-analytics] recover terminal workflow summary %s: %v", runID, err)
 		}
 	}
-	return nil
+	return len(runIDs), nil
 }
 
 // maybeFinishWorkflowV2Parent checks whether a v2 workflow run has reached a
@@ -93,8 +100,9 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	}
 	outcome, _, err := readWorkflowV2TaskRunOutcome(s.db, run.TaskRunID)
 	if err != nil {
+		// Still tear the claw down; analytics recovers the outcome on a later sweep.
 		log.Printf("[workflow-v2] cannot read outcome for run %s: %v", runID, err)
-		return
+		outcome = ""
 	}
 	if outcome != "" {
 		if err := s.materializeTaskRun(run.TaskRunID); err != nil {

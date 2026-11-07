@@ -1183,6 +1183,10 @@ func computeTaskRunStatus(
 		}
 		return taskRunStatusClean
 	}
+	if meta.analyticsEnabled == 0 {
+		// Excluded runs are not part of PR-scoped analytics; failed/unknown is a sentinel summary state.
+		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.updatedAt
+	}
 	// Explicit v2 outcomes are authoritative, including when PRs are absent or still open.
 	switch meta.outcome {
 	case typesv2.OutcomeDelivered, typesv2.OutcomeNoChanges:
@@ -1198,10 +1202,7 @@ func computeTaskRunStatus(
 		taskCompletedAt = meta.outcomeAt
 	}
 	status, phase = taskRunStatusRunning, initialTaskRunPhase(meta, phaseTimes)
-	if meta.analyticsEnabled == 0 {
-		// Excluded runs are not part of PR-scoped analytics; failed/unknown is a sentinel summary state.
-		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.updatedAt
-	} else if meta.requiresPR == 0 && taskCompletedAt != 0 {
+	if meta.requiresPR == 0 && taskCompletedAt != 0 {
 		return successStatus(), taskRunPhaseTerminal, "", "", taskCompletedAt
 	} else if counts.open > 0 {
 		status, phase = taskRunStatusRunning, taskRunPhaseWaitingForMerge
@@ -1795,16 +1796,15 @@ func maxInt64(a, b int64) int64 {
 func (s *Server) closeOrphanedTaskRunSummaries() {
 	// Recover a terminal outcome committed just before a hub restart, before
 	// treating a deleted claw with a stale summary as an orphan failure.
-	if err := s.materializeTerminalWorkflowV2TaskRuns(); err != nil {
+	if _, err := s.materializeTerminalWorkflowV2TaskRuns(); err != nil {
 		log.Printf("[task-run-analytics] recover terminal workflow summaries: %v", err)
-		return
 	}
 	nowMS := epochMillis(now())
 	res, err := s.db.Exec(`
 		UPDATE task_run_summaries
 		   SET status=?, phase=?, failure_type=?,
 		       finished_at=CASE WHEN last_event_at > 0 THEN last_event_at ELSE ? END, updated_at=?
-		 WHERE status=? AND phase<>? AND requires_pr=1 AND outcome=''
+		 WHERE status=? AND phase<>? AND outcome=''
 		   AND EXISTS (SELECT 1 FROM task_runs tr JOIN claws c ON c.id=tr.claw_id
 		                WHERE tr.id=task_run_summaries.run_id AND c.status='deleted')
 		   AND NOT EXISTS (SELECT 1 FROM claws c WHERE c.task_run_id=task_run_summaries.run_id AND c.status<>'deleted')
