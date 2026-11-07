@@ -308,7 +308,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 				}
 				_, err = store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(sw.workspace.Files))
 				if err == nil {
-					err = store.CompleteActivation(ctx, run.ID)
+					err = cs.srv.completeWorkflowV2Activation(ctx, store, run.ID)
 				}
 				if err != nil {
 					cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

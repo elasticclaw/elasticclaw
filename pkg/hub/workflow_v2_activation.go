@@ -82,7 +82,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			}
 			_, err = store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(workspace.Files))
 			if err == nil {
-				err = store.CompleteActivation(ctx, run.ID)
+				err = s.completeWorkflowV2Activation(ctx, store, run.ID)
 			}
 			if err == nil {
 				return nil
