@@ -615,3 +615,29 @@ func TestRuntimeRecoveryDoesNotReadConversationRows(t *testing.T) {
 		t.Fatalf("conversation deletion changed recovery: %#v", run)
 	}
 }
+
+func TestCronTickRequiresHubProducer(t *testing.T) {
+	store := workflowv2.NewStore(openRuntimeDB(t))
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "cron-auth", TenantID: "tenant-1", InitialClawID: "claw-cron-auth",
+		WorkspaceYAML: []byte(runtimeWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, producer := range []workflowv2.Producer{workflowv2.ProducerHub, workflowv2.ProducerEngine, workflowv2.ProducerAgent, workflowv2.ProducerCustom, workflowv2.ProducerOperator} {
+		t.Run(string(producer), func(t *testing.T) {
+			result, err := store.ApplyEvent(context.Background(), run.ID, workflowv2.EventInput{
+				ID: "cron-auth-" + string(producer), Kind: "cron.tick", Producer: producer,
+				Payload: map[string]interface{}{"scheduled_at": "2026-08-08T12:00:00Z", "slot_id": "slot-1"},
+			})
+			want := typesv2.DispositionUnauthorized
+			if producer == workflowv2.ProducerHub {
+				want = typesv2.DispositionAccepted
+			}
+			if err != nil || result.Disposition != want {
+				t.Fatalf("disposition = %s, want %s, err = %v", result.Disposition, want, err)
+			}
+		})
+	}
+}

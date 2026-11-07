@@ -242,6 +242,12 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 
 const activationPendingReason = "workflow activation pending organization context"
 
+// IsActivationPending reports whether a run with this status and waiting
+// reason is still suspended for activation and cannot accept events yet.
+func IsActivationPending(status, waitingReason string) bool {
+	return status == string(RunSuspended) && waitingReason == activationPendingReason
+}
+
 // CompleteActivation releases a context-pinned run for effect execution. It is
 // idempotent when context assembly already advanced the run or deliberately
 // suspended it on a domain-level context failure.
@@ -745,7 +751,7 @@ func authorizeEvent(input EventInput) (typesv2.ControlDisposition, string) {
 		return typesv2.DispositionUnauthorized, fmt.Sprintf("producer %q cannot emit event %q", input.Producer, input.Kind)
 	}
 	for key := range input.Payload {
-		if !producerMaySupplyPayload(input.Producer, key) {
+		if !producerMaySupplyPayload(input.Producer, input.Kind, key) {
 			return typesv2.DispositionUnauthorized, fmt.Sprintf("producer %q cannot supply payload namespace %q", input.Producer, key)
 		}
 	}
@@ -757,8 +763,11 @@ func authorizeEvent(input EventInput) (typesv2.ControlDisposition, string) {
 	return "", ""
 }
 
-func producerMaySupplyPayload(producer Producer, namespace string) bool {
+func producerMaySupplyPayload(producer Producer, kind, namespace string) bool {
 	namespace = strings.SplitN(strings.TrimSpace(namespace), ".", 2)[0]
+	if producer == ProducerHub && kind == "cron.tick" && (namespace == "scheduled_at" || namespace == "slot_id") {
+		return true
+	}
 	switch producer {
 	case ProducerAgent:
 		return namespace == "agent" || namespace == "task" || namespace == "plan" || namespace == "delivery" ||
@@ -803,7 +812,12 @@ func producerMayEmit(producer Producer, kind string) bool {
 		return prefix == "context"
 	case ProducerCustom:
 		return prefix == "custom"
-	case ProducerHub, ProducerEngine:
+	case ProducerHub:
+		if kind == "cron.tick" {
+			return true
+		}
+		fallthrough
+	case ProducerEngine:
 		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task" || prefix == "exec" || prefix == "dependency"
 	default:
 		return false

@@ -72,6 +72,22 @@ func (s *Store) RecordCronRunSkipped(ctx context.Context, tenantID, workspaceNam
 	return id, nil
 }
 
+// FinishCronRunSignaled marks a tick delivered to existing runs as complete.
+// Its run_context retains the slot ID and target run IDs without linking this
+// tick to a run's lifecycle through v2_run_id.
+func (s *Store) FinishCronRunSignaled(ctx context.Context, cronRunID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("workflow v2 store is not configured")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_v2_cron_runs SET status='signaled', result='signaled', finished_at=?
+		WHERE id=? AND status='running'`, s.now().UTC().UnixMilli(), cronRunID)
+	if err != nil {
+		return fmt.Errorf("finish signaled cron run: %w", err)
+	}
+	return nil
+}
+
 // UpdateCronRunForV2Run links a cron history row to its v2 run and claw.
 func (s *Store) UpdateCronRunForV2Run(ctx context.Context, cronRunID, v2RunID, clawID string) error {
 	if s == nil || s.db == nil {
