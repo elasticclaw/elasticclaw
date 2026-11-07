@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -11,6 +12,11 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
+
+// errWorkflowV2FinishedAtActivation reports that delivery.adopted moved the run
+// to a terminal state during activation. The run, its cron slot and its parent
+// task run are already finished, so callers must not provision a claw.
+var errWorkflowV2FinishedAtActivation = errors.New("workflow v2 run finished during activation")
 
 // completeWorkflowV2Activation adopts delivery before releasing initial effects.
 func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workflowv2.Store, runID string) error {
@@ -65,7 +71,8 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 		}
 		// delivery.adopted may itself reach a terminal state.
 		if run.Status != workflowv2.RunActive && run.Status != workflowv2.RunSuspended {
-			return nil
+			s.maybeFinishWorkflowV2Parent(ctx, runID)
+			return errWorkflowV2FinishedAtActivation
 		}
 	}
 	return store.CompleteActivation(ctx, runID)

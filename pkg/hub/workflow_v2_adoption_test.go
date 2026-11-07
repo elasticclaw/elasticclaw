@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const adoptionWorkspace = `
@@ -150,5 +152,55 @@ func TestWorkflowV2ActivationAdoption(t *testing.T) {
 				t.Fatalf("calls=%d", calls)
 			}
 		})
+	}
+}
+
+func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}}}, "", "", "")
+	branchSweepTestToken(s)
+	oldClient := defaultGitHubClient
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() { defaultGitHubClient = oldClient })
+	defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := json.Marshal([]any{map[string]any{"number": 1, "html_url": "https://github.com/owner/repo/pull/1", "state": "open",
+			"user": map[string]string{"login": "factory-app[bot]", "type": "Bot"},
+			"head": map[string]any{"ref": "deps/ts-minor-1", "sha": "head", "repo": map[string]string{"full_name": "owner/repo"}},
+			"base": map[string]string{"ref": "main"}}})
+		return githubAppTokenResponse(200, string(body)), nil
+	})}
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "adoption", Files: map[string]string{
+		"elasticclaw-config.yaml": adoptionWorkspace + "execution:\n  provider: noop\n",
+	}}, []*types.WorkflowConfig{{Name: "adoption", RawConfig: strings.Replace(adoptionWorkflow, `  reviewing:
+    phase: review`, `  reviewing:
+    phase: done
+    terminal: true`, 1) + "trigger:\n  cron:\n    schedule: \"0 9 * * *\"\n"}})
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+
+	if _, err := s.cronSchedulerV2.manualTrigger("adoption", "adoption", "test-tenant-id"); err != nil {
+		t.Fatal(err)
+	}
+	var runStatus, clawID, cronStatus string
+	if err := db.QueryRow(`SELECT r.status,c.claw_id,c.status FROM workflow_v2_cron_runs c JOIN workflow_v2_runs r ON r.id=c.v2_run_id`).
+		Scan(&runStatus, &clawID, &cronStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != string(workflowv2.RunCompleted) || cronStatus == "running" {
+		t.Fatalf("run=%s cron=%s", runStatus, cronStatus)
+	}
+	time.Sleep(100 * time.Millisecond)
+	// The parent claw is finished, never provisioned (noop would connect it).
+	var clawStatus, providerID string
+	if err := db.QueryRow(`SELECT status,provider_id FROM claws WHERE id=?`, clawID).Scan(&clawStatus, &providerID); err != nil ||
+		clawStatus != "deleted" || providerID != "" {
+		t.Fatalf("claw=%s provider=%s err=%v", clawStatus, providerID, err)
+	}
+	s.cronSchedulerV2.runningMu.Lock()
+	running := s.cronSchedulerV2.running["adoption/adoption"]
+	s.cronSchedulerV2.runningMu.Unlock()
+	if running != 0 {
+		t.Fatalf("cron slot still held: %d", running)
 	}
 }
