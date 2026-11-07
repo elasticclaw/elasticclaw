@@ -882,3 +882,27 @@ states:
 		t.Fatalf("error = %v, want execute_command capability missing", err)
 	}
 }
+
+func TestDeliveryBranchSelectors(t *testing.T) {
+	workspace := "schema_version: 2\nname: test\nrepositories:\n  app:\n    provider: github\n    repository: org/app\n"
+	for _, tc := range []struct {
+		repository, pattern string
+		valid               bool
+	}{
+		{"app", "deps/ts-minor-*", true}, {"app", "deps/[ab]?", true},
+		{"", "deps/*", false}, {"org/app", "deps/*", false}, {"missing", "deps/*", false},
+		{"app", "", false}, {"app", "[", false},
+	} {
+		t.Run(tc.repository+"/"+tc.pattern, func(t *testing.T) {
+			workflow := fmt.Sprintf("schema_version: 2\nname: test\ninitial_state: ready\nstates:\n  ready: {}\ndelivery:\n  pull_requests:\n    branches:\n      - repository: %q\n        pattern: %q\n", tc.repository, tc.pattern)
+			_, _, err := v2.ParseAndValidateWorkflowPair([]byte(workflow), []byte(workspace))
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%t err=%v", tc.valid, err)
+			}
+		})
+	}
+	selector := &v2.PullRequestDelivery{Branches: []v2.PullRequestBranch{{Repository: "app", Pattern: "deps/ts-minor-*"}}}
+	if !selector.MatchesBranch("app", "deps/ts-minor-123") || selector.MatchesBranch("other", "deps/ts-minor-123") || selector.MatchesBranch("app", "deps/ts-major-123") || selector.MatchesBranch("app", "deps/ts-minor-123/nested") {
+		t.Fatal("unexpected glob matching")
+	}
+}

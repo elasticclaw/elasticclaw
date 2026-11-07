@@ -2,6 +2,7 @@ package v2
 
 import (
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -107,8 +108,7 @@ type WorkflowReview struct {
 }
 
 // WorkflowDelivery declares aggregate constraints over the run-owned,
-// dynamically submitted delivery collection. It intentionally contains no
-// repository list; repository authority comes exclusively from the workspace.
+// delivery collection. Repository authority comes exclusively from the workspace.
 type WorkflowDelivery struct {
 	PullRequests *PullRequestDelivery `yaml:"pull_requests,omitempty" json:"pull_requests,omitempty"`
 }
@@ -116,11 +116,33 @@ type WorkflowDelivery struct {
 // PullRequestDelivery applies named CI/review policies to every active,
 // hub-verified PR and defines when that aggregate can complete.
 type PullRequestDelivery struct {
-	Required     bool   `yaml:"required,omitempty" json:"required,omitempty"`
-	Minimum      int    `yaml:"minimum,omitempty" json:"minimum,omitempty"`
-	CIPolicy     string `yaml:"ci_policy,omitempty" json:"ci_policy,omitempty"`
-	ReviewPolicy string `yaml:"review_policy,omitempty" json:"review_policy,omitempty"`
-	Completion   string `yaml:"completion,omitempty" json:"completion,omitempty"`
+	Branches     []PullRequestBranch `yaml:"branches,omitempty" json:"branches,omitempty"`
+	Required     bool                `yaml:"required,omitempty" json:"required,omitempty"`
+	Minimum      int                 `yaml:"minimum,omitempty" json:"minimum,omitempty"`
+	CIPolicy     string              `yaml:"ci_policy,omitempty" json:"ci_policy,omitempty"`
+	ReviewPolicy string              `yaml:"review_policy,omitempty" json:"review_policy,omitempty"`
+	Completion   string              `yaml:"completion,omitempty" json:"completion,omitempty"`
+}
+
+// PullRequestBranch selects head branches within a workspace repository.
+type PullRequestBranch struct {
+	Repository string `yaml:"repository" json:"repository"`
+	Pattern    string `yaml:"pattern" json:"pattern"`
+}
+
+// MatchesBranch uses slash-separated Go path globs; * does not cross a slash.
+func (d *PullRequestDelivery) MatchesBranch(repository, branch string) bool {
+	if d == nil {
+		return false
+	}
+	for _, rule := range d.Branches {
+		if rule.Repository == repository {
+			if matched, _ := path.Match(rule.Pattern, branch); matched {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 const DeliveryCompletionAllMerged = "all_merged"
