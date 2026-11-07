@@ -447,6 +447,20 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		return EventResult{}, err
 	}
 
+	// Provider observations keep suspended runs current without resuming them
+	// or scheduling effects. Explicit recovery retains its existing semantics.
+	if stored.Status == RunSuspended && (input.Producer == ProducerSourceControl ||
+		input.Producer == ProducerCI || input.Producer == ProducerReview || input.Kind == "workflow.delivery.evaluated") {
+		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID,
+			typesv2.DispositionAccepted, stored.StateVersion, "evidence updated while suspended", now); err != nil {
+			return EventResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return EventResult{}, err
+		}
+		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionAccepted, Run: stored}, nil
+	}
+
 	facts, err := loadFacts(ctx, tx, runID)
 	if err != nil {
 		return EventResult{}, err

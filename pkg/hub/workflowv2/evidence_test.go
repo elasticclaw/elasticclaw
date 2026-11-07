@@ -328,7 +328,7 @@ func TestTrustedPullRequestReconciliationInvalidatesOldHeadEvidence(t *testing.T
 	}
 }
 
-func TestSuspendedRunsAreNotExternalDeliveryTargets(t *testing.T) {
+func TestSuspendedRunsReceiveExternalDeliveryEvidence(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
 	_, pr := createPolicyDelivery(t, store, "run-suspended-target", "head-1", "open")
@@ -348,8 +348,37 @@ func TestSuspendedRunsAreNotExternalDeliveryTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(byPR) != 0 || len(byHead) != 0 || len(all) != 0 {
+	if len(byPR) != 1 || len(byHead) != 1 || len(all) != 1 {
 		t.Fatalf("suspended targets by PR/head/all = %#v/%#v/%#v", byPR, byHead, all)
+	}
+	pr.BaseSHA, pr.MergeableState = "base-1", "dirty"
+	if _, err := store.ReconcileMergeability(context.Background(), byPR[0], pr); err != nil {
+		t.Fatal(err)
+	}
+	pr.HeadSHA = "head-2"
+	if _, err := store.ReconcilePullRequest(context.Background(), byPR[0], "suspended-head", "pull_request.head_changed", pr); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, "run-suspended-target", pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	inspection, err := store.InspectRun(context.Background(), "run-suspended-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Run.Status != workflowv2.RunSuspended || inspection.Run.State != "reviewing" ||
+		inspection.Run.WaitingReason != "operator review" || inspection.Run.StateVersion != 1 {
+		t.Fatalf("evidence changed suspension: %#v", inspection.Run)
+	}
+	ci := inspection.Facts["ci"].(map[string]interface{})
+	if ci["status"] != "unsatisfied" {
+		t.Fatalf("CI facts = %#v", ci)
+	}
+	var receipts int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_event_receipts WHERE run_id=? AND disposition='accepted'`, "run-suspended-target").Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts == 0 {
+		t.Fatal("missing accepted receipts")
 	}
 }
 

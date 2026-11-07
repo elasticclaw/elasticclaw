@@ -40,15 +40,19 @@ func (s *Server) processWorkflowV2GitHubPREvent(payload githubPRPayload) {
 		verified.ID = target.PRID
 		verified.Provenance.Principal = payload.Sender.Login
 		kind := workflowV2PullRequestEventKind(payload.Action, verified.State, verified.HeadSHA != target.HeadSHA)
-		if kind == "" {
-			continue
+		if kind != "" {
+			eventID := workflowV2GitHubEventID(target.RunID, "pull_request", payload.Action,
+				verified.Repository, strconv.Itoa(verified.Number), verified.HeadSHA, verified.State,
+				payload.PullRequest.UpdatedAt)
+			if _, err := workflowv2.NewStore(s.db).ReconcilePullRequest(context.Background(), target, eventID, kind, verified); err != nil {
+				log.Printf("[workflow-v2 github] reconcile %s#%d for run %s: %v",
+					payload.Repository.FullName, payload.Number, target.RunID, err)
+				continue
+			}
 		}
-		eventID := workflowV2GitHubEventID(target.RunID, "pull_request", payload.Action,
-			verified.Repository, strconv.Itoa(verified.Number), verified.HeadSHA, verified.State,
-			payload.PullRequest.UpdatedAt)
-		if _, err := workflowv2.NewStore(s.db).ReconcilePullRequest(context.Background(), target, eventID, kind, verified); err != nil {
-			log.Printf("[workflow-v2 github] reconcile %s#%d for run %s: %v",
-				payload.Repository.FullName, payload.Number, target.RunID, err)
+		target.HeadSHA, target.State = verified.HeadSHA, verified.State
+		if _, err := workflowv2.NewStore(s.db).ReconcileMergeability(context.Background(), target, verified); err != nil {
+			log.Printf("[workflow-v2 github] reconcile mergeability for run %s: %v", target.RunID, err)
 		}
 	}
 }

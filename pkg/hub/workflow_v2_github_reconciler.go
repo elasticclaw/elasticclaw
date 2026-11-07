@@ -51,6 +51,11 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 		return fmt.Errorf("list active deliveries: %w", err)
 	}
 	current := make([]workflowv2.DeliveryTarget, 0, len(targets))
+	type prObservation struct {
+		pr  typesv2.VerifiedPullRequest
+		err error
+	}
+	observations := map[string]prObservation{}
 	for _, target := range targets {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -65,8 +70,19 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 			log.Printf("[workflow-v2 github] parse workspace for run %s: %v", target.RunID, parseErr)
 			continue
 		}
-		verified, verifyErr := s.verifyWorkflowV2PullRequest(targetCtx, workflowv2.Run{}, workspace.Workspace,
-			typesv2.PullRequestClaim{URL: target.URL})
+		key := target.Repository + "#" + strconv.Itoa(target.Number)
+		observation, loaded := observations[key]
+		if !loaded {
+			observation.pr, observation.err = s.verifyWorkflowV2PullRequest(targetCtx, workflowv2.Run{}, workspace.Workspace,
+				typesv2.PullRequestClaim{URL: target.URL})
+			observations[key] = observation
+		}
+		verified, verifyErr := observation.pr, observation.err
+		verified.RepositoryName = target.RepositoryName
+		verified.Provenance.Connection = strings.TrimSpace(workspace.Workspace.Repositories[target.RepositoryName].SourceControl)
+		if verified.Provenance.Connection == "" {
+			verified.Provenance.Connection = "github"
+		}
 		cancel()
 		if verifyErr != nil {
 			log.Printf("[workflow-v2 github] verify %s#%d for run %s: %v",
@@ -93,6 +109,9 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 		}
 		target.HeadSHA = verified.HeadSHA
 		target.State = verified.State
+		if _, err := store.ReconcileMergeability(ctx, target, verified); err != nil {
+			log.Printf("[workflow-v2 github] reconcile mergeability for run %s: %v", target.RunID, err)
+		}
 		if verified.State == "open" {
 			current = append(current, target)
 		}

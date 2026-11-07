@@ -295,6 +295,11 @@ func Migrate(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
+	for _, column := range []string{"mergeable_state", "mergeable_head_sha", "base_sha"} {
+		if err := addColumnIfMissing(db, "workflow_v2_delivery_prs", column, "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("workflow v2 migrate: %w", err)
+		}
+	}
 	if err := addColumnIfMissing(db, "workflow_v2_delivery_prs", "registered_only", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
