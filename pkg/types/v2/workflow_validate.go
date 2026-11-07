@@ -28,19 +28,20 @@ var writableNamespaces = []string{
 }
 
 var knownWorkflowKeys = map[string]bool{
-	"schema_version":  true,
-	"name":            true,
-	"enabled":         true,
-	"manual_trigger":  true,
-	"initial_state":   true,
-	"states":          true,
-	"transitions":     true,
-	"commands":        true,
-	"ci":              true,
-	"review":          true,
-	"delivery":        true,
-	"events":          true,
-	"trigger":         true,
+	"schema_version": true,
+	"name":           true,
+	"enabled":        true,
+	"manual_trigger": true,
+	"initial_state":  true,
+	"states":         true,
+	"transitions":    true,
+	"commands":       true,
+	"ci":             true,
+	"review":         true,
+	"delivery":       true,
+	"events":         true,
+	"trigger":        true,
+	"analytics":      true,
 }
 
 // ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
@@ -95,7 +96,14 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 		return nil, fmt.Errorf("workflow %q: initial_state %q is not defined in states", wf.Name, wf.InitialState)
 	}
 
+	if wf.Analytics != nil && wf.Analytics.RunKind != "" && wf.Analytics.RunKind != "code_task" && wf.Analytics.RunKind != "maintenance" {
+		return nil, fmt.Errorf("workflow %q: analytics.run_kind %q is unsupported", wf.Name, wf.Analytics.RunKind)
+	}
+
 	for name, st := range wf.States {
+		if st.Outcome != "" && (!st.Terminal || !IsTerminalOutcome(st.Outcome)) {
+			return nil, fmt.Errorf("workflow %q: states.%s.outcome %q requires a terminal state and a supported outcome", wf.Name, name, st.Outcome)
+		}
 		if err := validateResourceName("states", name); err != nil {
 			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 		}
