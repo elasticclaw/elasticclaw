@@ -95,6 +95,10 @@ type EventInput struct {
 	Payload              map[string]interface{}
 	Facts                map[string]interface{}
 	mutation             eventMutation
+	// observation marks provider-reconciled input (PR state, mergeability,
+	// CI/review evidence and policy). Only these reach suspended runs as
+	// evidence; see ApplyEvent.
+	observation bool
 }
 
 type eventMutation func(context.Context, *sql.Tx, *EventInput) error
@@ -105,6 +109,9 @@ type EventResult struct {
 	Reason      string                     `json:"reason,omitempty"`
 	Run         Run                        `json:"run"`
 	Transition  *Transition                `json:"transition,omitempty"`
+	// Deferred reports that nothing was recorded because a suspended run
+	// listens on the event; the provider reconciler re-observes it later.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 type Transition struct {
@@ -448,9 +455,16 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	}
 
 	// Provider observations keep suspended runs current without resuming them
-	// or scheduling effects. Explicit recovery retains its existing semantics.
-	if stored.Status == RunSuspended && (input.Producer == ProducerSourceControl ||
-		input.Producer == ProducerCI || input.Producer == ProducerReview || input.Kind == "workflow.delivery.evaluated") {
+	// or scheduling effects. An observation the workflow listens on would be
+	// consumed without ever driving its transition, so it is rolled back
+	// instead: its domain state stays unchanged and the reconciler re-detects
+	// it once the run is active again, as it did before suspended runs were
+	// reconciled.
+	if stored.Status == RunSuspended && input.observation {
+		if workflowListensOn(workflow.Workflow, input.Kind) {
+			return EventResult{EventID: input.ID, Reason: "deferred while the run is suspended",
+				Run: stored, Deferred: true}, nil
+		}
 		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID,
 			typesv2.DispositionAccepted, stored.StateVersion, "evidence updated while suspended", now); err != nil {
 			return EventResult{}, err
@@ -884,6 +898,20 @@ func matchingTransition(workflow *typesv2.Workflow, kind, state string, facts ma
 		}
 	}
 	return matchedName, matched, count, listeners, nil
+}
+
+// workflowListensOn reports whether any state's transition or event clause
+// handles kind. Recovery may move a run to any state, so all are considered.
+func workflowListensOn(workflow *typesv2.Workflow, kind string) bool {
+	if _, ok := workflow.Events[kind]; ok {
+		return true
+	}
+	for _, definition := range workflow.Transitions {
+		if definition.On == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func matchingEventClause(workflow *typesv2.Workflow, kind, state string, facts map[string]interface{}) (string, *typesv2.EventClause, int, error) {

@@ -154,7 +154,7 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 	}
 	event, err := s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: eventKind, AttemptID: target.AttemptID,
-		Producer: ProducerSourceControl, Provenance: verified.Provenance,
+		Producer: ProducerSourceControl, Provenance: verified.Provenance, observation: true,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		var currentHead string
 		var currentState, mergeableHead, baseSHA, mergeableState string
@@ -307,7 +307,7 @@ func (s *Store) applyReviewFeedbackEvent(ctx context.Context, target DeliveryTar
 	}
 	return s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: eventKind, AttemptID: target.AttemptID,
-		Producer: ProducerReview, Provenance: provenance,
+		Producer: ProducerReview, Provenance: provenance, observation: true,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		var currentValue, currentProvenance string
 		err := tx.QueryRowContext(ctx, `SELECT value_json,provenance_json FROM workflow_v2_facts
