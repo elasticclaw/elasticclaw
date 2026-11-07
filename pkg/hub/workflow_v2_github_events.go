@@ -200,9 +200,10 @@ func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *wor
 					encoded, _ := json.Marshal(rawStatuses)
 					var statuses []commitStatus
 					if err := json.Unmarshal(encoded, &statuses); err != nil {
-						return err
+						log.Printf("[workflow-v2 github] decode commit statuses for %s: %v", target.Repository, err)
+					} else {
+						statusesByRepository[target.Repository] = statuses
 					}
-					statusesByRepository[target.Repository] = statuses
 				}
 			}
 			if needsWorkflow[target.Repository] {
@@ -218,15 +219,16 @@ func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *wor
 						CheckSuiteID int64  `json:"check_suite_id"`
 					}
 					if err := json.Unmarshal(encoded, &runs); err != nil {
-						return err
-					}
-					bySuite := map[int64]struct{ name, path string }{}
-					for _, run := range runs {
-						if run.CheckSuiteID > 0 {
-							bySuite[run.CheckSuiteID] = struct{ name, path string }{run.Name, run.Path}
+						log.Printf("[workflow-v2 github] decode workflow runs for %s: %v", target.Repository, err)
+					} else {
+						bySuite := map[int64]struct{ name, path string }{}
+						for _, run := range runs {
+							if run.CheckSuiteID > 0 {
+								bySuite[run.CheckSuiteID] = struct{ name, path string }{run.Name, run.Path}
+							}
 						}
+						workflowRunsByRepository[target.Repository] = bySuite
 					}
-					workflowRunsByRepository[target.Repository] = bySuite
 				}
 			}
 		}
@@ -314,7 +316,7 @@ func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *wor
 }
 
 func workflowV2GitHubCheckNameMatches(pipeline typesv2.Pipeline, name, appSlug string) bool {
-	matched, err := path.Match(pipeline.CheckName, name)
+	matched, err := typesv2.MatchCheckName(pipeline.CheckName, name)
 	return err == nil && matched && (pipeline.AppSlug == "" || strings.EqualFold(pipeline.AppSlug, appSlug))
 }
 

@@ -38,3 +38,22 @@ ci:
 		})
 	}
 }
+
+func TestMatchCheckNameSpansSlash(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, name string
+		want          bool
+	}{
+		{"*", "CI / unit", true},
+		{"*unit*", "CI / unit", true},
+		{"CI*", "CI / unit", true},
+		{"CI / ?nit", "CI / unit", true},
+		{"build / test (*)", "build / test (ubuntu)", true},
+		{"depot-*", "CI / unit", false},
+	} {
+		got, err := MatchCheckName(tc.pattern, tc.name)
+		if err != nil || got != tc.want {
+			t.Fatalf("MatchCheckName(%q, %q) = %v, %v; want %v", tc.pattern, tc.name, got, err, tc.want)
+		}
+	}
+}
