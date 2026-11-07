@@ -136,7 +136,7 @@ func TestCronSchedulerV2SignalTargetsOpenRunsOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, field := range []string{"workspace_name", "workflow_name", "tenant_id"} {
+	for _, field := range []string{"workspace_name", "workflow_name"} {
 		run := createSignalTestRun(t, store, "other-"+field, raw)
 		if _, err := db.Exec(`UPDATE workflow_v2_runs SET `+field+`='other' WHERE id=?`, run.ID); err != nil {
 			t.Fatal(err)
@@ -161,6 +161,74 @@ func TestCronSchedulerV2SignalTargetsOpenRunsOnly(t *testing.T) {
 	}
 }
 
+// Tenant scoping matches countActiveV2Runs: an open run recorded under another
+// tenant is still signaled instead of letting the tick start a second run.
+func TestCronSchedulerV2SignalIgnoresRunTenant(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	store := workflowv2.NewStore(db)
+	raw := signalWorkflowYAML()
+	run := createSignalTestRun(t, store, "run-other-tenant", raw)
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET tenant_id='other' WHERE id=?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	status, err := newCronSchedulerV2(s).runWorkflow(signalTestWorkflow(t, raw), "test-tenant-id")
+	if err != nil || status != workflowRunSignaled {
+		t.Fatalf("tick = %s, %v", status, err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("runs = %d, %v", count, err)
+	}
+}
+
+// A run left pending activation (e.g. by a restart) is neither signaled nor
+// duplicated by a new run.
+func TestCronSchedulerV2SignalSkipsActivationPendingRun(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	raw := signalWorkflowYAML()
+	_, err := workflowv2.NewStore(db).CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-pending", TenantID: "test-tenant-id", InitialClawID: "claw-run-pending",
+		WorkspaceYAML: []byte(cronWorkspaceV2YAML), WorkflowYAML: []byte(raw), TriggerType: "cron",
+		ActivationPending: true, Timeout: workflowV2RunTimeout(raw),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := newCronSchedulerV2(s).runWorkflow(signalTestWorkflow(t, raw), "test-tenant-id")
+	if err != nil || status != workflowRunSkipped {
+		t.Fatalf("tick = %s, %v", status, err)
+	}
+	var runs, events int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs`).Scan(&runs); err != nil || runs != 1 {
+		t.Fatalf("runs = %d, %v", runs, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE kind='cron.tick'`).Scan(&events); err != nil || events != 0 {
+		t.Fatalf("events = %d, %v", events, err)
+	}
+}
+
+// A matching cron.tick transition resumes a suspended run.
+func TestCronSchedulerV2SignalResumesSuspendedRun(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	store := workflowv2.NewStore(db)
+	raw := signalWorkflowYAML() + "\ntransitions:\n  tick:\n    from: [s]\n    on: cron.tick\n    to: done\n"
+	run := createSignalTestRun(t, store, "run-suspended", raw)
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended', waiting_reason='awaiting review' WHERE id=?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	status, err := newCronSchedulerV2(s).runWorkflow(signalTestWorkflow(t, raw), "test-tenant-id")
+	if err != nil || status != workflowRunSignaled {
+		t.Fatalf("tick = %s, %v", status, err)
+	}
+	updated, err := store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != "done" || updated.Status == workflowv2.RunSuspended {
+		t.Fatalf("suspended run not resumed: state=%s status=%s", updated.State, updated.Status)
+	}
+}
+
 func TestCronSchedulerV2SignalManualTriggerStartsThenSignals(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
@@ -178,6 +246,17 @@ func TestCronSchedulerV2SignalManualTriggerStartsThenSignals(t *testing.T) {
 		s.Handler().ServeHTTP(rr, req)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("trigger %d = %d: %s", i, rr.Code, rr.Body.String())
+		}
+		var resp map[string]string
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		want := "signaled"
+		if i == 0 {
+			want = "triggered"
+		}
+		if resp["status"] != want {
+			t.Fatalf("trigger %d status = %q, want %q", i, resp["status"], want)
 		}
 	}
 	var count int
@@ -218,7 +297,7 @@ func TestCronSchedulerV2SignalManualTriggerStartsThenSignals(t *testing.T) {
 	if err := workflowv2.NewStore(db).CancelActivation(context.Background(), runID, "test completed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.cronSchedulerV2.manualTrigger("engineering", "delivery", "test-tenant-id"); err != nil {
+	if _, _, err := s.cronSchedulerV2.manualTrigger("engineering", "delivery", "test-tenant-id"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs`).Scan(&count); err != nil || count != 2 {

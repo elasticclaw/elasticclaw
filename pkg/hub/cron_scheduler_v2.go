@@ -246,12 +246,22 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 		lock, _ := cs.signalLocks.LoadOrStore(key, &sync.Mutex{})
 		lock.(*sync.Mutex).Lock()
 		defer lock.(*sync.Mutex).Unlock()
-		runIDs, err := cs.openV2RunIDs(tenantID, sw.workspace.Name, sw.workflow.Name)
+		runIDs, pending, err := cs.openV2RunIDs(sw.workspace.Name, sw.workflow.Name)
 		if err != nil {
 			return workflowRunFailed, err
 		}
 		if len(runIDs) > 0 {
 			return cs.signalRuns(store, sw, tenantID, runIDs, now)
+		}
+		if pending > 0 {
+			// A run still pending activation (e.g. left over from a restart) cannot
+			// take events yet, and starting a second run would duplicate it.
+			reason := fmt.Sprintf("%d run(s) pending activation", pending)
+			_, _ = store.RecordCronRunSkipped(context.Background(), tenantID, sw.workspace.Name, sw.workflow.Name, "cron", map[string]interface{}{
+				"reason": reason,
+			})
+			log.Printf("[cron-v2] skipping %s (%s)", key, reason)
+			return workflowRunSkipped, nil
 		}
 	}
 
@@ -362,27 +372,34 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 	return workflowRunStarted, nil
 }
 
-// openV2RunIDs includes suspended runs and orders targets for stable delivery.
-func (cs *cronSchedulerV2) openV2RunIDs(tenantID, workspaceName, workflowName string) ([]string, error) {
+// openV2RunIDs returns the open runs a tick can signal, ordered for stable
+// delivery, plus the number of open runs still pending activation. Like
+// countActiveV2Runs, it keys open runs by workspace and workflow only.
+func (cs *cronSchedulerV2) openV2RunIDs(workspaceName, workflowName string) ([]string, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	rows, err := cs.srv.db.QueryContext(ctx, `
-		SELECT id FROM workflow_v2_runs
-		WHERE tenant_id=? AND workspace_name=? AND workflow_name=? AND status IN ('active','suspended')
-		ORDER BY id`, tenantID, workspaceName, workflowName)
+		SELECT id, status, COALESCE(waiting_reason,'') FROM workflow_v2_runs
+		WHERE workspace_name=? AND workflow_name=? AND status IN ('active','suspended')
+		ORDER BY id`, workspaceName, workflowName)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var ids []string
+	pending := 0
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var id, status, waitingReason string
+		if err := rows.Scan(&id, &status, &waitingReason); err != nil {
+			return nil, 0, err
+		}
+		if workflowv2.IsActivationPending(status, waitingReason) {
+			pending++
+			continue
 		}
 		ids = append(ids, id)
 	}
-	return ids, rows.Err()
+	return ids, pending, rows.Err()
 }
 
 func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWorkflowV2, tenantID string, runIDs []string, scheduledAt time.Time) (workflowRunStartStatus, error) {
@@ -410,7 +427,11 @@ func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWork
 				Producer: string(workflowv2.ProducerHub), Principal: "cron_scheduler", ObservedAt: scheduledAt,
 			},
 		})
-		if err == nil && result.Disposition != v2.DispositionAccepted {
+		// A rejected event is durably recorded and suspends the run by design,
+		// so the tick was still delivered.
+		if err == nil && result.Disposition == v2.DispositionRejected {
+			log.Printf("[cron-v2] tick %s rejected by run %s: %s", slotID, runID, result.Reason)
+		} else if err == nil && result.Disposition != v2.DispositionAccepted {
 			err = fmt.Errorf("event disposition %s: %s", result.Disposition, result.Reason)
 		}
 		if err != nil {
@@ -438,10 +459,11 @@ func (cs *cronSchedulerV2) decrementRunning(key string) {
 
 // manualTrigger triggers a v2 cron workflow run manually. It matches v1
 // cronScheduler.manualTrigger: any enabled cron workflow can be triggered.
-func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID string) (string, error) {
+// The returned status tells a started run apart from a signal-only tick.
+func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID string) (string, workflowRunStartStatus, error) {
 	workspaces, err := cs.srv.loadAllWorkspaces()
 	if err != nil {
-		return "", err
+		return "", workflowRunFailed, err
 	}
 	for _, ws := range workspaces {
 		if ws.Name != workspaceName {
@@ -453,10 +475,10 @@ func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID s
 			}
 			trigger, ok := cronTriggerFromV2Workflow(wf)
 			if !ok {
-				return "", &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s is not cron-triggered", workspaceName, workflowName)}
+				return "", workflowRunFailed, &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s is not cron-triggered", workspaceName, workflowName)}
 			}
 			if !isWorkflowEnabled(wf) {
-				return "", &cronTriggerDisabledError{msg: fmt.Sprintf("workflow %s/%s is disabled", workspaceName, workflowName)}
+				return "", workflowRunFailed, &cronTriggerDisabledError{msg: fmt.Sprintf("workflow %s/%s is disabled", workspaceName, workflowName)}
 			}
 			sw := &scheduledWorkflowV2{
 				workspace: ws,
@@ -466,15 +488,15 @@ func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID s
 			}
 			status, err := cs.runWorkflow(sw, tenantID)
 			if status == workflowRunSkipped {
-				return "", &cronTriggerSkippedError{msg: fmt.Sprintf("workflow %s/%s: run skipped due to overlap policy", workspaceName, workflowName)}
+				return "", workflowRunFailed, &cronTriggerSkippedError{msg: fmt.Sprintf("workflow %s/%s: run skipped due to overlap policy", workspaceName, workflowName)}
 			}
 			if err != nil {
-				return "", err
+				return "", workflowRunFailed, err
 			}
-			return sw.key, nil
+			return sw.key, status, nil
 		}
 	}
-	return "", &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s not found", workspaceName, workflowName)}
+	return "", workflowRunFailed, &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s not found", workspaceName, workflowName)}
 }
 
 func (cs *cronSchedulerV2) firstTenantID() (string, error) {
