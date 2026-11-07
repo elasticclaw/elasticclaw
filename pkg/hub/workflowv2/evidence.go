@@ -304,10 +304,14 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 					Facts: map[string]interface{}{
 						"ci.policy": requirements.CIPolicy, "ci.status": status, "ci.policy_revision": result.Revision,
 					},
-					Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerCI), ObservedAt: observed},
+					Provenance:  typesv2.EvidenceProvenance{Producer: string(ProducerCI), ObservedAt: observed},
+					observation: true,
 				})
 				if err != nil {
 					return err
+				}
+				if event.Deferred {
+					return nil
 				}
 				if event.Disposition != typesv2.DispositionAccepted {
 					return fmt.Errorf("CI policy event was %s: %s", event.Disposition, event.Reason)
@@ -330,10 +334,14 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 						"review.policy": requirements.ReviewPolicy, "review.status": status,
 						"review.policy_revision": result.Revision,
 					},
-					Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerReview), ObservedAt: observed},
+					Provenance:  typesv2.EvidenceProvenance{Producer: string(ProducerReview), ObservedAt: observed},
+					observation: true,
 				})
 				if err != nil {
 					return err
+				}
+				if event.Deferred {
+					return nil
 				}
 				if event.Disposition != typesv2.DispositionAccepted {
 					return fmt.Errorf("review policy event was %s: %s", event.Disposition, event.Reason)
@@ -356,12 +364,13 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 			"delivery.review_satisfied": result.ReviewSatisfied, "delivery.all_merged": result.AllMerged,
 			"delivery.satisfied": result.Satisfied, "delivery.policy_revision": result.Revision,
 		},
-		Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerEngine), ObservedAt: observed},
+		Provenance:  typesv2.EvidenceProvenance{Producer: string(ProducerEngine), ObservedAt: observed},
+		observation: true,
 	})
 	if err != nil {
 		return err
 	}
-	if deliveryEvent.Disposition != typesv2.DispositionAccepted {
+	if deliveryEvent.Disposition != typesv2.DispositionAccepted && !deliveryEvent.Deferred {
 		return fmt.Errorf("delivery policy event was %s: %s", deliveryEvent.Disposition, deliveryEvent.Reason)
 	}
 	return nil

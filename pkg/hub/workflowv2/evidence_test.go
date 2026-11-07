@@ -328,7 +328,7 @@ func TestTrustedPullRequestReconciliationInvalidatesOldHeadEvidence(t *testing.T
 	}
 }
 
-func TestSuspendedRunsAreNotExternalDeliveryTargets(t *testing.T) {
+func TestSuspendedRunsReceiveExternalDeliveryEvidence(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
 	_, pr := createPolicyDelivery(t, store, "run-suspended-target", "head-1", "open")
@@ -348,8 +348,108 @@ func TestSuspendedRunsAreNotExternalDeliveryTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(byPR) != 0 || len(byHead) != 0 || len(all) != 0 {
+	if len(byPR) != 1 || len(byHead) != 1 || len(all) != 1 {
 		t.Fatalf("suspended targets by PR/head/all = %#v/%#v/%#v", byPR, byHead, all)
+	}
+	pr.BaseSHA, pr.MergeableState = "base-1", "dirty"
+	if _, err := store.ReconcileMergeability(context.Background(), byPR[0], pr); err != nil {
+		t.Fatal(err)
+	}
+	pr.HeadSHA = "head-2"
+	if _, err := store.ReconcilePullRequest(context.Background(), byPR[0], "suspended-head", "pull_request.head_changed", pr); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, "run-suspended-target", pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	inspection, err := store.InspectRun(context.Background(), "run-suspended-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Run.Status != workflowv2.RunSuspended || inspection.Run.State != "reviewing" ||
+		inspection.Run.WaitingReason != "operator review" || inspection.Run.StateVersion != 1 {
+		t.Fatalf("evidence changed suspension: %#v", inspection.Run)
+	}
+	if prFacts := inspection.Facts["pull_request"].(map[string]interface{}); prFacts["head_sha"] != "head-2" {
+		t.Fatalf("PR facts = %#v", prFacts)
+	}
+	// ci.policy.evaluated drives a transition, so it is deferred rather than
+	// consumed while suspended.
+	if ci, ok := inspection.Facts["ci"].(map[string]interface{}); ok && ci["status"] == "unsatisfied" {
+		t.Fatalf("listened CI policy consumed while suspended: %#v", ci)
+	}
+	var receipts int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_event_receipts WHERE run_id=? AND disposition='accepted'`, "run-suspended-target").Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts == 0 {
+		t.Fatal("missing accepted receipts")
+	}
+	// After recovery the next reconcile cycle publishes the policy and fires
+	// the transition.
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-suspended-target'`); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, "run-suspended-target", pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	run, err := store.GetRun(context.Background(), "run-suspended-target")
+	if err != nil || run.State != "fixing" {
+		t.Fatalf("recovered run = %#v, %v", run, err)
+	}
+}
+
+func TestSuspendedRunDefersMergeUntilRecovery(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  done:\n    phase: done\n    terminal: true\ntransitions:\n  merged:\n    from: reviewing\n    on: pull_request.merged\n    to: done\n", 1)
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: "run-suspended-merge", TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, "run-suspended-merge", "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	pr := typesv2.VerifiedPullRequest{URL: "https://github.example/org/api/pull/10", RepositoryName: "api", Repository: "org/api",
+		Number: 10, SourceBranch: "feature", BaseBranch: "main", HeadSHA: "head-1", State: "open", VerifiedAt: now,
+		Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}
+	if _, err := store.SubmitDelivery(ctx, "run-suspended-merge", attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}},
+	}, workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+		typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		return pr, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id='run-suspended-merge'`); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := store.ActiveDeliveryTargetsAll(ctx)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %#v, %v", targets, err)
+	}
+	pr.State = "merged"
+	result, err := store.ReconcilePullRequest(ctx, targets[0], "merge-event", "pull_request.merged", pr)
+	if err != nil || !result.Deferred {
+		t.Fatalf("suspended merge = %#v, %v", result, err)
+	}
+	var state string
+	if err := db.QueryRow(`SELECT state FROM workflow_v2_delivery_prs WHERE run_id='run-suspended-merge'`).Scan(&state); err != nil || state != "open" {
+		t.Fatalf("delivery state = %q, %v", state, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-suspended-merge'`); err != nil {
+		t.Fatal(err)
+	}
+	targets, err = store.ActiveDeliveryTargetsAll(ctx)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("recovered targets = %#v, %v", targets, err)
+	}
+	result, err = store.ReconcilePullRequest(ctx, targets[0], "merge-event", "pull_request.merged", pr)
+	if err != nil || result.Disposition != typesv2.DispositionAccepted || result.Run.State != "done" {
+		t.Fatalf("recovered merge = %#v, %v", result, err)
 	}
 }
 

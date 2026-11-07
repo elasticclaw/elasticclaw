@@ -161,6 +161,7 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 		input.Facts = map[string]interface{}{
 			"delivery.count": summary["count"], "delivery.open": summary["open"],
 			"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
+			"delivery.any_conflicted": summary["any_conflicted"], "delivery.any_behind": summary["any_behind"],
 		}
 		return nil
 	})
@@ -328,13 +329,15 @@ type rowQueryer interface {
 }
 
 func deliveryFactsFrom(ctx context.Context, queryer rowQueryer, runID string) (map[string]interface{}, error) {
-	var count, open, merged int
+	var count, open, merged, conflicted, behind int
 	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN state='open' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN state='merged' THEN 1 ELSE 0 END),0)
-		FROM workflow_v2_delivery_prs WHERE run_id=? AND active=1 AND registered_only=0`, runID).Scan(&count, &open, &merged); err != nil {
+		COALESCE(SUM(CASE WHEN state='merged' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN state='open' AND mergeable_head_sha=current_head_sha AND mergeable_state='dirty' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN state='open' AND mergeable_head_sha=current_head_sha AND mergeable_state='behind' THEN 1 ELSE 0 END),0)
+		FROM workflow_v2_delivery_prs WHERE run_id=? AND active=1 AND registered_only=0`, runID).Scan(&count, &open, &merged, &conflicted, &behind); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{"count": count, "open": open, "merged": merged,
-		"all_merged": merged == count}, nil
+		"all_merged": merged == count, "any_conflicted": conflicted > 0, "any_behind": behind > 0}, nil
 }

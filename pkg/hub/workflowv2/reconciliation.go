@@ -33,9 +33,8 @@ type DeliveryTarget struct {
 	WorkflowYAML   string
 }
 
-// ActiveDeliveryTargets finds every active V2 run that owns a verified PR. A PR
-// may intentionally belong to more than one run, so callers must reconcile
-// every returned target.
+// ActiveDeliveryTargets finds active or suspended V2 runs owning a verified PR.
+// A PR may belong to more than one run, so callers must reconcile every target.
 func (s *Store) ActiveDeliveryTargets(ctx context.Context, repository string, number int) ([]DeliveryTarget, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("workflow v2 store is not configured")
@@ -50,7 +49,7 @@ func (s *Store) ActiveDeliveryTargets(ctx context.Context, repository string, nu
 			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
-		WHERE p.repository=? AND p.pr_number=? AND p.active=1 AND p.registered_only=0 AND r.status='active'
+		WHERE p.repository=? AND p.pr_number=? AND p.active=1 AND p.registered_only=0 AND r.status IN ('active','suspended')
 		AND a.status='active' ORDER BY r.id`, repository, number)
 	if err != nil {
 		return nil, err
@@ -76,7 +75,7 @@ func (s *Store) ActiveDeliveryTargetsByHead(ctx context.Context, headSHA string)
 			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
-		WHERE p.current_head_sha=? AND p.active=1 AND p.registered_only=0 AND r.status='active' AND a.status='active'
+		WHERE p.current_head_sha=? AND p.active=1 AND p.registered_only=0 AND r.status IN ('active','suspended') AND a.status='active'
 		ORDER BY r.id,p.repository,p.pr_number`, headSHA)
 	if err != nil {
 		return nil, err
@@ -86,8 +85,7 @@ func (s *Store) ActiveDeliveryTargetsByHead(ctx context.Context, headSHA string)
 }
 
 // ActiveDeliveryTargetsAll returns every currently owned V2 delivery subject
-// for periodic provider reconciliation. V1 rows and suspended runs are never
-// selected.
+// for periodic provider reconciliation, including suspended runs.
 func (s *Store) ActiveDeliveryTargetsAll(ctx context.Context) ([]DeliveryTarget, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("workflow v2 store is not configured")
@@ -98,7 +96,7 @@ func (s *Store) ActiveDeliveryTargetsAll(ctx context.Context) ([]DeliveryTarget,
 			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
-		WHERE p.active=1 AND p.registered_only=0 AND r.status='active' AND a.status='active'
+		WHERE p.active=1 AND p.registered_only=0 AND r.status IN ('active','suspended') AND a.status='active'
 		ORDER BY r.updated_at,p.repository,p.pr_number,r.id`)
 	if err != nil {
 		return nil, err
@@ -156,13 +154,13 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 	}
 	event, err := s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: eventKind, AttemptID: target.AttemptID,
-		Producer: ProducerSourceControl, Provenance: verified.Provenance,
+		Producer: ProducerSourceControl, Provenance: verified.Provenance, observation: true,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		var currentHead string
-		var currentState string
-		if err := tx.QueryRowContext(ctx, `SELECT current_head_sha,state FROM workflow_v2_delivery_prs
+		var currentState, mergeableHead, baseSHA, mergeableState string
+		if err := tx.QueryRowContext(ctx, `SELECT current_head_sha,state,mergeable_head_sha,base_sha,mergeable_state FROM workflow_v2_delivery_prs
 			WHERE id=? AND run_id=? AND repository=? AND pr_number=? AND active=1 AND registered_only=0`, target.PRID,
-			target.RunID, target.Repository, target.Number).Scan(&currentHead, &currentState); err != nil {
+			target.RunID, target.Repository, target.Number).Scan(&currentHead, &currentState, &mergeableHead, &baseSHA, &mergeableState); err != nil {
 			return err
 		}
 		if currentHead != target.HeadSHA || currentState != target.State {
@@ -202,11 +200,15 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 		if err != nil {
 			return err
 		}
+		if mergeableHead != verified.HeadSHA {
+			baseSHA, mergeableState = "", ""
+		}
 		pullRequest := map[string]interface{}{
 			"id": target.PRID, "repository": verified.Repository, "number": verified.Number,
 			"url": verified.URL, "head_sha": verified.HeadSHA, "state": verified.State,
 			"previous_head_sha": currentHead, "previous_state": currentState,
 			"head_changed": currentHead != verified.HeadSHA,
+			"base_sha":     baseSHA, "mergeable_state": mergeableState,
 		}
 		input.Payload = map[string]interface{}{"pull_request": pullRequest, "delivery": summary}
 		input.Facts = map[string]interface{}{
@@ -214,8 +216,10 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 			"pull_request.number": verified.Number, "pull_request.url": verified.URL,
 			"pull_request.head_sha": verified.HeadSHA, "pull_request.state": verified.State,
 			"pull_request.head_changed": currentHead != verified.HeadSHA,
-			"delivery.count":            summary["count"], "delivery.open": summary["open"],
+			"pull_request.base_sha":     baseSHA, "pull_request.mergeable_state": mergeableState,
+			"delivery.count": summary["count"], "delivery.open": summary["open"],
 			"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
+			"delivery.any_conflicted": summary["any_conflicted"], "delivery.any_behind": summary["any_behind"],
 		}
 		return nil
 	})
@@ -303,7 +307,7 @@ func (s *Store) applyReviewFeedbackEvent(ctx context.Context, target DeliveryTar
 	}
 	return s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: eventKind, AttemptID: target.AttemptID,
-		Producer: ProducerReview, Provenance: provenance,
+		Producer: ProducerReview, Provenance: provenance, observation: true,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		var currentValue, currentProvenance string
 		err := tx.QueryRowContext(ctx, `SELECT value_json,provenance_json FROM workflow_v2_facts

@@ -249,7 +249,9 @@ func (s *Store) Snapshot(ctx context.Context, runID, attemptID string) (typesv2.
 		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id,url,repository,repository_name,pr_number,source_branch,base_branch,
-		current_head_sha,state,supersedes_id,verified_at,provenance_json FROM workflow_v2_delivery_prs
+		current_head_sha,state,supersedes_id,verified_at,provenance_json,
+		CASE WHEN mergeable_head_sha=current_head_sha THEN base_sha ELSE '' END,
+		CASE WHEN mergeable_head_sha=current_head_sha THEN mergeable_state ELSE '' END FROM workflow_v2_delivery_prs
 		WHERE run_id=? AND active=1 AND registered_only=0 ORDER BY repository,pr_number`, runID)
 	if err != nil {
 		return typesv2.WorkflowSnapshot{}, err
@@ -260,7 +262,7 @@ func (s *Store) Snapshot(ctx context.Context, runID, attemptID string) (typesv2.
 		var verified int64
 		var provenanceJSON string
 		if err := rows.Scan(&pr.ID, &pr.URL, &pr.Repository, &pr.RepositoryName, &pr.Number, &pr.SourceBranch,
-			&pr.BaseBranch, &pr.HeadSHA, &pr.State, &pr.Supersedes, &verified, &provenanceJSON); err != nil {
+			&pr.BaseBranch, &pr.HeadSHA, &pr.State, &pr.Supersedes, &verified, &provenanceJSON, &pr.BaseSHA, &pr.MergeableState); err != nil {
 			return typesv2.WorkflowSnapshot{}, err
 		}
 		pr.VerifiedAt = time.UnixMilli(verified).UTC()
