@@ -141,6 +141,9 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			if err := refreshDeferredDelivery(ctx, tx, runID, input); err != nil {
 				return err
 			}
+			if err := refreshDeferredMergeability(ctx, tx, runID, input); err != nil {
+				return err
+			}
 			return refreshDeferredReviewFeedback(ctx, tx, runID, input)
 		})
 		if errors.Is(err, errDeferredEventGone) {
@@ -168,6 +171,34 @@ func refreshDeferredDelivery(ctx context.Context, tx *sql.Tx, runID string, inpu
 		return err
 	}
 	input.Payload["delivery"] = summary
+	return nil
+}
+
+// refreshDeferredMergeability replaces the queued mergeability of a PR with the
+// persisted one while the PR is still on the queued head. A queued
+// pull_request.mergeable survives a later clean -> blocked change; replaying
+// its queue-time state would override the current fact in guard evaluation.
+func refreshDeferredMergeability(ctx context.Context, tx *sql.Tx, runID string, input *EventInput) error {
+	pullRequest, ok := input.Payload["pull_request"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	prID, _ := pullRequest["id"].(string)
+	headSHA, _ := pullRequest["head_sha"].(string)
+	if _, ok := pullRequest["mergeable_state"]; !ok || prID == "" || headSHA == "" {
+		return nil
+	}
+	var baseSHA, mergeableState string
+	err := tx.QueryRowContext(ctx, `SELECT base_sha,mergeable_state FROM workflow_v2_delivery_prs
+		WHERE id=? AND run_id=? AND current_head_sha=? AND mergeable_head_sha=?`,
+		prID, runID, headSHA, headSHA).Scan(&baseSHA, &mergeableState)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	pullRequest["base_sha"], pullRequest["mergeable_state"] = baseSHA, mergeableState
 	return nil
 }
 

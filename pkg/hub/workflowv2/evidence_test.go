@@ -1101,19 +1101,27 @@ func TestSuspendedRunReplaysEditedFeedbackContent(t *testing.T) {
 // A change back to dirty drops it.
 func TestSuspendedRunKeepsDeferredMergeableAcrossMergeabilityUpdates(t *testing.T) {
 	for _, tc := range []struct {
-		name, state, want string
+		name, state, guard, want string
 	}{
-		{"clean to blocked keeps mergeable", "blocked", "reviewing"},
-		{"dirty again drops mergeable", "dirty", "rebasing"},
+		{"clean to blocked keeps mergeable", "blocked", "", "reviewing"},
+		{"dirty again drops mergeable", "dirty", "", "rebasing"},
+		// The replay must match guards against the current state, not the
+		// queued clean one.
+		{"clean guard sees blocked", "blocked", "clean", "rebasing"},
+		{"blocked guard sees blocked", "blocked", "blocked", "reviewing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			db := openRuntimeDB(t)
 			store := workflowv2.NewStore(db)
+			guard := ""
+			if tc.guard != "" {
+				guard = "    when:\n      pull_request:\n        mergeable_state:\n          equals: " + tc.guard + "\n"
+			}
 			workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
 				"  rebasing:\n    phase: build\ntransitions:\n"+
 					"  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n"+
-					"  rebased:\n    from: rebasing\n    on: pull_request.mergeable\n    to: reviewing\n", 1)
+					"  rebased:\n    from: rebasing\n    on: pull_request.mergeable\n"+guard+"    to: reviewing\n", 1)
 			workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n" +
 				"  resume_rebase:\n    from: rebasing\n    to: rebasing\n"
 			pr := createSuspendedDelivery(t, store, db, "run-mergeable", workflowYAML)
