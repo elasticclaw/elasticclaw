@@ -151,9 +151,11 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 			} `json:"repository"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse status payload: %v", err)
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
 		}
+		log.Printf("[github-webhook] status repo=%q sha=%q state=%q", payload.Repository.FullName, payload.SHA, payload.State)
 		if payload.State == "pending" {
 			break
 		}
