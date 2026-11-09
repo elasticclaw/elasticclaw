@@ -80,11 +80,8 @@ func TestWorkflowV2ActivationAdoption(t *testing.T) {
 				if tc.fail {
 					return nil, fmt.Errorf("GitHub unavailable")
 				}
-				if r.URL.Path != "/repos/owner/repo/pulls" || r.URL.Query().Get("state") != "open" || r.Header.Get("Authorization") != "Bearer repo-token" {
-					t.Fatalf("request=%s", r.URL)
-				}
-				if _, ok := r.Context().Deadline(); !ok {
-					t.Fatal("missing deadline")
+				if !assertAdoptionLookupRequest(t, r) {
+					return githubAppTokenResponse(404, `{}`), nil
 				}
 				if tc.paginate && r.URL.Query().Get("page") == "" {
 					response := githubAppTokenResponse(200, `[]`)
@@ -271,7 +268,33 @@ func TestWorkflowV2ActivationAdoptionKeepsContextSuspension(t *testing.T) {
 	}
 }
 
-func TestWorkflowV2ManualAdoptionFinishingRunReportsCompleted(t *testing.T) {
+// assertAdoptionLookupRequest checks that the adoption lookup lists open PRs
+// on the configured repository with the repo token and a bounded context.
+func assertAdoptionLookupRequest(t *testing.T, r *http.Request) bool {
+	t.Helper()
+	if r.URL.Path != "/repos/owner/repo/pulls" || r.URL.Query().Get("state") != "open" || r.Header.Get("Authorization") != "Bearer repo-token" {
+		t.Errorf("unexpected adoption lookup request=%s", r.URL)
+		return false
+	}
+	if _, ok := r.Context().Deadline(); !ok {
+		t.Error("adoption lookup request has no deadline")
+		return false
+	}
+	return true
+}
+
+func TestWorkflowV2ManualAdoptionFinishingRunReportsTerminalStatus(t *testing.T) {
+	for _, tc := range []struct{ terminalState, want string }{
+		{terminalState: "reviewing", want: string(workflowv2.RunCompleted)},
+		{terminalState: "cancelled", want: string(workflowv2.RunCancelled)},
+	} {
+		t.Run(tc.terminalState, func(t *testing.T) {
+			testWorkflowV2ManualAdoptionFinishingRun(t, tc.terminalState, tc.want)
+		})
+	}
+}
+
+func testWorkflowV2ManualAdoptionFinishingRun(t *testing.T, terminalState, want string) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token",
@@ -280,7 +303,12 @@ func TestWorkflowV2ManualAdoptionFinishingRunReportsCompleted(t *testing.T) {
 	oldClient := defaultGitHubClient
 	defaultGitHubClient = newGitHubClient()
 	t.Cleanup(func() { defaultGitHubClient = oldClient })
+	calls := 0
 	defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if !assertAdoptionLookupRequest(t, r) {
+			return githubAppTokenResponse(404, `{}`), nil
+		}
 		body, _ := json.Marshal([]any{map[string]any{"number": 1, "html_url": "https://github.com/owner/repo/pull/1", "state": "open",
 			"user": map[string]string{"login": "factory-app[bot]", "type": "Bot"},
 			"head": map[string]any{"ref": "deps/ts-minor-1", "sha": "head", "repo": map[string]string{"full_name": "owner/repo"}},
@@ -289,10 +317,10 @@ func TestWorkflowV2ManualAdoptionFinishingRunReportsCompleted(t *testing.T) {
 	})}
 	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "adoption", Files: map[string]string{
 		"elasticclaw-config.yaml": adoptionWorkspace + "execution:\n  provider: noop\n",
-	}}, []*types.WorkflowConfig{{Name: "adoption", RawConfig: strings.Replace(adoptionWorkflow, `  reviewing:
-    phase: review`, `  reviewing:
+	}}, []*types.WorkflowConfig{{Name: "adoption", RawConfig: strings.NewReplacer(`  reviewing:
+    phase: review`, "  "+terminalState+`:
     phase: done
-    terminal: true`, 1) + "manual_trigger: true\n"}})
+    terminal: true`, "to: reviewing", "to: "+terminalState).Replace(adoptionWorkflow) + "manual_trigger: true\n"}})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/adoption/workflows/adoption/trigger", strings.NewReader(`{"inputs":{}}`))
 	req.Header.Set("Authorization", "Bearer test-token")
@@ -310,7 +338,7 @@ func TestWorkflowV2ManualAdoptionFinishingRunReportsCompleted(t *testing.T) {
 	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id=?`, created["run_id"]).Scan(&runStatus); err != nil {
 		t.Fatal(err)
 	}
-	if created["status"] != "completed" || runStatus != string(workflowv2.RunCompleted) {
-		t.Fatalf("response=%v run=%s", created, runStatus)
+	if calls == 0 || created["status"] != want || runStatus != want {
+		t.Fatalf("calls=%d response=%v run=%s", calls, created, runStatus)
 	}
 }

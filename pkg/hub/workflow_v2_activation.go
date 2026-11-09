@@ -123,8 +123,14 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 	}
 	status := "created"
 	if finishedAtActivation {
-		// No claw was provisioned; the run already reached a terminal state.
-		status = "completed"
+		// No claw was provisioned; report the terminal state the run reached
+		// (completed or cancelled).
+		status = "finished"
+		if run, err := workflowv2.NewStore(s.db).GetRun(r.Context(), runID); err != nil {
+			log.Printf("[workflow-v2] manual trigger read finished run %s: %v", runID, err)
+		} else {
+			status = string(run.Status)
+		}
 	}
 	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": status})
 }
