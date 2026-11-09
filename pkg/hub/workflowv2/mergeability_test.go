@@ -3,6 +3,7 @@ package workflowv2_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
@@ -195,5 +196,54 @@ func TestMergeabilityAfterHeadMoveFiresOnNewHead(t *testing.T) {
 	pr.MergeableState = "clean"
 	if result, err := store.ReconcileMergeability(ctx, target(), pr); err != nil || kindOf(result) != "pull_request.mergeable" {
 		t.Fatalf("head-2 clean = %q, %v", kindOf(result), err)
+	}
+}
+
+// A webhook and the reconciler can fetch the PR concurrently. An observation
+// fetched before the persisted one must not overwrite it, even though it reads
+// the newer row as its compare-and-swap baseline.
+func TestMergeabilityIgnoresOlderObservation(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "mergeability-order", "head-1", "open")
+	targets, err := store.ActiveDeliveryTargets(ctx, pr.Repository, pr.Number)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets: %v, %v", targets, err)
+	}
+	observe := func(base, state string, minute int) workflowv2.EventResult {
+		t.Helper()
+		observation := pr
+		observation.BaseSHA, observation.MergeableState = base, state
+		observation.VerifiedAt = time.Date(2026, 8, 8, 12, minute, 0, 0, time.UTC)
+		observation.Provenance.ObservedAt = observation.VerifiedAt
+		result, err := store.ReconcileMergeability(ctx, targets[0], observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	if result := observe("base-2", "dirty", 5); result.EventID == "" {
+		t.Fatal("newer conflict was not recorded")
+	}
+	if result := observe("base-1", "clean", 3); result.EventID != "" {
+		t.Fatalf("older clean observation emitted %s", result.EventID)
+	}
+	// Re-observing the persisted tuple later also advances the watermark.
+	if result := observe("base-2", "dirty", 8); result.EventID != "" {
+		t.Fatalf("unchanged tuple emitted %s", result.EventID)
+	}
+	if result := observe("base-1", "clean", 6); result.EventID != "" {
+		t.Fatalf("observation older than the last confirmation emitted %s", result.EventID)
+	}
+	inspection, err := store.InspectRun(ctx, targets[0].RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delivery := inspection.Facts["delivery"].(map[string]interface{}); delivery["any_conflicted"] != true {
+		t.Fatalf("stale observation cleared conflict: %#v", delivery)
+	}
+	if result := observe("base-3", "clean", 9); result.EventID == "" {
+		t.Fatal("newer clean observation was not recorded")
 	}
 }

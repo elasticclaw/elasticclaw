@@ -21,15 +21,34 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 	if verified.Repository != target.Repository || verified.Number != target.Number || verified.HeadSHA != target.HeadSHA {
 		return EventResult{}, fmt.Errorf("mergeability observation does not match delivery target")
 	}
+	// Webhook and reconciler fetches race. The CAS below only guards writes
+	// after the local read, so an observation fetched before the persisted one
+	// must be dropped explicitly or it would overwrite newer state.
+	observedAt := verified.Provenance.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = verified.VerifiedAt
+	}
+	var observed int64
+	if !observedAt.IsZero() {
+		observed = observedAt.UnixMilli()
+	}
 	var previousHead, previousBase, previousState string
-	err := s.db.QueryRowContext(ctx, `SELECT mergeable_head_sha,base_sha,mergeable_state
+	var previousObserved int64
+	err := s.db.QueryRowContext(ctx, `SELECT mergeable_head_sha,base_sha,mergeable_state,mergeable_observed_at
 		FROM workflow_v2_delivery_prs WHERE id=? AND run_id=? AND active=1 AND registered_only=0`,
-		target.PRID, target.RunID).Scan(&previousHead, &previousBase, &previousState)
+		target.PRID, target.RunID).Scan(&previousHead, &previousBase, &previousState, &previousObserved)
 	if err != nil {
 		return EventResult{}, err
 	}
-	if previousHead == verified.HeadSHA && previousBase == verified.BaseSHA && previousState == state {
+	if observed < previousObserved {
 		return EventResult{}, nil
+	}
+	if previousHead == verified.HeadSHA && previousBase == verified.BaseSHA && previousState == state {
+		// Confirming the current tuple advances the watermark so an older
+		// observation of a different tuple cannot land afterwards.
+		_, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET mergeable_observed_at=?
+			WHERE id=? AND run_id=? AND mergeable_observed_at<?`, observed, target.PRID, target.RunID, observed)
+		return EventResult{}, err
 	}
 	kind := "pull_request.mergeability_updated"
 	switch state {
@@ -60,11 +79,11 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 		deferKey: mergeabilityDeferKey(target.PRID),
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs
-			SET mergeable_head_sha=?,base_sha=?,mergeable_state=?
+			SET mergeable_head_sha=?,base_sha=?,mergeable_state=?,mergeable_observed_at=?
 			WHERE id=? AND run_id=? AND active=1 AND registered_only=0 AND state='open' AND current_head_sha=?
-			AND mergeable_head_sha=? AND base_sha=? AND mergeable_state=?`,
-			verified.HeadSHA, verified.BaseSHA, state, target.PRID, target.RunID, verified.HeadSHA,
-			previousHead, previousBase, previousState)
+			AND mergeable_head_sha=? AND base_sha=? AND mergeable_state=? AND mergeable_observed_at<=?`,
+			verified.HeadSHA, verified.BaseSHA, state, observed, target.PRID, target.RunID, verified.HeadSHA,
+			previousHead, previousBase, previousState, observed)
 		if err != nil {
 			return err
 		}
