@@ -305,6 +305,37 @@ func TestCronSchedulerV2SignalManualTriggerStartsThenSignals(t *testing.T) {
 	}
 }
 
+// A tick the run rejects (here: the destination invariant fails) suspends the
+// run. History still records it as signaled, but lists the run under
+// rejected_run_ids so the suspension is visible from the cron history.
+func TestCronSchedulerV2SignalRecordsRejectedRuns(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	store := workflowv2.NewStore(db)
+	raw := signalWorkflowYAML() + "\ntransitions:\n  tick:\n    from: [s]\n    on: cron.tick\n    to: bad\n"
+	raw = strings.Replace(raw, "states:\n", "states:\n  bad:\n    phase: build\n    invariant:\n      impossible:\n        equals: true\n", 1)
+	run := createSignalTestRun(t, store, "run-reject", raw)
+	cs := newCronSchedulerV2(s)
+	sw := signalTestWorkflow(t, raw)
+
+	status, err := cs.runWorkflow(sw, "test-tenant-id")
+	if err != nil || status != workflowRunSignaled {
+		t.Fatalf("tick = %s, %v", status, err)
+	}
+	if got, err := store.GetRun(context.Background(), run.ID); err != nil || got.Status != workflowv2.RunSuspended {
+		t.Fatalf("run after rejected tick = %#v, %v", got, err)
+	}
+	history, err := cs.getRunHistory("engineering", "delivery", "test-tenant-id", 50)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("history = %#v, %v", history, err)
+	}
+	if history[0].Status != string(workflowRunSignaled) {
+		t.Fatalf("history status = %q, want signaled", history[0].Status)
+	}
+	if rejected, _ := history[0].RunContext["rejected_run_ids"].([]interface{}); len(rejected) != 1 || rejected[0] != run.ID {
+		t.Fatalf("rejected_run_ids = %v", history[0].RunContext["rejected_run_ids"])
+	}
+}
+
 func TestCronSchedulerV2ParallelStillStartsRuns(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
@@ -347,9 +378,9 @@ func TestCronSchedulerV2SignalSkipsRunClosedAfterSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	status, delivered, err := cs.signalRuns(store, sw, "test-tenant-id", ids, time.Now().UTC())
-	if err != nil || !delivered || status != workflowRunSignaled {
-		t.Fatalf("signal = %s, %t, %v", status, delivered, err)
+	status, targets, err := cs.signalRuns(store, sw, "test-tenant-id", ids, time.Now().UTC())
+	if err != nil || len(targets) != 1 || targets[0] != open.ID || status != workflowRunSignaled {
+		t.Fatalf("signal = %s, %v, %v", status, targets, err)
 	}
 	if run, err := store.GetRun(context.Background(), closed.ID); err != nil || run.Status != workflowv2.RunCancelled {
 		t.Fatalf("closed run revived: %#v, %v", run, err)
@@ -368,9 +399,9 @@ func TestCronSchedulerV2SignalSkipsRunClosedAfterSelection(t *testing.T) {
 	if err := store.CancelActivation(context.Background(), open.ID, "stopped"); err != nil {
 		t.Fatal(err)
 	}
-	status, delivered, err = cs.signalRuns(store, sw, "test-tenant-id", ids, time.Now().UTC())
-	if err != nil || delivered {
-		t.Fatalf("signal to closed runs = %s, %t, %v", status, delivered, err)
+	status, targets, err = cs.signalRuns(store, sw, "test-tenant-id", ids, time.Now().UTC())
+	if err != nil || len(targets) != 0 {
+		t.Fatalf("signal to closed runs = %s, %v, %v", status, targets, err)
 	}
 	var events int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE kind='cron.tick'`).Scan(&events); err != nil || events != 1 {
@@ -434,6 +465,7 @@ func TestWorkflowV2ManualTriggerFollowsSignalPolicy(t *testing.T) {
 	sw := signalTestWorkflow(t, raw)
 	SaveWorkspaceForTest(t, sw.workspace, []*types.WorkflowConfig{sw.workflow})
 	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	var runID string
 	for i, want := range []string{"created", "signaled", "signaled"} {
 		req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/trigger", strings.NewReader(`{"inputs":{}}`))
 		req.Header.Set("Authorization", "Bearer test-token")
@@ -443,12 +475,19 @@ func TestWorkflowV2ManualTriggerFollowsSignalPolicy(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("trigger %d = %d: %s", i, rr.Code, rr.Body.String())
 		}
-		var resp map[string]string
+		var resp map[string]interface{}
 		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 			t.Fatal(err)
 		}
 		if resp["status"] != want {
 			t.Fatalf("trigger %d status = %q, want %q", i, resp["status"], want)
+		}
+		if i == 0 {
+			runID, _ = resp["run_id"].(string)
+			continue
+		}
+		if targets, _ := resp["target_run_ids"].([]interface{}); len(targets) != 1 || targets[0] != runID {
+			t.Fatalf("trigger %d target_run_ids = %v, want [%s]", i, resp["target_run_ids"], runID)
 		}
 	}
 	var runs, ticks int

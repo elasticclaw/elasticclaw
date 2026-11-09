@@ -243,7 +243,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 		// Hold the signal lock through activation so a concurrent tick cannot
 		// miss a run that is still being provisioned.
 		defer cs.lockSignal(key)()
-		if status, handled, err := cs.signalOpenRuns(store, sw, tenantID, now); handled {
+		if status, _, handled, err := cs.signalOpenRuns(store, sw, tenantID, now); handled {
 			return status, err
 		}
 	}
@@ -367,15 +367,15 @@ func (cs *cronSchedulerV2) lockSignal(key string) func() {
 // signalOpenRuns applies the signal overlap policy; the caller holds the
 // signal lock. handled is false when no run is open, so the caller should
 // start a new run while still holding the lock.
-func (cs *cronSchedulerV2) signalOpenRuns(store *workflowv2.Store, sw *scheduledWorkflowV2, tenantID string, now time.Time) (status workflowRunStartStatus, handled bool, err error) {
+func (cs *cronSchedulerV2) signalOpenRuns(store *workflowv2.Store, sw *scheduledWorkflowV2, tenantID string, now time.Time) (status workflowRunStartStatus, targets []string, handled bool, err error) {
 	runIDs, pending, err := cs.openV2RunIDs(sw.workspace.Name, sw.workflow.Name)
 	if err != nil {
-		return workflowRunFailed, true, err
+		return workflowRunFailed, nil, true, err
 	}
 	if len(runIDs) > 0 {
-		status, delivered, err := cs.signalRuns(store, sw, tenantID, runIDs, now)
-		if delivered || err != nil {
-			return status, true, err
+		status, targets, err := cs.signalRuns(store, sw, tenantID, runIDs, now)
+		if len(targets) > 0 || err != nil {
+			return status, targets, true, err
 		}
 		// Every selected run closed before the tick reached it, so fall
 		// through as if no run had been open.
@@ -388,9 +388,9 @@ func (cs *cronSchedulerV2) signalOpenRuns(store *workflowv2.Store, sw *scheduled
 			"reason": reason,
 		})
 		log.Printf("[cron-v2] skipping %s (%s)", sw.key, reason)
-		return workflowRunSkipped, true, nil
+		return workflowRunSkipped, nil, true, nil
 	}
-	return "", false, nil
+	return "", nil, false, nil
 }
 
 // openV2RunIDs returns the open runs a tick can signal, ordered for stable
@@ -423,16 +423,17 @@ func (cs *cronSchedulerV2) openV2RunIDs(workspaceName, workflowName string) ([]s
 	return ids, pending, rows.Err()
 }
 
-// signalRuns delivers one cron.tick to each selected run. delivered is false
-// when every run closed after selection, in which case nothing is recorded.
-func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWorkflowV2, tenantID string, runIDs []string, scheduledAt time.Time) (status workflowRunStartStatus, delivered bool, err error) {
+// signalRuns delivers one cron.tick to each selected run and returns the runs
+// the tick reached. targets is empty when every run closed after selection, in
+// which case nothing is recorded.
+func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWorkflowV2, tenantID string, runIDs []string, scheduledAt time.Time) (status workflowRunStartStatus, targets []string, err error) {
 	ctx := context.Background()
 	slotID := uuid.NewString()
 	payload := map[string]interface{}{
 		"scheduled_at": scheduledAt.Format(time.RFC3339),
 		"slot_id":      slotID,
 	}
-	var targets []string
+	var rejected []string
 	var signalErr error
 	for _, runID := range runIDs {
 		// The run may have been cancelled or finished since openV2RunIDs read
@@ -452,9 +453,10 @@ func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWork
 		}
 		targets = append(targets, runID)
 		// A rejected event is durably recorded and suspends the run by design,
-		// so the tick was still delivered.
+		// so the tick was still delivered; history lists it separately.
 		if err == nil && result.Disposition == v2.DispositionRejected {
 			log.Printf("[cron-v2] tick %s rejected by run %s: %s", slotID, runID, result.Reason)
+			rejected = append(rejected, runID)
 		} else if err == nil && result.Disposition != v2.DispositionAccepted {
 			err = fmt.Errorf("event disposition %s: %s", result.Disposition, result.Reason)
 		}
@@ -462,27 +464,30 @@ func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWork
 			signalErr = errors.Join(signalErr, fmt.Errorf("signal run %s: %w", runID, err))
 			continue
 		}
-		delivered = true
 		cs.srv.maybeFinishWorkflowV2Parent(ctx, runID)
 	}
 	if len(targets) == 0 {
-		return workflowRunFailed, false, nil
+		return workflowRunFailed, nil, nil
 	}
-	cronRunID, err := store.RecordCronRunStarted(ctx, tenantID, sw.workspace.Name, sw.workflow.Name, "cron", map[string]interface{}{
+	runContext := map[string]interface{}{
 		"scheduled_at":   payload["scheduled_at"],
 		"slot_id":        slotID,
 		"target_run_ids": targets,
-	})
+	}
+	if len(rejected) > 0 {
+		runContext["rejected_run_ids"] = rejected
+	}
+	cronRunID, err := store.RecordCronRunStarted(ctx, tenantID, sw.workspace.Name, sw.workflow.Name, "cron", runContext)
 	if err != nil {
-		return workflowRunFailed, delivered, errors.Join(signalErr, err)
+		return workflowRunFailed, targets, errors.Join(signalErr, err)
 	}
 	if signalErr != nil {
-		return workflowRunFailed, delivered, errors.Join(signalErr, store.FailCronRun(ctx, cronRunID, signalErr.Error()))
+		return workflowRunFailed, targets, errors.Join(signalErr, store.FailCronRun(ctx, cronRunID, signalErr.Error()))
 	}
 	if err := store.FinishCronRunSignaled(ctx, cronRunID); err != nil {
-		return workflowRunFailed, delivered, err
+		return workflowRunFailed, targets, err
 	}
-	return workflowRunSignaled, delivered, nil
+	return workflowRunSignaled, targets, nil
 }
 
 func (cs *cronSchedulerV2) decrementRunning(key string) {

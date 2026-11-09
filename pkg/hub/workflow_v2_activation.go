@@ -154,7 +154,7 @@ func (s *Server) signalWorkflowV2ManualTrigger(w http.ResponseWriter, r *http.Re
 		}
 	}
 	unlock = cs.lockSignal(sw.key)
-	status, handled, err := cs.signalOpenRuns(workflowv2.NewStore(s.db), sw, tenantID, time.Now().UTC())
+	status, targets, handled, err := cs.signalOpenRuns(workflowv2.NewStore(s.db), sw, tenantID, time.Now().UTC())
 	if !handled {
 		return unlock, false
 	}
@@ -165,7 +165,7 @@ func (s *Server) signalWorkflowV2ManualTrigger(w http.ResponseWriter, r *http.Re
 	case status == workflowRunSkipped:
 		jsonError(w, http.StatusConflict, "a workflow v2 run is still pending activation")
 	default:
-		jsonOK(w, map[string]string{"status": string(status)})
+		jsonOK(w, map[string]interface{}{"status": string(status), "target_run_ids": targets})
 	}
 	return nil, true
 }
