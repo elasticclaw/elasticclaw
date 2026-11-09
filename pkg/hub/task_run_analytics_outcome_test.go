@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 )
@@ -476,5 +477,30 @@ func TestWorkflowV2TerminalUnparseablePinnedWorkflowStillTearsDown(t *testing.T)
 	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_key=?`,
 		runID, "workflow_v2:"+v2RunID+":completed").Scan(&events); err != nil || events != 1 {
 		t.Fatalf("terminal event count=%d err=%v", events, err)
+	}
+}
+
+func TestWorkflowV2TimedOutNonPRRunWithoutOutcomeStaysFailed(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "timeout-claw")
+	runID, _ := startTaskRunWithRequiresPRForTest(t, s, "timeout-claw", "timeout", false)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace),
+		WorkflowYAML: []byte("schema_version: 2\nname: timeout\nenabled: true\ninitial_state: working\nstates:\n  working: {phase: build}\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The reaper's timeout path: cancel in a non-terminal state, then finish the parent.
+	assertExecSucceeds(t, db, `UPDATE workflow_v2_runs SET timeout_at=1 WHERE id=?`, run.ID)
+	s.reapWorkflowV2RunTimeouts(time.Now(), func() bool { return true })
+	for i := 0; i < 2; i++ {
+		if err := s.materializeTaskRun(runID); err != nil {
+			t.Fatal(err)
+		}
+		s.closeOrphanedTaskRunSummaries()
+		if status, _ := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusFailed {
+			t.Fatalf("pass %d: status=%s, want %s", i, status, taskRunStatusFailed)
+		}
 	}
 }

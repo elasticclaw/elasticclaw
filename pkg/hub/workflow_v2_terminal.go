@@ -169,11 +169,14 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		// Already finished; avoid duplicate events.
 		return
 	}
+	// A run cancelled before reaching a terminal outcome (e.g. reaper timeout)
+	// did not complete its task.
+	cancelledWithoutOutcome := outcome == "" && run.Status == workflowv2.RunCancelled
 	// Eagerly update the task-run summary so the dashboard reflects the
 	// terminal state without waiting for the analytics materializer.
 	if outcome == "" {
 		status, failureType := taskRunStatusClean, ""
-		if run.Status == workflowv2.RunCancelled || run.State == "prepare_failed" {
+		if cancelledWithoutOutcome || run.State == "prepare_failed" {
 			// failure_type is CHECK-constrained; a state name such as
 			// "cancelled" would make this UPDATE fail.
 			status, failureType = taskRunStatusFailed, taskRunFailureUnknown
@@ -192,15 +195,19 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if s.cronScheduler != nil {
 		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}
-	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
-		EventKey:        "workflow_v2:" + runID + ":" + string(run.Status),
-		Source:          taskRunSourceHub,
-		EventType:       taskRunEventTaskCompleted,
-		ActorType:       taskRunActorAgent,
-		InteractionRole: taskRunInteractionTerminal,
-		Detail:          map[string]any{"workflow_v2_run_id": runID, "terminal_state": run.State, "requires_pr": false, "outcome": outcome},
-	}); err != nil {
-		log.Printf("[workflow-v2] failed to record task completion for claw %s: %v", clawID, err)
+	// task_completed marks a requires_pr=false run successful, so a cancelled
+	// run must not record it; the orphan sweep closes its summary as failed.
+	if !cancelledWithoutOutcome {
+		if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+			EventKey:        "workflow_v2:" + runID + ":" + string(run.Status),
+			Source:          taskRunSourceHub,
+			EventType:       taskRunEventTaskCompleted,
+			ActorType:       taskRunActorAgent,
+			InteractionRole: taskRunInteractionTerminal,
+			Detail:          map[string]any{"workflow_v2_run_id": runID, "terminal_state": run.State, "requires_pr": false, "outcome": outcome},
+		}); err != nil {
+			log.Printf("[workflow-v2] failed to record task completion for claw %s: %v", clawID, err)
+		}
 	}
 	s.broadcastToUsers(run.TenantID, types.WSMessage{
 		Type:    "claw_status",
