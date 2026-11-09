@@ -148,8 +148,9 @@ func (s *Server) workflowV2AdoptionCandidates(ctx context.Context, workspace *ty
 			if pr.Head.Repo == nil || !strings.EqualFold(pr.Head.Repo.FullName, repo.Repository) {
 				continue
 			}
+			// GitHub returns its canonical owner/repo case, which may differ from the workspace.
 			expectedURL := fmt.Sprintf("https://github.com/%s/pull/%d", repo.Repository, pr.Number)
-			if pr.Number <= 0 || pr.URL != expectedURL || pr.Head.SHA == "" || pr.Base.Ref == "" {
+			if pr.Number <= 0 || !strings.EqualFold(pr.URL, expectedURL) || pr.Head.SHA == "" || pr.Base.Ref == "" {
 				continue
 			}
 			observed := time.Now().UTC()

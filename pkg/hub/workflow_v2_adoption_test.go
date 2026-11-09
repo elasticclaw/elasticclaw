@@ -46,11 +46,12 @@ delivery:
 
 func TestWorkflowV2ActivationAdoption(t *testing.T) {
 	for _, tc := range []struct {
-		name, login, userType, branch, headRepo, state string
-		fail, noApp, legacy, paginate                  bool
-		want                                           int
+		name, login, userType, branch, headRepo, state, url string
+		fail, noApp, legacy, paginate                       bool
+		want                                                int
 	}{
 		{name: "own bot", want: 1},
+		{name: "GitHub canonical case", headRepo: "Owner/Repo", url: "https://github.com/Owner/Repo/pull/1", want: 1},
 		{name: "pagination", paginate: true, want: 1},
 		{name: "human", login: "contributor", userType: "User"},
 		{name: "other bot", login: "dependabot[bot]"},
@@ -105,7 +106,11 @@ func TestWorkflowV2ActivationAdoption(t *testing.T) {
 				if state == "" {
 					state = "open"
 				}
-				body, _ := json.Marshal([]any{map[string]any{"number": 1, "html_url": "https://github.com/owner/repo/pull/1", "state": state, "user": map[string]string{"login": login, "type": userType}, "head": map[string]any{"ref": branch, "sha": "head", "repo": map[string]string{"full_name": headRepo}}, "base": map[string]string{"ref": "main"}}})
+				prURL := tc.url
+				if prURL == "" {
+					prURL = "https://github.com/owner/repo/pull/1"
+				}
+				body, _ := json.Marshal([]any{map[string]any{"number": 1, "html_url": prURL, "state": state, "user": map[string]string{"login": login, "type": userType}, "head": map[string]any{"ref": branch, "sha": "head", "repo": map[string]string{"full_name": headRepo}}, "base": map[string]string{"ref": "main"}}})
 				return githubAppTokenResponse(200, string(body)), nil
 			})}
 			if tc.legacy {
@@ -190,12 +195,23 @@ func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
 	if runStatus != string(workflowv2.RunCompleted) || cronStatus == "running" {
 		t.Fatalf("run=%s cron=%s", runStatus, cronStatus)
 	}
-	time.Sleep(100 * time.Millisecond)
 	// The parent claw is finished, never provisioned (noop would connect it).
-	var clawStatus, providerID string
-	if err := db.QueryRow(`SELECT status,provider_id FROM claws WHERE id=?`, clawID).Scan(&clawStatus, &providerID); err != nil ||
-		clawStatus != "deleted" || providerID != "" {
-		t.Fatalf("claw=%s provider=%s err=%v", clawStatus, providerID, err)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var clawStatus, providerID string
+		if err := db.QueryRow(`SELECT status,provider_id FROM claws WHERE id=?`, clawID).Scan(&clawStatus, &providerID); err != nil {
+			t.Fatal(err)
+		}
+		if providerID != "" {
+			t.Fatalf("claw %s was provisioned: provider=%s", clawStatus, providerID)
+		}
+		if clawStatus == "deleted" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("parent claw not finished: %s", clawStatus)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	s.cronSchedulerV2.runningMu.Lock()
 	running := s.cronSchedulerV2.running["adoption/adoption"]
