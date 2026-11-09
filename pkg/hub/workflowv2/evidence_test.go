@@ -2,6 +2,7 @@ package workflowv2_test
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -958,5 +959,101 @@ func TestSuspendedRunKeepsDeferredHeadChangeAcrossEdits(t *testing.T) {
 				t.Fatalf("recovered run = %#v, %v (deferred head change lost?)", run, err)
 			}
 		})
+	}
+}
+
+// createSuspendedDelivery starts a run on workflowYAML, delivers PR #10 at
+// head-1 and suspends the run.
+func createSuspendedDelivery(t *testing.T, store *workflowv2.Store, db *sql.DB, runID, workflowYAML string) typesv2.VerifiedPullRequest {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: runID, TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, runID, "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	pr := typesv2.VerifiedPullRequest{URL: "https://github.example/org/api/pull/10", RepositoryName: "api", Repository: "org/api",
+		Number: 10, SourceBranch: "feature", BaseBranch: "main", HeadSHA: "head-1", State: "open", VerifiedAt: now,
+		Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}
+	verified, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}},
+	}, workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+		typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		return pr, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	return verified[0]
+}
+
+// A close queued while suspended must not replay once a later non-lifecycle
+// observation (a push after a missed reopen webhook) records the PR as open.
+func TestSuspendedRunDropsDeferredCloseAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  done:\n    phase: done\n    terminal: true\ntransitions:\n  closed:\n    from: reviewing\n    on: pull_request.closed\n    to: done\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	pr := createSuspendedDelivery(t, store, db, "run-reopen", workflowYAML)
+	pr.State = "closed"
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcilePullRequest(ctx, target, "close", "pull_request.closed", pr)
+	}); !result.Deferred {
+		t.Fatalf("close while suspended was not deferred: %#v", result)
+	}
+	pr.State, pr.HeadSHA = "open", "head-2"
+	reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcilePullRequest(ctx, target, "push", "pull_request.head_changed", pr)
+	})
+	if _, err := store.ApplyCommand(ctx, "run-reopen", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, "run-reopen")
+	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("recovered run = %#v, %v (stale close replayed?)", run, err)
+	}
+}
+
+// Review feedback queued while suspended is bound to the head it was left on
+// and must not replay after the PR head moved.
+func TestSuspendedRunDropsDeferredFeedbackAfterHeadMove(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"transitions:\n  feedback:\n    from: reviewing\n    on: review.feedback.received\n    to: fixing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	pr := createSuspendedDelivery(t, store, db, "run-stale-deferred-feedback", workflowYAML)
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ApplyReviewFeedback(ctx, target, "comment-1", map[string]interface{}{"body": "fix this"},
+			typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerReview), Principal: "alice",
+				ObservedAt: time.Date(2026, 8, 8, 12, 1, 0, 0, time.UTC)})
+	}); !result.Deferred {
+		t.Fatalf("feedback while suspended was not deferred: %#v", result)
+	}
+	pr.HeadSHA = "head-2"
+	reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcilePullRequest(ctx, target, "push", "pull_request.head_changed", pr)
+	})
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE defer_key='review.feedback.received'`).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("stale feedback still queued: %d, %v", queued, err)
+	}
+	if _, err := store.ApplyCommand(ctx, "run-stale-deferred-feedback", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, "run-stale-deferred-feedback")
+	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("recovered run = %#v, %v (stale feedback replayed?)", run, err)
 	}
 }

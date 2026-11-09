@@ -230,8 +230,26 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 		if verified.State != "open" {
 			stale = append(stale, pullRequestDeferKey(target.PRID, "pull_request.head_changed"))
 		}
+		// A queued lifecycle observation (closed, merged, verified_open) no
+		// longer describes the PR once its state moved, even when the newer
+		// observation is not a lifecycle kind (a reopen seen only through a
+		// later push). A lifecycle event is re-queued by ApplyEvent afterwards.
+		if currentState != verified.State {
+			stale = append(stale, pullRequestDeferKey(target.PRID, ""))
+		}
 		for _, key := range stale {
 			if err := clearDeferredEvent(ctx, tx, target.RunID, key); err != nil {
+				return err
+			}
+		}
+		// Review feedback is bound to the head it was left on; the live path
+		// rejects feedback for a stale head, so a replay must not deliver it.
+		if currentHead != verified.HeadSHA {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events WHERE run_id=?
+				AND defer_key IN ('review.feedback.received','review.feedback.reconciled')
+				AND event_id IN (SELECT id FROM workflow_v2_events WHERE run_id=?
+					AND json_extract(payload_json,'$.review.pull_request_id')=?)`,
+				target.RunID, target.RunID, target.PRID); err != nil {
 				return err
 			}
 		}
