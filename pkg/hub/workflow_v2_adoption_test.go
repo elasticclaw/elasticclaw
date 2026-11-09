@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -267,5 +268,49 @@ func TestWorkflowV2ActivationAdoptionKeepsContextSuspension(t *testing.T) {
 	var events int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND kind LIKE 'delivery.%'`, run.ID).Scan(&events); err != nil || events != 0 || calls != 0 {
 		t.Fatalf("delivery events=%d calls=%d err=%v", events, calls, err)
+	}
+}
+
+func TestWorkflowV2ManualAdoptionFinishingRunReportsCompleted(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}}}, "", "", "")
+	branchSweepTestToken(s)
+	oldClient := defaultGitHubClient
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() { defaultGitHubClient = oldClient })
+	defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := json.Marshal([]any{map[string]any{"number": 1, "html_url": "https://github.com/owner/repo/pull/1", "state": "open",
+			"user": map[string]string{"login": "factory-app[bot]", "type": "Bot"},
+			"head": map[string]any{"ref": "deps/ts-minor-1", "sha": "head", "repo": map[string]string{"full_name": "owner/repo"}},
+			"base": map[string]string{"ref": "main"}}})
+		return githubAppTokenResponse(200, string(body)), nil
+	})}
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "adoption", Files: map[string]string{
+		"elasticclaw-config.yaml": adoptionWorkspace + "execution:\n  provider: noop\n",
+	}}, []*types.WorkflowConfig{{Name: "adoption", RawConfig: strings.Replace(adoptionWorkflow, `  reviewing:
+    phase: review`, `  reviewing:
+    phase: done
+    terminal: true`, 1) + "manual_trigger: true\n"}})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/adoption/workflows/adoption/trigger", strings.NewReader(`{"inputs":{}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var created map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	var runStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id=?`, created["run_id"]).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if created["status"] != "completed" || runStatus != string(workflowv2.RunCompleted) {
+		t.Fatalf("response=%v run=%s", created, runStatus)
 	}
 }

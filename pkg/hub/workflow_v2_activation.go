@@ -121,7 +121,12 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		// The start command may have transitioned straight to a terminal state.
 		go s.maybeFinishWorkflowV2Parent(context.Background(), runID)
 	}
-	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": "created"})
+	status := "created"
+	if finishedAtActivation {
+		// No claw was provisioned; the run already reached a terminal state.
+		status = "completed"
+	}
+	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": status})
 }
 
 func v2WorkflowStartCommand(rawConfig string) string {
