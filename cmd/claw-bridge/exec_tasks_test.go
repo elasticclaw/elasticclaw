@@ -141,6 +141,72 @@ func TestBridgeCommandCompletionUsesAssignmentStateVersion(t *testing.T) {
 	}
 }
 
+// A command still running when a newer assignment advances the snapshot must
+// complete with its own version, so the hub rejects it as stale instead of
+// letting it satisfy the newer task's transition.
+func TestBridgeLateCommandCompletionKeepsItsAssignmentVersion(t *testing.T) {
+	home := setBridgeTestWorkspaceHome(t)
+	store := openTestBridgeControlStore(t)
+	binding := workflowControlBinding{RunID: "run-exec-order", AttemptID: "attempt-exec-order"}
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor.binding = &binding
+	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 1}
+
+	release := filepath.Join(home, "release-a")
+	assign := func(messageID, taskID, command string, version uint64) {
+		t.Helper()
+		payload, _ := json.Marshal(typesv2.ExecRunConfig{Command: command, Timeout: "10s"})
+		envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+			MessageID: messageID, Kind: typesv2.MessageExecRunAssign, RunID: binding.RunID,
+			AttemptID: binding.AttemptID, TaskID: taskID, ExpectedStateVersion: &version, Payload: payload}
+		if _, _, err := supervisor.acceptHubEnvelope(context.Background(), binding, envelope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitCompletion := func(taskID string) typesv2.ControlEnvelope {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			ready, err := store.ready(binding, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, envelope := range ready {
+				if envelope.Kind == typesv2.MessageExecRunCompleted && envelope.TaskID == taskID {
+					return envelope
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("completion for %s was not queued", taskID)
+		return typesv2.ControlEnvelope{}
+	}
+
+	assign("assign-a", "task-a", "while [ ! -f "+shellQuote(release)+" ]; do sleep 0.01; done", 1)
+	assign("assign-b", "task-b", "true", 2)
+	b := waitCompletion("task-b")
+	if err := os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := waitCompletion("task-a")
+
+	for _, tc := range []struct {
+		completion typesv2.ControlEnvelope
+		want       uint64
+	}{{b, 2}, {a, 1}} {
+		if got := tc.completion.ExpectedStateVersion; got == nil || *got != tc.want {
+			t.Fatalf("%s completion version = %v, want %d", tc.completion.TaskID, derefVersion(got), tc.want)
+		}
+	}
+}
+
+func derefVersion(version *uint64) interface{} {
+	if version == nil {
+		return nil
+	}
+	return *version
+}
+
 func TestBridgeExecRunFailureEmitsFailed(t *testing.T) {
 	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
@@ -358,7 +424,7 @@ func TestCommandTaskCompletionReportsBranches(t *testing.T) {
 			if _, err := store.recordIncoming(envelope); err != nil {
 				t.Fatal(err)
 			}
-			supervisor.executeCommandTask(context.Background(), binding, envelope.MessageID, tc.kind, envelope.TaskID, envelope.Payload)
+			supervisor.executeCommandTask(context.Background(), binding, envelope)
 			select {
 			case <-reporter.wake:
 			default:
@@ -369,7 +435,7 @@ func TestCommandTaskCompletionReportsBranches(t *testing.T) {
 				t.Fatalf("completion=%+v err=%v", ready, err)
 			}
 			// An already completed assignment must not execute or report again.
-			supervisor.executeCommandTask(context.Background(), binding, envelope.MessageID, tc.kind, envelope.TaskID, envelope.Payload)
+			supervisor.executeCommandTask(context.Background(), binding, envelope)
 			select {
 			case <-reporter.wake:
 				t.Fatal("duplicate assignment triggered report")

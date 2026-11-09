@@ -553,7 +553,7 @@ func (s *controlSupervisor) acceptHubEnvelope(ctx context.Context, binding workf
 		if envelope.ExpectedStateVersion != nil {
 			s.observeStateVersion(binding, *envelope.ExpectedStateVersion)
 		}
-		s.startCommandTask(ctx, binding, envelope.MessageID, envelope.Kind, envelope.TaskID, envelope.Payload)
+		s.startCommandTask(ctx, binding, envelope)
 	}
 	return typesv2.ControlReceipt{MessageID: envelope.MessageID,
 		Disposition: typesv2.DispositionAccepted, StateVersion: s.stateVersion(binding)}, task, nil
