@@ -87,6 +87,10 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 	return store.CompleteActivation(ctx, runID)
 }
 
+// filterLegacyAdoptionOwners mirrors the branch sweep's ownership rule. A
+// legacy claw that finished its task stays 'idle' and is resumed by PR
+// feedback, so it still owns its open PR; legacy claws release ownership only
+// when they reach 'deleted' (PR merged/closed, teardown) or 'error'.
 func (s *Server) filterLegacyAdoptionOwners(ctx context.Context, candidates []typesv2.VerifiedPullRequest) ([]typesv2.VerifiedPullRequest, error) {
 	var available []typesv2.VerifiedPullRequest
 	for _, pr := range candidates {
