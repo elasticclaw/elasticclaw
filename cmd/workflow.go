@@ -567,13 +567,19 @@ func runWorkflowTrigger(workspace, name string, inputs []string, cron bool) erro
 	}
 
 	var result struct {
-		ClawID string `json:"claw_id"`
-		Status string `json:"status"`
+		ClawID       string   `json:"claw_id"`
+		Status       string   `json:"status"`
+		TargetRunIDs []string `json:"target_run_ids"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
 
+	if result.Status == "signaled" {
+		// signal overlap policy: the open run(s) received cron.tick instead.
+		fmt.Printf("Signaled open run(s) of workflow %q in workspace %q: %s (no new run started)\n", name, workspace, strings.Join(result.TargetRunIDs, ", "))
+		return nil
+	}
 	fmt.Printf("Triggered workflow %q in workspace %q -> agent %s (%s)\n", name, workspace, shortID(result.ClawID), result.Status)
 	return nil
 }
