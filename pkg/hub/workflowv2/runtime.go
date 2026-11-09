@@ -721,6 +721,29 @@ func insertCommandEvent(ctx context.Context, tx *sql.Tx, runID string, input Com
 		nil, nil, now)
 }
 
+// ErrRunNotOpen reports that an event targeted a run that is no longer active
+// or suspended, or that is still pending activation.
+var ErrRunNotOpen = errors.New("workflow v2 run is not open for events")
+
+// ApplyOpenRunEvent applies an event only while the run is still open, checked
+// inside the event transaction. Unbound events (no attempt ID) are otherwise
+// not revalidated against run status, so a caller that selected the run
+// earlier could revive a run cancelled or finished in between. On
+// ErrRunNotOpen nothing is recorded.
+func (s *Store) ApplyOpenRunEvent(ctx context.Context, runID string, input EventInput) (EventResult, error) {
+	return s.applyEventWithMutation(ctx, runID, input, func(ctx context.Context, tx *sql.Tx, _ *EventInput) error {
+		var status, waitingReason string
+		if err := tx.QueryRowContext(ctx, `SELECT status,COALESCE(waiting_reason,'') FROM workflow_v2_runs WHERE id=?`,
+			runID).Scan(&status, &waitingReason); err != nil {
+			return err
+		}
+		if (status != string(RunActive) && status != string(RunSuspended)) || IsActivationPending(status, waitingReason) {
+			return ErrRunNotOpen
+		}
+		return nil
+	})
+}
+
 func (s *Store) applyEventWithMutation(ctx context.Context, runID string, input EventInput,
 	mutation eventMutation) (EventResult, error) {
 	input.mutation = mutation
