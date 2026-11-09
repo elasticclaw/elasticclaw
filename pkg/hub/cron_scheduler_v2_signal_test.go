@@ -326,3 +326,136 @@ func TestCronSchedulerV2ParallelStillStartsRuns(t *testing.T) {
 		t.Fatalf("runs = %d, %v", count, err)
 	}
 }
+
+// A run selected by openV2RunIDs can close before its tick is applied (reaper,
+// manual stop). The tick must not revive it, and a tick whose every target
+// closed reports nothing delivered so the caller starts a new run instead.
+func TestCronSchedulerV2SignalSkipsRunClosedAfterSelection(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	store := workflowv2.NewStore(db)
+	raw := signalWorkflowYAML() + "\ntransitions:\n  tick:\n    from: [s]\n    on: cron.tick\n    to: s2\n"
+	raw = strings.Replace(raw, "states:\n", "states:\n  s2:\n    phase: build\n", 1)
+	open := createSignalTestRun(t, store, "run-open", raw)
+	closed := createSignalTestRun(t, store, "run-closed", raw)
+	cs := newCronSchedulerV2(s)
+	sw := signalTestWorkflow(t, raw)
+	ids, _, err := cs.openV2RunIDs("engineering", "delivery")
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("open runs = %v, %v", ids, err)
+	}
+	if err := store.CancelActivation(context.Background(), closed.ID, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+
+	status, delivered, err := cs.signalRuns(store, sw, "test-tenant-id", ids, time.Now().UTC())
+	if err != nil || !delivered || status != workflowRunSignaled {
+		t.Fatalf("signal = %s, %t, %v", status, delivered, err)
+	}
+	if run, err := store.GetRun(context.Background(), closed.ID); err != nil || run.Status != workflowv2.RunCancelled {
+		t.Fatalf("closed run revived: %#v, %v", run, err)
+	}
+	if run, err := store.GetRun(context.Background(), open.ID); err != nil || run.State != "s2" {
+		t.Fatalf("open run not signaled: %#v, %v", run, err)
+	}
+	history, err := cs.getRunHistory("engineering", "delivery", "test-tenant-id", 50)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("history = %#v, %v", history, err)
+	}
+	if targets := history[0].RunContext["target_run_ids"].([]interface{}); len(targets) != 1 || targets[0] != open.ID {
+		t.Fatalf("targets = %v", targets)
+	}
+
+	if err := store.CancelActivation(context.Background(), open.ID, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	status, delivered, err = cs.signalRuns(store, sw, "test-tenant-id", ids, time.Now().UTC())
+	if err != nil || delivered {
+		t.Fatalf("signal to closed runs = %s, %t, %v", status, delivered, err)
+	}
+	var events int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE kind='cron.tick'`).Scan(&events); err != nil || events != 1 {
+		t.Fatalf("cron.tick events = %d, %v", events, err)
+	}
+	if history, err := cs.getRunHistory("engineering", "delivery", "test-tenant-id", 50); err != nil || len(history) != 1 {
+		t.Fatalf("history after closed tick = %#v, %v", history, err)
+	}
+}
+
+// Concurrent first ticks with no open run start exactly one run; the other
+// tick signals it.
+func TestCronSchedulerV2SignalConcurrentFirstTicksStartOneRun(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+	sw := signalTestWorkflow(t, signalWorkflowYAML())
+	cs := newCronSchedulerV2(s)
+	statuses := make(chan workflowRunStartStatus, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			status, err := cs.runWorkflow(sw, "test-tenant-id")
+			if err != nil {
+				t.Errorf("tick: %v", err)
+			}
+			statuses <- status
+		}()
+	}
+	wg.Wait()
+	close(statuses)
+	got := map[workflowRunStartStatus]int{}
+	for status := range statuses {
+		got[status]++
+	}
+	if got[workflowRunStarted] != 1 || got[workflowRunSignaled] != 1 {
+		t.Fatalf("statuses = %v", got)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("runs = %d, %v", count, err)
+	}
+}
+
+// The UI's manual trigger (/trigger, not /cron/trigger) must follow the
+// signal policy too: once a run is open, a manual trigger ticks it instead of
+// starting a duplicate.
+func TestWorkflowV2ManualTriggerFollowsSignalPolicy(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+	raw := strings.Replace(signalWorkflowYAML(), "enabled: true\n", "enabled: true\nmanual_trigger: true\n", 1)
+	sw := signalTestWorkflow(t, raw)
+	SaveWorkspaceForTest(t, sw.workspace, []*types.WorkflowConfig{sw.workflow})
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	for i, want := range []string{"created", "signaled", "signaled"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/trigger", strings.NewReader(`{"inputs":{}}`))
+		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("trigger %d = %d: %s", i, rr.Code, rr.Body.String())
+		}
+		var resp map[string]string
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp["status"] != want {
+			t.Fatalf("trigger %d status = %q, want %q", i, resp["status"], want)
+		}
+	}
+	var runs, ticks int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs`).Scan(&runs); err != nil || runs != 1 {
+		t.Fatalf("runs = %d, %v", runs, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE kind='cron.tick'`).Scan(&ticks); err != nil || ticks != 2 {
+		t.Fatalf("cron.tick events = %d, %v", ticks, err)
+	}
+}
