@@ -68,6 +68,10 @@ func (s *Store) ReplayDeferredEvents(ctx context.Context) error {
 		}
 		runIDs = append(runIDs, runID)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
@@ -101,6 +105,10 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			return err
 		}
 		queue = append(queue, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
