@@ -865,6 +865,34 @@ func TestTaskRunAnalyticsTicketRetryAfterClosedPRKeepsClockRunning(t *testing.T)
 	}
 }
 
+func TestTaskRunAnalyticsTicketFailedOutcomeOpenPRStopsClock(t *testing.T) {
+	s := &Server{}
+	for _, outcome := range []string{"failed", "cancelled", ""} {
+		t.Run(outcome, func(t *testing.T) {
+			status := taskRunStatusFailed
+			if outcome == "cancelled" {
+				status = taskRunStatusCancelled
+			}
+			runs := []taskRunAnalyticsRunView{{RunID: "run", Status: status, Outcome: outcome, StartedAt: 1000}}
+			prs := map[string][]taskRunAnalyticsPRView{"run": {{State: "open", OpenedAt: 2000}}}
+			events := map[string][]taskRunAnalyticsEventView{"run": {{EventType: "agent_started", EventTime: 3000}}}
+			metadata := taskRunAnalyticsTicketMetadata{updatedAt: now().UnixMilli()}
+			ticket, err := s.buildTaskRunAnalyticsTicket("tenant", "issue", runs, nil, prs, events, nil, metadata, false, 10000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Without an explicit outcome an open PR still keeps the clock running.
+			wantRunning := outcome == ""
+			if ticket.ClockRunning != wantRunning || ticket.OpenPRCount != 1 {
+				t.Fatalf("clockRunning=%t openPRs=%d, want %t/1", ticket.ClockRunning, ticket.OpenPRCount, wantRunning)
+			}
+			if !wantRunning && ticket.LeadTime != 2000 {
+				t.Fatalf("lead time=%d, want 2000", ticket.LeadTime)
+			}
+		})
+	}
+}
+
 func TestTaskRunAnalyticsTicketAwaitingMergeUsesPROpenedAt(t *testing.T) {
 	s := &Server{}
 	runs := []taskRunAnalyticsRunView{{RunID: "run", StartedAt: 1000}}

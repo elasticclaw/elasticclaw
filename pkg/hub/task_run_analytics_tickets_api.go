@@ -727,7 +727,20 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	}
 	// A replacement PR still open keeps the clock running even when an earlier
 	// closed PR already labels the ticket delivered.
-	waitingOnOpenPR := mergedAt == 0 && ticket.MergedPRCount == 0 && ticket.OpenPRCount > 0
+	// PRs left open by a run whose outcome is failed/cancelled do not count,
+	// matching deriveTaskRunAnalyticsTicketStatus.
+	waitingOnOpenPR := false
+	if mergedAt == 0 && ticket.MergedPRCount == 0 {
+		abandonedRuns := map[string]bool{}
+		for _, run := range ticket.Runs {
+			if run.Outcome == "failed" || run.Outcome == "cancelled" {
+				abandonedRuns[run.RunID] = true
+			}
+		}
+		for _, pr := range ticket.PRs {
+			waitingOnOpenPR = waitingOnOpenPR || (pr.State == "open" && !abandonedRuns[pr.RunID])
+		}
+	}
 	// A run still in flight keeps the clock running through silent stalls,
 	// also when a retry follows a closed PR; failed tickets stop at their
 	// last activity. The reaper closes runs whose claws were deleted.
