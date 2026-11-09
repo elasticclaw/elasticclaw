@@ -95,6 +95,52 @@ func TestBridgeExecRunCommandEmitsCompleted(t *testing.T) {
 	}
 }
 
+// A hub-side transition (for example an auto-promoted PR) advances the run
+// without a bridge receipt; the completion must use the assignment's version.
+func TestBridgeCommandCompletionUsesAssignmentStateVersion(t *testing.T) {
+	setBridgeTestWorkspaceHome(t)
+	store := openTestBridgeControlStore(t)
+	binding := workflowControlBinding{RunID: "run-exec-version", AttemptID: "attempt-exec-version"}
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor.binding = &binding
+	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 1}
+
+	assigned := uint64(3)
+	payload, _ := json.Marshal(typesv2.ExecRunConfig{Command: "true", Timeout: "5s"})
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: "assign-exec-version", Kind: typesv2.MessageExecRunAssign, RunID: binding.RunID,
+		AttemptID: binding.AttemptID, TaskID: "task-exec-version", ExpectedStateVersion: &assigned, Payload: payload}
+	if _, _, err := supervisor.acceptHubEnvelope(context.Background(), binding, envelope); err != nil {
+		t.Fatal(err)
+	}
+
+	var completed *typesv2.ControlEnvelope
+	deadline := time.Now().Add(2 * time.Second)
+	for completed == nil && time.Now().Before(deadline) {
+		ready, err := store.ready(binding, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range ready {
+			if ready[i].Kind == typesv2.MessageExecRunCompleted {
+				completed = &ready[i]
+			}
+		}
+		if completed == nil {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if completed == nil {
+		t.Fatal("exec.run.completed event was not queued")
+	}
+	if completed.ExpectedStateVersion == nil || *completed.ExpectedStateVersion != assigned {
+		t.Fatalf("completion expected state version = %v, want %d", completed.ExpectedStateVersion, assigned)
+	}
+	if got := supervisor.stateVersion(binding); got != assigned {
+		t.Fatalf("snapshot state version = %d, want %d", got, assigned)
+	}
+}
+
 func TestBridgeExecRunFailureEmitsFailed(t *testing.T) {
 	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)

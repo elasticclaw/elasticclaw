@@ -548,6 +548,11 @@ func (s *controlSupervisor) acceptHubEnvelope(ctx context.Context, binding workf
 		s.cancelAllTasks()
 	}
 	if envelope.Kind == typesv2.MessageExecRunAssign || envelope.Kind == typesv2.MessageDependencyUpdateAssign {
+		// Hub-side transitions (webhooks, auto-promoted PRs) are not pushed to
+		// the bridge; the assignment carries the version its completion must match.
+		if envelope.ExpectedStateVersion != nil {
+			s.observeStateVersion(binding, *envelope.ExpectedStateVersion)
+		}
 		s.startCommandTask(ctx, binding, envelope.MessageID, envelope.Kind, envelope.TaskID, envelope.Payload)
 	}
 	return typesv2.ControlReceipt{MessageID: envelope.MessageID,
@@ -782,6 +787,22 @@ func (s *controlSupervisor) updateReceiptVersion(binding workflowControlBinding,
 		s.snapshot.StateVersion = receipt.StateVersion
 		snapshot := *s.snapshot
 		_ = s.store.saveSnapshot(snapshot)
+	}
+}
+
+// observeStateVersion advances the local snapshot to a newer hub version.
+func (s *controlSupervisor) observeStateVersion(binding workflowControlBinding, version uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.binding == nil || !s.binding.equal(binding) {
+		return
+	}
+	if s.snapshot == nil {
+		s.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID}
+	}
+	if version > s.snapshot.StateVersion {
+		s.snapshot.StateVersion = version
+		_ = s.store.saveSnapshot(*s.snapshot)
 	}
 }
 
