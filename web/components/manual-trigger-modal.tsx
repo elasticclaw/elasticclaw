@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from "react"
 import { useRouter } from "next/navigation"
-import { Zap, Play, AlertCircle } from "lucide-react"
+import { Zap, Play, AlertCircle, Info } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -26,6 +26,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
+  const [signaledNotice, setSignaledNotice] = useState<string | null>(null)
   const [seededWorkflow, setSeededWorkflow] = useState<Workflow | null | undefined>(undefined)
   const router = useRouter()
 
@@ -37,6 +38,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
     // Clear on every workflow change, not just the has-inputs branch —
     // otherwise an error from the previous workflow survives the switch.
     setTriggerError(null)
+    setSignaledNotice(null)
     if (!workflow?.inputs) {
       setInputValues({})
     } else {
@@ -58,6 +60,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
     if (!workflow) return
     setTriggering(true)
     setTriggerError(null)
+    setSignaledNotice(null)
     try {
       const inputs: Record<string, unknown> = {}
       if (workflow.inputs) {
@@ -86,8 +89,16 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           }
         }
       }
-      await triggerWorkflow(workflow, inputs)
+      const result = await triggerWorkflow(workflow, inputs)
       setTriggering(false)
+      if (result?.status === "signaled") {
+        // signal overlap policy: the open run(s) received a cron.tick and no
+        // new run was created, so keep the modal open to say so.
+        const count = result.target_run_ids?.length ?? 0
+        const target = count === 1 ? "the open run" : `${count} open runs`
+        setSignaledNotice(`No new run was started. The trigger was sent to ${target}, and the inputs were not applied.`)
+        return
+      }
       onOpenChange(false)
     } catch (e) {
       setTriggering(false)
@@ -133,9 +144,16 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           </div>
         )}
 
+        {signaledNotice && (
+          <div className="flex items-center gap-1.5 text-sm text-blue-700 bg-blue-50 p-2 rounded">
+            <Info className="size-4 shrink-0" />
+            <span>{signaledNotice}</span>
+          </div>
+        )}
+
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={triggering}>
-            Cancel
+            {signaledNotice ? "Close" : "Cancel"}
           </Button>
           <Button onClick={handleTrigger} disabled={triggering}>
             {triggering ? (
