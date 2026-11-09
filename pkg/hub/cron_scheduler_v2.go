@@ -467,7 +467,9 @@ func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWork
 			signalErr = errors.Join(signalErr, fmt.Errorf("signal run %s: %w", runID, err))
 			continue
 		}
-		cs.srv.maybeFinishWorkflowV2Parent(ctx, runID)
+		// Terminal cleanup runs off the per-workflow signal lock so a slow
+		// teardown never delays concurrent ticks or manual triggers.
+		go cs.srv.maybeFinishWorkflowV2Parent(context.Background(), runID)
 	}
 	if len(targets) == 0 {
 		return workflowRunFailed, nil, nil
