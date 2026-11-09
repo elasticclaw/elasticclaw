@@ -21,6 +21,7 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
   const [v2Runs, setV2Runs] = useState<WorkflowV2Run[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [cronTicksError, setCronTicksError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -32,14 +33,20 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
       setV1Runs([])
       setV2Runs([])
       setCronTicks([])
+      setCronTicksError(null)
       const fetchRuns = isV2Workflow(workflow)
         ? Promise.all([
             fetchV2WorkflowRuns(workflow.workspaceName, workflow.name),
-            // Cron ticks are supplementary; a failed history fetch must not hide the v2 runs.
-            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).catch(() => ({ runs: [], count: 0 })),
+            // Cron ticks are supplementary: a 404 still means the workflow is not configured,
+            // but other failures must not hide the v2 runs, so they are surfaced separately.
+            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).catch((err) => {
+              if (err instanceof ApiError && err.status === 404) throw err
+              return { runs: [], count: 0, error: err instanceof Error ? err.message : "Unable to load cron ticks" }
+            }),
           ]).then(([response, history]) => {
             if (cancelled) return
             setV2Runs(response.runs || [])
+            if ("error" in history) setCronTicksError(history.error)
             setCronTicks((history.runs || []).filter((run) => run.status === "skipped" || run.status === "signaled"))
           })
         : fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).then((response) => {
@@ -82,7 +89,12 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
           <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
             {loading && <LoadingState label="Loading run history…" />}
             {!loading && error && <Notice destructive>{error}</Notice>}
-            {!loading && !error && runs.length === 0 && cronTicks.length === 0 && (
+            {!loading && !error && cronTicksError && (
+              <div className="mb-4">
+                <Notice>Skipped and signaled cron ticks could not be loaded: {cronTicksError}</Notice>
+              </div>
+            )}
+            {!loading && !error && !cronTicksError && runs.length === 0 && cronTicks.length === 0 && (
               <EmptyState>No runs have been recorded for this workflow yet.</EmptyState>
             )}
             {!loading && !error && runs.length > 0 && (
