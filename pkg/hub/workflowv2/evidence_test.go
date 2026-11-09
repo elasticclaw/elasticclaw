@@ -603,7 +603,8 @@ func TestSuspendedRunDropsSupersededConflict(t *testing.T) {
 			}
 			tc.advance(t, store, &pr)
 			var pending int
-			if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE defer_key LIKE 'mergeability:%'`).Scan(&pending); err != nil || pending != 0 {
+			if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE defer_key LIKE ?`,
+				workflowv2.MergeabilityDeferKey("")+"%").Scan(&pending); err != nil || pending != 0 {
 				t.Fatalf("superseded conflict still queued: %d, %v", pending, err)
 			}
 			if _, err := store.ApplyCommand(ctx, "run-supersede", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {

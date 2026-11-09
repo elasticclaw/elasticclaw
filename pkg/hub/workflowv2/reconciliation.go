@@ -121,6 +121,12 @@ func scanDeliveryTargets(rows *sql.Rows) ([]DeliveryTarget, error) {
 	return targets, rows.Err()
 }
 
+// mergeabilityDeferKey names the deferred-replay subject of a PR's
+// mergeability observation; the latest observation per PR wins.
+func mergeabilityDeferKey(prID string) string {
+	return "mergeability:" + prID
+}
+
 // pullRequestDeferKey names the deferred-replay subject of a PR observation.
 // Lifecycle kinds (merged, closed, verified_open) share one subject so the
 // latest lifecycle state wins. A head change and an edit are distinct facts:
@@ -215,7 +221,7 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 		// results aggregate head-bound evidence that was just superseded.
 		var stale []string
 		if currentHead != verified.HeadSHA || verified.State != "open" {
-			stale = append(stale, "mergeability:"+target.PRID,
+			stale = append(stale, mergeabilityDeferKey(target.PRID),
 				pullRequestDeferKey(target.PRID, "pull_request.updated"))
 		}
 		if currentHead != verified.HeadSHA {
