@@ -13,44 +13,58 @@ import (
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
-// readWorkflowV2TaskRunOutcome uses the pinned document, so edits to the workflow
+// workflowV2TaskRunTerminal is what analytics needs from the finished v2 run
+// of a task run. finishedAt is set for any completed/cancelled run and is the
+// durable marker recorded on the summary once it has seen that run.
+type workflowV2TaskRunTerminal struct {
+	outcome    typesv2.TerminalOutcome
+	outcomeAt  int64
+	finishedAt int64
+	// failedWithoutOutcome mirrors the eager terminal update: a run cancelled
+	// (e.g. by a timeout) or ending in prepare_failed without an outcome failed.
+	failedWithoutOutcome bool
+}
+
+func workflowV2FailedWithoutOutcome(status workflowv2.RunStatus, state string, outcome typesv2.TerminalOutcome) bool {
+	return outcome == "" && (status == workflowv2.RunCancelled || state == "prepare_failed")
+}
+
+// readWorkflowV2TaskRunTerminal uses the pinned document, so edits to the workflow
 // cannot change the classification when analytics is rebuilt later.
-func readWorkflowV2TaskRunOutcome(db interface{ QueryRow(string, ...any) *sql.Row }, taskRunID string) (typesv2.TerminalOutcome, int64, error) {
-	var state, workflowYAML string
-	var finishedAt int64
-	err := db.QueryRow(`SELECT state, workflow_yaml, finished_at FROM workflow_v2_runs
-  WHERE task_run_id=? AND status IN ('completed','cancelled') ORDER BY created_at DESC, id DESC LIMIT 1`, taskRunID).Scan(&state, &workflowYAML, &finishedAt)
+func readWorkflowV2TaskRunTerminal(db interface{ QueryRow(string, ...any) *sql.Row }, taskRunID string) (workflowV2TaskRunTerminal, error) {
+	var state, status, workflowYAML string
+	var terminal workflowV2TaskRunTerminal
+	err := db.QueryRow(`SELECT state, status, workflow_yaml, finished_at FROM workflow_v2_runs
+  WHERE task_run_id=? AND status IN ('completed','cancelled') ORDER BY created_at DESC, id DESC LIMIT 1`, taskRunID).Scan(&state, &status, &workflowYAML, &terminal.finishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", 0, nil
+		return workflowV2TaskRunTerminal{}, nil
 	}
 	if err != nil {
-		return "", 0, err
+		return workflowV2TaskRunTerminal{}, err
 	}
 	workflow, err := typesv2.ParseWorkflow([]byte(workflowYAML))
 	if err != nil {
 		// A pinned document the current parser rejects must not block event
 		// recording or claw teardown; classify the run as having no outcome.
 		log.Printf("[workflow-v2] cannot parse pinned workflow for task run %s; ignoring outcome: %v", taskRunID, err)
-		return "", 0, nil
+	} else if definition := workflow.States[state]; definition.Terminal {
+		terminal.outcome, terminal.outcomeAt = definition.Outcome, terminal.finishedAt
 	}
-	definition := workflow.States[state]
-	if !definition.Terminal {
-		return "", 0, nil
-	}
-	return definition.Outcome, finishedAt, nil
+	terminal.failedWithoutOutcome = workflowV2FailedWithoutOutcome(workflowv2.RunStatus(status), state, terminal.outcome)
+	return terminal, nil
 }
 
-// materializeTerminalWorkflowV2TaskRuns is one-shot per run: a summary
-// materialized after its v2 run finished has already seen the outcome, so it
-// is not selected again on later reaper ticks.
+// materializeTerminalWorkflowV2TaskRuns is one-shot per run: a summary whose
+// workflow_v2_finished_at matches the run's finished_at was written by a
+// transaction that already saw the finished run, so it is not selected again.
+// Wall-clock comparisons are not used: the v2 finish time is taken before its
+// transaction, so a concurrent materialization can be newer yet stale.
 func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
-	// <= catches a summary materialized in the same millisecond the run
-	// finished; recovery then moves materialized_at past finished_at so each
-	// terminal run is recovered once. Any status qualifies: a summary closed
-	// before its outcome was materialized must still pick the outcome up.
+	// Any status qualifies: a summary closed before its outcome was
+	// materialized must still pick the outcome up.
 	rows, err := s.db.Query(`SELECT s.run_id, s.status, MAX(r.finished_at) FROM task_run_summaries s
   JOIN workflow_v2_runs r ON r.task_run_id=s.run_id
-  WHERE s.outcome='' AND s.materialized_at <= r.finished_at
+  WHERE s.outcome='' AND s.workflow_v2_finished_at < r.finished_at
     AND r.status IN ('completed','cancelled')
   GROUP BY s.run_id`)
 	if err != nil {
@@ -79,12 +93,12 @@ func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
 		if run.status != taskRunStatusRunning {
 			// A closed summary without an outcome was finished by the terminal
 			// path itself; re-materializing it could reopen it as running.
-			outcome, _, err := readWorkflowV2TaskRunOutcome(s.db, run.runID)
+			terminal, err := readWorkflowV2TaskRunTerminal(s.db, run.runID)
 			if err != nil {
 				log.Printf("[task-run-analytics] read terminal workflow outcome %s: %v", run.runID, err)
 				continue
 			}
-			if outcome == "" {
+			if terminal.outcome == "" {
 				s.markTerminalWorkflowV2TaskRunRecovered(run.runID, run.finishedAt)
 				continue
 			}
@@ -99,8 +113,8 @@ func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
 }
 
 func (s *Server) markTerminalWorkflowV2TaskRunRecovered(runID string, finishedAt int64) {
-	if _, err := s.db.Exec(`UPDATE task_run_summaries SET materialized_at=? WHERE run_id=? AND materialized_at<=?`,
-		finishedAt+1, runID, finishedAt); err != nil {
+	if _, err := s.db.Exec(`UPDATE task_run_summaries SET workflow_v2_finished_at=? WHERE run_id=? AND workflow_v2_finished_at<?`,
+		finishedAt, runID, finishedAt); err != nil {
 		log.Printf("[task-run-analytics] mark terminal workflow summary %s recovered: %v", runID, err)
 	}
 }
@@ -130,12 +144,12 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		// No parent task run; nothing to finish.
 		return
 	}
-	outcome, _, err := readWorkflowV2TaskRunOutcome(s.db, run.TaskRunID)
+	terminal, err := readWorkflowV2TaskRunTerminal(s.db, run.TaskRunID)
 	if err != nil {
 		// Still tear the claw down; analytics recovers the outcome on a later sweep.
 		log.Printf("[workflow-v2] cannot read outcome for run %s: %v", runID, err)
-		outcome = ""
 	}
+	outcome := terminal.outcome
 	if outcome != "" {
 		if err := s.materializeTaskRun(run.TaskRunID); err != nil {
 			// Still tear the claw down: materializeTerminalWorkflowV2TaskRuns
@@ -176,7 +190,7 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	// terminal state without waiting for the analytics materializer.
 	if outcome == "" {
 		status, failureType := taskRunStatusClean, ""
-		if cancelledWithoutOutcome || run.State == "prepare_failed" {
+		if workflowV2FailedWithoutOutcome(run.Status, run.State, outcome) {
 			// failure_type is CHECK-constrained; a state name such as
 			// "cancelled" would make this UPDATE fail.
 			status, failureType = taskRunStatusFailed, taskRunFailureUnknown

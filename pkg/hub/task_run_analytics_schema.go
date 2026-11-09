@@ -14,7 +14,12 @@ func migrateTaskRunAnalyticsOutcomes(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_task_run ON workflow_v2_runs(task_run_id)`); err != nil {
 		return err
 	}
-	return addColumn(db, "task_run_summaries", "outcome", `TEXT NOT NULL DEFAULT '' CHECK(outcome IN ('','delivered','no_changes','closed','failed','cancelled'))`)
+	if err := addColumn(db, "task_run_summaries", "outcome", `TEXT NOT NULL DEFAULT '' CHECK(outcome IN ('','delivered','no_changes','closed','failed','cancelled'))`); err != nil {
+		return err
+	}
+	// finished_at of the v2 run the summary was materialized from; terminal
+	// recovery and the orphan sweep compare it with workflow_v2_runs.finished_at.
+	return addColumn(db, "task_run_summaries", "workflow_v2_finished_at", `INTEGER NOT NULL DEFAULT 0`)
 }
 
 func widenTaskRunAnalyticsChecks(db *sql.DB) (err error) {

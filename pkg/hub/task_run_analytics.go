@@ -1054,8 +1054,8 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type,
 			human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at,
 			pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at,
-			analytics_enabled, requires_pr, excluded_reason, outcome
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			analytics_enabled, requires_pr, excluded_reason, outcome, workflow_v2_finished_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(run_id) DO UPDATE SET
 			initial_attempt_id=excluded.initial_attempt_id,
 			current_attempt_id=excluded.current_attempt_id,
@@ -1100,7 +1100,8 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			analytics_enabled=excluded.analytics_enabled,
 			requires_pr=excluded.requires_pr,
 			excluded_reason=excluded.excluded_reason,
-			outcome=excluded.outcome`,
+			outcome=excluded.outcome,
+			workflow_v2_finished_at=excluded.workflow_v2_finished_at`,
 		uuid.New().String(), meta.tenantID, runID, meta.initialAttemptID, meta.currentAttemptID, status, phase, meta.attemptCount, meta.ownerType,
 		meta.workspaceName, meta.workflowName, meta.factoryName, meta.ownerID, meta.ownerDisplayName,
 		meta.runKind, meta.integration, meta.integrationWorkspace, meta.issueID, meta.issueTitle, meta.issueCreatedAt, meta.clawID,
@@ -1108,6 +1109,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		warningTypes, failureType, humanInteractions, meta.createdAt, phaseTimes.queuedAt, phaseTimes.provisionStartedAt,
 		phaseTimes.agentStartedAt, phaseTimes.prOpenedAt, counts.earliestReadyAt, counts.latestMergedAt, finishedAt, meta.timeoutAt,
 		lastEventAt, materializedAt, updatedAt, meta.analyticsEnabled, meta.requiresPR, meta.excludedReason, meta.outcome,
+		meta.workflowV2.finishedAt,
 	)
 	if err != nil {
 		return err
@@ -1198,6 +1200,11 @@ func computeTaskRunStatus(
 	case typesv2.OutcomeCancelled:
 		return taskRunStatusCancelled, taskRunPhaseTerminal, "", "", meta.outcomeAt
 	}
+	if meta.requiresPR == 0 && meta.workflowV2.failedWithoutOutcome {
+		// Matches the eager terminal update, so a timed-out non-PR run stays
+		// failed even when it left an open PR behind.
+		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.workflowV2.finishedAt
+	}
 	if meta.requiresPR == 0 && taskCompletedAt == 0 {
 		taskCompletedAt = meta.outcomeAt
 	}
@@ -1242,6 +1249,7 @@ func initialTaskRunPhase(meta taskRunMeta, phaseTimes taskRunPhaseTimeSummary) s
 }
 
 type taskRunMeta struct {
+	workflowV2           workflowV2TaskRunTerminal
 	outcome              typesv2.TerminalOutcome
 	outcomeAt            int64
 	tenantID             string
@@ -1293,7 +1301,8 @@ func readTaskRunMetaTx(tx *sql.Tx, runID string) (taskRunMeta, error) {
 		&meta.timeoutAt, &meta.createdAt, &meta.updatedAt,
 	)
 	if err == nil {
-		meta.outcome, meta.outcomeAt, err = readWorkflowV2TaskRunOutcome(tx, runID)
+		meta.workflowV2, err = readWorkflowV2TaskRunTerminal(tx, runID)
+		meta.outcome, meta.outcomeAt = meta.workflowV2.outcome, meta.workflowV2.outcomeAt
 	}
 	return meta, err
 }
@@ -1812,7 +1821,7 @@ func (s *Server) closeOrphanedTaskRunSummaries() {
 		   AND NOT EXISTS (SELECT 1 FROM claws c WHERE c.task_run_id=task_run_summaries.run_id AND c.status<>'deleted')
 		   AND NOT EXISTS (SELECT 1 FROM task_run_prs p WHERE p.run_id=task_run_summaries.run_id AND p.state=?)
 		   AND NOT EXISTS (SELECT 1 FROM workflow_v2_runs r WHERE r.task_run_id=task_run_summaries.run_id
-		                    AND r.status IN ('completed','cancelled') AND r.finished_at >= task_run_summaries.materialized_at)`,
+		                    AND r.status IN ('completed','cancelled') AND r.finished_at > task_run_summaries.workflow_v2_finished_at)`,
 		taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureAgentStopped, nowMS, nowMS,
 		taskRunStatusRunning, taskRunPhaseWaitingForMerge, taskRunPRStateOpen)
 	if err != nil {

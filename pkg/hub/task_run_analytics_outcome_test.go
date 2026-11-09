@@ -465,8 +465,8 @@ func TestWorkflowV2TerminalUnparseablePinnedWorkflowStillTearsDown(t *testing.T)
 	runID, v2RunID := createTerminalOutcomeRunForTest(t, s, "broken-claw", "no_changes")
 	assertExecSucceeds(t, db, `UPDATE workflow_v2_runs SET workflow_yaml='states: [' WHERE id=?`, v2RunID)
 
-	if outcome, _, err := readWorkflowV2TaskRunOutcome(db, runID); err != nil || outcome != "" {
-		t.Fatalf("outcome=%q err=%v; an unparseable pinned workflow must read as no outcome", outcome, err)
+	if terminal, err := readWorkflowV2TaskRunTerminal(db, runID); err != nil || terminal.outcome != "" {
+		t.Fatalf("outcome=%q err=%v; an unparseable pinned workflow must read as no outcome", terminal.outcome, err)
 	}
 	s.maybeFinishWorkflowV2Parent(context.Background(), v2RunID)
 	var clawStatus string
@@ -481,26 +481,95 @@ func TestWorkflowV2TerminalUnparseablePinnedWorkflowStillTearsDown(t *testing.T)
 }
 
 func TestWorkflowV2TimedOutNonPRRunWithoutOutcomeStaysFailed(t *testing.T) {
-	s, db := newTaskRunAnalyticsTestServer(t, "timeout-claw")
-	runID, _ := startTaskRunWithRequiresPRForTest(t, s, "timeout-claw", "timeout", false)
-	store := workflowv2.NewStore(db)
-	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+	for _, openPR := range []bool{false, true} {
+		t.Run(fmt.Sprintf("open_pr=%t", openPR), func(t *testing.T) {
+			s, db := newTaskRunAnalyticsTestServer(t, "timeout-claw")
+			runID, _ := startTaskRunWithRequiresPRForTest(t, s, "timeout-claw", "timeout", false)
+			store := workflowv2.NewStore(db)
+			run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+				TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace),
+				WorkflowYAML: []byte("schema_version: 2\nname: timeout\nenabled: true\ninitial_state: working\nstates:\n  working: {phase: build}\n"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if openPR {
+				associatePRForTest(t, s, runID, "org/repo", 1, "open")
+			}
+			// The reaper's timeout path: cancel in a non-terminal state, then finish the parent.
+			assertExecSucceeds(t, db, `UPDATE workflow_v2_runs SET timeout_at=1 WHERE id=?`, run.ID)
+			s.reapWorkflowV2RunTimeouts(time.Now(), func() bool { return true })
+			for i := 0; i < 2; i++ {
+				if err := s.materializeTaskRun(runID); err != nil {
+					t.Fatal(err)
+				}
+				// Re-materialization alone must keep the cancellation, before any sweep.
+				if status, _ := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusFailed {
+					t.Fatalf("pass %d after materialize: status=%s, want %s", i, status, taskRunStatusFailed)
+				}
+				s.closeOrphanedTaskRunSummaries()
+				if status, _ := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusFailed {
+					t.Fatalf("pass %d after sweep: status=%s, want %s", i, status, taskRunStatusFailed)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkflowV2NonPRCancelledTerminalStateWithoutOutcomeStaysFailed(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "cancel-claw")
+	runID, _ := startTaskRunWithRequiresPRForTest(t, s, "cancel-claw", "cancel", false)
+	run, err := workflowv2.NewStore(db).CreateRun(context.Background(), workflowv2.CreateRunRequest{
 		TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace),
-		WorkflowYAML: []byte("schema_version: 2\nname: timeout\nenabled: true\ninitial_state: working\nstates:\n  working: {phase: build}\n"),
+		WorkflowYAML: []byte("schema_version: 2\nname: cancel\nenabled: true\ninitial_state: cancelled\nstates:\n  cancelled: {phase: done, terminal: true}\n"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The reaper's timeout path: cancel in a non-terminal state, then finish the parent.
-	assertExecSucceeds(t, db, `UPDATE workflow_v2_runs SET timeout_at=1 WHERE id=?`, run.ID)
-	s.reapWorkflowV2RunTimeouts(time.Now(), func() bool { return true })
+	s.maybeFinishWorkflowV2Parent(context.Background(), run.ID)
 	for i := 0; i < 2; i++ {
 		if err := s.materializeTaskRun(runID); err != nil {
 			t.Fatal(err)
 		}
-		s.closeOrphanedTaskRunSummaries()
 		if status, _ := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusFailed {
-			t.Fatalf("pass %d: status=%s, want %s", i, status, taskRunStatusFailed)
+			t.Fatalf("pass %d: status=%s, want %s (eager and materialized results must agree)", i, status, taskRunStatusFailed)
 		}
+	}
+}
+
+func TestWorkflowV2TerminalRecoveryIgnoresNewerStaleMaterialization(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "race-claw")
+	runID, _ := startTaskRunWithRequiresPRForTest(t, s, "race-claw", "race", false)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace),
+		WorkflowYAML: []byte(`schema_version: 2
+name: race
+enabled: true
+initial_state: working
+states:
+  working: {phase: build}
+  unchanged: {phase: done, terminal: true, outcome: no_changes}
+transitions:
+  finish: {from: working, on: workflow.finished, to: unchanged}
+`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A materialization that saw the run active but stamped a time later than
+	// the v2 finish (ApplyEvent takes its clock before its transaction).
+	if err := s.materializeTaskRun(runID); err != nil {
+		t.Fatal(err)
+	}
+	assertExecSucceeds(t, db, `UPDATE task_run_summaries SET materialized_at=? WHERE run_id=?`, time.Now().Add(time.Hour).UnixMilli(), runID)
+	if _, err := store.ApplyEvent(context.Background(), run.ID, workflowv2.EventInput{ID: "finish", MessageID: "finish", Kind: "workflow.finished", Producer: workflowv2.ProducerHub}); err != nil {
+		t.Fatal(err)
+	}
+	// The hub restarted before the parent finished, and the claw was reaped.
+	assertExecSucceeds(t, db, `UPDATE claws SET status='deleted' WHERE id='race-claw'`)
+	s.closeOrphanedTaskRunSummaries()
+	if status, outcome := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusClean || outcome != "no_changes" {
+		t.Fatalf("status=%s outcome=%s, want %s/no_changes", status, outcome, taskRunStatusClean)
 	}
 }
