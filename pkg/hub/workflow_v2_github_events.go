@@ -49,6 +49,10 @@ func (s *Server) processWorkflowV2GitHubPREvent(payload githubPRPayload) {
 					payload.Repository.FullName, payload.Number, target.RunID, err)
 				continue
 			}
+		} else if verified.HeadSHA != target.HeadSHA || verified.State != target.State {
+			// The stored head is stale and this action does not reconcile it;
+			// the periodic reconciler updates the PR before mergeability.
+			continue
 		}
 		target.HeadSHA, target.State = verified.HeadSHA, verified.State
 		if _, err := workflowv2.NewStore(s.db).ReconcileMergeability(context.Background(), target, verified); err != nil {
