@@ -28,6 +28,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
   const [triggerError, setTriggerError] = useState<string | null>(null)
   const [signaledNotice, setSignaledNotice] = useState<string | null>(null)
   const [seededWorkflow, setSeededWorkflow] = useState<Workflow | null | undefined>(undefined)
+  const [wasOpen, setWasOpen] = useState(open)
   const router = useRouter()
 
   // Seed defaults when workflow changes. Done during render with a guarded
@@ -53,6 +54,16 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
         }
       }
       setInputValues(defaults)
+    }
+  }
+
+  // The modal stays mounted between openings, so clear feedback from the
+  // previous trigger each time it reopens (same render-time pattern as above).
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) {
+      setTriggerError(null)
+      setSignaledNotice(null)
     }
   }
 
