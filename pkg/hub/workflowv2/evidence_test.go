@@ -1303,3 +1303,57 @@ func TestSuspendedRunRecoversThroughInvariantInvalidatedWhileSuspended(t *testin
 		}
 	})
 }
+
+// A recovery that postpones the destination invariant must not release effects
+// before the replay judges it: the run stays held (suspended, so the effect
+// worker cannot claim) until the queue drains, and a failed replay leaves it
+// held for the reconciler sweep instead of active with a broken invariant.
+func TestRecoveryHoldsEffectsUntilReplaySettlesInvariant(t *testing.T) {
+	invariant := "    invariant:\n      ci.status:\n        not_equals: unsatisfied\n"
+	onEnter := "    on_enter:\n      effects:\n        - agent.task:\n            prompt: Review the delivery.\n"
+	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant+onEnter, 1)
+	withResume := withInvariant + "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	noMatch := strings.Replace(withResume, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+		"          equals: never\n    to: fixing\n  review_failed:", 1)
+	for _, tc := range []struct {
+		name, workflow, state string
+		status                workflowv2.RunStatus
+	}{
+		{name: "queued transition leaves the state", workflow: withResume, state: "fixing", status: workflowv2.RunActive},
+		{name: "queued observation does not leave the state", workflow: noMatch, state: "reviewing", status: workflowv2.RunSuspended},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			pr := createSuspendedDelivery(t, store, db, "run-held", tc.workflow)
+			recordPolicyEvidence(t, store, "run-held", pr, "ci", "github-actions", "lint", "lint", "failure",
+				map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+			if _, err := db.Exec(`CREATE TRIGGER fail_replay BEFORE DELETE ON workflow_v2_deferred_events
+				BEGIN SELECT RAISE(ABORT, 'injected replay failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			result, err := store.ApplyCommand(ctx, "run-held", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"})
+			if err != nil || result.Disposition != typesv2.DispositionAccepted {
+				t.Fatalf("resume = %#v, %v", result, err)
+			}
+			if result.Run.Status != workflowv2.RunSuspended || result.Run.State != "reviewing" {
+				t.Fatalf("resumed run = %#v (released before the invariant was judged?)", result.Run)
+			}
+			if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+				t.Fatalf("claim while held = %#v, %v (effects released before the invariant was judged?)", claim, err)
+			}
+			if _, err := db.Exec(`DROP TRIGGER fail_replay`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ReplayDeferredEvents(ctx); err != nil {
+				t.Fatal(err)
+			}
+			run, err := store.GetRun(ctx, "run-held")
+			if err != nil || run.Status != tc.status || run.State != tc.state {
+				t.Fatalf("settled run = %#v, %v", run, err)
+			}
+		})
+	}
+}

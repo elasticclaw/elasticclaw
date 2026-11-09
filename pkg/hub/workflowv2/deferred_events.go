@@ -12,7 +12,30 @@ import (
 	"github.com/google/uuid"
 )
 
-var errDeferredEventGone = errors.New("deferred event already replayed")
+var (
+	errDeferredEventGone = errors.New("deferred event already replayed")
+	errReplayHalted      = errors.New("run no longer replays deferred events")
+)
+
+// replayPendingReason marks a run held suspended while its deferred queue
+// replays with the invariant check postponed. Effects only run for active runs,
+// so nothing scheduled meanwhile executes before settleReplayedInvariant judges
+// the invariant of the state the run ends in.
+const replayPendingReason = "replaying deferred events before judging the state invariant"
+
+// replaying reports whether a run may replay its deferred queue: active, or
+// held suspended by a replay that postponed its invariant check.
+func (run Run) replaying() bool {
+	return run.Status == RunActive || (run.Status == RunSuspended && run.WaitingReason == replayPendingReason)
+}
+
+// holdForReplay suspends an active run whose current invariant a replay found
+// broken, until settleReplayedInvariant judges it.
+func holdForReplay(ctx context.Context, tx *sql.Tx, run Run, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
+		WHERE id=? AND state_version=? AND status='active'`, replayPendingReason, now.UnixMilli(), run.ID, run.StateVersion)
+	return err
+}
 
 // deferSubject is the queue key of a deferred observation; see EventInput.deferKey.
 func (input EventInput) deferSubject() string {
@@ -43,9 +66,10 @@ func clearDeferredEvent(ctx context.Context, tx *sql.Tx, runID, key string) erro
 }
 
 // ReplayDeferredEvents fires the transitions that suspended runs deferred, for
-// every run that is active again. The transition that resumes a run replays
-// its queue immediately; this sweep covers failures and recoveries outside the
-// event path. Queues of finished runs are discarded.
+// every run that is active again, and settles runs a failed replay left held.
+// The transition that resumes a run replays its queue immediately; this sweep
+// covers failures and recoveries outside the event path. Queues of finished
+// runs are discarded.
 func (s *Store) ReplayDeferredEvents(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("workflow v2 store is not configured")
@@ -55,7 +79,8 @@ func (s *Store) ReplayDeferredEvents(ctx context.Context) error {
 		return err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT d.run_id FROM workflow_v2_deferred_events d
-		JOIN workflow_v2_runs r ON r.id=d.run_id WHERE r.status='active' ORDER BY d.run_id`)
+		JOIN workflow_v2_runs r ON r.id=d.run_id WHERE r.status='active'
+		UNION SELECT id FROM workflow_v2_runs WHERE status='suspended' AND waiting_reason=? ORDER BY 1`, replayPendingReason)
 	if err != nil {
 		return err
 	}
@@ -128,6 +153,17 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			ID: id, MessageID: id, Kind: item.kind, Producer: Producer(item.producer), Provenance: provenance,
 			Payload: payload, observation: true, deferKey: item.key, deferInvariant: true,
 		}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
+			// A replay must not resume a run another event suspended or finished.
+			run, err := scanRun(tx.QueryRowContext(ctx, `SELECT id,tenant_id,workspace_name,workflow_name,
+				workspace_revision,workflow_revision,state,display_phase,state_version,status,waiting_reason,
+				current_attempt_id,current_task_id,context_bundle_id,task_run_id,trigger_type,created_at,updated_at,finished_at
+				FROM workflow_v2_runs WHERE id=?`, runID))
+			if err != nil {
+				return err
+			}
+			if !run.replaying() {
+				return errReplayHalted
+			}
 			result, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events
 				WHERE run_id=? AND defer_key=? AND event_id=?`, runID, item.key, item.eventID)
 			if err != nil {
@@ -149,14 +185,17 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 		if errors.Is(err, errDeferredEventGone) {
 			continue
 		}
+		if errors.Is(err, errReplayHalted) {
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("replay deferred event %s: %w", item.eventID, err)
 		}
-		if result.Run.Status != RunActive {
+		if !result.Run.replaying() {
 			return nil
 		}
 	}
-	return s.suspendOnBrokenInvariant(ctx, runID)
+	return s.settleReplayedInvariant(ctx, runID)
 }
 
 // hasDeferredEvents reports whether a run has queued observations to replay.
@@ -166,37 +205,52 @@ func hasDeferredEvents(ctx context.Context, tx *sql.Tx, runID string) (bool, err
 	return queued, err
 }
 
-// suspendOnBrokenInvariant runs the invariant check that a replay postponed:
-// once the queue drained, an active run whose state invariant no longer holds
-// is suspended exactly as a live event would have left it.
-func (s *Store) suspendOnBrokenInvariant(ctx context.Context, runID string) error {
+// settleReplayedInvariant runs the invariant check that a replay postponed:
+// once the queue drained, a run whose state invariant holds is released (held
+// runs become active), and one whose invariant no longer holds is suspended
+// exactly as a live event would have left it. Observations queued during the
+// replay keep the run held for the next sweep.
+func (s *Store) settleReplayedInvariant(ctx context.Context, runID string) error {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	stored, workflowYAML, err := getRunForUpdate(ctx, tx, runID)
-	if err != nil || stored.Status != RunActive {
+	if err != nil || !stored.replaying() {
 		return err
 	}
 	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
 	if err != nil {
 		return fmt.Errorf("load pinned workflow: %w", err)
 	}
-	invariant := workflow.Workflow.States[stored.State].Invariant
-	if len(invariant) == 0 {
-		return nil
-	}
 	facts, err := loadFacts(ctx, tx, runID)
 	if err != nil {
 		return err
 	}
-	if valid, err := typesv2.MatchPredicate(invariant, facts); err != nil || valid {
+	valid, err := typesv2.MatchPredicate(workflow.Workflow.States[stored.State].Invariant, facts)
+	if err != nil {
 		return err
 	}
-	reason := fmt.Sprintf("state invariant no longer holds for %s after replaying deferred events", stored.State)
-	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
-		WHERE id=? AND state_version=? AND status='active'`, reason, s.now().UTC().UnixMilli(), runID, stored.StateVersion); err != nil {
+	queued, err := hasDeferredEvents(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	now := s.now().UTC()
+	switch {
+	case valid:
+		_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='active',waiting_reason='',updated_at=?
+			WHERE id=? AND state_version=? AND status='suspended' AND waiting_reason=?`,
+			now.UnixMilli(), runID, stored.StateVersion, replayPendingReason)
+	case queued:
+		err = holdForReplay(ctx, tx, stored, now)
+	default:
+		reason := fmt.Sprintf("state invariant no longer holds for %s after replaying deferred events", stored.State)
+		_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
+			WHERE id=? AND state_version=? AND (status='active' OR (status='suspended' AND waiting_reason=?))`,
+			reason, now.UnixMilli(), runID, stored.StateVersion, replayPendingReason)
+	}
+	if err != nil {
 		return err
 	}
 	return tx.Commit()
