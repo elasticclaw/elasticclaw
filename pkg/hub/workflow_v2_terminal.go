@@ -46,10 +46,11 @@ func readWorkflowV2TaskRunOutcome(db interface{ QueryRow(string, ...any) *sql.Ro
 func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
 	// <= catches a summary materialized in the same millisecond the run
 	// finished; recovery then moves materialized_at past finished_at so each
-	// terminal run is recovered once.
-	rows, err := s.db.Query(`SELECT s.run_id, MAX(r.finished_at) FROM task_run_summaries s
+	// terminal run is recovered once. Any status qualifies: a summary closed
+	// before its outcome was materialized must still pick the outcome up.
+	rows, err := s.db.Query(`SELECT s.run_id, s.status, MAX(r.finished_at) FROM task_run_summaries s
   JOIN workflow_v2_runs r ON r.task_run_id=s.run_id
-  WHERE s.status='running' AND s.outcome='' AND s.materialized_at <= r.finished_at
+  WHERE s.outcome='' AND s.materialized_at <= r.finished_at
     AND r.status IN ('completed','cancelled')
   GROUP BY s.run_id`)
 	if err != nil {
@@ -57,12 +58,13 @@ func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
 	}
 	type terminalRun struct {
 		runID      string
+		status     string
 		finishedAt int64
 	}
 	var runs []terminalRun
 	for rows.Next() {
 		var run terminalRun
-		if err := rows.Scan(&run.runID, &run.finishedAt); err != nil {
+		if err := rows.Scan(&run.runID, &run.status, &run.finishedAt); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -74,16 +76,33 @@ func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
 		return 0, err
 	}
 	for _, run := range runs {
+		if run.status != taskRunStatusRunning {
+			// A closed summary without an outcome was finished by the terminal
+			// path itself; re-materializing it could reopen it as running.
+			outcome, _, err := readWorkflowV2TaskRunOutcome(s.db, run.runID)
+			if err != nil {
+				log.Printf("[task-run-analytics] read terminal workflow outcome %s: %v", run.runID, err)
+				continue
+			}
+			if outcome == "" {
+				s.markTerminalWorkflowV2TaskRunRecovered(run.runID, run.finishedAt)
+				continue
+			}
+		}
 		if err := s.materializeTaskRun(run.runID); err != nil {
 			log.Printf("[task-run-analytics] recover terminal workflow summary %s: %v", run.runID, err)
 			continue
 		}
-		if _, err := s.db.Exec(`UPDATE task_run_summaries SET materialized_at=? WHERE run_id=? AND materialized_at<=?`,
-			run.finishedAt+1, run.runID, run.finishedAt); err != nil {
-			log.Printf("[task-run-analytics] mark terminal workflow summary %s recovered: %v", run.runID, err)
-		}
+		s.markTerminalWorkflowV2TaskRunRecovered(run.runID, run.finishedAt)
 	}
 	return len(runs), nil
+}
+
+func (s *Server) markTerminalWorkflowV2TaskRunRecovered(runID string, finishedAt int64) {
+	if _, err := s.db.Exec(`UPDATE task_run_summaries SET materialized_at=? WHERE run_id=? AND materialized_at<=?`,
+		finishedAt+1, runID, finishedAt); err != nil {
+		log.Printf("[task-run-analytics] mark terminal workflow summary %s recovered: %v", runID, err)
+	}
 }
 
 // maybeFinishWorkflowV2Parent checks whether a v2 workflow run has reached a
@@ -119,8 +138,9 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	}
 	if outcome != "" {
 		if err := s.materializeTaskRun(run.TaskRunID); err != nil {
+			// Still tear the claw down: materializeTerminalWorkflowV2TaskRuns
+			// recovers the summary, and the orphan sweep leaves it alone until then.
 			log.Printf("[workflow-v2] cannot materialize outcome for run %s: %v", runID, err)
-			return
 		}
 	}
 	var clawID string

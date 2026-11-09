@@ -1797,7 +1797,9 @@ func (s *Server) closeOrphanedTaskRunSummaries() {
 	// Recover a terminal outcome committed just before a hub restart, before
 	// treating a deleted claw with a stale summary as an orphan failure.
 	if _, err := s.materializeTerminalWorkflowV2TaskRuns(); err != nil {
+		// Without recovery a committed outcome could be orphan-failed below.
 		log.Printf("[task-run-analytics] recover terminal workflow summaries: %v", err)
+		return
 	}
 	nowMS := epochMillis(now())
 	res, err := s.db.Exec(`
@@ -1808,7 +1810,9 @@ func (s *Server) closeOrphanedTaskRunSummaries() {
 		   AND EXISTS (SELECT 1 FROM task_runs tr JOIN claws c ON c.id=tr.claw_id
 		                WHERE tr.id=task_run_summaries.run_id AND c.status='deleted')
 		   AND NOT EXISTS (SELECT 1 FROM claws c WHERE c.task_run_id=task_run_summaries.run_id AND c.status<>'deleted')
-		   AND NOT EXISTS (SELECT 1 FROM task_run_prs p WHERE p.run_id=task_run_summaries.run_id AND p.state=?)`,
+		   AND NOT EXISTS (SELECT 1 FROM task_run_prs p WHERE p.run_id=task_run_summaries.run_id AND p.state=?)
+		   AND NOT EXISTS (SELECT 1 FROM workflow_v2_runs r WHERE r.task_run_id=task_run_summaries.run_id
+		                    AND r.status IN ('completed','cancelled') AND r.finished_at >= task_run_summaries.materialized_at)`,
 		taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureAgentStopped, nowMS, nowMS,
 		taskRunStatusRunning, taskRunPhaseWaitingForMerge, taskRunPRStateOpen)
 	if err != nil {

@@ -1359,11 +1359,14 @@ func taskRunAnalyticsSummaryWhere(filters taskRunAnalyticsFilters) (string, []an
 	}
 	// Default scope is PR-producing runs plus maintenance runs; other
 	// requires_pr=0 runs stay excluded (excluded_reason=non_pr_producing).
+	// The dashboard sends analytics_enabled=true on its own, so that filter
+	// keeps the default PR scope; only analytics_enabled=false (inspecting
+	// excluded runs) or an explicit requires_pr lifts it.
 	eligibilityFilterProvided := filters.RequiresPR != nil || filters.AnalyticsEnabled != nil
 	if filters.RequiresPR != nil {
 		where = append(where, `requires_pr=?`)
 		args = append(args, boolInt(*filters.RequiresPR))
-	} else if !eligibilityFilterProvided {
+	} else if filters.AnalyticsEnabled == nil || *filters.AnalyticsEnabled {
 		where = append(where, `(requires_pr=1 OR run_kind='maintenance')`)
 	}
 	if filters.AnalyticsEnabled != nil {

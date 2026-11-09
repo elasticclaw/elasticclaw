@@ -311,3 +311,123 @@ func TestWorkflowV2AnalyticsDisabledOutcomeKeepsExclusionSentinel(t *testing.T) 
 		t.Fatalf("disabled run status=%s phase=%s failure=%s", status, phase, failureType)
 	}
 }
+
+func createTerminalOutcomeRunForTest(t *testing.T, s *Server, clawID, outcome string) (string, string) {
+	t.Helper()
+	runID, _ := startTaskRunWithRequiresPRForTest(t, s, clawID, clawID, false)
+	doc := fmt.Sprintf("schema_version: 2\nname: terminal\nenabled: true\ninitial_state: done\nstates:\n  done: {phase: done, terminal: true, outcome: %q}\n", outcome)
+	run, err := workflowv2.NewStore(s.db).CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace), WorkflowYAML: []byte(doc),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The summary predates the v2 finish, as if the hub restarted in between.
+	assertExecSucceeds(t, s.db, `UPDATE task_run_summaries SET materialized_at=0 WHERE run_id=?`, runID)
+	return runID, run.ID
+}
+
+func taskRunSummaryStatusOutcomeForTest(t *testing.T, s *Server, runID string) (string, string) {
+	t.Helper()
+	var status, outcome string
+	if err := s.db.QueryRow(`SELECT status, outcome FROM task_run_summaries WHERE run_id=?`, runID).Scan(&status, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	return status, outcome
+}
+
+func TestWorkflowV2TerminalOutcomeMaterializeFailureStillTearsDownAndRecovers(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "fail-claw")
+	runID, v2RunID := createTerminalOutcomeRunForTest(t, s, "fail-claw", "no_changes")
+	assertExecSucceeds(t, db, `CREATE TRIGGER fail_outcome BEFORE UPDATE OF outcome ON task_run_summaries
+  WHEN NEW.outcome<>'' BEGIN SELECT RAISE(ABORT, 'materialize failed'); END`)
+
+	s.maybeFinishWorkflowV2Parent(context.Background(), v2RunID)
+	var clawStatus string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='fail-claw'`).Scan(&clawStatus); err != nil || clawStatus != "deleted" {
+		t.Fatalf("claw status=%s err=%v; teardown must not depend on materialization", clawStatus, err)
+	}
+
+	// Recovery keeps failing: the orphan sweep must not fail the pending outcome.
+	s.closeOrphanedTaskRunSummaries()
+	if status, outcome := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusRunning || outcome != "" {
+		t.Fatalf("pending outcome was closed: status=%s outcome=%s", status, outcome)
+	}
+
+	assertExecSucceeds(t, db, `DROP TRIGGER fail_outcome`)
+	s.closeOrphanedTaskRunSummaries()
+	if status, outcome := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusClean || outcome != "no_changes" {
+		t.Fatalf("recovered status=%s outcome=%s", status, outcome)
+	}
+}
+
+func TestWorkflowV2TerminalRecoveryCoversClosedSummaries(t *testing.T) {
+	t.Run("outcome", func(t *testing.T) {
+		s, db := newTaskRunAnalyticsTestServer(t, "closed-claw")
+		runID, _ := createTerminalOutcomeRunForTest(t, s, "closed-claw", "no_changes")
+		assertExecSucceeds(t, db, `UPDATE task_run_summaries SET status=?, phase=?, failure_type=? WHERE run_id=?`,
+			taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureAgentStopped, runID)
+		if got, err := s.materializeTerminalWorkflowV2TaskRuns(); err != nil || got != 1 {
+			t.Fatalf("selected %d err=%v", got, err)
+		}
+		if status, outcome := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusClean || outcome != "no_changes" {
+			t.Fatalf("status=%s outcome=%s", status, outcome)
+		}
+	})
+	t.Run("no outcome", func(t *testing.T) {
+		s, db := newTaskRunAnalyticsTestServer(t, "legacy-claw")
+		runID, _ := createTerminalOutcomeRunForTest(t, s, "legacy-claw", "")
+		assertExecSucceeds(t, db, `UPDATE task_run_summaries SET status=?, phase=? WHERE run_id=?`, taskRunStatusClean, taskRunPhaseTerminal, runID)
+		for i, want := range []int{1, 0} {
+			if got, err := s.materializeTerminalWorkflowV2TaskRuns(); err != nil || got != want {
+				t.Fatalf("call %d selected %d, want %d (err=%v)", i, got, want, err)
+			}
+		}
+		// The terminal path closed it; recovery must not reopen it as running.
+		if status, _ := taskRunSummaryStatusOutcomeForTest(t, s, runID); status != taskRunStatusClean {
+			t.Fatalf("status=%s", status)
+		}
+	})
+}
+
+func TestTaskRunAnalyticsDashboardDefaultScopeExcludesNonPRCodeTasks(t *testing.T) {
+	_, db := newTaskRunAnalyticsAPITestServer(t)
+	for _, fixture := range []struct {
+		id, kind   string
+		requiresPR bool
+	}{{"pr", "code_task", true}, {"maintenance", "maintenance", false}, {"non-pr", "code_task", false}} {
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: fixture.id, AttemptID: fixture.id + "-attempt", ClawID: fixture.id + "-claw", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, StartedAt: 1760000000000, RequiresPR: boolPtr(fixture.requiresPR)})
+		assertExecSucceeds(t, db, `UPDATE task_run_summaries SET run_kind=? WHERE run_id=?`, fixture.kind, fixture.id)
+	}
+	for _, tc := range []struct {
+		name    string
+		filters taskRunAnalyticsFilters
+		want    string
+	}{
+		{"default", taskRunAnalyticsFilters{}, "maintenance,pr"},
+		{"dashboard analytics_enabled=true", taskRunAnalyticsFilters{AnalyticsEnabled: boolPtr(true)}, "maintenance,pr"},
+		{"analytics_enabled=false", taskRunAnalyticsFilters{AnalyticsEnabled: boolPtr(false)}, ""},
+		{"requires_pr=false", taskRunAnalyticsFilters{RequiresPR: boolPtr(false)}, "maintenance,non-pr"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.filters.TenantID = "test-tenant-id"
+			where, args := taskRunAnalyticsSummaryWhere(tc.filters)
+			rows, err := db.Query(`SELECT run_id FROM task_run_summaries `+where+` ORDER BY run_id`, args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var ids []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, id)
+			}
+			if got := strings.Join(ids, ","); got != tc.want {
+				t.Fatalf("runs=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
