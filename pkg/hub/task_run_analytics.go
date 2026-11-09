@@ -726,10 +726,11 @@ func taskRunAnalyticsContractForWorkflow(workflow *types.WorkflowConfig) (enable
 	if !enabled {
 		return false, requiresPR, "analytics_disabled"
 	}
-	if !requiresPR {
+	if !requiresPR && taskRunKindForWorkflow(workflow) != taskRunKindMaintenance {
+		// Maintenance runs are in the default analytics scope without a PR.
 		return true, false, "non_pr_producing"
 	}
-	return true, true, ""
+	return true, requiresPR, ""
 }
 
 func recordTaskRunPhaseEventTx(tx *sql.Tx, tenantID, runID, attemptID, clawStatus string, eventTime time.Time) error {
@@ -1202,7 +1203,11 @@ func computeTaskRunStatus(
 	}
 	if meta.requiresPR == 0 && meta.workflowV2.failedWithoutOutcome {
 		// Matches the eager terminal update, so a timed-out non-PR run stays
-		// failed even when it left an open PR behind.
+		// failed even when it left an open PR behind. A recorded definitive
+		// failure (timeout, manual stop) is more specific than unknown.
+		if definitiveFailure != "" {
+			return taskRunStatusFailed, taskRunPhaseTerminal, definitiveFailure, "", meta.workflowV2.finishedAt
+		}
 		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.workflowV2.finishedAt
 	}
 	if meta.requiresPR == 0 && taskCompletedAt == 0 {

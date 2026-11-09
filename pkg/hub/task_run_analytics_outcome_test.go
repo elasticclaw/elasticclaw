@@ -272,6 +272,9 @@ func TestWorkflowV2AnalyticsMaintenanceRunFromLoadedWorkflow(t *testing.T) {
 	}
 	s, db := newTaskRunAnalyticsTestServer(t, "maintenance-claw")
 	enabled, requiresPR, excludedReason := taskRunAnalyticsContractForWorkflow(workflow)
+	if !enabled || requiresPR || excludedReason != "" {
+		t.Fatalf("contract enabled=%t requiresPR=%t excludedReason=%q, want true/false/\"\"", enabled, requiresPR, excludedReason)
+	}
 	runID, _, err := s.ensureTaskRunForClaw("maintenance-claw", TaskRunStart{
 		TenantID: "test-tenant-id", RunKind: taskRunKindForWorkflow(workflow), OwnerType: taskRunOwnerWorkflow,
 		OwnerName: "eng/deps", WorkspaceName: "eng", WorkflowName: workflow.Name, Source: taskRunSourceWorkflow,
@@ -513,6 +516,31 @@ func TestWorkflowV2TimedOutNonPRRunWithoutOutcomeStaysFailed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWorkflowV2CancelledNonPRRunKeepsDefinitiveFailureType(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "stop-claw")
+	runID, _ := startTaskRunWithRequiresPRForTest(t, s, "stop-claw", "stop", false)
+	run, err := workflowv2.NewStore(db).CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace),
+		WorkflowYAML: []byte("schema_version: 2\nname: stop\nenabled: true\ninitial_state: working\nstates:\n  working: {phase: build}\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.recordTaskRunManualStopBeforeDelivery("stop-claw", "alice")
+	assertExecSucceeds(t, db, `UPDATE workflow_v2_runs SET timeout_at=1 WHERE id=?`, run.ID)
+	s.reapWorkflowV2RunTimeouts(time.Now(), func() bool { return true })
+	if err := s.materializeTaskRun(runID); err != nil {
+		t.Fatal(err)
+	}
+	var status, failureType string
+	if err := db.QueryRow(`SELECT status, failure_type FROM task_run_summaries WHERE run_id=?`, runID).Scan(&status, &failureType); err != nil {
+		t.Fatal(err)
+	}
+	if status != taskRunStatusFailed || failureType != taskRunFailureManualStopDelivery {
+		t.Fatalf("status=%s failure_type=%s, want %s/%s", status, failureType, taskRunStatusFailed, taskRunFailureManualStopDelivery)
 	}
 }
 
