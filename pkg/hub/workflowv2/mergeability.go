@@ -73,10 +73,14 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 	if seen > 0 || kind == "pull_request.mergeability_updated" {
 		eventID, kind = uuid.NewString(), "pull_request.mergeability_updated"
 	}
+	deferKey := mergeabilityDeferKey(target.PRID)
+	if kind == "pull_request.mergeability_updated" {
+		deferKey = mergeabilityUpdatedDeferKey(target.PRID)
+	}
 	return s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: kind, AttemptID: target.AttemptID,
 		Producer: ProducerSourceControl, Provenance: verified.Provenance, observation: true,
-		deferKey: mergeabilityDeferKey(target.PRID),
+		deferKey: deferKey,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs
 			SET mergeable_head_sha=?,base_sha=?,mergeable_state=?,mergeable_observed_at=?
@@ -89,6 +93,9 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 		}
 		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 			return fmt.Errorf("delivery changed while reconciling mergeability")
+		}
+		if err := supersedeDeferredMergeability(ctx, tx, target.RunID, target.PRID, kind, state); err != nil {
+			return err
 		}
 		summary, err := deliveryFactsFrom(ctx, tx, target.RunID)
 		if err != nil {
@@ -110,4 +117,28 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 		}
 		return nil
 	})
+}
+
+// supersedeDeferredMergeability keeps the queues of a suspended run consistent
+// with a new mergeability observation. A conflicted, behind or mergeable event
+// supersedes a queued pull_request.mergeability_updated. A
+// pull_request.mergeability_updated never fires those transitions, so it only
+// drops a queued one whose state class the PR has left: a PR that went from
+// clean to blocked is still mergeable, and the reconciler will not emit
+// pull_request.mergeable again for it.
+func supersedeDeferredMergeability(ctx context.Context, tx *sql.Tx, runID, prID, kind, state string) error {
+	if kind != "pull_request.mergeability_updated" {
+		return clearDeferredEvent(ctx, tx, runID, mergeabilityUpdatedDeferKey(prID))
+	}
+	current := "pull_request.mergeable"
+	switch state {
+	case "dirty":
+		current = "pull_request.conflicted"
+	case "behind":
+		current = "pull_request.behind"
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events WHERE run_id=? AND defer_key=?
+		AND event_id IN (SELECT id FROM workflow_v2_events WHERE run_id=? AND kind<>?)`,
+		runID, mergeabilityDeferKey(prID), runID, current)
+	return err
 }

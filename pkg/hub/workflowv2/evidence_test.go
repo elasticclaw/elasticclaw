@@ -3,6 +3,7 @@ package workflowv2_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1091,5 +1092,143 @@ func TestSuspendedRunReplaysEditedFeedbackContent(t *testing.T) {
 	run, err := store.GetRun(ctx, "run-edited-feedback")
 	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
 		t.Fatalf("recovered run = %#v, %v (stale feedback content replayed?)", run, err)
+	}
+}
+
+// A pull_request.mergeable queued while suspended survives a later
+// mergeability change that keeps the PR out of dirty/behind: the reconciler
+// already persisted the state and will not emit pull_request.mergeable again.
+// A change back to dirty drops it.
+func TestSuspendedRunKeepsDeferredMergeableAcrossMergeabilityUpdates(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, want string
+	}{
+		{"clean to blocked keeps mergeable", "blocked", "reviewing"},
+		{"dirty again drops mergeable", "dirty", "rebasing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+				"  rebasing:\n    phase: build\ntransitions:\n"+
+					"  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n"+
+					"  rebased:\n    from: rebasing\n    on: pull_request.mergeable\n    to: reviewing\n", 1)
+			workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n" +
+				"  resume_rebase:\n    from: rebasing\n    to: rebasing\n"
+			pr := createSuspendedDelivery(t, store, db, "run-mergeable", workflowYAML)
+			mergeability := func(state string) workflowv2.EventResult {
+				pr.MergeableState = state
+				pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Second)
+				return reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+					return store.ReconcileMergeability(ctx, target, pr)
+				})
+			}
+			pr.BaseSHA = "base-1"
+			if result := mergeability("dirty"); !result.Deferred {
+				t.Fatalf("conflict while suspended was not deferred: %#v", result)
+			}
+			if _, err := store.ApplyCommand(ctx, "run-mergeable", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+				t.Fatal(err)
+			}
+			if run, err := store.GetRun(ctx, "run-mergeable"); err != nil || run.State != "rebasing" {
+				t.Fatalf("conflict not replayed: %#v, %v", run, err)
+			}
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id='run-mergeable'`); err != nil {
+				t.Fatal(err)
+			}
+			if result := mergeability("clean"); !result.Deferred {
+				t.Fatalf("mergeable while suspended was not deferred: %#v", result)
+			}
+			mergeability(tc.state)
+			if _, err := store.ApplyCommand(ctx, "run-mergeable", "resume_rebase", workflowv2.CommandInput{ID: "resume-2", MessageID: "resume-2"}); err != nil {
+				t.Fatal(err)
+			}
+			run, err := store.GetRun(ctx, "run-mergeable")
+			if err != nil || run.Status != workflowv2.RunActive || run.State != tc.want {
+				t.Fatalf("recovered run = %#v, %v, want state %s", run, err, tc.want)
+			}
+		})
+	}
+}
+
+// A replayed observation carries its queue-time payload, which overrides facts
+// in guard evaluation. Delivery aggregates must reflect sibling PRs that
+// changed after the observation was queued.
+func TestSuspendedRunReplaysCurrentDeliveryAggregates(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  done:\n    phase: done\n    terminal: true\ntransitions:\n"+
+			"  all_closed:\n    from: reviewing\n    on: pull_request.closed\n    when:\n      delivery:\n        open:\n          equals: 0\n    to: done\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: "run-aggregates", TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, "run-aggregates", "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	newPR := func(number int, head string) typesv2.VerifiedPullRequest {
+		return typesv2.VerifiedPullRequest{URL: fmt.Sprintf("https://github.example/org/api/pull/%d", number), RepositoryName: "api",
+			Repository: "org/api", Number: number, SourceBranch: fmt.Sprintf("feature-%d", number), BaseBranch: "main", HeadSHA: head,
+			State: "open", VerifiedAt: now, Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}
+	}
+	byURL := map[string]typesv2.VerifiedPullRequest{}
+	for _, pr := range []typesv2.VerifiedPullRequest{newPR(10, "head-a"), newPR(11, "head-b")} {
+		byURL[pr.URL] = pr
+	}
+	verified, err := store.SubmitDelivery(ctx, "run-aggregates", attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: newPR(10, "").URL}, {URL: newPR(11, "").URL}},
+	}, workflowv2.PullRequestVerifierFunc(func(_ context.Context, _ workflowv2.Run, _ *typesv2.Workspace,
+		claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		return byURL[claim.URL], nil
+	}))
+	if err != nil || len(verified) != 2 {
+		t.Fatalf("delivery = %#v, %v", verified, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id='run-aggregates'`); err != nil {
+		t.Fatal(err)
+	}
+	reconcile := func(pr typesv2.VerifiedPullRequest, eventID, kind string) workflowv2.EventResult {
+		t.Helper()
+		targets, err := store.ActiveDeliveryTargetsAll(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, target := range targets {
+			if target.Number == pr.Number {
+				result, err := store.ReconcilePullRequest(ctx, target, eventID, kind, pr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return result
+			}
+		}
+		t.Fatalf("no target for PR %d in %#v", pr.Number, targets)
+		return workflowv2.EventResult{}
+	}
+	a, b := verified[0], verified[1]
+	if a.Number != 10 {
+		a, b = b, a
+	}
+	b.State = "closed"
+	reconcile(b, "close-b", "pull_request.closed")
+	a.State = "closed"
+	if result := reconcile(a, "close-a", "pull_request.closed"); !result.Deferred {
+		t.Fatalf("close while suspended was not deferred: %#v", result)
+	}
+	b.State = "open"
+	reconcile(b, "reopen-b", "pull_request.reopened")
+	if _, err := store.ApplyCommand(ctx, "run-aggregates", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, "run-aggregates")
+	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("recovered run = %#v, %v (stale delivery.open replayed?)", run, err)
 	}
 }

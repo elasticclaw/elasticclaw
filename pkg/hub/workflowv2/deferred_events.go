@@ -86,7 +86,8 @@ func (s *Store) ReplayDeferredEvents(ctx context.Context) error {
 
 // replayDeferredEvents re-applies each queued observation as a fresh event.
 // Facts were already written when the observation was recorded, so the replay
-// carries only the original payload for transition matching.
+// carries only the original payload for transition matching, with aggregates
+// refreshed to the current delivery.
 func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 	type pending struct {
 		key, eventID, kind, producer, provenanceJSON, payloadJSON string
@@ -137,6 +138,9 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			} else if changed != 1 {
 				return errDeferredEventGone
 			}
+			if err := refreshDeferredDelivery(ctx, tx, runID, input); err != nil {
+				return err
+			}
 			return refreshDeferredReviewFeedback(ctx, tx, runID, input)
 		})
 		if errors.Is(err, errDeferredEventGone) {
@@ -149,6 +153,21 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			return nil
 		}
 	}
+	return nil
+}
+
+// refreshDeferredDelivery replaces the queued delivery summary with the current
+// one. Payload values override facts in guard evaluation, and a sibling PR may
+// have changed state after the observation was queued.
+func refreshDeferredDelivery(ctx context.Context, tx *sql.Tx, runID string, input *EventInput) error {
+	if _, ok := input.Payload["delivery"]; !ok {
+		return nil
+	}
+	summary, err := deliveryFactsFrom(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	input.Payload["delivery"] = summary
 	return nil
 }
 

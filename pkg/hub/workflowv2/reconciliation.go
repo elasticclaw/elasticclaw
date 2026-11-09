@@ -127,6 +127,13 @@ func mergeabilityDeferKey(prID string) string {
 	return "mergeability:" + prID
 }
 
+// mergeabilityUpdatedDeferKey names the subject of a queued
+// pull_request.mergeability_updated, kept apart so it cannot supersede a
+// queued conflicted, behind or mergeable transition.
+func mergeabilityUpdatedDeferKey(prID string) string {
+	return mergeabilityDeferKey(prID) + ":updated"
+}
+
 // pullRequestDeferKey names the deferred-replay subject of a PR observation.
 // Lifecycle kinds (merged, closed, verified_open) share one subject so the
 // latest lifecycle state wins. A head change and an edit are distinct facts:
@@ -221,7 +228,7 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 		// results aggregate head-bound evidence that was just superseded.
 		var stale []string
 		if currentHead != verified.HeadSHA || verified.State != "open" {
-			stale = append(stale, mergeabilityDeferKey(target.PRID),
+			stale = append(stale, mergeabilityDeferKey(target.PRID), mergeabilityUpdatedDeferKey(target.PRID),
 				pullRequestDeferKey(target.PRID, "pull_request.updated"))
 		}
 		if currentHead != verified.HeadSHA {
