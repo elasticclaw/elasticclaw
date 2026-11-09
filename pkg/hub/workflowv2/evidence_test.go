@@ -1057,3 +1057,39 @@ func TestSuspendedRunDropsDeferredFeedbackAfterHeadMove(t *testing.T) {
 		t.Fatalf("recovered run = %#v, %v (stale feedback replayed?)", run, err)
 	}
 }
+
+// Feedback edited while suspended must replay with its current content: the
+// queued received event carries the original payload, which would otherwise
+// override the refreshed fact in guard evaluation.
+func TestSuspendedRunReplaysEditedFeedbackContent(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"transitions:\n  feedback:\n    from: reviewing\n    on: review.feedback.received\n    when:\n      review:\n        feedback:\n          severity:\n            equals: blocking\n    to: fixing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	createSuspendedDelivery(t, store, db, "run-edited-feedback", workflowYAML)
+	provenance := func(minute int) typesv2.EvidenceProvenance {
+		return typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerReview), Principal: "alice",
+			ExternalID: "comment-1", ObservedAt: time.Date(2026, 8, 8, 12, minute, 0, 0, time.UTC)}
+	}
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ApplyReviewFeedback(ctx, target, "comment-1",
+			map[string]interface{}{"kind": "comment", "body": "fix this", "severity": "blocking"}, provenance(1))
+	}); !result.Deferred {
+		t.Fatalf("feedback while suspended was not deferred: %#v", result)
+	}
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcileReviewFeedback(ctx, target, "comment-1",
+			map[string]interface{}{"kind": "comment", "body": "never mind", "severity": "nit"}, provenance(2))
+	}); result.Disposition != typesv2.DispositionAccepted {
+		t.Fatalf("feedback edit while suspended = %#v", result)
+	}
+	if _, err := store.ApplyCommand(ctx, "run-edited-feedback", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, "run-edited-feedback")
+	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("recovered run = %#v, %v (stale feedback content replayed?)", run, err)
+	}
+}
