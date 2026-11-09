@@ -103,6 +103,10 @@ type EventInput struct {
 	// deferKey names the subject a deferred observation describes, so a
 	// suspended run keeps only the latest one per subject. Empty uses Kind.
 	deferKey string
+	// deferInvariant marks a deferred-queue replay: evidence recorded while
+	// suspended may break an invariant that a later queued transition
+	// resolves, so replayDeferredEvents checks it once the queue drains.
+	deferInvariant bool
 }
 
 type eventMutation func(context.Context, *sql.Tx, *EventInput) error
@@ -520,7 +524,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		if err != nil {
 			return EventResult{}, err
 		}
-		if !valid {
+		if !valid && !input.deferInvariant {
 			reason = fmt.Sprintf("state invariant no longer holds for %s and no transition matched %s", stored.State, input.Kind)
 			return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
 		}
@@ -569,6 +573,15 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	valid, err := typesv2.MatchPredicate(destination.Invariant, prospectiveFacts)
 	if err != nil {
 		return EventResult{}, err
+	}
+	if !valid && !destination.Terminal && !input.deferInvariant && stored.Status == RunSuspended {
+		// Evidence recorded while suspended may break the invariant that a
+		// queued transition resolves; replay judges it once the queue drains.
+		if valid, err = hasDeferredEvents(ctx, tx, runID); err != nil {
+			return EventResult{}, err
+		}
+	} else if !valid && !destination.Terminal && input.deferInvariant {
+		valid = true
 	}
 	if !valid {
 		reason := fmt.Sprintf("destination invariant does not hold for state %s", transitionDef.To)

@@ -126,7 +126,7 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 		id := uuid.NewString()
 		result, err := s.applyEventWithMutation(ctx, runID, EventInput{
 			ID: id, MessageID: id, Kind: item.kind, Producer: Producer(item.producer), Provenance: provenance,
-			Payload: payload, observation: true, deferKey: item.key,
+			Payload: payload, observation: true, deferKey: item.key, deferInvariant: true,
 		}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 			result, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events
 				WHERE run_id=? AND defer_key=? AND event_id=?`, runID, item.key, item.eventID)
@@ -156,7 +156,50 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			return nil
 		}
 	}
-	return nil
+	return s.suspendOnBrokenInvariant(ctx, runID)
+}
+
+// hasDeferredEvents reports whether a run has queued observations to replay.
+func hasDeferredEvents(ctx context.Context, tx *sql.Tx, runID string) (bool, error) {
+	var queued bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_v2_deferred_events WHERE run_id=?)`, runID).Scan(&queued)
+	return queued, err
+}
+
+// suspendOnBrokenInvariant runs the invariant check that a replay postponed:
+// once the queue drained, an active run whose state invariant no longer holds
+// is suspended exactly as a live event would have left it.
+func (s *Store) suspendOnBrokenInvariant(ctx context.Context, runID string) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stored, workflowYAML, err := getRunForUpdate(ctx, tx, runID)
+	if err != nil || stored.Status != RunActive {
+		return err
+	}
+	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
+	if err != nil {
+		return fmt.Errorf("load pinned workflow: %w", err)
+	}
+	invariant := workflow.Workflow.States[stored.State].Invariant
+	if len(invariant) == 0 {
+		return nil
+	}
+	facts, err := loadFacts(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	if valid, err := typesv2.MatchPredicate(invariant, facts); err != nil || valid {
+		return err
+	}
+	reason := fmt.Sprintf("state invariant no longer holds for %s after replaying deferred events", stored.State)
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
+		WHERE id=? AND state_version=? AND status='active'`, reason, s.now().UTC().UnixMilli(), runID, stored.StateVersion); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // refreshDeferredDelivery replaces the queued delivery summary with the current

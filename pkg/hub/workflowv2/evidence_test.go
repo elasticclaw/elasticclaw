@@ -1240,3 +1240,66 @@ func TestSuspendedRunReplaysCurrentDeliveryAggregates(t *testing.T) {
 		t.Fatalf("recovered run = %#v, %v (stale delivery.open replayed?)", run, err)
 	}
 }
+
+// Evidence recorded while suspended may invalidate the resume destination's
+// invariant while a queued transition leaves that state. Recovery must replay
+// the queue before judging the invariant, or the run stays suspended for good.
+func TestSuspendedRunRecoversThroughInvariantInvalidatedWhileSuspended(t *testing.T) {
+	invariant := "    invariant:\n      ci.status:\n        not_equals: unsatisfied\n"
+	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant, 1)
+	withResume := withInvariant + "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	t.Run("queued transition leaves the state", func(t *testing.T) {
+		ctx := context.Background()
+		db := openRuntimeDB(t)
+		store := workflowv2.NewStore(db)
+		pr := createSuspendedDelivery(t, store, db, "run-invariant", withResume)
+		recordPolicyEvidence(t, store, "run-invariant", pr, "ci", "github-actions", "lint", "lint", "failure",
+			map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+		result, err := store.ApplyCommand(ctx, "run-invariant", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"})
+		if err != nil || result.Disposition != typesv2.DispositionAccepted {
+			t.Fatalf("resume = %#v, %v", result, err)
+		}
+		run, err := store.GetRun(ctx, "run-invariant")
+		if err != nil || run.Status != workflowv2.RunActive || run.State != "fixing" {
+			t.Fatalf("recovered run = %#v, %v (resume rejected on suspended evidence?)", run, err)
+		}
+	})
+	t.Run("nothing queued leaves the state", func(t *testing.T) {
+		ctx := context.Background()
+		db := openRuntimeDB(t)
+		store := workflowv2.NewStore(db)
+		// No transition listens on CI, so nothing is queued and the broken
+		// invariant must still reject the resume.
+		noCITransition := strings.Replace(withResume, "    on: ci.policy.evaluated\n", "    on: custom.never\n", 1)
+		pr := createSuspendedDelivery(t, store, db, "run-invariant-strict", noCITransition)
+		recordPolicyEvidence(t, store, "run-invariant-strict", pr, "ci", "github-actions", "lint", "lint", "failure",
+			map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+		if _, err := store.ApplyCommand(ctx, "run-invariant-strict", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+			t.Fatal(err)
+		}
+		run, err := store.GetRun(ctx, "run-invariant-strict")
+		if err != nil || run.Status != workflowv2.RunSuspended || run.State != "reviewing" {
+			t.Fatalf("run = %#v, %v (resumed into a broken invariant?)", run, err)
+		}
+	})
+	t.Run("queued observation does not leave the state", func(t *testing.T) {
+		ctx := context.Background()
+		db := openRuntimeDB(t)
+		store := workflowv2.NewStore(db)
+		// The queued CI result matches no transition from reviewing, so after
+		// replay the invariant is still broken and the run suspends again.
+		noMatch := strings.Replace(withResume, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+			"          equals: never\n    to: fixing\n  review_failed:", 1)
+		pr := createSuspendedDelivery(t, store, db, "run-invariant-replay", noMatch)
+		recordPolicyEvidence(t, store, "run-invariant-replay", pr, "ci", "github-actions", "lint", "lint", "failure",
+			map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+		if _, err := store.ApplyCommand(ctx, "run-invariant-replay", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+			t.Fatal(err)
+		}
+		run, err := store.GetRun(ctx, "run-invariant-replay")
+		if err != nil || run.Status != workflowv2.RunSuspended || run.State != "reviewing" {
+			t.Fatalf("run = %#v, %v (active with a broken invariant?)", run, err)
+		}
+	})
+}
