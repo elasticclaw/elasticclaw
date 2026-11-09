@@ -101,6 +101,8 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 // legacy claw that finished its task stays 'idle' and is resumed by PR
 // feedback, so it still owns its open PR; legacy claws release ownership only
 // when they reach 'deleted' (PR merged/closed, teardown) or 'error'.
+// Unlike registerSweptPR it does not exclude the current claw: activation runs
+// before provisioning, so the new claw cannot own claw_prs rows yet.
 func (s *Server) filterLegacyAdoptionOwners(ctx context.Context, candidates []typesv2.VerifiedPullRequest) ([]typesv2.VerifiedPullRequest, error) {
 	var available []typesv2.VerifiedPullRequest
 	for _, pr := range candidates {
