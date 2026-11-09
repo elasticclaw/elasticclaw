@@ -29,6 +29,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
   const [signaledNotice, setSignaledNotice] = useState<string | null>(null)
   const [seededWorkflow, setSeededWorkflow] = useState<Workflow | null | undefined>(undefined)
   const [wasOpen, setWasOpen] = useState(open)
+  const [feedbackSeen, setFeedbackSeen] = useState(false)
   const router = useRouter()
 
   // Seed defaults when workflow changes. Done during render with a guarded
@@ -57,11 +58,16 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
     }
   }
 
-  // The modal stays mounted between openings, so clear feedback from the
-  // previous trigger each time it reopens (same render-time pattern as above).
+  // The modal stays mounted between openings, so clear feedback the user
+  // already saw each time it reopens (same render-time pattern as above).
+  // Closing mid-trigger does not count as seen: that result lands while the
+  // modal is closed and must still be shown on the next open.
   if (open !== wasOpen) {
     setWasOpen(open)
-    if (open) {
+    if (!open && !triggering) {
+      setFeedbackSeen(true)
+    } else if (open && feedbackSeen) {
+      setFeedbackSeen(false)
       setTriggerError(null)
       setSignaledNotice(null)
     }
