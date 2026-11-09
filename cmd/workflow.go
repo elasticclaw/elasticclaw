@@ -612,6 +612,11 @@ func runWorkflowCronTrigger(workspace, name string) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 
+	if result.Status == "signaled" {
+		// signal overlap policy: the open run(s) received cron.tick instead.
+		fmt.Printf("Signaled open run(s) of cron workflow %q in workspace %q (no new run started)\n", name, workspace)
+		return nil
+	}
 	fmt.Printf("Triggered cron workflow %q in workspace %q (%s)\n", name, workspace, result.Status)
 	return nil
 }
