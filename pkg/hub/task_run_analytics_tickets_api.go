@@ -727,13 +727,12 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	}
 	// A replacement PR still open keeps the clock running even when an earlier
 	// closed PR already labels the ticket delivered.
-	// PRs left open by a run whose outcome is failed/cancelled do not count,
-	// matching deriveTaskRunAnalyticsTicketStatus.
+	// PRs left open by an abandoned run (taskRunOutcomeAbandoned) do not count.
 	waitingOnOpenPR := false
 	if mergedAt == 0 && ticket.MergedPRCount == 0 {
 		abandonedRuns := map[string]bool{}
 		for _, run := range ticket.Runs {
-			if run.Outcome == "failed" || run.Outcome == "cancelled" {
+			if taskRunOutcomeAbandoned(run.Outcome) {
 				abandonedRuns[run.RunID] = true
 			}
 		}
@@ -847,10 +846,16 @@ func taskRunTicketCostAndTokens(run taskRunAnalyticsRunView) (float64, int64) {
 	return cost, tokens
 }
 
+// taskRunOutcomeAbandoned reports whether a run's explicit v2 outcome gave up
+// on delivery, so PRs it left open or closed do not count for the ticket.
+func taskRunOutcomeAbandoned(outcome string) bool {
+	return outcome == "failed" || outcome == "cancelled"
+}
+
 func deriveTaskRunAnalyticsTicketStatus(runs []taskRunAnalyticsTicketRunSummary, prs []taskRunAnalyticsTicketPRView) string {
 	failedRuns := map[string]bool{}
 	for _, run := range runs {
-		if run.Outcome == "failed" || run.Outcome == "cancelled" {
+		if taskRunOutcomeAbandoned(run.Outcome) {
 			failedRuns[run.RunID] = true
 		}
 		if run.Outcome == "no_changes" || run.Outcome == "delivered" || run.Outcome == "closed" {

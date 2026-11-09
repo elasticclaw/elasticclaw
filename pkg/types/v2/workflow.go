@@ -42,6 +42,7 @@ const (
 	OutcomeCancelled TerminalOutcome = "cancelled"
 )
 
+// IsTerminalOutcome reports whether outcome is one of the known terminal outcomes.
 func IsTerminalOutcome(outcome TerminalOutcome) bool {
 	switch outcome {
 	case OutcomeDelivered, OutcomeNoChanges, OutcomeClosed, OutcomeFailed, OutcomeCancelled:
