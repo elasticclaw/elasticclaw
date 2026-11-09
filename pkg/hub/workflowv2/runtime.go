@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -99,6 +100,9 @@ type EventInput struct {
 	// CI/review evidence and policy). Only these reach suspended runs as
 	// evidence; see ApplyEvent.
 	observation bool
+	// deferKey names the subject a deferred observation describes, so a
+	// suspended run keeps only the latest one per subject. Empty uses Kind.
+	deferKey string
 }
 
 type eventMutation func(context.Context, *sql.Tx, *EventInput) error
@@ -109,8 +113,8 @@ type EventResult struct {
 	Reason      string                     `json:"reason,omitempty"`
 	Run         Run                        `json:"run"`
 	Transition  *Transition                `json:"transition,omitempty"`
-	// Deferred reports that nothing was recorded because a suspended run
-	// listens on the event; the provider reconciler re-observes it later.
+	// Deferred reports that a suspended run recorded the observation but
+	// postponed its transition until the run is active again.
 	Deferred bool `json:"deferred,omitempty"`
 }
 
@@ -454,25 +458,29 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		return EventResult{}, err
 	}
 
-	// Provider observations keep suspended runs current without resuming them
-	// or scheduling effects. An observation the workflow listens on would be
-	// consumed without ever driving its transition, so it is rolled back
-	// instead: its domain state stays unchanged and the reconciler re-detects
-	// it once the run is active again, as it did before suspended runs were
-	// reconciled.
+	// Provider observations keep suspended runs current (domain state, facts,
+	// receipts) without resuming them or scheduling effects. Once persisted,
+	// the reconciler no longer sees the change as drift, so an observation the
+	// workflow listens on is also queued, latest per subject, and replayed
+	// through the transition engine when the run is active again.
 	if stored.Status == RunSuspended && input.observation {
-		if workflowListensOn(workflow.Workflow, input.Kind) {
-			return EventResult{EventID: input.ID, Reason: "deferred while the run is suspended",
-				Run: stored, Deferred: true}, nil
+		deferred := workflowListensOn(workflow.Workflow, input.Kind)
+		reason := "evidence updated while suspended"
+		if deferred {
+			reason = "evidence updated while suspended; transition deferred until recovery"
+			if err := deferEvent(ctx, tx, runID, input, now); err != nil {
+				return EventResult{}, err
+			}
 		}
 		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID,
-			typesv2.DispositionAccepted, stored.StateVersion, "evidence updated while suspended", now); err != nil {
+			typesv2.DispositionAccepted, stored.StateVersion, reason, now); err != nil {
 			return EventResult{}, err
 		}
 		if err := tx.Commit(); err != nil {
 			return EventResult{}, err
 		}
-		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionAccepted, Run: stored}, nil
+		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionAccepted, Reason: reason,
+			Run: stored, Deferred: deferred}, nil
 	}
 
 	facts, err := loadFacts(ctx, tx, runID)
@@ -634,6 +642,14 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	updated, err := s.GetRun(ctx, runID)
 	if err != nil {
 		return EventResult{}, err
+	}
+	if stored.Status == RunSuspended && status == RunActive {
+		// Recovery: fire what the run deferred while suspended. The result
+		// still describes this transition; a failure keeps the queue for the
+		// provider reconciler's ReplayDeferredEvents sweep.
+		if err := s.replayDeferredEvents(ctx, runID); err != nil {
+			log.Printf("[workflow-v2] replay deferred events for run %s: %v", runID, err)
+		}
 	}
 	return EventResult{
 		EventID: input.ID, Disposition: typesv2.DispositionAccepted, Run: updated,

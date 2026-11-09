@@ -57,6 +57,7 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 	return s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: kind, AttemptID: target.AttemptID,
 		Producer: ProducerSourceControl, Provenance: verified.Provenance, observation: true,
+		deferKey: "mergeability:" + target.PRID,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs
 			SET mergeable_head_sha=?,base_sha=?,mergeable_state=?

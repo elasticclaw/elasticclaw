@@ -155,6 +155,7 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 	event, err := s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: eventKind, AttemptID: target.AttemptID,
 		Producer: ProducerSourceControl, Provenance: verified.Provenance, observation: true,
+		deferKey: "pull_request:" + target.PRID,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		var currentHead string
 		var currentState, mergeableHead, baseSHA, mergeableState string

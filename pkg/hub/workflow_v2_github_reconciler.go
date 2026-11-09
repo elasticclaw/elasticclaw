@@ -46,6 +46,9 @@ func (s *Server) runWorkflowV2GitHubReconciler(ctx context.Context) {
 
 func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 	store := workflowv2.NewStore(s.db)
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		log.Printf("[workflow-v2 github] replay deferred events: %v", err)
+	}
 	targets, err := store.ActiveDeliveryTargetsAll(ctx)
 	if err != nil {
 		return fmt.Errorf("list active deliveries: %w", err)

@@ -291,6 +291,15 @@ func Migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_claw ON workflow_v2_cron_runs(claw_id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_v2_run ON workflow_v2_cron_runs(v2_run_id);
 
+	CREATE TABLE IF NOT EXISTS workflow_v2_deferred_events (
+		run_id     TEXT NOT NULL REFERENCES workflow_v2_runs(id) ON DELETE CASCADE,
+		defer_key  TEXT NOT NULL,
+		event_id   TEXT NOT NULL,
+		seq        INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY(run_id, defer_key)
+	);
+
 	`)
 	if err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
