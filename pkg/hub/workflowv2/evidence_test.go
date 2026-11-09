@@ -377,6 +377,13 @@ func TestSuspendedRunsReceiveExternalDeliveryEvidence(t *testing.T) {
 	if ci, ok := inspection.Facts["ci"].(map[string]interface{}); !ok || ci["status"] != "unsatisfied" {
 		t.Fatalf("listened CI policy facts not updated while suspended: %#v", inspection.Facts["ci"])
 	}
+	// Deferring the CI transition must not leave delivery facts behind the
+	// CI facts they summarize.
+	ci := inspection.Facts["ci"].(map[string]interface{})
+	delivery := inspection.Facts["delivery"].(map[string]interface{})
+	if delivery["policy_revision"] != ci["policy_revision"] || delivery["ci_satisfied"] != false || delivery["satisfied"] != false {
+		t.Fatalf("delivery facts stale while suspended: ci %#v delivery %#v", ci, delivery)
+	}
 	var receipts int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_event_receipts WHERE run_id=? AND disposition='accepted'`, "run-suspended-target").Scan(&receipts); err != nil {
 		t.Fatal(err)
@@ -528,6 +535,100 @@ func TestSuspendedRunReplaysOnlyLatestObservationPerSubject(t *testing.T) {
 	if err != nil || run.Status != workflowv2.RunActive || run.State != "checking" {
 		t.Fatalf("recovered run = %#v, %v (stale conflicted replayed?)", run, err)
 	}
+}
+
+// A conflict queued while suspended must not replay once a later observation
+// supersedes it, even when the workflow does not listen on the later kind.
+func TestSuspendedRunDropsSupersededConflict(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		advance func(t *testing.T, store *workflowv2.Store, pr *typesv2.VerifiedPullRequest)
+	}{
+		{"clean again", func(t *testing.T, store *workflowv2.Store, pr *typesv2.VerifiedPullRequest) {
+			pr.MergeableState = "clean"
+			reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+				return store.ReconcileMergeability(context.Background(), target, *pr)
+			})
+		}},
+		{"merged", func(t *testing.T, store *workflowv2.Store, pr *typesv2.VerifiedPullRequest) {
+			pr.State = "merged"
+			reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+				return store.ReconcilePullRequest(context.Background(), target, "merge", "pull_request.merged", *pr)
+			})
+		}},
+		{"head moved", func(t *testing.T, store *workflowv2.Store, pr *typesv2.VerifiedPullRequest) {
+			pr.HeadSHA = "head-2"
+			reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+				return store.ReconcilePullRequest(context.Background(), target, "push", "pull_request.head_changed", *pr)
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+				"  rebasing:\n    phase: build\ntransitions:\n"+
+					"  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n", 1)
+			workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+			if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+				ID: "run-supersede", TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := store.StartAttempt(ctx, "run-supersede", "claw-policy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+			pr := typesv2.VerifiedPullRequest{URL: "https://github.example/org/api/pull/10", RepositoryName: "api", Repository: "org/api",
+				Number: 10, SourceBranch: "feature", BaseBranch: "main", HeadSHA: "head-1", State: "open", VerifiedAt: now,
+				Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}
+			if _, err := store.SubmitDelivery(ctx, "run-supersede", attempt.ID, typesv2.DeliveryManifest{
+				PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}},
+			}, workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+				typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+				return pr, nil
+			})); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id='run-supersede'`); err != nil {
+				t.Fatal(err)
+			}
+			pr.BaseSHA, pr.MergeableState = "base-1", "dirty"
+			if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+				return store.ReconcileMergeability(ctx, target, pr)
+			}); !result.Deferred {
+				t.Fatalf("conflict while suspended was not deferred: %#v", result)
+			}
+			tc.advance(t, store, &pr)
+			var pending int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE defer_key LIKE 'mergeability:%'`).Scan(&pending); err != nil || pending != 0 {
+				t.Fatalf("superseded conflict still queued: %d, %v", pending, err)
+			}
+			if _, err := store.ApplyCommand(ctx, "run-supersede", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+				t.Fatal(err)
+			}
+			run, err := store.GetRun(ctx, "run-supersede")
+			if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+				t.Fatalf("recovered run = %#v, %v (stale conflicted replayed?)", run, err)
+			}
+		})
+	}
+}
+
+func reconcileOnlyTarget(t *testing.T, store *workflowv2.Store,
+	apply func(workflowv2.DeliveryTarget) (workflowv2.EventResult, error)) workflowv2.EventResult {
+	t.Helper()
+	targets, err := store.ActiveDeliveryTargetsAll(context.Background())
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %#v, %v", targets, err)
+	}
+	result, err := apply(targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestReviewFeedbackRejectsStaleDeliveryHead(t *testing.T) {

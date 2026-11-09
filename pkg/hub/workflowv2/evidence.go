@@ -310,9 +310,8 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 				if err != nil {
 					return err
 				}
-				if event.Deferred {
-					return nil
-				}
+				// A deferred event is accepted too: fall through so delivery
+				// facts stay consistent with the CI facts while suspended.
 				if event.Disposition != typesv2.DispositionAccepted {
 					return fmt.Errorf("CI policy event was %s: %s", event.Disposition, event.Reason)
 				}
@@ -339,9 +338,6 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 				})
 				if err != nil {
 					return err
-				}
-				if event.Deferred {
-					return nil
 				}
 				if event.Disposition != typesv2.DispositionAccepted {
 					return fmt.Errorf("review policy event was %s: %s", event.Disposition, event.Reason)

@@ -197,6 +197,13 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 				return err
 			}
 		}
+		// A mergeability observation queued by a suspended run describes the
+		// old head or an open PR; it must not replay once either changed.
+		if currentHead != verified.HeadSHA || verified.State != "open" {
+			if err := clearDeferredEvent(ctx, tx, target.RunID, "mergeability:"+target.PRID); err != nil {
+				return err
+			}
+		}
 		summary, err := deliveryFactsFrom(ctx, tx, target.RunID)
 		if err != nil {
 			return err

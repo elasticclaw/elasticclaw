@@ -471,6 +471,8 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			if err := deferEvent(ctx, tx, runID, input, now); err != nil {
 				return EventResult{}, err
 			}
+		} else if err := clearDeferredEvent(ctx, tx, runID, input.deferSubject()); err != nil {
+			return EventResult{}, err
 		}
 		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID,
 			typesv2.DispositionAccepted, stored.StateVersion, reason, now); err != nil {

@@ -14,18 +14,31 @@ import (
 
 var errDeferredEventGone = errors.New("deferred event already replayed")
 
+// deferSubject is the queue key of a deferred observation; see EventInput.deferKey.
+func (input EventInput) deferSubject() string {
+	if input.deferKey != "" {
+		return input.deferKey
+	}
+	return input.Kind
+}
+
 // deferEvent queues a listened observation recorded by a suspended run. Only
 // the latest observation per subject is kept: an older one would fire a
 // transition on state the provider has already moved past.
 func deferEvent(ctx context.Context, tx *sql.Tx, runID string, input EventInput, now time.Time) error {
-	key := input.deferKey
-	if key == "" {
-		key = input.Kind
-	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_deferred_events(run_id,defer_key,event_id,seq,created_at)
 		VALUES(?,?,?,(SELECT COALESCE(MAX(seq),0)+1 FROM workflow_v2_deferred_events WHERE run_id=?),?)
 		ON CONFLICT(run_id,defer_key) DO UPDATE SET event_id=excluded.event_id,seq=excluded.seq,created_at=excluded.created_at`,
-		runID, key, input.ID, runID, now.UnixMilli())
+		runID, input.deferSubject(), input.ID, runID, now.UnixMilli())
+	return err
+}
+
+// clearDeferredEvent drops the queued observation for a subject. A newer
+// observation supersedes it even when the workflow does not listen on the newer
+// kind, and a subject that no longer applies (PR head moved, PR closed) must
+// not replay stale state on recovery.
+func clearDeferredEvent(ctx context.Context, tx *sql.Tx, runID, key string) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events WHERE run_id=? AND defer_key=?`, runID, key)
 	return err
 }
 

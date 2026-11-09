@@ -153,3 +153,47 @@ func TestMergeabilityKeepsMultiplePRFactsConsistent(t *testing.T) {
 		t.Fatalf("new-head observation: %#v, %v", result, err)
 	}
 }
+
+// The dedupe tuple lives in the delivery row, which a head move does not blank:
+// the first observation on the new head fires its typed event exactly once.
+func TestMergeabilityAfterHeadMoveFiresOnNewHead(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "mergeability-head", "head-1", "open")
+	target := func() workflowv2.DeliveryTarget {
+		targets, err := store.ActiveDeliveryTargets(ctx, pr.Repository, pr.Number)
+		if err != nil || len(targets) != 1 {
+			t.Fatalf("targets: %v, %v", targets, err)
+		}
+		return targets[0]
+	}
+	kindOf := func(result workflowv2.EventResult) string {
+		if result.EventID == "" {
+			return ""
+		}
+		var kind string
+		if err := db.QueryRow(`SELECT kind FROM workflow_v2_events WHERE id=?`, result.EventID).Scan(&kind); err != nil {
+			t.Fatal(err)
+		}
+		return kind
+	}
+	pr.BaseSHA, pr.MergeableState = "base-1", "dirty"
+	if result, err := store.ReconcileMergeability(ctx, target(), pr); err != nil || kindOf(result) != "pull_request.conflicted" {
+		t.Fatalf("head-1 dirty = %#v, %v", result, err)
+	}
+	pr.HeadSHA = "head-2"
+	if _, err := store.ReconcilePullRequest(ctx, target(), "push", "pull_request.head_changed", pr); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"pull_request.conflicted", ""} {
+		result, err := store.ReconcileMergeability(ctx, target(), pr)
+		if err != nil || kindOf(result) != want {
+			t.Fatalf("head-2 dirty #%d = %q, %v; want %q", i, kindOf(result), err, want)
+		}
+	}
+	pr.MergeableState = "clean"
+	if result, err := store.ReconcileMergeability(ctx, target(), pr); err != nil || kindOf(result) != "pull_request.mergeable" {
+		t.Fatalf("head-2 clean = %q, %v", kindOf(result), err)
+	}
+}
