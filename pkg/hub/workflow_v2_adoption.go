@@ -18,6 +18,16 @@ import (
 // task run are already finished, so callers must not provision a claw.
 var errWorkflowV2FinishedAtActivation = errors.New("workflow v2 run finished during activation")
 
+// workflowV2FinishedAtActivationError carries the terminal status the run
+// reached, so callers can report it without re-reading the run.
+type workflowV2FinishedAtActivationError struct{ status workflowv2.RunStatus }
+
+func (e workflowV2FinishedAtActivationError) Error() string {
+	return errWorkflowV2FinishedAtActivation.Error() + ": " + string(e.status)
+}
+
+func (e workflowV2FinishedAtActivationError) Unwrap() error { return errWorkflowV2FinishedAtActivation }
+
 // completeWorkflowV2Activation adopts delivery before releasing initial effects.
 func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workflowv2.Store, runID string) error {
 	var workspaceYAML, workflowYAML string
@@ -81,7 +91,7 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 		// delivery.adopted may itself reach a terminal state.
 		if run.Status != workflowv2.RunActive && run.Status != workflowv2.RunSuspended {
 			s.maybeFinishWorkflowV2Parent(ctx, runID)
-			return errWorkflowV2FinishedAtActivation
+			return workflowV2FinishedAtActivationError{status: run.Status}
 		}
 	}
 	return store.CompleteActivation(ctx, runID)

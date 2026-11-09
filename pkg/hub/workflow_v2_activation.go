@@ -62,6 +62,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 	workflowYAML := []byte(workflow.RawConfig)
 	runID := uuid.NewString()
 	finishedAtActivation := false
+	var finishedStatus workflowv2.RunStatus
 	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
 		ctx: r.Context(), inputs: inputs, reason: "manual workflow v2 trigger",
 		beforeProvision: func(ctx context.Context, clawID, tenantID string) error {
@@ -85,7 +86,10 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			if err == nil {
 				err = s.completeWorkflowV2Activation(ctx, store, run.ID)
 			}
-			finishedAtActivation = errors.Is(err, errWorkflowV2FinishedAtActivation)
+			var finished workflowV2FinishedAtActivationError
+			if errors.As(err, &finished) {
+				finishedAtActivation, finishedStatus = true, finished.status
+			}
 			if err == nil || finishedAtActivation {
 				return err
 			}
@@ -125,12 +129,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 	if finishedAtActivation {
 		// No claw was provisioned; report the terminal state the run reached
 		// (completed or cancelled).
-		status = "finished"
-		if run, err := workflowv2.NewStore(s.db).GetRun(r.Context(), runID); err != nil {
-			log.Printf("[workflow-v2] manual trigger read finished run %s: %v", runID, err)
-		} else {
-			status = string(run.Status)
-		}
+		status = string(finishedStatus)
 	}
 	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": status})
 }
