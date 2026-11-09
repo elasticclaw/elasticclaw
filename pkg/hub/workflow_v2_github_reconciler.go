@@ -78,7 +78,11 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 		if !loaded {
 			observation.pr, observation.err = s.verifyWorkflowV2PullRequest(targetCtx, workflowv2.Run{}, workspace.Workspace,
 				typesv2.PullRequestClaim{URL: target.URL})
-			observations[key] = observation
+			// Verification errors can depend on the target's workspace, so
+			// only successful observations are shared with other runs.
+			if observation.err == nil {
+				observations[key] = observation
+			}
 		}
 		verified, verifyErr := observation.pr, observation.err
 		verified.RepositoryName = target.RepositoryName
