@@ -1806,9 +1806,9 @@ func (s *Server) closeOrphanedTaskRunSummaries() {
 	// Recover a terminal outcome committed just before a hub restart, before
 	// treating a deleted claw with a stale summary as an orphan failure.
 	if _, err := s.materializeTerminalWorkflowV2TaskRuns(); err != nil {
-		// Without recovery a committed outcome could be orphan-failed below.
+		// The sweep still runs: it skips any summary that has not seen its
+		// finished v2 run, so an unrecovered outcome is never orphan-failed.
 		log.Printf("[task-run-analytics] recover terminal workflow summaries: %v", err)
-		return
 	}
 	nowMS := epochMillis(now())
 	res, err := s.db.Exec(`
