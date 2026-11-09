@@ -35,7 +35,8 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
       const fetchRuns = isV2Workflow(workflow)
         ? Promise.all([
             fetchV2WorkflowRuns(workflow.workspaceName, workflow.name),
-            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name),
+            // Cron ticks are supplementary; a failed history fetch must not hide the v2 runs.
+            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).catch(() => ({ runs: [], count: 0 })),
           ]).then(([response, history]) => {
             if (cancelled) return
             setV2Runs(response.runs || [])
