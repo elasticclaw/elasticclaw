@@ -295,6 +295,7 @@ func TestWorkflowV2ManualAdoptionFinishingRunReportsTerminalStatus(t *testing.T)
 }
 
 func testWorkflowV2ManualAdoptionFinishingRun(t *testing.T, terminalState, want string) {
+	t.Helper()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token",
