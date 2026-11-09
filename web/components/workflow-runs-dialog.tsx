@@ -37,17 +37,21 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
       const fetchRuns = isV2Workflow(workflow)
         ? Promise.all([
             fetchV2WorkflowRuns(workflow.workspaceName, workflow.name),
-            // Cron ticks are supplementary: any failure, including a 404, must not
-            // hide the v2 runs, so it is surfaced separately.
-            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).catch((err) => ({
-              runs: [],
-              count: 0,
-              error: err instanceof Error ? err.message : "Unable to load cron ticks",
-            })),
+            // Cron ticks are supplementary and must never hide the v2 runs. The v2
+            // runs request already answers whether the workflow exists, so a 404 here
+            // only means there is no cron tick history; other failures are surfaced.
+            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).catch((err) => {
+              if (err instanceof ApiError && err.status === 404) return { runs: [], count: 0 }
+              return {
+                runs: [],
+                count: 0,
+                error: (err instanceof Error && err.message) || "Unable to load cron ticks",
+              }
+            }),
           ]).then(([response, history]) => {
             if (cancelled) return
             setV2Runs(response.runs || [])
-            if ("error" in history) setCronTicksError(history.error)
+            if ("error" in history && history.error) setCronTicksError(history.error)
             setCronTicks((history.runs || []).filter(isCronTickRow))
           })
         : fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).then((response) => {
