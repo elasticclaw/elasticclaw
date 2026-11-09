@@ -862,3 +862,100 @@ func TestEvidenceDomainCannotBeForgedByWrongAdapter(t *testing.T) {
 		t.Fatal("agent forged CI evidence")
 	}
 }
+
+// A CI result queued while suspended describes the head it was evaluated on;
+// it must not replay after the PR head moved.
+func TestSuspendedRunDropsDeferredCIResultAfterHeadMove(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "run-stale-ci", "head-1", "open")
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id='run-stale-ci'`); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, "run-stale-ci", pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE defer_key='ci.policy.evaluated'`).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("CI failure not deferred: %d, %v", queued, err)
+	}
+	pr.HeadSHA = "head-2"
+	reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcilePullRequest(ctx, target, "push", "pull_request.head_changed", pr)
+	})
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE defer_key='ci.policy.evaluated'`).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("stale CI result still queued: %d, %v", queued, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-stale-ci'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, "run-stale-ci")
+	if err != nil || run.State != "reviewing" || run.StateVersion != 1 {
+		t.Fatalf("recovered run = %#v, %v (stale CI failure replayed?)", run, err)
+	}
+}
+
+// A PR edit observed after a queued head change must not drop that head
+// change, whether or not the workflow listens on the edit.
+func TestSuspendedRunKeepsDeferredHeadChangeAcrossEdits(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		listenUpdate bool
+	}{{"edit not listened", false}, {"edit listened", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			transitions := "  pushed:\n    from: reviewing\n    on: pull_request.head_changed\n    to: fixing\n"
+			if tc.listenUpdate {
+				transitions += "  edited:\n    from: reviewing\n    on: pull_request.updated\n    to: checking\n"
+			}
+			workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+				"  checking:\n    phase: review\ntransitions:\n"+transitions, 1)
+			workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+			if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+				ID: "run-edit", TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := store.StartAttempt(ctx, "run-edit", "claw-policy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+			pr := typesv2.VerifiedPullRequest{URL: "https://github.example/org/api/pull/10", RepositoryName: "api", Repository: "org/api",
+				Number: 10, SourceBranch: "feature", BaseBranch: "main", HeadSHA: "head-1", State: "open", VerifiedAt: now,
+				Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}
+			if _, err := store.SubmitDelivery(ctx, "run-edit", attempt.ID, typesv2.DeliveryManifest{
+				PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}},
+			}, workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+				typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+				return pr, nil
+			})); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id='run-edit'`); err != nil {
+				t.Fatal(err)
+			}
+			pr.HeadSHA = "head-2"
+			if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+				return store.ReconcilePullRequest(ctx, target, "push", "pull_request.head_changed", pr)
+			}); !result.Deferred {
+				t.Fatalf("head change while suspended was not deferred: %#v", result)
+			}
+			reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+				return store.ReconcilePullRequest(ctx, target, "edit", "pull_request.updated", pr)
+			})
+			if _, err := store.ApplyCommand(ctx, "run-edit", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+				t.Fatal(err)
+			}
+			run, err := store.GetRun(ctx, "run-edit")
+			if err != nil || run.Status != workflowv2.RunActive || run.State != "fixing" {
+				t.Fatalf("recovered run = %#v, %v (deferred head change lost?)", run, err)
+			}
+		})
+	}
+}

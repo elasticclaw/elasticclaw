@@ -121,6 +121,19 @@ func scanDeliveryTargets(rows *sql.Rows) ([]DeliveryTarget, error) {
 	return targets, rows.Err()
 }
 
+// pullRequestDeferKey names the deferred-replay subject of a PR observation.
+// Lifecycle kinds (merged, closed, verified_open) share one subject so the
+// latest lifecycle state wins. A head change and an edit are distinct facts:
+// an edit must not supersede a queued head change.
+func pullRequestDeferKey(prID, kind string) string {
+	switch kind {
+	case "pull_request.head_changed", "pull_request.updated":
+		return "pull_request:" + prID + ":" + kind
+	default:
+		return "pull_request:" + prID
+	}
+}
+
 // ReconcilePullRequest applies a trusted source-control observation to one
 // existing delivery subject, invalidates old-head evidence, emits a typed
 // workflow event, and then recomputes aggregate delivery policy.
@@ -155,7 +168,7 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 	event, err := s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: eventKind, AttemptID: target.AttemptID,
 		Producer: ProducerSourceControl, Provenance: verified.Provenance, observation: true,
-		deferKey: "pull_request:" + target.PRID,
+		deferKey: pullRequestDeferKey(target.PRID, eventKind),
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		var currentHead string
 		var currentState, mergeableHead, baseSHA, mergeableState string
@@ -197,10 +210,22 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 				return err
 			}
 		}
-		// A mergeability observation queued by a suspended run describes the
-		// old head or an open PR; it must not replay once either changed.
+		// Observations queued by a suspended run that describe the old head or
+		// an open PR must not replay once either changed. CI and review policy
+		// results aggregate head-bound evidence that was just superseded.
+		var stale []string
 		if currentHead != verified.HeadSHA || verified.State != "open" {
-			if err := clearDeferredEvent(ctx, tx, target.RunID, "mergeability:"+target.PRID); err != nil {
+			stale = append(stale, "mergeability:"+target.PRID,
+				pullRequestDeferKey(target.PRID, "pull_request.updated"))
+		}
+		if currentHead != verified.HeadSHA {
+			stale = append(stale, "ci.policy.evaluated", "review.policy.evaluated")
+		}
+		if verified.State != "open" {
+			stale = append(stale, pullRequestDeferKey(target.PRID, "pull_request.head_changed"))
+		}
+		for _, key := range stale {
+			if err := clearDeferredEvent(ctx, tx, target.RunID, key); err != nil {
 				return err
 			}
 		}
