@@ -244,6 +244,9 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 		// miss a run that is still being provisioned.
 		defer cs.lockSignal(key)()
 		if status, _, handled, err := cs.signalOpenRuns(store, sw, tenantID, now); handled {
+			if err != nil {
+				log.Printf("[cron-v2] failed to signal open runs for %s: %v", key, err)
+			}
 			return status, err
 		}
 	}
@@ -402,7 +405,7 @@ func (cs *cronSchedulerV2) openV2RunIDs(workspaceName, workflowName string) ([]s
 	rows, err := cs.srv.db.QueryContext(ctx, `
 		SELECT id, status, COALESCE(waiting_reason,'') FROM workflow_v2_runs
 		WHERE workspace_name=? AND workflow_name=? AND status IN ('active','suspended')
-		ORDER BY id`, workspaceName, workflowName)
+		ORDER BY created_at, id`, workspaceName, workflowName)
 	if err != nil {
 		return nil, 0, err
 	}
