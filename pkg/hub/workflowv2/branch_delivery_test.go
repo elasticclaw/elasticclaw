@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
@@ -217,5 +218,88 @@ func TestBranchRegistrationSkipsPROwnedByActiveRun(t *testing.T) {
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND kind='delivery.verified'`, run.ID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("events=%d err=%v", count, err)
+	}
+}
+
+const adoptionInitialEffectWorkflowYAML = `
+schema_version: 2
+name: adoption-initial-effect
+enabled: true
+initial_state: working
+states:
+  working:
+    phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Update dependencies.
+  awaiting:
+    phase: review
+transitions:
+  adopted:
+    from: working
+    on: delivery.adopted
+    to: awaiting
+` + branchDeliveryYAML
+
+// Adoption during activation leaves the initial state, so its on_enter effects
+// must not run in the destination state.
+func TestAdoptionDuringActivationCancelsInitialEffects(t *testing.T) {
+	for _, adopt := range []bool{true, false} {
+		t.Run(fmt.Sprint(adopt), func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			previous := createDeliveryRun(t, store, "previous")
+			url := "https://github.example/org/api/pull/10"
+			delivered, err := store.SubmitDelivery(ctx, previous.RunID, previous.ID, typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: url}}}, deliveryVerifier(map[string]string{url: "head"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='completed' WHERE id=?`, previous.RunID); err != nil {
+				t.Fatal(err)
+			}
+			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "new", TenantID: "tenant-1", InitialClawID: "new-claw", ActivationPending: true,
+				WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(adoptionInitialEffectWorkflowYAML)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.AssembleOrganizationContext(ctx, run.ID, workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, _ string, _ typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+				return typesv2.ContextBundleSource{}, fmt.Errorf("unexpected knowledge resolution")
+			})); err != nil {
+				t.Fatal(err)
+			}
+			var candidates []typesv2.VerifiedPullRequest
+			if adopt {
+				candidates = delivered
+			}
+			if _, err := store.AdoptPullRequests(ctx, run.ID, candidates, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CompleteActivation(ctx, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.GetRun(ctx, run.ID)
+			if err != nil || current.Status != workflowv2.RunActive {
+				t.Fatalf("run=%+v err=%v", current, err)
+			}
+			claim, err := store.ClaimEffect(ctx, "worker", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if adopt {
+				if current.State != "awaiting" || claim != nil {
+					t.Fatalf("state=%s claim=%+v", current.State, claim)
+				}
+				var status string
+				if err := db.QueryRow(`SELECT status FROM workflow_v2_effects WHERE run_id=? AND origin_type='initial'`, run.ID).Scan(&status); err != nil || status != "cancelled" {
+					t.Fatalf("initial effect status=%s err=%v", status, err)
+				}
+				return
+			}
+			if current.State != "working" || claim == nil || claim.Effect.RunID != run.ID || claim.Effect.Kind != "agent.task" {
+				t.Fatalf("state=%s claim=%+v", current.State, claim)
+			}
+		})
 	}
 }
