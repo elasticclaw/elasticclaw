@@ -610,10 +610,10 @@ function AnalyticsCommandCenterInner({ canViewCosts = false }: { canViewCosts?: 
             <Kpi
               label="Cost per unique ticket"
               title={withApproximateNote("Cost of ticket runs divided by distinct tickets worked on in the period. Maintenance runs are excluded.")}
-              value={effect?.uniqueTickets ? `${costPrefix}${usd.format((effect.ticketCostUsd ?? 0) / effect.uniqueTickets)}` : "—"}
+              value={effect?.uniqueTickets && effect.ticketCostUsd != null ? `${costPrefix}${usd.format(effect.ticketCostUsd / effect.uniqueTickets)}` : "—"}
               change={calculateDelta(
-                effect?.uniqueTickets ? (effect.ticketCostUsd ?? 0) / effect.uniqueTickets : undefined,
-                effect?.prior?.uniqueTickets ? (effect.prior.ticketCostUsd ?? 0) / effect.prior.uniqueTickets : undefined
+                effect?.uniqueTickets && effect.ticketCostUsd != null ? effect.ticketCostUsd / effect.uniqueTickets : undefined,
+                effect?.prior?.uniqueTickets && effect.prior.ticketCostUsd != null ? effect.prior.ticketCostUsd / effect.prior.uniqueTickets : undefined
               )}
               cost
             />
@@ -646,7 +646,7 @@ function AnalyticsCommandCenterInner({ canViewCosts = false }: { canViewCosts?: 
               {runs.map((run) => <TableRow key={run.runId}>
                 <TableCell><RunStatusBadge status={run.status} outcome={run.outcome} /></TableCell>
                 <TableCell><button type="button" className="text-left hover:underline" onClick={() => setSelectedRunId(run.runId)}>{run.workflowName || run.factoryName || run.runId}<span className="block font-mono text-xs text-muted-foreground">{run.runId}</span></button></TableCell>
-                <TableCell>{run.runKind.replace(/_/g, " ")}</TableCell>
+                <TableCell>{run.runKind ? run.runKind.replace(/_/g, " ") : "—"}</TableCell>
                 <TableCell>{shortDateFormatter.format(new Date(run.startedAt))}</TableCell>
               </TableRow>)}
               {runs.length === 0 && <TableRow><TableCell colSpan={4} className="text-muted-foreground">No runs match these filters.</TableCell></TableRow>}
