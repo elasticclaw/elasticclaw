@@ -25,6 +25,11 @@ const (
 func (s *Server) runWorkflowV2GitHubReconciler(ctx context.Context) {
 	reconcile := func() {
 		if !defaultGitHubClient.allowLowPriority() {
+			// Replaying persisted deferrals needs no GitHub calls, so an
+			// exhausted budget must not stall recovered runs.
+			if err := workflowv2.NewStore(s.db).ReplayDeferredEvents(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("[workflow-v2 github] replay deferred events: %v", err)
+			}
 			return
 		}
 		if err := s.reconcileWorkflowV2GitHub(ctx); err != nil && ctx.Err() == nil {
@@ -116,8 +121,11 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 		}
 		target.HeadSHA = verified.HeadSHA
 		target.State = verified.State
-		if _, err := store.ReconcileMergeability(ctx, target, verified); err != nil {
-			log.Printf("[workflow-v2 github] reconcile mergeability for run %s: %v", target.RunID, err)
+		targetCtx, cancel = context.WithTimeout(ctx, workflowV2GitHubReconcileTimeout)
+		_, mergeabilityErr := store.ReconcileMergeability(targetCtx, target, verified)
+		cancel()
+		if mergeabilityErr != nil {
+			log.Printf("[workflow-v2 github] reconcile mergeability for run %s: %v", target.RunID, mergeabilityErr)
 		}
 		if verified.State == "open" {
 			current = append(current, target)
