@@ -48,11 +48,11 @@ delivery:
 func TestWorkflowV2ActivationAdoption(t *testing.T) {
 	for _, tc := range []struct {
 		name, login, userType, branch, headRepo, state, url string
-		fail, noApp, legacy, paginate                       bool
+		fail, noApp, legacy, paginate, reconcile            bool
 		want                                                int
 	}{
 		{name: "own bot", want: 1},
-		{name: "GitHub canonical case", headRepo: "Owner/Repo", url: "https://github.com/Owner/Repo/pull/1", want: 1},
+		{name: "GitHub canonical case", headRepo: "Owner/Repo", url: "https://github.com/Owner/Repo/pull/1", reconcile: true, want: 1},
 		{name: "pagination", paginate: true, want: 1},
 		{name: "human", login: "contributor", userType: "User"},
 		{name: "other bot", login: "dependabot[bot]"},
@@ -153,6 +153,9 @@ func TestWorkflowV2ActivationAdoption(t *testing.T) {
 			}
 			if tc.paginate && calls != 2 {
 				t.Fatalf("calls=%d", calls)
+			}
+			if tc.reconcile {
+				assertAdoptedPRReconciles(t, s, store, run.ID, tc.url)
 			}
 		})
 	}
@@ -265,6 +268,30 @@ func TestWorkflowV2ActivationAdoptionKeepsContextSuspension(t *testing.T) {
 	var events int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND kind LIKE 'delivery.%'`, run.ID).Scan(&events); err != nil || events != 0 || calls != 0 {
 		t.Fatalf("delivery events=%d calls=%d err=%v", events, calls, err)
+	}
+}
+
+// assertAdoptedPRReconciles proves an adopted PR keeps reconciling when
+// GitHub's canonical owner/repo case differs from the workspace declaration.
+func assertAdoptedPRReconciles(t *testing.T, s *Server, store *workflowv2.Store, runID, prURL string) {
+	t.Helper()
+	defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/repos/owner/repo/pulls/1" {
+			return githubAppTokenResponse(404, `{}`), nil
+		}
+		body, _ := json.Marshal(map[string]any{"id": 1, "number": 1, "html_url": prURL, "state": "closed", "merged": true,
+			"head": map[string]any{"ref": "deps/ts-minor-1", "sha": "head"}, "base": map[string]string{"ref": "main"}})
+		return githubAppTokenResponse(200, string(body)), nil
+	})}
+	if err := s.reconcileWorkflowV2GitHub(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := store.InspectRun(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts := inspection.Facts["delivery"].(map[string]interface{}); facts["merged"] != float64(1) {
+		t.Fatalf("adopted PR did not reconcile: facts=%v", facts)
 	}
 }
 
