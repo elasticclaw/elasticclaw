@@ -33,6 +33,15 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 		return err
 	}
 	if wf.Workflow.Delivery != nil && wf.Workflow.Delivery.PullRequests != nil && len(wf.Workflow.Delivery.PullRequests.Branches) > 0 {
+		pending, err := store.GetRun(ctx, runID)
+		if err != nil {
+			return err
+		}
+		// A delivery.adopted transition would mark the run active and bypass
+		// a suspension such as a failed required context source.
+		if pending.SuspendedBeyondActivation() {
+			return store.CompleteActivation(ctx, runID)
+		}
 		lookupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		candidates, lookupErr := s.workflowV2AdoptionCandidates(lookupCtx, ws.Workspace, wf.Workflow.Delivery.PullRequests)
 		cancel()

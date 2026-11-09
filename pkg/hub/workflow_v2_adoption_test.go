@@ -220,3 +220,52 @@ func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
 		t.Fatalf("cron slot still held: %d", running)
 	}
 }
+
+func TestWorkflowV2ActivationAdoptionKeepsContextSuspension(t *testing.T) {
+	ctx := context.Background()
+	s, db := newTaskRunAnalyticsTestServer(t, "adoption-claw")
+	parent, _ := startTaskRunForTest(t, s, "adoption-claw", "adoption")
+	branchSweepTestToken(s)
+	oldClient := defaultGitHubClient
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() { defaultGitHubClient = oldClient })
+	calls := 0
+	defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		body, _ := json.Marshal([]any{map[string]any{"number": 1, "html_url": "https://github.com/owner/repo/pull/1", "state": "open",
+			"user": map[string]string{"login": "factory-app[bot]", "type": "Bot"},
+			"head": map[string]any{"ref": "deps/ts-minor-1", "sha": "head", "repo": map[string]string{"full_name": "owner/repo"}},
+			"base": map[string]string{"ref": "main"}}})
+		return githubAppTokenResponse(200, string(body)), nil
+	})}
+	workspace := adoptionWorkspace + `knowledge:
+  sources:
+    principles:
+      type: workspace_files
+      scope: organization
+      required: true
+      paths: [MISSING.md]
+`
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "adoption-run", TenantID: "test-tenant-id", InitialClawID: "adoption-claw", TaskRunID: parent, WorkspaceYAML: []byte(workspace), WorkflowYAML: []byte(adoptionWorkflow), ActivationPending: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.completeWorkflowV2Activation(ctx, store, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != workflowv2.RunSuspended || got.State != "working" || !strings.Contains(got.WaitingReason, "required knowledge") {
+		t.Fatalf("run=%+v", got)
+	}
+	var events int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND kind LIKE 'delivery.%'`, run.ID).Scan(&events); err != nil || events != 0 || calls != 0 {
+		t.Fatalf("delivery events=%d calls=%d err=%v", events, calls, err)
+	}
+}

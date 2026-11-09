@@ -242,6 +242,12 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 
 const activationPendingReason = "workflow activation pending organization context"
 
+// SuspendedBeyondActivation reports a deliberate suspension, such as a failed
+// required context source, that activation must not release.
+func (r Run) SuspendedBeyondActivation() bool {
+	return r.Status == RunSuspended && r.WaitingReason != activationPendingReason
+}
+
 // CompleteActivation releases a context-pinned run for effect execution. It is
 // idempotent when context assembly already advanced the run or deliberately
 // suspended it on a domain-level context failure.
