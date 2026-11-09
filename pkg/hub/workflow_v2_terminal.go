@@ -174,7 +174,9 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if outcome == "" {
 		status, failureType := taskRunStatusClean, ""
 		if run.Status == workflowv2.RunCancelled || run.State == "prepare_failed" {
-			status, failureType = taskRunStatusFailed, run.State
+			// failure_type is CHECK-constrained; a state name such as
+			// "cancelled" would make this UPDATE fail.
+			status, failureType = taskRunStatusFailed, taskRunFailureUnknown
 		}
 		finishedAt := time.Now().UTC().UnixMilli()
 		if _, err := s.db.ExecContext(ctx, `

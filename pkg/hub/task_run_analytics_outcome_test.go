@@ -431,3 +431,50 @@ func TestTaskRunAnalyticsDashboardDefaultScopeExcludesNonPRCodeTasks(t *testing.
 		})
 	}
 }
+
+func TestWorkflowV2TerminalNoOutcomeFailureUsesValidFailureType(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "prepare-claw")
+	runID, _ := startTaskRunForTest(t, s, "prepare-claw", "prepare")
+	doc := "schema_version: 2\nname: prepare\nenabled: true\ninitial_state: prepare_failed\nstates:\n  prepare_failed: {phase: done, terminal: true}\n"
+	run, err := workflowv2.NewStore(db).CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		TenantID: "test-tenant-id", TaskRunID: runID, WorkspaceYAML: []byte(analyticsOutcomeWorkspace), WorkflowYAML: []byte(doc),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Record every terminal write: later re-materialization rewrites the row.
+	assertExecSucceeds(t, db, `CREATE TABLE eager_writes(status TEXT, failure_type TEXT)`)
+	assertExecSucceeds(t, db, `CREATE TRIGGER record_eager_write AFTER UPDATE OF failure_type ON task_run_summaries
+  WHEN NEW.phase='terminal' BEGIN INSERT INTO eager_writes VALUES(NEW.status, NEW.failure_type); END`)
+
+	s.maybeFinishWorkflowV2Parent(context.Background(), run.ID)
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM eager_writes WHERE status=? AND failure_type=?`,
+		taskRunStatusFailed, taskRunFailureUnknown).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count == 0 {
+		t.Fatal("eager terminal update for a no-outcome failure state was rejected or skipped")
+	}
+}
+
+func TestWorkflowV2TerminalUnparseablePinnedWorkflowStillTearsDown(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "broken-claw")
+	runID, v2RunID := createTerminalOutcomeRunForTest(t, s, "broken-claw", "no_changes")
+	assertExecSucceeds(t, db, `UPDATE workflow_v2_runs SET workflow_yaml='states: [' WHERE id=?`, v2RunID)
+
+	if outcome, _, err := readWorkflowV2TaskRunOutcome(db, runID); err != nil || outcome != "" {
+		t.Fatalf("outcome=%q err=%v; an unparseable pinned workflow must read as no outcome", outcome, err)
+	}
+	s.maybeFinishWorkflowV2Parent(context.Background(), v2RunID)
+	var clawStatus string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='broken-claw'`).Scan(&clawStatus); err != nil || clawStatus != "deleted" {
+		t.Fatalf("claw status=%s err=%v", clawStatus, err)
+	}
+	var events int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_key=?`,
+		runID, "workflow_v2:"+v2RunID+":completed").Scan(&events); err != nil || events != 1 {
+		t.Fatalf("terminal event count=%d err=%v", events, err)
+	}
+}
