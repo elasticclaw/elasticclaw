@@ -37,17 +37,18 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
       const fetchRuns = isV2Workflow(workflow)
         ? Promise.all([
             fetchV2WorkflowRuns(workflow.workspaceName, workflow.name),
-            // Cron ticks are supplementary: a 404 still means the workflow is not configured,
-            // but other failures must not hide the v2 runs, so they are surfaced separately.
-            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).catch((err) => {
-              if (err instanceof ApiError && err.status === 404) throw err
-              return { runs: [], count: 0, error: err instanceof Error ? err.message : "Unable to load cron ticks" }
-            }),
+            // Cron ticks are supplementary: any failure, including a 404, must not
+            // hide the v2 runs, so it is surfaced separately.
+            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).catch((err) => ({
+              runs: [],
+              count: 0,
+              error: err instanceof Error ? err.message : "Unable to load cron ticks",
+            })),
           ]).then(([response, history]) => {
             if (cancelled) return
             setV2Runs(response.runs || [])
             if ("error" in history) setCronTicksError(history.error)
-            setCronTicks((history.runs || []).filter((run) => run.status === "skipped" || run.status === "signaled"))
+            setCronTicks((history.runs || []).filter(isCronTickRow))
           })
         : fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).then((response) => {
             if (cancelled) return
@@ -91,7 +92,7 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
             {!loading && error && <Notice destructive>{error}</Notice>}
             {!loading && !error && cronTicksError && (
               <div className="mb-4">
-                <Notice>Skipped and signaled cron ticks could not be loaded: {cronTicksError}</Notice>
+                <Notice>Cron ticks could not be loaded: {cronTicksError}</Notice>
               </div>
             )}
             {!loading && !error && !cronTicksError && runs.length === 0 && cronTicks.length === 0 && (
@@ -226,6 +227,13 @@ function StatusBadge({ status }: { status: string }) {
       {status}
     </Badge>
   )
+}
+
+// Ticks that did not start a run: skipped and signaled ones, plus signal ticks
+// that failed during delivery (they carry a slot_id but no run of their own).
+function isCronTickRow(run: WorkflowRun) {
+  return run.status === "skipped" || run.status === "signaled" ||
+    (run.status === "failed" && typeof run.run_context?.slot_id === "string")
 }
 
 function statusVariant(status: string) {
