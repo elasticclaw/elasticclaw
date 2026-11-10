@@ -461,6 +461,14 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	if err := writeFacts(ctx, tx, runID, input.ID, input.Producer, input.Provenance, input.Facts, now); err != nil {
 		return EventResult{}, err
 	}
+	// The transition engine sees this observation live, so it supersedes one
+	// queued for the same subject; replaying the older one later (a sweep after
+	// a failed recovery replay) would fire a transition on outdated state.
+	if stored.Status == RunActive && input.observation && !input.deferInvariant {
+		if err := clearDeferredEvent(ctx, tx, runID, input.deferSubject()); err != nil {
+			return EventResult{}, err
+		}
+	}
 
 	// Provider observations keep suspended runs current (domain state, facts,
 	// receipts) without resuming them or scheduling effects. Once persisted,

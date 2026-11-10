@@ -1389,3 +1389,48 @@ func TestRecoveryHoldsEffectsUntilReplaySettlesInvariant(t *testing.T) {
 		})
 	}
 }
+
+// A live observation on an active run supersedes one queued for the same
+// subject: a failed recovery replay leaves the queue for the sweep, and the
+// sweep must not replay a CI failure that a later live CI result superseded.
+func TestLiveObservationSupersedesQueuedDeferredEvent(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := policyWorkflowYAML + "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	pr := createSuspendedDelivery(t, store, db, "run-live", workflowYAML)
+	recordPolicyEvidence(t, store, "run-live", pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	if _, err := db.Exec(`CREATE TRIGGER fail_replay BEFORE DELETE ON workflow_v2_deferred_events
+		BEGIN SELECT RAISE(ABORT, 'injected replay failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	// reviewing has no invariant, so the resume releases the run active and
+	// the failed replay leaves the queued CI failure for the sweep.
+	result, err := store.ApplyCommand(ctx, "run-live", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"})
+	if err != nil || result.Run.Status != workflowv2.RunActive || result.Run.State != "reviewing" {
+		t.Fatalf("resume = %#v, %v", result, err)
+	}
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE run_id='run-live'`).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("queued after failed replay = %d, %v", queued, err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_replay`); err != nil {
+		t.Fatal(err)
+	}
+	live := recordPolicyEvidence(t, store, "run-live", pr, "ci", "github-actions", "lint", "lint", "success",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	if live.CIStatus != "pending" {
+		t.Fatalf("live CI result = %#v", live)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE run_id='run-live'`).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("queued after live CI result = %d, %v (superseded observation kept)", queued, err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, "run-live")
+	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("run after sweep = %#v, %v (stale CI failure replayed?)", run, err)
+	}
+}
