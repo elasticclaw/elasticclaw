@@ -104,6 +104,28 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	s.mu.Unlock()
 }
 
+// finishWorkflowV2ClawAfterActivation finishes the parent of a run that
+// reached a terminal state during activation. It runs in the background, like
+// every other terminal hook: it must outlive the caller's ctx (an HTTP request
+// for manual triggers), has no deadline because a timeout mid-way would leave
+// the parent partially finished, and cannot block activation if it stalls.
+// The claw was never provisioned, so if the parent finish exits early (for
+// example on a failed run lookup) the claw is deleted here instead of holding
+// its concurrency slot until the reaper's provisioning timeout.
+func (s *Server) finishWorkflowV2ClawAfterActivation(runID, clawID, result string) {
+	s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", result,
+		"workflow v2 run finished during activation", terminalTxOpts{})
+	if err != nil {
+		log.Printf("[workflow-v2] failed to finish claw %s of run %s finished at activation: %v", shortID(clawID), runID, err)
+		return
+	}
+	if applied {
+		log.Printf("[workflow-v2] parent finish left claw %s of run %s alive; deleted it", shortID(clawID), runID)
+		s.promotePendingClaws()
+	}
+}
+
 // finishWorkflowV2CronRun finishes the cron history row of a terminal run and
 // releases its overlap slot. Both steps are idempotent.
 func (s *Server) finishWorkflowV2CronRun(ctx context.Context, run workflowv2.Run) {

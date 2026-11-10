@@ -119,7 +119,9 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 		want        string
 		wantRun     string
 	}{
-		{"finished", workflowV2FinishedAtActivationError{status: "completed"}, false, "provisioning", "running"},
+		// The run does not exist, so the parent finish exits early and the
+		// creator's backstop deletes the claw and promotes the queue.
+		{"finished", workflowV2FinishedAtActivationError{runID: "missing-run", status: "completed"}, false, "deleted", "success"},
 		// A failed dequeue must not leave the claw pending for the next
 		// promotion to provision, and records the run's terminal result.
 		{"finished dequeue failed", workflowV2FinishedAtActivationError{status: "completed"}, true, "deleted", "success"},
@@ -155,6 +157,10 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 					if got := queueTestStatus(t, db, id); got != "pending" {
 						t.Fatalf("claw status=%q during activation, want pending", got)
 					}
+					if tc.activation != nil && !tc.failDequeue {
+						// Queued behind the finished claw's slot until it is deleted.
+						insertQueueTestClaw(t, db, "next0001", "pending", "cruise-demo", time.Now().UTC())
+					}
 					return tc.activation
 				},
 			})
@@ -167,12 +173,30 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 			}
 			// The claw already left 'pending' when the creator returned, and
 			// promotion only selects pending claws, so it cannot provision it.
-			if got := queueTestStatus(t, db, id); got != tc.want {
-				t.Fatalf("finished claw status=%q, want %q without provisioning", got, tc.want)
+			if got := queueTestStatus(t, db, id); got != "provisioning" && got != "deleted" {
+				t.Fatalf("finished claw status=%q, want it out of the pending queue", got)
 			}
 			s.promotePendingClaws()
-			if got := queueTestStatus(t, db, id); got != tc.want {
-				t.Fatalf("finished claw status=%q after promotion, want %q", got, tc.want)
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				var status, providerID string
+				if err := db.QueryRow(`SELECT status, COALESCE(provider_id,'') FROM claws WHERE id=?`, id).Scan(&status, &providerID); err != nil {
+					t.Fatal(err)
+				}
+				if providerID != "" {
+					t.Fatalf("finished claw was provisioned: status=%q provider=%q", status, providerID)
+				}
+				if status == tc.want {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("finished claw status=%q, want %q", status, tc.want)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !tc.failDequeue {
+				// Deleting the finished claw freed the slot it held.
+				waitForQueueTestPromotion(t, db, "next0001")
 			}
 			var runStatus string
 			if err := db.QueryRow(`SELECT status FROM workflow_runs WHERE id='queue-run'`).Scan(&runStatus); err != nil {

@@ -18,9 +18,13 @@ import (
 // task run are already finished, so callers must not provision a claw.
 var errWorkflowV2FinishedAtActivation = errors.New("workflow v2 run finished during activation")
 
-// workflowV2FinishedAtActivationError carries the terminal status the run
-// reached, so callers can report it without re-reading the run.
-type workflowV2FinishedAtActivationError struct{ status workflowv2.RunStatus }
+// workflowV2FinishedAtActivationError carries the run and the terminal status
+// it reached, so callers can finish its parent and report the status without
+// re-reading the run.
+type workflowV2FinishedAtActivationError struct {
+	runID  string
+	status workflowv2.RunStatus
+}
 
 func (e workflowV2FinishedAtActivationError) Error() string {
 	return errWorkflowV2FinishedAtActivation.Error() + ": " + string(e.status)
@@ -95,14 +99,9 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 			cronCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			s.finishWorkflowV2CronRun(cronCtx, run)
 			cancel()
-			// Finish the parent in the background, like every other terminal
-			// hook: callers skip provisioning, so it must outlive the caller's
-			// ctx (an HTTP request for manual triggers), and it has no deadline
-			// because a timeout mid-way would leave the parent partially
-			// finished. Running it async keeps a stalled finish from blocking
-			// activation. Its cron steps are idempotent no-ops by then.
-			go s.maybeFinishWorkflowV2Parent(context.Background(), runID)
-			return workflowV2FinishedAtActivationError{status: run.Status}
+			// The claw creator finishes the parent once it has taken the
+			// claw out of the pending queue (finishWorkflowV2ClawAfterActivation).
+			return workflowV2FinishedAtActivationError{runID: runID, status: run.Status}
 		}
 	}
 	return store.CompleteActivation(ctx, runID)

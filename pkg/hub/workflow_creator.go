@@ -297,22 +297,24 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		err := opts.beforeProvision(callbackCtx, clawID, tenantID)
 		if errors.Is(err, errWorkflowV2FinishedAtActivation) {
 			log.Printf("[workflow] run for claw %s finished during activation; skipping provisioning", clawID[:8])
+			var finished workflowV2FinishedAtActivationError
+			errors.As(err, &finished)
+			result := workflowV2ClawResult(finished.status)
 			// Leave the pending queue without provisioning, like a claw that
-			// was never queued; maybeFinishWorkflowV2Parent deletes it and
-			// then promotes pending claws.
+			// was never queued; the parent finish below deletes it and then
+			// promotes pending claws.
 			if _, dequeueErr := s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=? AND status='pending'`, clawID); dequeueErr != nil {
 				// A claw left pending would be provisioned by the next
 				// promotion once the hold is released; finish it here instead.
 				log.Printf("[workflow] failed to dequeue finished claw %s: %v", clawID[:8], dequeueErr)
-				var finished workflowV2FinishedAtActivationError
-				errors.As(err, &finished)
-				if _, finishErr := s.finishClawTerminalTx(clawID, "deleted", "", workflowV2ClawResult(finished.status),
+				if _, finishErr := s.finishClawTerminalTx(clawID, "deleted", "", result,
 					"workflow v2 run finished during activation", terminalTxOpts{}); finishErr != nil {
 					log.Printf("[workflow] failed to finish dequeue-failed claw %s: %v", clawID[:8], finishErr)
 				}
 				s.activatingClaws.Delete(clawID)
 				go s.promotePendingClaws()
 			}
+			go s.finishWorkflowV2ClawAfterActivation(finished.runID, clawID, result)
 			return clawID, false, nil
 		}
 		if err != nil {
