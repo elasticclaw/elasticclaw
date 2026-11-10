@@ -565,12 +565,12 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	if changed != 1 {
 		return EventResult{}, fmt.Errorf("state compare-and-swap failed for run %s version %d", runID, stored.StateVersion)
 	}
-	// A delivery transition during activation (adopting an existing PR, or
-	// promoting a registered branch PR) leaves the initial state before its
-	// on_enter effects could be claimed; they must not run in the destination
-	// state. Other activation-time transitions, such as context.bundle.ready,
-	// keep their initial effects.
-	if (input.Kind == "delivery.adopted" || input.Kind == "delivery.verified") && stored.Status == RunSuspended && stored.WaitingReason == activationPendingReason {
+	// A delivery transition during activation (adopting an existing PR,
+	// promoting a registered branch PR, or the policy evaluation they publish)
+	// leaves the initial state before its on_enter effects could be claimed;
+	// they must not run in the destination state. Other activation-time
+	// transitions, such as context.bundle.ready, keep their initial effects.
+	if activationDeliveryEventKinds[input.Kind] && stored.Status == RunSuspended && stored.WaitingReason == activationPendingReason {
 		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',last_error=?,updated_at=?
 			WHERE run_id=? AND origin_type='initial' AND status='planned'`,
 			"initial state left during activation", now.UnixMilli(), runID); err != nil {
@@ -1172,6 +1172,15 @@ func finishRunScan(run *Run, phase, status string, created, updated, finished in
 		value := time.UnixMilli(finished).UTC()
 		run.FinishedAt = &value
 	}
+}
+
+// activationDeliveryEventKinds are the events adoption and branch promotion
+// publish while a run is still activation-pending.
+var activationDeliveryEventKinds = map[string]bool{
+	"delivery.adopted":            true,
+	"delivery.verified":           true,
+	"workflow.delivery.evaluated": true,
+	"review.policy.evaluated":     true,
 }
 
 func terminalRunStatus(state string) RunStatus {

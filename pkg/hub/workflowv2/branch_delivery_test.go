@@ -245,8 +245,16 @@ transitions:
 // Adoption during activation leaves the initial state, so its on_enter effects
 // must not run in the destination state.
 func TestAdoptionDuringActivationCancelsInitialEffects(t *testing.T) {
-	for _, adopt := range []bool{true, false} {
-		t.Run(fmt.Sprint(adopt), func(t *testing.T) {
+	for _, tc := range []struct {
+		on    string
+		adopt bool
+	}{
+		{"delivery.adopted", true}, {"delivery.adopted", false},
+		{"workflow.delivery.evaluated", true}, {"workflow.delivery.evaluated", false},
+	} {
+		adopt := tc.adopt
+		workflowYAML := strings.Replace(adoptionInitialEffectWorkflowYAML, "on: delivery.adopted", "on: "+tc.on, 1)
+		t.Run(fmt.Sprintf("%s/%t", tc.on, adopt), func(t *testing.T) {
 			ctx := context.Background()
 			db := openRuntimeDB(t)
 			store := workflowv2.NewStore(db)
@@ -260,7 +268,7 @@ func TestAdoptionDuringActivationCancelsInitialEffects(t *testing.T) {
 				t.Fatal(err)
 			}
 			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "new", TenantID: "tenant-1", InitialClawID: "new-claw", ActivationPending: true,
-				WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(adoptionInitialEffectWorkflowYAML)})
+				WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(workflowYAML)})
 			if err != nil {
 				t.Fatal(err)
 			}
