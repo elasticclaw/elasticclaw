@@ -174,6 +174,26 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 			"delivery.minimum_met": policy.MinimumMet, "delivery.ci_satisfied": policy.CISatisfied,
 			"delivery.review_satisfied": policy.ReviewSatisfied, "delivery.satisfied": policy.Satisfied,
 		}
+		// The CI and review statuses aggregate the same PRs, so they are
+		// refreshed too, under the producers that own them; their revisions
+		// are likewise left to the publications.
+		var workflowYAML string
+		if err := tx.QueryRowContext(ctx, `SELECT workflow_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workflowYAML); err != nil {
+			return err
+		}
+		workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
+		if err != nil {
+			return fmt.Errorf("load pinned workflow: %w", err)
+		}
+		if delivery := workflow.Workflow.Delivery; delivery != nil && delivery.PullRequests != nil {
+			input.ownedFacts = map[Producer]map[string]interface{}{}
+			if delivery.PullRequests.CIPolicy != "" {
+				input.ownedFacts[ProducerCI] = map[string]interface{}{"ci.status": policy.CIStatus}
+			}
+			if delivery.PullRequests.ReviewPolicy != "" {
+				input.ownedFacts[ProducerReview] = map[string]interface{}{"review.status": policy.ReviewStatus}
+			}
+		}
 		return nil
 	})
 	if err != nil {

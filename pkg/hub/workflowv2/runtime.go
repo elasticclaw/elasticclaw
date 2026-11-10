@@ -107,6 +107,10 @@ type EventInput struct {
 	// suspended may break an invariant that a later queued transition
 	// resolves, so replayDeferredEvents checks it once the queue drains.
 	deferInvariant bool
+	// ownedFacts are hub-derived facts written with the event under the
+	// producer that owns them, such as the CI and review policy statuses a
+	// delivery submission re-aggregates. Only store code sets them.
+	ownedFacts map[Producer]map[string]interface{}
 }
 
 type eventMutation func(context.Context, *sql.Tx, *EventInput) error
@@ -460,6 +464,11 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	}
 	if err := writeFacts(ctx, tx, runID, input.ID, input.Producer, input.Provenance, input.Facts, now); err != nil {
 		return EventResult{}, err
+	}
+	for producer, facts := range input.ownedFacts {
+		if err := writeFacts(ctx, tx, runID, input.ID, producer, input.Provenance, facts, now); err != nil {
+			return EventResult{}, err
+		}
 	}
 	// The transition engine sees this observation live, so it supersedes one
 	// queued for the same subject; replaying the older one later (a sweep after
