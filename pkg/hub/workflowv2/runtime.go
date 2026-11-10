@@ -619,7 +619,7 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	}
 	// Leaving the state discards the clause effects a replay parked there
 	// (rejectAndSuspend discards them when the run suspends in it). A self-loop
-	// stays in the state, so they keep waiting for the settle.
+	// stays in the state, so it keeps them; see below.
 	if transitionDef.To != stored.State {
 		if err := cancelPostponedEffects(ctx, tx, stored, now); err != nil {
 			return EventResult{}, err
@@ -628,6 +628,14 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	if !valid {
 		reason := fmt.Sprintf("destination invariant does not hold for state %s", transitionDef.To)
 		return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
+	}
+	// A verified self-loop verifies the invariant the parked effects wait for
+	// and makes the run active, so it releases them like the settle would; no
+	// active run is left holding parked effects.
+	if transitionDef.To == stored.State && !held {
+		if err := releasePostponedEffects(ctx, tx, runID, now); err != nil {
+			return EventResult{}, err
+		}
 	}
 
 	transitionID := uuid.NewString()
