@@ -151,7 +151,10 @@ func pullRequestDeferKey(prID, kind string) string {
 // that no longer describe it once its head or state moved, whichever path
 // (reconciler or delivery resubmission) recorded the move. Observations of the
 // old head or of an open PR must not replay; CI and review policy results
-// aggregate head-bound evidence that was just superseded; review feedback is
+// aggregate head-bound evidence that was just superseded, and the delivery
+// policy result aggregates those and every PR's state (the caller recomputes
+// it after the move, after a resubmission's recovery replay has already run);
+// review feedback is
 // bound to the head it was left on, and the live path rejects it for a stale
 // head. A queued lifecycle observation (closed, merged, verified_open) no
 // longer describes the PR once its state moved, even when the newer
@@ -171,6 +174,9 @@ func clearStaleDeferredEvents(ctx context.Context, tx *sql.Tx, runID, prID strin
 	}
 	if stateChanged {
 		stale = append(stale, pullRequestDeferKey(prID, ""))
+	}
+	if headChanged || stateChanged {
+		stale = append(stale, "workflow.delivery.evaluated")
 	}
 	for _, key := range stale {
 		if err := clearDeferredEvent(ctx, tx, runID, key); err != nil {

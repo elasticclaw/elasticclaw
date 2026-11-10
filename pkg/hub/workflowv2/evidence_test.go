@@ -2158,3 +2158,44 @@ func TestRejectedControlCancelsHeldEntryEffects(t *testing.T) {
 		t.Fatalf("held entry effect after control rejection = %s, want cancelled", status)
 	}
 }
+
+// A delivery policy result queued while suspended aggregates evidence of the
+// head it was evaluated on. A resubmission that verifies a new head and resumes
+// the run must not replay it: the policy for the new head has no evidence yet.
+func TestResubmissionDropsDeferredDeliveryPolicyOfPreviousHead(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  approved:\n    phase: review\ntransitions:\n"+
+			"  ci_green:\n    from: reviewing\n    on: workflow.delivery.evaluated\n    when:\n"+
+			"      workflow:\n        delivery:\n          ci_satisfied:\n            equals: true\n    to: approved\n"+
+			"  resubmitted:\n    from: reviewing\n    on: delivery.verified\n    to: reviewing\n", 1)
+	pr := createSuspendedDelivery(t, store, db, "run-stale-policy", workflowYAML)
+	for _, check := range []string{"lint", "unit"} {
+		recordPolicyEvidence(t, store, "run-stale-policy", pr, "ci", "github-actions", check, check, "success",
+			map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	}
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events
+		WHERE run_id='run-stale-policy' AND defer_key='workflow.delivery.evaluated'`).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("delivery policy not deferred: %d, %v", queued, err)
+	}
+	run, err := store.GetRun(ctx, "run-stale-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resubmitted := pr
+	resubmitted.HeadSHA = "head-2"
+	if _, err := store.SubmitDelivery(ctx, "run-stale-policy", run.CurrentAttemptID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}},
+	}, workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+		typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		return resubmitted, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, "run-stale-policy"); err != nil || run.State != "reviewing" || run.Status != workflowv2.RunActive {
+		t.Fatalf("resubmitted run = %#v, %v (previous head's delivery policy replayed?)", run, err)
+	}
+}
