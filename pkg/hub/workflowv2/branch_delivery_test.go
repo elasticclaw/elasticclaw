@@ -409,3 +409,50 @@ func TestBranchPromotionDuringActivationCancelsInitialEffects(t *testing.T) {
 		t.Fatalf("initial effect status=%s err=%v", status, err)
 	}
 }
+
+// A self-transition on the initial state during activation re-enters it and
+// schedules its on_enter effects again, so the unclaimed initial copies are
+// cancelled and the effects run exactly once.
+func TestSelfTransitionDuringActivationRunsInitialEffectsOnce(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	previous := createDeliveryRun(t, store, "previous")
+	url := "https://github.example/org/api/pull/10"
+	delivered, err := store.SubmitDelivery(ctx, previous.RunID, previous.ID, typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: url}}}, deliveryVerifier(map[string]string{url: "head"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='completed' WHERE id=?`, previous.RunID); err != nil {
+		t.Fatal(err)
+	}
+	workflowYAML := strings.Replace(adoptionInitialEffectWorkflowYAML,
+		"on: delivery.adopted\n    to: awaiting", "on: workflow.delivery.evaluated\n    to: working", 1)
+	run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "self", TenantID: "tenant-1", InitialClawID: "self-claw", ActivationPending: true,
+		WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(workflowYAML)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssembleOrganizationContext(ctx, run.ID, workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, _ string, _ typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+		return typesv2.ContextBundleSource{}, fmt.Errorf("unexpected knowledge resolution")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdoptPullRequests(ctx, run.ID, delivered, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteActivation(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetRun(ctx, run.ID)
+	if err != nil || current.State != "working" || current.StateVersion != 2 || current.Status != workflowv2.RunActive {
+		t.Fatalf("run=%+v err=%v", current, err)
+	}
+	claim, err := store.ClaimEffect(ctx, "worker", time.Minute)
+	if err != nil || claim == nil || claim.Effect.RunID != run.ID || claim.Effect.Kind != "agent.task" {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	if extra, err := store.ClaimEffect(ctx, "worker", time.Minute); err != nil || extra != nil {
+		t.Fatalf("extra claim=%+v err=%v", extra, err)
+	}
+}
