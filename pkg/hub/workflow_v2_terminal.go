@@ -99,10 +99,6 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	s.mu.Unlock()
 }
 
-// releaseWorkflowV2CronSlot releases the in-memory overlap slot for a terminal
-// v2 cron run exactly once. It does not update the cron history row; callers
-// that need to record a failure reason should finish that row separately. The
-// release is idempotent via cron_slot_released.
 // finishWorkflowV2CronRun finishes the cron history row of a terminal run and
 // releases its overlap slot. Both steps are idempotent.
 func (s *Server) finishWorkflowV2CronRun(ctx context.Context, run workflowv2.Run) {
@@ -112,6 +108,10 @@ func (s *Server) finishWorkflowV2CronRun(ctx context.Context, run workflowv2.Run
 	s.releaseWorkflowV2CronSlot(ctx, run.ID)
 }
 
+// releaseWorkflowV2CronSlot releases the in-memory overlap slot for a terminal
+// v2 cron run exactly once. It does not update the cron history row; callers
+// that need to record a failure reason should finish that row separately. The
+// release is idempotent via cron_slot_released.
 func (s *Server) releaseWorkflowV2CronSlot(ctx context.Context, runID string) {
 	if s == nil || s.db == nil || s.cronSchedulerV2 == nil || runID == "" {
 		return
