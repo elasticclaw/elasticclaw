@@ -1495,6 +1495,47 @@ func TestReplayReleasesPostponedClauseEffectsWhenInvariantSettles(t *testing.T) 
 	}
 }
 
+// A self-loop transition does not leave the state, so it keeps the clause
+// effects a replay parked there until the settle judges the invariant: the CI
+// clause closes the gate and a reviewing -> reviewing transition reopens it.
+func TestReplaySelfLoopKeepsPostponedClauseEffects(t *testing.T) {
+	invariant := "    invariant:\n      work.gate_closed:\n        exists: false\n"
+	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant, 1)
+	noMatch := strings.Replace(withInvariant, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+		"          equals: never\n    to: fixing\n  review_failed:", 1)
+	selfLoop := strings.Replace(noMatch, "ci:\n  policies:",
+		"  review_passed:\n    from: reviewing\n    on: review.policy.evaluated\n    when:\n      review:\n        status:\n          not_equals: unsatisfied\n"+
+			"    set:\n      work.gate_closed: null\n    to: reviewing\nci:\n  policies:", 1)
+	clauses := "events:\n  ci.policy.evaluated:\n    clauses:\n      - from: reviewing\n        set:\n          work.gate_closed: true\n        effects:\n" +
+		"          - agent.task:\n              prompt: Investigate the CI failure.\n"
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	pr := createSuspendedDelivery(t, store, db, "run-self-loop", selfLoop+clauses)
+	if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id='run-self-loop'`); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, "run-self-loop", pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	recordPolicyEvidence(t, store, "run-self-loop", pr, "review", "github-reviews", "alice", "approval", "approved",
+		nil, workflowv2.ProducerReview)
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-self-loop'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, "run-self-loop")
+	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" || run.StateVersion < 2 {
+		t.Fatalf("settled run = %#v, %v (self-loop not taken?)", run, err)
+	}
+	claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute)
+	if err != nil || claim == nil || claim.Effect.Kind != "agent.task" {
+		t.Fatalf("claim after settle = %#v, %v (self-loop cancelled the parked clause effect?)", claim, err)
+	}
+}
+
 // A live observation on an active run supersedes one queued for the same
 // subject: a failed recovery replay leaves the queue for the sweep, and the
 // sweep must not replay a CI failure that a later live CI result superseded.
