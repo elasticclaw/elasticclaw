@@ -196,6 +196,18 @@ func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
 	if runStatus != string(workflowv2.RunCompleted) {
 		t.Fatalf("run=%s", runStatus)
 	}
+	// Cron history and the overlap slot are finished before the trigger
+	// returns, so the next fire is not skipped while the parent finishes.
+	var cronStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_cron_runs`).Scan(&cronStatus); err != nil || cronStatus == "running" {
+		t.Fatalf("cron=%s err=%v", cronStatus, err)
+	}
+	s.cronSchedulerV2.runningMu.Lock()
+	running := s.cronSchedulerV2.running["adoption/adoption"]
+	s.cronSchedulerV2.runningMu.Unlock()
+	if running != 0 {
+		t.Fatalf("cron slot still held: %d", running)
+	}
 	// The parent claw is finished in the background, never provisioned (noop
 	// would connect it).
 	deadline := time.Now().Add(5 * time.Second)
@@ -214,17 +226,6 @@ func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
 			t.Fatalf("parent claw not finished: %s", clawStatus)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	// The cron history row is finished before the parent claw.
-	var cronStatus string
-	if err := db.QueryRow(`SELECT status FROM workflow_v2_cron_runs`).Scan(&cronStatus); err != nil || cronStatus == "running" {
-		t.Fatalf("cron=%s err=%v", cronStatus, err)
-	}
-	s.cronSchedulerV2.runningMu.Lock()
-	running := s.cronSchedulerV2.running["adoption/adoption"]
-	s.cronSchedulerV2.runningMu.Unlock()
-	if running != 0 {
-		t.Fatalf("cron slot still held: %d", running)
 	}
 }
 

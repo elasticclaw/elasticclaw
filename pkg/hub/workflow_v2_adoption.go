@@ -90,12 +90,17 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 		}
 		// delivery.adopted may itself reach a terminal state.
 		if run.Status != workflowv2.RunActive && run.Status != workflowv2.RunSuspended {
+			// Finish cron history and release the overlap slot before
+			// returning, so the next cron fire never sees this run as running.
+			cronCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			s.finishWorkflowV2CronRun(cronCtx, run)
+			cancel()
 			// Finish the parent in the background, like every other terminal
 			// hook: callers skip provisioning, so it must outlive the caller's
 			// ctx (an HTTP request for manual triggers), and it has no deadline
 			// because a timeout mid-way would leave the parent partially
 			// finished. Running it async keeps a stalled finish from blocking
-			// activation.
+			// activation. Its cron steps are idempotent no-ops by then.
 			go s.maybeFinishWorkflowV2Parent(context.Background(), runID)
 			return workflowV2FinishedAtActivationError{status: run.Status}
 		}

@@ -29,10 +29,7 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if run.Status != workflowv2.RunCompleted && run.Status != workflowv2.RunCancelled {
 		return
 	}
-	if s.cronSchedulerV2 != nil && run.TriggerType == "cron" {
-		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
-	}
-	s.releaseWorkflowV2CronSlot(ctx, run.ID)
+	s.finishWorkflowV2CronRun(ctx, run)
 	if strings.TrimSpace(run.TaskRunID) == "" {
 		// No parent task run; nothing to finish.
 		return
@@ -106,6 +103,15 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 // v2 cron run exactly once. It does not update the cron history row; callers
 // that need to record a failure reason should finish that row separately. The
 // release is idempotent via cron_slot_released.
+// finishWorkflowV2CronRun finishes the cron history row of a terminal run and
+// releases its overlap slot. Both steps are idempotent.
+func (s *Server) finishWorkflowV2CronRun(ctx context.Context, run workflowv2.Run) {
+	if s.cronSchedulerV2 != nil && run.TriggerType == "cron" {
+		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
+	}
+	s.releaseWorkflowV2CronSlot(ctx, run.ID)
+}
+
 func (s *Server) releaseWorkflowV2CronSlot(ctx context.Context, runID string) {
 	if s == nil || s.db == nil || s.cronSchedulerV2 == nil || runID == "" {
 		return
