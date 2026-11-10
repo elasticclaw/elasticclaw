@@ -2471,6 +2471,86 @@ func TestResubmissionAddingPRRefreshesPolicyStatusFactsBeforeReplay(t *testing.T
 	}
 }
 
+// A head move of another PR invalidates its CI and review evidence. The run
+// that resumes before new evidence arrives must not replay the queued merge of
+// the first PR against the CI or review status of the previous head.
+func TestHeadMoveRefreshesPolicyStatusFactsBeforeReplay(t *testing.T) {
+	for _, domain := range []string{"ci", "review"} {
+		t.Run(domain, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			runID := "run-head-move-" + domain + "-status"
+			workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+				"  done:\n    phase: done\n    terminal: true\ntransitions:\n"+
+					"  merged:\n    from: reviewing\n    on: pull_request.merged\n    when:\n"+
+					"      "+domain+":\n        status:\n          equals: satisfied\n    to: done\n", 1)
+			workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+			if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+				ID: runID, TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := store.StartAttempt(ctx, runID, "claw-policy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/10"}
+			second := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/11"}
+			verified, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{
+				PullRequests: []typesv2.PullRequestClaim{first, second},
+			}, deliveryVerifier(map[string]string{first.URL: "head-1", second.URL: "other-1"}))
+			if err != nil || len(verified) != 2 {
+				t.Fatalf("delivery = %#v, %v", verified, err)
+			}
+			for _, pr := range verified {
+				for _, check := range []string{"lint", "unit"} {
+					recordPolicyEvidence(t, store, runID, pr, "ci", "github-actions", check, check, "success",
+						map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+				}
+				recordPolicyEvidence(t, store, runID, pr, "review", "github-reviews", "alice", "approval", "approved",
+					nil, workflowv2.ProducerReview)
+			}
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id=?`, runID); err != nil {
+				t.Fatal(err)
+			}
+			reconcile := func(number int, eventID, kind string, pr typesv2.VerifiedPullRequest) workflowv2.EventResult {
+				t.Helper()
+				targets, err := store.ActiveDeliveryTargetsAll(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, target := range targets {
+					if target.Number == number {
+						pr.Provenance.ObservedAt = time.Date(2026, 8, 8, 12, 2, 0, 0, time.UTC)
+						result, err := store.ReconcilePullRequest(ctx, target, eventID, kind, pr)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return result
+					}
+				}
+				t.Fatalf("no target for PR #%d in %#v", number, targets)
+				return workflowv2.EventResult{}
+			}
+			merged := verified[0]
+			merged.State = "merged"
+			if result := reconcile(10, "merge", "pull_request.merged", merged); !result.Deferred {
+				t.Fatalf("merge while suspended was not deferred: %#v", result)
+			}
+			moved := verified[1]
+			moved.HeadSHA = "other-2"
+			reconcile(11, "push", "pull_request.head_changed", moved)
+			if _, err := store.ApplyCommand(ctx, runID, "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+				t.Fatal(err)
+			}
+			if run, err := store.GetRun(ctx, runID); err != nil || run.State != "reviewing" || run.Status != workflowv2.RunActive {
+				t.Fatalf("resumed run = %#v, %v (queued merge replayed on a stale %s.status?)", run, err, domain)
+			}
+		})
+	}
+}
+
 // Each PR move clears the delivery policy result a suspended run queued, and
 // the caller that recorded the move republishes it afterwards. A later move of
 // another PR therefore drops the result queued after an earlier move only to

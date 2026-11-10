@@ -134,6 +134,31 @@ func (s *Store) preflightDeliveryControlTx(ctx context.Context, tx *sql.Tx,
 		StateVersion: run.StateVersion, Reason: reason}, true, nil
 }
 
+// policyStatusFacts returns the CI and review policy statuses of policy under
+// the producers that own them, for the policies the pinned workflow uses.
+// Writers that change the policy inputs (the delivered PRs or their heads) set
+// them with their event: a resumed run replays its deferred queue before the
+// policy events are published, and must not see the statuses of the previous
+// inputs.
+func policyStatusFacts(workflowYAML string, policy DeliveryPolicyResult) (map[Producer]map[string]interface{}, error) {
+	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
+	if err != nil {
+		return nil, fmt.Errorf("load pinned workflow: %w", err)
+	}
+	delivery := workflow.Workflow.Delivery
+	if delivery == nil || delivery.PullRequests == nil {
+		return nil, nil
+	}
+	facts := map[Producer]map[string]interface{}{}
+	if delivery.PullRequests.CIPolicy != "" {
+		facts[ProducerCI] = map[string]interface{}{"ci.status": policy.CIStatus}
+	}
+	if delivery.PullRequests.ReviewPolicy != "" {
+		facts[ProducerReview] = map[string]interface{}{"review.status": policy.ReviewStatus}
+	}
+	return facts, nil
+}
+
 func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, messageID string,
 	expectedStateVersion *uint64, manifest typesv2.DeliveryManifest,
 	verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, EventResult, error) {
@@ -181,20 +206,8 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 		if err := tx.QueryRowContext(ctx, `SELECT workflow_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workflowYAML); err != nil {
 			return err
 		}
-		workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
-		if err != nil {
-			return fmt.Errorf("load pinned workflow: %w", err)
-		}
-		if delivery := workflow.Workflow.Delivery; delivery != nil && delivery.PullRequests != nil {
-			input.ownedFacts = map[Producer]map[string]interface{}{}
-			if delivery.PullRequests.CIPolicy != "" {
-				input.ownedFacts[ProducerCI] = map[string]interface{}{"ci.status": policy.CIStatus}
-			}
-			if delivery.PullRequests.ReviewPolicy != "" {
-				input.ownedFacts[ProducerReview] = map[string]interface{}{"review.status": policy.ReviewStatus}
-			}
-		}
-		return nil
+		input.ownedFacts, err = policyStatusFacts(workflowYAML, policy)
+		return err
 	})
 	if err != nil {
 		return nil, EventResult{}, err

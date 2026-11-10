@@ -279,6 +279,15 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 		if err != nil {
 			return err
 		}
+		// A head move supersedes the PR's evidence, so the CI and review
+		// statuses are refreshed with the move, as on a delivery submission.
+		policy, err := evaluateDeliveryPolicy(ctx, tx, target.RunID)
+		if err != nil {
+			return err
+		}
+		if input.ownedFacts, err = policyStatusFacts(target.WorkflowYAML, policy); err != nil {
+			return err
+		}
 		if mergeableHead != verified.HeadSHA {
 			baseSHA, mergeableState = "", ""
 		}
