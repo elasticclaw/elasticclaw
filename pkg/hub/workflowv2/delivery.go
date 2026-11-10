@@ -157,11 +157,22 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 		if err != nil {
 			return err
 		}
+		// The policy result facts must describe the delivery as submitted: a
+		// resumed run replays its deferred queue before the policy below is
+		// published, and a result stored for fewer PRs (delivery.satisfied
+		// while every earlier PR was merged) would fire on stale facts. The
+		// revision is left to the publication so it still emits the event.
+		policy, err := evaluateDeliveryPolicy(ctx, tx, runID)
+		if err != nil {
+			return err
+		}
 		input.Payload = map[string]interface{}{"delivery": summary}
 		input.Facts = map[string]interface{}{
 			"delivery.count": summary["count"], "delivery.open": summary["open"],
 			"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
 			"delivery.any_conflicted": summary["any_conflicted"], "delivery.any_behind": summary["any_behind"],
+			"delivery.minimum_met": policy.MinimumMet, "delivery.ci_satisfied": policy.CISatisfied,
+			"delivery.review_satisfied": policy.ReviewSatisfied, "delivery.satisfied": policy.Satisfied,
 		}
 		return nil
 	})

@@ -2292,3 +2292,55 @@ func TestResubmissionAddingPRDropsDeferredDeliveryPolicy(t *testing.T) {
 		})
 	}
 }
+
+// A delivery policy satisfied while suspended (every delivered PR merged and
+// green) leaves delivery.satisfied=true in the facts. A resubmission that adds
+// an open PR and resumes the run must not let the queued merge of the first PR
+// replay against that stale result and complete the run.
+func TestResubmissionAddingPRRefreshesDeliveryPolicyFactsBeforeReplay(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	runID := "run-added-pr-merged"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  done:\n    phase: done\n    terminal: true\ntransitions:\n"+
+			"  merged:\n    from: reviewing\n    on: pull_request.merged\n    when:\n"+
+			"      delivery:\n        satisfied:\n          equals: true\n    to: done\n"+
+			"  resubmitted:\n    from: reviewing\n    on: delivery.verified\n    to: reviewing\n", 1)
+	pr := createSuspendedDelivery(t, store, db, runID, workflowYAML)
+	for _, check := range []string{"lint", "unit"} {
+		recordPolicyEvidence(t, store, runID, pr, "ci", "github-actions", check, check, "success",
+			map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	}
+	recordPolicyEvidence(t, store, runID, pr, "review", "github-reviews", "alice", "approval", "approved",
+		nil, workflowv2.ProducerReview)
+	pr.State = "merged"
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcilePullRequest(ctx, target, "merge", "pull_request.merged", pr)
+	}); !result.Deferred {
+		t.Fatalf("merge while suspended was not deferred: %#v", result)
+	}
+	if policy, err := store.EvaluateDeliveryPolicy(ctx, runID); err != nil || !policy.Satisfied {
+		t.Fatalf("delivery policy before resubmission = %#v, %v", policy, err)
+	}
+	run, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/11"}
+	otherVerifier := deliveryVerifier(map[string]string{other.URL: "other-1"})
+	if _, err := store.SubmitDelivery(ctx, runID, run.CurrentAttemptID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}, other},
+	}, workflowv2.PullRequestVerifierFunc(func(ctx context.Context, run workflowv2.Run, workspace *typesv2.Workspace,
+		claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		if claim.URL == pr.URL {
+			return pr, nil
+		}
+		return otherVerifier.VerifyPullRequest(ctx, run, workspace, claim)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, runID); err != nil || run.State != "reviewing" || run.Status != workflowv2.RunActive {
+		t.Fatalf("resubmitted run = %#v, %v (queued merge replayed on a stale delivery policy?)", run, err)
+	}
+}
