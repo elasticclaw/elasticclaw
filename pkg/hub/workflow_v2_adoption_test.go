@@ -188,16 +188,17 @@ func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
 	if _, err := s.cronSchedulerV2.manualTrigger("adoption", "adoption", "test-tenant-id"); err != nil {
 		t.Fatal(err)
 	}
-	var runStatus, clawID, cronStatus string
-	if err := db.QueryRow(`SELECT r.status,c.claw_id,c.status FROM workflow_v2_cron_runs c JOIN workflow_v2_runs r ON r.id=c.v2_run_id`).
-		Scan(&runStatus, &clawID, &cronStatus); err != nil {
+	var runStatus, clawID string
+	if err := db.QueryRow(`SELECT r.status,c.claw_id FROM workflow_v2_cron_runs c JOIN workflow_v2_runs r ON r.id=c.v2_run_id`).
+		Scan(&runStatus, &clawID); err != nil {
 		t.Fatal(err)
 	}
-	if runStatus != string(workflowv2.RunCompleted) || cronStatus == "running" {
-		t.Fatalf("run=%s cron=%s", runStatus, cronStatus)
+	if runStatus != string(workflowv2.RunCompleted) {
+		t.Fatalf("run=%s", runStatus)
 	}
-	// The parent claw is finished, never provisioned (noop would connect it).
-	deadline := time.Now().Add(2 * time.Second)
+	// The parent claw is finished in the background, never provisioned (noop
+	// would connect it).
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		var clawStatus, providerID string
 		if err := db.QueryRow(`SELECT status,provider_id FROM claws WHERE id=?`, clawID).Scan(&clawStatus, &providerID); err != nil {
@@ -213,6 +214,11 @@ func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
 			t.Fatalf("parent claw not finished: %s", clawStatus)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	// The cron history row is finished before the parent claw.
+	var cronStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_cron_runs`).Scan(&cronStatus); err != nil || cronStatus == "running" {
+		t.Fatalf("cron=%s err=%v", cronStatus, err)
 	}
 	s.cronSchedulerV2.runningMu.Lock()
 	running := s.cronSchedulerV2.running["adoption/adoption"]
@@ -368,5 +374,20 @@ func testWorkflowV2ManualAdoptionFinishingRun(t *testing.T, terminalState, want 
 	}
 	if calls == 0 || created["status"] != want || runStatus != want {
 		t.Fatalf("calls=%d response=%v run=%s", calls, created, runStatus)
+	}
+	// The parent claw is finished in the background.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var clawStatus string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, created["claw_id"]).Scan(&clawStatus); err != nil {
+			t.Fatal(err)
+		}
+		if clawStatus == "deleted" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("parent claw not finished: %s", clawStatus)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

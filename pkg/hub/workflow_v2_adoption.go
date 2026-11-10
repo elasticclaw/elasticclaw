@@ -90,12 +90,13 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 		}
 		// delivery.adopted may itself reach a terminal state.
 		if run.Status != workflowv2.RunActive && run.Status != workflowv2.RunSuspended {
-			// Detach from the caller (an HTTP request for manual triggers):
-			// callers skip provisioning, so a cancelled ctx here would leave the
-			// claw unprovisioned with nothing left to finish it. No deadline,
-			// like every other terminal hook: a timeout mid-way would leave the
-			// parent partially finished with nothing to re-drive it.
-			s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+			// Finish the parent in the background, like every other terminal
+			// hook: callers skip provisioning, so it must outlive the caller's
+			// ctx (an HTTP request for manual triggers), and it has no deadline
+			// because a timeout mid-way would leave the parent partially
+			// finished. Running it async keeps a stalled finish from blocking
+			// activation.
+			go s.maybeFinishWorkflowV2Parent(context.Background(), runID)
 			return workflowV2FinishedAtActivationError{status: run.Status}
 		}
 	}
