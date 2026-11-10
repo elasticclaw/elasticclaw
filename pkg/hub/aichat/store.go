@@ -120,7 +120,7 @@ func (s *Store) History(ctx context.Context, threadID string) ([]Message, error)
 func (s *Store) messages(ctx context.Context, threadID string, limit int, completedOnly bool) ([]Message, error) {
 	query := `SELECT id,thread_id,seq,role,content,COALESCE(model,''),input_tokens,output_tokens,status,created_at,blocks_json,interview_json FROM ai_chat_messages WHERE thread_id=?`
 	if completedOnly {
-		query += ` AND (status='completed' OR (status IN ('error','cancelled') AND EXISTS(SELECT 1 FROM json_each(COALESCE(blocks_json,'[]')) WHERE json_extract(value,'$.type')='action')))`
+		query += ` AND (status='completed' OR (status IN ('error','cancelled','interrupted') AND EXISTS(SELECT 1 FROM json_each(COALESCE(blocks_json,'[]')) WHERE json_extract(value,'$.type')='action')))`
 	}
 	query += ` ORDER BY seq DESC`
 	args := []any{threadID}
@@ -209,7 +209,7 @@ func (s *Store) beginTurn(ctx context.Context, t Thread, text, model string, ret
 		if err := tx.QueryRowContext(ctx, `SELECT role,status FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&role, &status); err != nil {
 			return Message{}, ErrRetry
 		}
-		if role != "assistant" || (status != "error" && status != "cancelled" && status != "limit") {
+		if role != "assistant" || (status != "error" && status != "cancelled" && status != "interrupted" && status != "limit") {
 			return Message{}, ErrRetry
 		}
 	} else {

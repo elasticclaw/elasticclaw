@@ -288,6 +288,59 @@ func TestRunnerCancellationAndConcurrency(t *testing.T) {
 	}
 }
 
+// A stop through the cancel route is saved as cancelled and only stops the
+// turn it names; a client that goes away leaves a retryable interrupted turn.
+func TestStopAndDisconnectStatuses(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{{"stop", "cancelled"}, {"disconnect", "interrupted"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			started := make(chan struct{}, 1)
+			p := fakeProvider{stream: func(ctx context.Context, _ llm.Request, _ func(string) error) (llm.Response, error) {
+				started <- struct{}{}
+				<-ctx.Done()
+				return llm.Response{}, ctx.Err()
+			}}
+			handler, s, _ := apiFixture(t, p)
+			thread := testThread(t, s)
+			ctx, disconnect := context.WithCancel(context.Background())
+			defer disconnect()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				req := httptest.NewRequest("POST", "/api/ai-chat/threads/"+thread.ID+"/messages", strings.NewReader(`{"text":"question"}`)).WithContext(ctx)
+				req.Header.Set("Login", "Octocat")
+				req.Header.Set("Feature", "on")
+				handler.ServeHTTP(httptest.NewRecorder(), req)
+			}()
+			<-started
+			messages, err := s.Messages(context.Background(), thread.ID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "stop" {
+				request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?message=earlier-turn", "", "Octocat", "on")
+				select {
+				case <-done:
+					t.Fatal("a stop for another turn ended this one")
+				case <-time.After(50 * time.Millisecond):
+				}
+				if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?message="+messages[1].ID, "", "Octocat", "on"); rec.Code != http.StatusNoContent {
+					t.Fatal(rec.Code)
+				}
+			} else {
+				disconnect()
+			}
+			<-done
+			messages, err = s.Messages(context.Background(), thread.ID, 0)
+			if err != nil || messages[1].Status != tc.want {
+				t.Fatal(err, messages)
+			}
+			if _, err := s.BeginTurn(context.Background(), thread, "", "fake", true); err != nil {
+				t.Fatalf("retry after %s: %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestPromptAndHistory(t *testing.T) {
 	s := testStore(t)
 	thread := testThread(t, s)

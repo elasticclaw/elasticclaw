@@ -151,6 +151,14 @@ func (a *api) cancelTurn(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A stop names its turn, so a late request cannot stop the next one.
+	if message := r.URL.Query().Get("message"); message != "" {
+		var latest string
+		if err := a.store.DB.QueryRowContext(r.Context(), `SELECT id FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&latest); err != nil || latest != message {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	a.runner.Cancel(t)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -226,7 +234,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
-	emit, stopHeartbeat := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Cancel(t) })
+	emit, stopHeartbeat := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Interrupt(t) })
 	defer stopHeartbeat()
 	_ = a.runner.Run(ctx, t, m, cfg, provider, emit)
 	stopHeartbeat()
