@@ -57,7 +57,8 @@ func widenTaskRunAnalyticsChecks(db *sql.DB) (err error) {
 			continue
 		}
 		if !strings.Contains(schema, change.oldCheck) {
-			return fmt.Errorf("unsupported %s analytics CHECK", change.table)
+			// Fail closed: skipping would leave inserts of the new values failing at runtime.
+			return fmt.Errorf("widen %s analytics CHECK: schema matches neither %q nor %q; inspect sqlite_master and widen the CHECK by hand", change.table, change.oldCheck, change.newCheck)
 		}
 		if err := rebuildTaskRunCheck(conn, change.table, schema, change.oldCheck, change.newCheck); err != nil {
 			return err
