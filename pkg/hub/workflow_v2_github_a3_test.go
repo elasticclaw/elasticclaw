@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -108,8 +109,22 @@ func TestWorkflowV2A3CheckNameAndCommitStatusEvidence(t *testing.T) {
 				t.Fatal("app-scoped pipeline fetched unattributable statuses")
 			}
 			if appSlug == "" {
+				// A settled status delivery refreshes evidence through the
+				// webhook's status route; a pending one is skipped.
 				statusState = "failure"
-				s.processWorkflowV2GitHubCheckEvent("check_run", payload)
+				var status githubStatusPayload
+				if err := json.Unmarshal([]byte(`{"sha":"head-1","state":"pending","context":"unit","repository":{"full_name":"org/api"}}`), &status); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := status.checkPayload(); ok {
+					t.Fatal("pending status produced a check event")
+				}
+				status.State = "failure"
+				check, ok := status.checkPayload()
+				if !ok {
+					t.Fatal("settled status produced no check event")
+				}
+				s.processWorkflowV2GitHubCheckEvent("check_run", check)
 				policy, err = store.EvaluateDeliveryPolicy(context.Background(), run.ID)
 				if err != nil || policy.CIStatus != "unsatisfied" {
 					t.Fatalf("failed status policy=%#v, err=%v", policy, err)
