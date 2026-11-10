@@ -553,10 +553,10 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		if err := writeFacts(ctx, tx, runID, input.ID, ProducerEngine, input.Provenance, clauseWrites, now); err != nil {
 			return EventResult{}, err
 		}
+		if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
+			return EventResult{}, err
+		}
 		if clause != nil && !clause.Ignore {
-			if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
-				return EventResult{}, err
-			}
 			if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
 				"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
 				return EventResult{}, err
@@ -633,12 +633,10 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
 	}
 	if transitionDef.To == stored.State {
-		// A self-loop re-planning a clause supersedes what an older
-		// observation of the same subject parked.
-		if clause != nil && !clause.Ignore {
-			if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
-				return EventResult{}, err
-			}
+		// A self-loop supersedes what an older observation of the same
+		// subject parked, whether or not it re-plans a clause.
+		if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
+			return EventResult{}, err
 		}
 		// A verified self-loop verifies the invariant the parked effects wait
 		// for and makes the run active, so it releases them like the settle

@@ -87,9 +87,11 @@ func postponeClauseEffects(ctx context.Context, tx *sql.Tx, runID string, input 
 }
 
 // supersedeParkedEffects cancels the clause effects a replay parked for an
-// older observation of the subject an event is about to plan clause effects
-// for. The deferred queue keeps only the latest observation per subject, so
-// releasing both would run the outdated work next to its replacement.
+// older observation of the subject a newer observation describes, whether or
+// not the newer one plans clause effects itself. The deferred queue keeps only
+// the latest observation per subject, so releasing the older work would run it
+// against state the provider has moved past (a CI failure task after CI
+// recovered) or next to its replacement.
 func supersedeParkedEffects(ctx context.Context, tx *sql.Tx, runID string, input EventInput, now time.Time) error {
 	if !input.observation {
 		return nil

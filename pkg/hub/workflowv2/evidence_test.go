@@ -1718,6 +1718,84 @@ func TestReplayedSelfLoopSupersedesParkedClauseEffectsOfSameSubject(t *testing.T
 	}
 }
 
+// A newer observation supersedes the clause effects a replay parked for an
+// older one of the same subject even when it plans none itself. The CI failure
+// parks its task and holds the run; the CI result that later restores the
+// invariant through a self-loop matches no clause (or an ignore clause), so
+// the outdated failure task must not be released.
+func TestReplayedSelfLoopSupersedesParkedClauseEffectsWithoutClause(t *testing.T) {
+	failureClause := "      - from: reviewing\n        when:\n          ci:\n            status:\n              equals: unsatisfied\n" +
+		"        set:\n          work.gate_closed: true\n        effects:\n" +
+		"          - agent.task:\n              prompt: Investigate the CI failure.\n"
+	ignoreClause := "      - from: reviewing\n        when:\n          ci:\n            status:\n              equals: satisfied\n        ignore: true\n"
+	for _, tc := range []struct {
+		name, clauses string
+	}{
+		{name: "no matching clause", clauses: failureClause},
+		{name: "ignore clause", clauses: ignoreClause + failureClause},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			invariant := "    invariant:\n      work.gate_closed:\n        exists: false\n"
+			withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+				"  reviewing:\n    phase: review\n"+invariant, 1)
+			noMatch := strings.Replace(withInvariant, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+				"          equals: never\n    to: fixing\n  review_failed:", 1)
+			selfLoop := strings.Replace(noMatch, "ci:\n  policies:",
+				"  ci_recovered:\n    from: reviewing\n    on: ci.policy.evaluated\n    when:\n      ci:\n        status:\n          equals: satisfied\n"+
+					"    set:\n      work.gate_closed: null\n    to: reviewing\nci:\n  policies:", 1)
+			clauses := "events:\n  ci.policy.evaluated:\n    clauses:\n" + tc.clauses
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			pr := createSuspendedDelivery(t, store, db, "run-supersede", selfLoop+clauses)
+			if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id='run-supersede'`); err != nil {
+				t.Fatal(err)
+			}
+			recordPolicyEvidence(t, store, "run-supersede", pr, "ci", "github-actions", "lint", "lint", "failure",
+				map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+			// The replay parks the failure's task and holds the run, then stops
+			// before the settle.
+			queueUndecodableDeferredEvent(t, db, "run-supersede")
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-supersede'`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ReplayDeferredEvents(ctx); err == nil {
+				t.Fatal("replay of an undecodable deferred event succeeded")
+			}
+			if _, err := db.Exec(`DELETE FROM workflow_v2_deferred_events WHERE run_id='run-supersede' AND defer_key='undecodable'`); err != nil {
+				t.Fatal(err)
+			}
+			var parked int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_effects WHERE run_id='run-supersede' AND postponed=1
+				AND status='planned'`).Scan(&parked); err != nil || parked != 1 {
+				t.Fatalf("parked effects = %d, %v", parked, err)
+			}
+			recordPolicyEvidence(t, store, "run-supersede", pr, "ci", "github-actions", "lint", "lint", "success",
+				map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+			recordPolicyEvidence(t, store, "run-supersede", pr, "ci", "github-actions", "unit", "unit", "success",
+				map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+			if err := store.ReplayDeferredEvents(ctx); err != nil {
+				t.Fatal(err)
+			}
+			run, err := store.GetRun(ctx, "run-supersede")
+			if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" || run.StateVersion < 2 {
+				t.Fatalf("settled run = %#v, %v (self-loop not taken?)", run, err)
+			}
+			if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+				t.Fatalf("claim after recovery = %#v, %v (superseded failure task released?)", claim, err)
+			}
+			var status, lastError string
+			if err := db.QueryRow(`SELECT status,last_error FROM workflow_v2_effects WHERE run_id='run-supersede'
+				AND origin_type='event_clause'`).Scan(&status, &lastError); err != nil {
+				t.Fatal(err)
+			}
+			if status != string(workflowv2.EffectCancelled) || !strings.Contains(lastError, "superseded") {
+				t.Fatalf("parked failure task = %s (%q), want superseded", status, lastError)
+			}
+		})
+	}
+}
+
 // A live observation on an active run supersedes one queued for the same
 // subject: a failed recovery replay leaves the queue for the sweep, and the
 // sweep must not replay a CI failure that a later live CI result superseded.
