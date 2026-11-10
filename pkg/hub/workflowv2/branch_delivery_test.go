@@ -303,3 +303,56 @@ func TestAdoptionDuringActivationCancelsInitialEffects(t *testing.T) {
 		})
 	}
 }
+
+const contextTransitionInitialEffectWorkflowYAML = `
+schema_version: 2
+name: context-initial-effect
+enabled: true
+initial_state: working
+states:
+  working:
+    phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Update dependencies.
+  awaiting:
+    phase: review
+transitions:
+  context_ready:
+    from: working
+    on: context.bundle.ready
+    to: awaiting
+`
+
+// Only adoption cancels initial effects; other activation-time transitions keep
+// the pre-adoption behavior.
+func TestContextTransitionDuringActivationKeepsInitialEffects(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "ctx", TenantID: "tenant-1", InitialClawID: "ctx-claw", ActivationPending: true,
+		WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(contextTransitionInitialEffectWorkflowYAML)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssembleOrganizationContext(ctx, run.ID, workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, _ string, _ typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+		return typesv2.ContextBundleSource{}, fmt.Errorf("unexpected knowledge resolution")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteActivation(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetRun(ctx, run.ID)
+	if err != nil || current.State != "awaiting" || current.Status != workflowv2.RunActive {
+		t.Fatalf("run=%+v err=%v", current, err)
+	}
+	claim, err := store.ClaimEffect(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim == nil || claim.Effect.RunID != run.ID || claim.Effect.Kind != "agent.task" {
+		t.Fatalf("claim=%+v", claim)
+	}
+}
