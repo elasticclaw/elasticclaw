@@ -279,6 +279,8 @@ func TestRunnerCancellationAndConcurrency(t *testing.T) {
 		t.Fatal("foreign owner cancelled turn")
 	}
 	runner.Cancel(threads[0])
+	// The aborted stream fails the next heartbeat; that must not relabel the stop.
+	runner.Interrupt(threads[0])
 	if err := <-finished; !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
@@ -326,6 +328,8 @@ func TestStopAndDisconnectStatuses(t *testing.T) {
 				if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?message="+messages[1].ID, "", "Octocat", "on"); rec.Code != http.StatusNoContent {
 					t.Fatal(rec.Code)
 				}
+				// The client aborts the stream once the stop is acknowledged.
+				disconnect()
 			} else {
 				disconnect()
 			}
@@ -338,6 +342,17 @@ func TestStopAndDisconnectStatuses(t *testing.T) {
 				t.Fatalf("retry after %s: %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestCancelReportsLookupFailure(t *testing.T) {
+	handler, s, _ := apiFixture(t, fakeProvider{})
+	thread := testThread(t, s)
+	if _, err := s.DB.Exec(`ALTER TABLE ai_chat_messages RENAME TO ai_chat_messages_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?message=m", "", "Octocat", "on"); rec.Code != http.StatusInternalServerError {
+		t.Fatal(rec.Code, rec.Body.String())
 	}
 }
 

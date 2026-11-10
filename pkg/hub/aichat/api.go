@@ -154,7 +154,12 @@ func (a *api) cancelTurn(w http.ResponseWriter, r *http.Request) {
 	// A stop names its turn, so a late request cannot stop the next one.
 	if message := r.URL.Query().Get("message"); message != "" {
 		var latest string
-		if err := a.store.DB.QueryRowContext(r.Context(), `SELECT id FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&latest); err != nil || latest != message {
+		err := a.store.DB.QueryRowContext(r.Context(), `SELECT id FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&latest)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "unable to stop the turn", 500)
+			return
+		}
+		if latest != message {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
