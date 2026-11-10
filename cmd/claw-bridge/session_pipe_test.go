@@ -82,11 +82,12 @@ func TestGatewaySessionClearsTurnMessageIDAfterSuccess(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
+		// The bridge may close the connection as soon as it reads this final
+		// frame, so the write can report an error after delivering it. The
+		// turnMessageID check below is what proves the frame arrived.
+		_ = wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
 			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "end"},
-		})}); err != nil {
-			t.Error(err)
-		}
+		})})
 		<-ctx.Done()
 	}))
 	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
