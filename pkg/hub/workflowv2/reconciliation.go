@@ -152,9 +152,11 @@ func pullRequestDeferKey(prID, kind string) string {
 // (reconciler or delivery resubmission) recorded the move. Observations of the
 // old head or of an open PR must not replay; CI and review policy results
 // aggregate head-bound evidence that was just superseded, and the delivery
-// policy result aggregates those and every PR's state (the caller recomputes
-// it after the move, after a resubmission's recovery replay has already run);
-// review feedback is
+// policy result aggregates those and every PR's state. Every caller republishes
+// the delivery policy once its move commits (a resubmission does so after its
+// recovery replay); the policy revision hashes each PR's head generation and
+// state, so the republication always replaces what this clear dropped,
+// including a result queued after another PR's earlier move. Review feedback is
 // bound to the head it was left on, and the live path rejects it for a stale
 // head. A queued lifecycle observation (closed, merged, verified_open) no
 // longer describes the PR once its state moved, even when the newer

@@ -2344,3 +2344,92 @@ func TestResubmissionAddingPRRefreshesDeliveryPolicyFactsBeforeReplay(t *testing
 		t.Fatalf("resubmitted run = %#v, %v (queued merge replayed on a stale delivery policy?)", run, err)
 	}
 }
+
+// Each PR move clears the delivery policy result a suspended run queued, and
+// the caller that recorded the move republishes it afterwards. A later move of
+// another PR therefore drops the result queued after an earlier move only to
+// queue one for the delivery as it now stands, never leaving the run without it.
+func TestSuccessivePRMovesKeepCurrentDeliveryPolicyQueued(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	const runID = "run-two-moves"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  approved:\n    phase: review\ntransitions:\n"+
+			"  ci_green:\n    from: reviewing\n    on: workflow.delivery.evaluated\n    when:\n"+
+			"      workflow:\n        delivery:\n          ci_satisfied:\n            equals: true\n    to: approved\n", 1)
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: runID, TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, runID, "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	claimed := map[string]typesv2.VerifiedPullRequest{}
+	var claims []typesv2.PullRequestClaim
+	for _, number := range []int{10, 11} {
+		url := fmt.Sprintf("https://github.example/org/api/pull/%d", number)
+		claimed[url] = typesv2.VerifiedPullRequest{URL: url, RepositoryName: "api", Repository: "org/api", Number: number,
+			SourceBranch: fmt.Sprintf("feature-%d", number), BaseBranch: "main", HeadSHA: fmt.Sprintf("head-%d-1", number),
+			State: "open", VerifiedAt: now, Provenance: typesv2.EvidenceProvenance{
+				Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}
+		claims = append(claims, typesv2.PullRequestClaim{URL: url})
+	}
+	prs, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{PullRequests: claims},
+		workflowv2.PullRequestVerifierFunc(func(_ context.Context, _ workflowv2.Run, _ *typesv2.Workspace,
+			claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+			return claimed[claim.URL], nil
+		}))
+	if err != nil || len(prs) != 2 {
+		t.Fatalf("submitted = %#v, %v", prs, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	queuedRevision := func() string {
+		t.Helper()
+		var revisions []string
+		rows, err := db.Query(`SELECT json_extract(e.payload_json,'$.workflow.delivery.revision') FROM workflow_v2_deferred_events d
+			JOIN workflow_v2_events e ON e.run_id=d.run_id AND e.id=d.event_id
+			WHERE d.run_id=? AND d.defer_key='workflow.delivery.evaluated'`, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var revision string
+			if err := rows.Scan(&revision); err != nil {
+				t.Fatal(err)
+			}
+			revisions = append(revisions, revision)
+		}
+		if err := rows.Err(); err != nil || len(revisions) != 1 {
+			t.Fatalf("queued delivery policy results = %v, %v", revisions, err)
+		}
+		return revisions[0]
+	}
+	var previous string
+	for i, pr := range prs {
+		targets, err := store.ActiveDeliveryTargets(ctx, pr.Repository, pr.Number)
+		if err != nil || len(targets) != 1 {
+			t.Fatalf("targets = %#v, %v", targets, err)
+		}
+		pr.HeadSHA = pr.HeadSHA[:len(pr.HeadSHA)-1] + "2"
+		pr.Provenance.ObservedAt = now.Add(time.Duration(i+1) * time.Minute)
+		if _, err := store.ReconcilePullRequest(ctx, targets[0], fmt.Sprintf("push-%d", i),
+			"pull_request.head_changed", pr); err != nil {
+			t.Fatal(err)
+		}
+		current, err := store.EvaluateDeliveryPolicy(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if queued := queuedRevision(); queued != current.Revision || queued == previous {
+			t.Fatalf("after push %d queued %s, current %s, previous %s", i, queued, current.Revision, previous)
+		}
+		previous = current.Revision
+	}
+}
