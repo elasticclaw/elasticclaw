@@ -1047,7 +1047,7 @@ func TestSuspendedRunDropsDeferredFeedbackAfterHeadMove(t *testing.T) {
 		return store.ReconcilePullRequest(ctx, target, "push", "pull_request.head_changed", pr)
 	})
 	var queued int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE defer_key='review.feedback.received'`).Scan(&queued); err != nil || queued != 0 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE defer_key LIKE 'review.feedback.received:%'`).Scan(&queued); err != nil || queued != 0 {
 		t.Fatalf("stale feedback still queued: %d, %v", queued, err)
 	}
 	if _, err := store.ApplyCommand(ctx, "run-stale-deferred-feedback", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
@@ -1056,6 +1056,75 @@ func TestSuspendedRunDropsDeferredFeedbackAfterHeadMove(t *testing.T) {
 	run, err := store.GetRun(ctx, "run-stale-deferred-feedback")
 	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
 		t.Fatalf("recovered run = %#v, %v (stale feedback replayed?)", run, err)
+	}
+}
+
+// Feedback queued while suspended is kept per PR: feedback on a sibling PR
+// must not supersede it, and the sibling's head move must not drop it.
+func TestSuspendedRunKeepsDeferredFeedbackPerPullRequest(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	runID := "run-feedback-per-pr"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"transitions:\n  feedback:\n    from: reviewing\n    on: review.feedback.received\n    to: fixing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: runID, TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, runID, "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/10"}
+	second := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/11"}
+	verified, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{first, second},
+	}, deliveryVerifier(map[string]string{first.URL: "head-1", second.URL: "other-1"}))
+	if err != nil || len(verified) != 2 {
+		t.Fatalf("delivery = %#v, %v", verified, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	target := func(number int) workflowv2.DeliveryTarget {
+		t.Helper()
+		targets, err := store.ActiveDeliveryTargetsAll(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, target := range targets {
+			if target.Number == number {
+				return target
+			}
+		}
+		t.Fatalf("no target for PR #%d in %#v", number, targets)
+		return workflowv2.DeliveryTarget{}
+	}
+	for i, number := range []int{10, 11} {
+		eventID := fmt.Sprintf("comment-%d", number)
+		result, err := store.ApplyReviewFeedback(ctx, target(number), eventID,
+			map[string]interface{}{"kind": "comment", "body": "fix this"},
+			typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerReview), Principal: "alice",
+				ExternalID: eventID, ObservedAt: time.Date(2026, 8, 8, 12, 1+i, 0, 0, time.UTC)})
+		if err != nil || !result.Deferred {
+			t.Fatalf("feedback on PR #%d while suspended = %#v, %v", number, result, err)
+		}
+	}
+	moved := verified[1]
+	moved.HeadSHA = "other-2"
+	moved.Provenance.ObservedAt = time.Date(2026, 8, 8, 12, 5, 0, 0, time.UTC)
+	if _, err := store.ReconcilePullRequest(ctx, target(11), "push", "pull_request.head_changed", moved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyCommand(ctx, runID, "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, runID)
+	if err != nil || run.State != "fixing" {
+		t.Fatalf("recovered run = %#v, %v (PR #10 feedback lost?)", run, err)
 	}
 }
 

@@ -147,6 +147,13 @@ func pullRequestDeferKey(prID, kind string) string {
 	}
 }
 
+// reviewFeedbackDeferKey names the deferred-replay subject of review feedback
+// on one PR: feedback left on one PR must not supersede feedback on another,
+// and a head move on one PR must not drop another PR's feedback.
+func reviewFeedbackDeferKey(prID, kind string) string {
+	return kind + ":" + prID
+}
+
 // clearStaleDeferredEvents drops observations a suspended run queued for a PR
 // that no longer describe it once its head or state moved, whichever path
 // (reconciler or delivery resubmission) recorded the move. Observations of the
@@ -169,7 +176,9 @@ func clearStaleDeferredEvents(ctx context.Context, tx *sql.Tx, runID, prID strin
 			pullRequestDeferKey(prID, "pull_request.updated"))
 	}
 	if headChanged {
-		stale = append(stale, "ci.policy.evaluated", "review.policy.evaluated")
+		stale = append(stale, "ci.policy.evaluated", "review.policy.evaluated",
+			reviewFeedbackDeferKey(prID, "review.feedback.received"),
+			reviewFeedbackDeferKey(prID, "review.feedback.reconciled"))
 	}
 	if !open {
 		stale = append(stale, pullRequestDeferKey(prID, "pull_request.head_changed"))
@@ -185,14 +194,7 @@ func clearStaleDeferredEvents(ctx context.Context, tx *sql.Tx, runID, prID strin
 			return err
 		}
 	}
-	if !headChanged {
-		return nil
-	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events WHERE run_id=?
-		AND defer_key IN ('review.feedback.received','review.feedback.reconciled')
-		AND event_id IN (SELECT id FROM workflow_v2_events WHERE run_id=?
-			AND json_extract(payload_json,'$.review.pull_request_id')=?)`, runID, runID, prID)
-	return err
+	return nil
 }
 
 // ReconcilePullRequest applies a trusted source-control observation to one
@@ -396,6 +398,7 @@ func (s *Store) applyReviewFeedbackEvent(ctx context.Context, target DeliveryTar
 	return s.applyEventWithMutation(ctx, target.RunID, EventInput{
 		ID: eventID, MessageID: eventID, Kind: eventKind, AttemptID: target.AttemptID,
 		Producer: ProducerReview, Provenance: provenance, observation: true,
+		deferKey: reviewFeedbackDeferKey(target.PRID, eventKind),
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		var currentValue, currentProvenance string
 		err := tx.QueryRowContext(ctx, `SELECT value_json,provenance_json FROM workflow_v2_facts
