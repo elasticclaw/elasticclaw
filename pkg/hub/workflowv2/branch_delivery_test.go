@@ -356,3 +356,40 @@ func TestContextTransitionDuringActivationKeepsInitialEffects(t *testing.T) {
 		t.Fatalf("claim=%+v", claim)
 	}
 }
+
+// Promoting a registered branch PR during activation also leaves the initial
+// state, so its on_enter effects must not run in the destination state.
+func TestBranchPromotionDuringActivationCancelsInitialEffects(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "promote", TenantID: "tenant-1", InitialClawID: "promote-claw", ActivationPending: true,
+		WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(strings.ReplaceAll(adoptionInitialEffectWorkflowYAML, "delivery.adopted", "delivery.verified"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "https://github.example/org/api/pull/10"
+	if _, _, err := store.RegisterPullRequest(ctx, run.ID, run.CurrentAttemptID, typesv2.PullRequestClaim{URL: url}, deliveryVerifier(map[string]string{url: "head"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssembleOrganizationContext(ctx, run.ID, workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, _ string, _ typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+		return typesv2.ContextBundleSource{}, fmt.Errorf("unexpected knowledge resolution")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteActivation(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetRun(ctx, run.ID)
+	if err != nil || current.State != "awaiting" || current.Status != workflowv2.RunActive {
+		t.Fatalf("run=%+v err=%v", current, err)
+	}
+	claim, err := store.ClaimEffect(ctx, "worker", time.Minute)
+	if err != nil || claim != nil {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_effects WHERE run_id=? AND origin_type='initial'`, run.ID).Scan(&status); err != nil || status != "cancelled" {
+		t.Fatalf("initial effect status=%s err=%v", status, err)
+	}
+}
