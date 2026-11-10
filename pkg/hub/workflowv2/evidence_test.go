@@ -1882,6 +1882,59 @@ func TestSuspendedRunRefiresDroppedConflictForUnchangedTuple(t *testing.T) {
 	}
 }
 
+// A head change queued while suspended replays against the head a later
+// resubmission recorded: payload values override facts in guard evaluation,
+// so replaying the superseded head would decide on a head that is gone. A
+// resubmission that reverts the queued change drops it.
+func TestReplayedHeadChangeDescribesResubmittedHead(t *testing.T) {
+	for _, tc := range []struct {
+		name, resubmittedHead, state string
+	}{
+		{"newer head", "head-3", "fixing"},
+		{"reverted head", "head-1", "reviewing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			guard := "    when:\n      pull_request:\n        head_sha:\n          equals: " + tc.resubmittedHead + "\n"
+			if tc.resubmittedHead == "head-1" {
+				guard = ""
+			}
+			workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+				"transitions:\n  pushed:\n    from: reviewing\n    on: pull_request.head_changed\n"+guard+"    to: fixing\n", 1)
+			workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+			pr := createSuspendedDelivery(t, store, db, "run-head", workflowYAML)
+			pr.HeadSHA = "head-2"
+			if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+				return store.ReconcilePullRequest(ctx, target, "push", "pull_request.head_changed", pr)
+			}); !result.Deferred {
+				t.Fatalf("head change while suspended was not deferred: %#v", result)
+			}
+			run, err := store.GetRun(ctx, "run-head")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resubmitted := pr
+			resubmitted.HeadSHA = tc.resubmittedHead
+			if _, err := store.SubmitDelivery(ctx, "run-head", run.CurrentAttemptID, typesv2.DeliveryManifest{
+				PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}},
+			}, workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+				typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+				return resubmitted, nil
+			})); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ApplyCommand(ctx, "run-head", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+				t.Fatal(err)
+			}
+			if run, err := store.GetRun(ctx, "run-head"); err != nil || run.State != tc.state || run.Status != workflowv2.RunActive {
+				t.Fatalf("recovered run = %#v, %v, want active in %s", run, err, tc.state)
+			}
+		})
+	}
+}
+
 // A control rejection that suspends a held run replaces the hold marker, so
 // the unverified entry's effects must be cancelled then: no later settle or
 // transition recognizes the entry as held.

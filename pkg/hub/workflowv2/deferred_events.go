@@ -281,6 +281,9 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			if err := refreshDeferredDelivery(ctx, tx, runID, input); err != nil {
 				return err
 			}
+			if err := refreshDeferredHead(ctx, tx, runID, item.key, input); err != nil {
+				return err
+			}
 			if err := refreshDeferredMergeability(ctx, tx, runID, input); err != nil {
 				return err
 			}
@@ -414,6 +417,43 @@ func deferredMergeabilityHeadMoved(ctx context.Context, tx *sql.Tx, runID, key s
 		return false, nil
 	}
 	return err == nil && currentHead != headSHA, err
+}
+
+// refreshDeferredHead points a queued pull request observation at the PR's
+// current head. A resubmission records a new head without emitting a
+// pull_request event, so a queued head change or lifecycle observation would
+// otherwise replay the superseded head, which overrides the facts in guard
+// evaluation. Mergeability of the queued head no longer applies; it is filled
+// in again below once confirmed for the current head. A head change that the
+// resubmission reverted is no longer a change and is dropped.
+func refreshDeferredHead(ctx context.Context, tx *sql.Tx, runID, key string, input *EventInput) error {
+	if !strings.HasPrefix(key, "pull_request:") {
+		return nil
+	}
+	pullRequest, _ := input.Payload["pull_request"].(map[string]interface{})
+	prID, _ := pullRequest["id"].(string)
+	headSHA, _ := pullRequest["head_sha"].(string)
+	if prID == "" || headSHA == "" {
+		return nil
+	}
+	var currentHead string
+	err := tx.QueryRowContext(ctx, `SELECT current_head_sha FROM workflow_v2_delivery_prs WHERE id=? AND run_id=?`,
+		prID, runID).Scan(&currentHead)
+	if err == sql.ErrNoRows || (err == nil && currentHead == headSHA) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	previousHead, _ := pullRequest["previous_head_sha"].(string)
+	if input.Kind == "pull_request.head_changed" && currentHead == previousHead {
+		return errDeferredEventStale
+	}
+	pullRequest["head_sha"], pullRequest["base_sha"], pullRequest["mergeable_state"] = currentHead, "", ""
+	if _, ok := pullRequest["head_changed"]; ok {
+		pullRequest["head_changed"] = currentHead != previousHead
+	}
+	return nil
 }
 
 // refreshDeferredMergeability replaces the queued mergeability of a PR with the
