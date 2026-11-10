@@ -219,6 +219,14 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		initialStatus = "pending"
 	}
 
+	if opts.beforeProvision != nil {
+		// Hold the claw out of promotePendingClaws until activation decides
+		// whether it provisions at all. Marked under promoteMu, before the
+		// row exists, so no promotion can see it unmarked.
+		s.activatingClaws.Store(clawID, struct{}{})
+		defer s.activatingClaws.Delete(clawID)
+	}
+
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := time.Now().UTC()
 	_, err = s.db.Exec(`
@@ -277,6 +285,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
 			log.Printf("[workflow] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
 		}
+		s.activatingClaws.Delete(clawID)
 		go s.promotePendingClaws()
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
@@ -285,18 +294,26 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if callbackCtx == nil {
 			callbackCtx = context.Background()
 		}
-		if err := opts.beforeProvision(callbackCtx, clawID, tenantID); errors.Is(err, errWorkflowV2FinishedAtActivation) {
+		err := opts.beforeProvision(callbackCtx, clawID, tenantID)
+		if errors.Is(err, errWorkflowV2FinishedAtActivation) {
 			log.Printf("[workflow] run for claw %s finished during activation; skipping provisioning", clawID[:8])
-			// maybeFinishWorkflowV2Parent promotes pending claws after it
-			// deletes this one; promoting here could provision this claw.
+			// Leave the pending queue without provisioning, like a claw that
+			// was never queued; maybeFinishWorkflowV2Parent deletes it and
+			// then promotes pending claws.
+			if _, err := s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=? AND status='pending'`, clawID); err != nil {
+				log.Printf("[workflow] failed to dequeue finished claw %s: %v", clawID[:8], err)
+			}
 			return clawID, false, nil
-		} else if err != nil {
+		}
+		if err != nil {
 			_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed",
 				"workflow v2 activation failed: "+err.Error(), terminalTxOpts{})
+			s.activatingClaws.Delete(clawID)
 			s.cancelWorkflowV2RunForClaw(callbackCtx, clawID, "workflow v2 activation failed")
 			go s.promotePendingClaws()
 			return "", false, fmt.Errorf("activate workflow v2 run: %w", err)
 		}
+		s.activatingClaws.Delete(clawID)
 	}
 
 	log.Printf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)

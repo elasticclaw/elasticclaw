@@ -108,6 +108,56 @@ func TestWorkflowCreationQueuesBehindOlderPendingClaw(t *testing.T) {
 	}
 }
 
+// A slot freed while workflow v2 activation is still running (for example
+// during the PR adoption lookup) must not provision the pending claw: the
+// activation may finish the run without any sandbox.
+func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		activation error
+		want       string
+	}{
+		{"finished", workflowV2FinishedAtActivationError{status: "completed"}, "provisioning"},
+		{"activated", nil, "connected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+			t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+			s, db := newReaperTestServer(t, &types.HubConfig{
+				ConcurrencyGroups: []*types.ConcurrencyGroup{{Name: "cruise-demo", Limit: 1}},
+				Providers:         map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+			})
+			insertQueueTestClaw(t, db, "active001", "connected", "cruise-demo", time.Now().UTC())
+			workspace := &types.WorkspaceConfig{Name: "queue-workspace", Files: map[string]string{"README.md": "Queue test workspace"}}
+			workflow := &types.WorkflowConfig{Name: "queue-workflow", Provider: "noop", ConcurrencyGroup: "cruise-demo"}
+			id, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+				beforeProvision: func(_ context.Context, id, _ string) error {
+					if _, err := db.Exec(`UPDATE claws SET status='deleted' WHERE id='active001'`); err != nil {
+						t.Fatal(err)
+					}
+					s.promotePendingClaws()
+					if got := queueTestStatus(t, db, id); got != "pending" {
+						t.Fatalf("claw status=%q during activation, want pending", got)
+					}
+					return tc.activation
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "connected" {
+				waitForQueueTestPromotion(t, db, id)
+				return
+			}
+			s.promotePendingClaws()
+			time.Sleep(100 * time.Millisecond)
+			if got := queueTestStatus(t, db, id); got != tc.want {
+				t.Fatalf("finished claw status=%q, want %q without provisioning", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReaperPromotesPendingClawWithoutOtherActions(t *testing.T) {
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	s, db := newReaperTestServer(t, &types.HubConfig{MaxConcurrentClaws: 1})

@@ -186,6 +186,9 @@ type Server struct {
 	// promoteMu serializes promotePendingClaws to prevent TOCTOU race where
 	// multiple terminating claws each read active < max and promote, exceeding limit.
 	promoteMu sync.Mutex
+	// activatingClaws holds workflow claws whose beforeProvision activation
+	// is still running; promotePendingClaws must not provision them yet.
+	activatingClaws sync.Map
 
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
