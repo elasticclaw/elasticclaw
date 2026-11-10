@@ -1160,6 +1160,60 @@ func TestSuspendedRunKeepsDeferredMergeableAcrossMergeabilityUpdates(t *testing.
 	}
 }
 
+// A replay refreshes the queued payload to the current mergeability, so the
+// replayed event no longer describes the queued tuple. The queued tuple still
+// counts as fired: confirming it after the PR returns to it must not emit
+// pull_request.mergeable a second time.
+func TestReplayedMergeableTupleIsNotRefiredAfterReturning(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  rebasing:\n    phase: build\ntransitions:\n"+
+			"  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n"+
+			"  rebased:\n    from: rebasing\n    on: pull_request.mergeable\n    to: reviewing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n" +
+		"  resume_rebase:\n    from: rebasing\n    to: rebasing\n"
+	pr := createSuspendedDelivery(t, store, db, "run-refire", workflowYAML)
+	mergeability := func(state string) workflowv2.EventResult {
+		pr.MergeableState = state
+		pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Second)
+		return reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+			return store.ReconcileMergeability(ctx, target, pr)
+		})
+	}
+	pr.BaseSHA = "base-1"
+	mergeability("dirty")
+	if _, err := store.ApplyCommand(ctx, "run-refire", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id='run-refire'`); err != nil {
+		t.Fatal(err)
+	}
+	if result := mergeability("clean"); !result.Deferred {
+		t.Fatalf("mergeable while suspended was not deferred: %#v", result)
+	}
+	mergeability("blocked")
+	if _, err := store.ApplyCommand(ctx, "run-refire", "resume_rebase", workflowv2.CommandInput{ID: "resume-2", MessageID: "resume-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, "run-refire"); err != nil || run.State != "reviewing" {
+		t.Fatalf("deferred mergeable not replayed: %#v, %v", run, err)
+	}
+	mergeability("clean")
+	if result := mergeability("clean"); result.EventID != "" {
+		t.Fatalf("confirming the replayed tuple fired again: %#v", result)
+	}
+	var mergeable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id='run-refire'
+		AND kind='pull_request.mergeable'`).Scan(&mergeable); err != nil {
+		t.Fatal(err)
+	}
+	if mergeable != 2 {
+		t.Fatalf("pull_request.mergeable events = %d, want the deferred one and its replay", mergeable)
+	}
+}
+
 // A replayed observation carries its queue-time payload, which overrides facts
 // in guard evaluation. Delivery aggregates must reflect sibling PRs that
 // changed after the observation was queued.

@@ -64,12 +64,15 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 	// A tuple may recur after another state. Refresh facts in that case, but
 	// never fire the same mergeability transition twice for the same tuple.
 	// An observation a suspended run deferred only counts while it is still
-	// queued: once superseded or cleared by a push, its transition never ran.
-	// A replay is recorded as a new event with the same payload and counts.
+	// queued or once replayed: if superseded or cleared by a push, its
+	// transition never ran. The replay refreshes the payload to the current
+	// tuple, so it is tracked by a receipt on the queued event.
 	var recorded, fired, observedTuple int
 	if err := s.db.QueryRowContext(ctx, `WITH tuple AS (SELECT e.id,
 			EXISTS(SELECT 1 FROM workflow_v2_deferred_events d WHERE d.run_id=e.run_id AND d.event_id=e.id)
 			OR NOT EXISTS(SELECT 1 FROM workflow_v2_event_receipts r WHERE r.run_id=e.run_id AND r.event_id=e.id
+				AND r.reason=?)
+			OR EXISTS(SELECT 1 FROM workflow_v2_event_receipts r WHERE r.run_id=e.run_id AND r.event_id=e.id
 				AND r.reason=?) AS fired
 		FROM workflow_v2_events e WHERE e.run_id=? AND e.kind=?
 			AND json_extract(e.payload_json,'$.pull_request.id')=?
@@ -78,7 +81,7 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 			AND json_extract(e.payload_json,'$.pull_request.mergeable_state')=?)
 		SELECT (SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND id=?),
 			(SELECT COUNT(*) FROM tuple WHERE fired), (SELECT COUNT(*) FROM tuple)`,
-		deferredUntilRecoveryReason, target.RunID, kind, target.PRID, verified.HeadSHA, verified.BaseSHA, state,
+		deferredUntilRecoveryReason, replayedDeferredReason, target.RunID, kind, target.PRID, verified.HeadSHA, verified.BaseSHA, state,
 		target.RunID, eventID).Scan(&recorded, &fired, &observedTuple); err != nil {
 		return EventResult{}, err
 	}

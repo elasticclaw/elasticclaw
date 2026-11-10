@@ -31,6 +31,10 @@ const (
 	replayPendingEntryReason = "replaying deferred events before judging the entered state invariant"
 )
 
+// replayedDeferredReason is the receipt reason that marks a deferred event as
+// replayed, so its transition counts as fired.
+const replayedDeferredReason = "deferred transition replayed"
+
 // heldForReplay reports whether a replay holds the run suspended.
 func (run Run) heldForReplay() bool {
 	return run.Status == RunSuspended &&
@@ -248,6 +252,12 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 				return err
 			} else if stale {
 				return errDeferredEventStale
+			}
+			// The refreshed payload below may describe another tuple than the
+			// queued event, so mark the queued event itself as consumed.
+			if err := insertEventReceipt(ctx, tx, runID, item.eventID, "", typesv2.DispositionAccepted,
+				run.StateVersion, replayedDeferredReason, s.now().UTC()); err != nil {
+				return err
 			}
 			if err := refreshDeferredDelivery(ctx, tx, runID, input); err != nil {
 				return err
