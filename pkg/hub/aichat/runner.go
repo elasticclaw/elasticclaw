@@ -158,12 +158,24 @@ func (r *Runner) Cancel(t Thread) { r.cancel(t, "", errStopped) }
 // CancelTurn stops the in-flight turn only if it is the one the client keyed.
 // A key with no flight yet is remembered, so the turn is refused when it starts.
 // An empty key behaves like Cancel and stops any flight, keyed or not.
-func (r *Runner) CancelTurn(t Thread, turn string) {
-	if r.cancel(t, turn, errStopped) || turn == "" {
-		return
-	}
+func (r *Runner) CancelTurn(t Thread, turn string) { r.cancel(t, turn, errStopped) }
+
+// Interrupt stops the thread's in-flight turn after its client went away.
+func (r *Runner) Interrupt(t Thread) { r.cancel(t, "", context.Canceled) }
+
+// cancel keeps only the first cause. Looking up the flight and remembering an
+// early stop share one lock, so a turn cannot start between them.
+func (r *Runner) cancel(t Thread, turn string, cause error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	owner := t.TenantID + "\x00" + t.OwnerLogin
+	if f, ok := r.flights[t.ID]; ok && f.owner == owner && (turn == "" || f.turn == turn) {
+		f.cancel(cause)
+		return
+	}
+	if turn == "" || !errors.Is(cause, errStopped) {
+		return
+	}
 	now := time.Now()
 	if r.earlyStops == nil {
 		r.earlyStops = map[string]time.Time{}
@@ -173,22 +185,7 @@ func (r *Runner) CancelTurn(t Thread, turn string) {
 			delete(r.earlyStops, key)
 		}
 	}
-	r.earlyStops[t.TenantID+"\x00"+t.OwnerLogin+"\x00"+turn] = now
-}
-
-// Interrupt stops the thread's in-flight turn after its client went away.
-func (r *Runner) Interrupt(t Thread) { r.cancel(t, "", context.Canceled) }
-
-// cancel reports whether it found the flight; only the first cause is kept.
-func (r *Runner) cancel(t Thread, turn string, cause error) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	f, ok := r.flights[t.ID]
-	if !ok || f.owner != t.TenantID+"\x00"+t.OwnerLogin || (turn != "" && f.turn != turn) {
-		return false
-	}
-	f.cancel(cause)
-	return true
+	r.earlyStops[owner+"\x00"+turn] = now
 }
 
 func prompt(cfg *config.Config, mode string) string {
