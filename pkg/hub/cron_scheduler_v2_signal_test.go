@@ -145,6 +145,25 @@ func TestCronSchedulerV2StopWaitsForTickTerminalCleanup(t *testing.T) {
 	}
 }
 
+// A manual trigger that outlives the HTTP drain can signal after stop began;
+// its cleanup must run inline instead of adding to the group stop waited on.
+func TestCronSchedulerV2SignalAfterStopCleansUpInline(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	store := workflowv2.NewStore(db)
+	raw := signalWorkflowYAML() + "\ntransitions:\n  tick:\n    from: [s]\n    on: cron.tick\n    to: done\n"
+	run := createSignalTestRun(t, store, "run-signal", raw)
+	cs := newCronSchedulerV2(s)
+	s.cronSchedulerV2 = cs
+	cs.stop()
+	if status, err := cs.runWorkflow(signalTestWorkflow(t, raw), "test-tenant-id"); err != nil || status != workflowRunSignaled {
+		t.Fatalf("tick = %s, %v", status, err)
+	}
+	var released int
+	if err := db.QueryRow(`SELECT cron_slot_released FROM workflow_v2_runs WHERE id=?`, run.ID).Scan(&released); err != nil || released != 1 {
+		t.Fatalf("cron_slot_released = %d, %v; cleanup after stop did not run inline", released, err)
+	}
+}
+
 func TestCronSchedulerV2SignalTargetsOpenRunsOnly(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	store := workflowv2.NewStore(db)

@@ -36,8 +36,11 @@ type cronSchedulerV2 struct {
 	signalLocks sync.Map       // workflow key -> *sync.Mutex
 
 	// cleanups tracks terminal cleanup started by ticks so stop can wait for
-	// it before the hub closes the database.
-	cleanups sync.WaitGroup
+	// it before the hub closes the database. cleanupMu guards stopping so no
+	// Add races stop's Wait.
+	cleanups  sync.WaitGroup
+	cleanupMu sync.Mutex
+	stopping  bool
 }
 
 type scheduledWorkflowV2 struct {
@@ -77,9 +80,30 @@ func (cs *cronSchedulerV2) stop() {
 		log.Println("[cron-v2] scheduler stopped")
 	}
 	cs.mu.Unlock()
-	// Ticks have returned, so no new cleanup can start; wait for the ones in
-	// flight so their writes never hit a closed database.
+	// Ticks have returned, but a manual trigger that outlived the HTTP drain
+	// can still signal; from here on it cleans up inline. Wait for the cleanup
+	// already in flight so its writes never hit a closed database.
+	cs.cleanupMu.Lock()
+	cs.stopping = true
+	cs.cleanupMu.Unlock()
 	cs.cleanups.Wait()
+}
+
+// startCleanup runs terminal cleanup in the background, or inline once stop
+// has begun so it never adds to cleanups while stop waits on them.
+func (cs *cronSchedulerV2) startCleanup(cleanup func()) {
+	cs.cleanupMu.Lock()
+	if cs.stopping {
+		cs.cleanupMu.Unlock()
+		cleanup()
+		return
+	}
+	cs.cleanups.Add(1)
+	cs.cleanupMu.Unlock()
+	go func() {
+		defer cs.cleanups.Done()
+		cleanup()
+	}()
 }
 
 func (cs *cronSchedulerV2) reload() error {
@@ -477,11 +501,7 @@ func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWork
 		// Terminal cleanup runs off the per-workflow signal lock so a slow
 		// teardown never delays concurrent ticks or manual triggers; stop
 		// waits for it so shutdown cannot abandon it.
-		cs.cleanups.Add(1)
-		go func(runID string) {
-			defer cs.cleanups.Done()
-			cs.srv.maybeFinishWorkflowV2Parent(ctx, runID)
-		}(runID)
+		cs.startCleanup(func() { cs.srv.maybeFinishWorkflowV2Parent(ctx, runID) })
 	}
 	if len(targets) == 0 {
 		return workflowRunFailed, nil, nil
