@@ -1319,8 +1319,10 @@ func TestRecoveryHoldsEffectsUntilReplaySettlesInvariant(t *testing.T) {
 	for _, tc := range []struct {
 		name, workflow, state string
 		status                workflowv2.RunStatus
+		claimPrompt           string
 	}{
-		{name: "queued transition leaves the state", workflow: withResume, state: "fixing", status: workflowv2.RunActive},
+		{name: "queued transition leaves the state", workflow: withResume, state: "fixing", status: workflowv2.RunActive,
+			claimPrompt: "Address the trusted review feedback."},
 		{name: "queued observation does not leave the state", workflow: noMatch, state: "reviewing", status: workflowv2.RunSuspended},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1328,6 +1330,10 @@ func TestRecoveryHoldsEffectsUntilReplaySettlesInvariant(t *testing.T) {
 			db := openRuntimeDB(t)
 			store := workflowv2.NewStore(db)
 			pr := createSuspendedDelivery(t, store, db, "run-held", tc.workflow)
+			// The initial review task ran before the run was suspended.
+			if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id='run-held'`); err != nil {
+				t.Fatal(err)
+			}
 			recordPolicyEvidence(t, store, "run-held", pr, "ci", "github-actions", "lint", "lint", "failure",
 				map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
 			if _, err := db.Exec(`CREATE TRIGGER fail_replay BEFORE DELETE ON workflow_v2_deferred_events
@@ -1353,6 +1359,32 @@ func TestRecoveryHoldsEffectsUntilReplaySettlesInvariant(t *testing.T) {
 			run, err := store.GetRun(ctx, "run-held")
 			if err != nil || run.Status != tc.status || run.State != tc.state {
 				t.Fatalf("settled run = %#v, %v", run, err)
+			}
+			// The unverified entry into reviewing never runs its effects: the run
+			// left the state, or was suspended in it, before its invariant held.
+			var status, lastError string
+			if err := db.QueryRow(`SELECT status,last_error FROM workflow_v2_effects WHERE run_id=? AND origin_type='transition'
+				AND json_extract(payload_json,'$.prompt')='Review the delivery.'`, "run-held").Scan(&status, &lastError); err != nil {
+				t.Fatal(err)
+			}
+			if status != string(workflowv2.EffectCancelled) || !strings.Contains(lastError, "reviewing") {
+				t.Fatalf("held entry effect = %s (%q), want cancelled", status, lastError)
+			}
+			claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.claimPrompt == "" {
+				if claim != nil {
+					t.Fatalf("claim on suspended run = %#v", claim)
+				}
+				return
+			}
+			if claim == nil || claim.Effect.Payload["prompt"] != tc.claimPrompt {
+				t.Fatalf("claim after replay = %#v, want the %q task", claim, tc.claimPrompt)
+			}
+			if next, err := store.ClaimEffect(ctx, "worker-2", time.Minute); err != nil || next != nil {
+				t.Fatalf("second claim = %#v, %v (held entry effect released?)", next, err)
 			}
 		})
 	}

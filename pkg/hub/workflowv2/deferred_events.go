@@ -17,16 +17,57 @@ var (
 	errReplayHalted      = errors.New("run no longer replays deferred events")
 )
 
-// replayPendingReason marks a run held suspended while its deferred queue
-// replays with the invariant check postponed. Effects only run for active runs,
-// so nothing scheduled meanwhile executes before settleReplayedInvariant judges
-// the invariant of the state the run ends in.
-const replayPendingReason = "replaying deferred events before judging the state invariant"
+// Held runs stay suspended while their deferred queue replays with the
+// invariant check postponed. Effects only run for active runs, so nothing
+// scheduled meanwhile executes before settleReplayedInvariant judges the
+// invariant of the state the run ends in. replayPendingReason holds a state
+// whose entry was verified; replayPendingEntryReason holds an entry whose
+// invariant was never verified, so its entry effects must not run if the run
+// leaves the state or the invariant fails (see cancelHeldEntryEffects).
+const (
+	replayPendingReason      = "replaying deferred events before judging the state invariant"
+	replayPendingEntryReason = "replaying deferred events before judging the entered state invariant"
+)
+
+// heldForReplay reports whether a replay holds the run suspended.
+func (run Run) heldForReplay() bool {
+	return run.Status == RunSuspended &&
+		(run.WaitingReason == replayPendingReason || run.WaitingReason == replayPendingEntryReason)
+}
+
+// heldEntry reports whether the run is held in a state whose entry invariant
+// was never verified.
+func (run Run) heldEntry() bool {
+	return run.Status == RunSuspended && run.WaitingReason == replayPendingEntryReason
+}
 
 // replaying reports whether a run may replay its deferred queue: active, or
 // held suspended by a replay that postponed its invariant check.
 func (run Run) replaying() bool {
-	return run.Status == RunActive || (run.Status == RunSuspended && run.WaitingReason == replayPendingReason)
+	return run.Status == RunActive || run.heldForReplay()
+}
+
+// cancelHeldEntryEffects cancels the effects that the unverified entry into
+// the run's current state scheduled. The run leaves that entry (another
+// transition, or a suspension because its invariant does not hold), so a live
+// event would never have scheduled them; releasing them later would run the
+// entry work of a state the run is no longer in.
+func cancelHeldEntryEffects(ctx context.Context, tx *sql.Tx, run Run, now time.Time) error {
+	var transitionID, eventID string
+	err := tx.QueryRowContext(ctx, `SELECT id,event_id FROM workflow_v2_transitions WHERE run_id=? AND to_version=?`,
+		run.ID, run.StateVersion).Scan(&transitionID, &eventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',last_error=?,updated_at=?
+		WHERE run_id=? AND status IN ('planned','retryable_failed')
+		AND ((origin_type='transition' AND origin_id=?) OR (origin_type='event_clause' AND origin_id=?))`,
+		fmt.Sprintf("state %s was left before its entry invariant was verified", run.State), now.UnixMilli(),
+		run.ID, transitionID, eventID)
+	return err
 }
 
 // holdForReplay suspends an active run whose current invariant a replay found
@@ -80,7 +121,8 @@ func (s *Store) ReplayDeferredEvents(ctx context.Context) error {
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT d.run_id FROM workflow_v2_deferred_events d
 		JOIN workflow_v2_runs r ON r.id=d.run_id WHERE r.status='active'
-		UNION SELECT id FROM workflow_v2_runs WHERE status='suspended' AND waiting_reason=? ORDER BY 1`, replayPendingReason)
+		UNION SELECT id FROM workflow_v2_runs WHERE status='suspended' AND waiting_reason IN (?,?) ORDER BY 1`,
+		replayPendingReason, replayPendingEntryReason)
 	if err != nil {
 		return err
 	}
@@ -240,15 +282,20 @@ func (s *Store) settleReplayedInvariant(ctx context.Context, runID string) error
 	switch {
 	case valid:
 		_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='active',waiting_reason='',updated_at=?
-			WHERE id=? AND state_version=? AND status='suspended' AND waiting_reason=?`,
-			now.UnixMilli(), runID, stored.StateVersion, replayPendingReason)
+			WHERE id=? AND state_version=? AND status='suspended' AND waiting_reason IN (?,?)`,
+			now.UnixMilli(), runID, stored.StateVersion, replayPendingReason, replayPendingEntryReason)
 	case queued:
 		err = holdForReplay(ctx, tx, stored, now)
 	default:
+		if stored.heldEntry() {
+			if err := cancelHeldEntryEffects(ctx, tx, stored, now); err != nil {
+				return err
+			}
+		}
 		reason := fmt.Sprintf("state invariant no longer holds for %s after replaying deferred events", stored.State)
 		_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
-			WHERE id=? AND state_version=? AND (status='active' OR (status='suspended' AND waiting_reason=?))`,
-			reason, now.UnixMilli(), runID, stored.StateVersion, replayPendingReason)
+			WHERE id=? AND state_version=? AND (status='active' OR (status='suspended' AND waiting_reason IN (?,?)))`,
+			reason, now.UnixMilli(), runID, stored.StateVersion, replayPendingReason, replayPendingEntryReason)
 	}
 	if err != nil {
 		return err

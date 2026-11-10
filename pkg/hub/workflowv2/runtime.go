@@ -594,6 +594,12 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	// effect worker cannot claim the effects scheduled below until the replay
 	// settles the invariant of the state the run ends in.
 	held := valid && !verified
+	// Leaving a held entry, or suspending in it, discards its entry effects.
+	if stored.heldEntry() {
+		if err := cancelHeldEntryEffects(ctx, tx, stored, now); err != nil {
+			return EventResult{}, err
+		}
+	}
 	if !valid {
 		reason := fmt.Sprintf("destination invariant does not hold for state %s", transitionDef.To)
 		return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
@@ -608,7 +614,7 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		status = terminalRunStatus(transitionDef.To)
 		finishedAt = now.UnixMilli()
 	} else if held {
-		status, waitingReason = RunSuspended, replayPendingReason
+		status, waitingReason = RunSuspended, replayPendingEntryReason
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET state=?,display_phase=?,state_version=?,status=?,waiting_reason=?,updated_at=?,finished_at=?
 		WHERE id=? AND state=? AND state_version=? AND workspace_revision=? AND workflow_revision=?`,
