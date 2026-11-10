@@ -139,7 +139,8 @@ func clearDeferredEvent(ctx context.Context, tx *sql.Tx, runID, key string) erro
 }
 
 // ReplayDeferredEvents fires the transitions that suspended runs deferred, for
-// every run that is active again, and settles runs a failed replay left held.
+// every run that is active again, and settles runs a failed replay left held
+// or active with parked clause effects.
 // The transition that resumes a run replays its queue immediately; this sweep
 // covers failures and recoveries outside the event path. Queues of finished
 // runs are discarded.
@@ -151,9 +152,14 @@ func (s *Store) ReplayDeferredEvents(ctx context.Context) error {
 		(SELECT id FROM workflow_v2_runs WHERE status NOT IN ('active','suspended'))`); err != nil {
 		return err
 	}
+	// A verified self-loop leaves the run active with parked clause effects
+	// until the settle; if that settle failed, the sweep must still settle the
+	// run or the effects stay parked forever.
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT d.run_id FROM workflow_v2_deferred_events d
 		JOIN workflow_v2_runs r ON r.id=d.run_id WHERE r.status='active'
-		UNION SELECT id FROM workflow_v2_runs WHERE status='suspended' AND waiting_reason IN (?,?) ORDER BY 1`,
+		UNION SELECT id FROM workflow_v2_runs WHERE status='suspended' AND waiting_reason IN (?,?)
+		UNION SELECT e.run_id FROM workflow_v2_effects e JOIN workflow_v2_runs r ON r.id=e.run_id
+			WHERE e.status IN ('planned','retryable_failed') AND e.postponed=1 AND r.status='active' ORDER BY 1`,
 		replayPendingReason, replayPendingEntryReason)
 	if err != nil {
 		return err

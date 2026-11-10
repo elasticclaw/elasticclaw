@@ -1549,10 +1549,11 @@ func TestReplayReleasesPostponedClauseEffectsWhenInvariantSettles(t *testing.T) 
 	}
 }
 
-// A self-loop transition does not leave the state, so it keeps the clause
-// effects a replay parked there until the settle judges the invariant: the CI
-// clause closes the gate and a reviewing -> reviewing transition reopens it.
-func TestReplaySelfLoopKeepsPostponedClauseEffects(t *testing.T) {
+// replaySelfLoopWithParkedClauseEffect replays a CI clause that parks an
+// agent.task under a broken invariant, then a reviewing -> reviewing self-loop
+// that restores it.
+func replaySelfLoopWithParkedClauseEffect(t *testing.T) (*workflowv2.Store, *sql.DB) {
+	t.Helper()
 	invariant := "    invariant:\n      work.gate_closed:\n        exists: false\n"
 	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
 		"  reviewing:\n    phase: review\n"+invariant, 1)
@@ -1563,7 +1564,6 @@ func TestReplaySelfLoopKeepsPostponedClauseEffects(t *testing.T) {
 			"    set:\n      work.gate_closed: null\n    to: reviewing\nci:\n  policies:", 1)
 	clauses := "events:\n  ci.policy.evaluated:\n    clauses:\n      - from: reviewing\n        set:\n          work.gate_closed: true\n        effects:\n" +
 		"          - agent.task:\n              prompt: Investigate the CI failure.\n"
-	ctx := context.Background()
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
 	pr := createSuspendedDelivery(t, store, db, "run-self-loop", selfLoop+clauses)
@@ -1577,9 +1577,18 @@ func TestReplaySelfLoopKeepsPostponedClauseEffects(t *testing.T) {
 	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-self-loop'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ReplayDeferredEvents(ctx); err != nil {
+	if err := store.ReplayDeferredEvents(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	return store, db
+}
+
+// A self-loop transition does not leave the state, so it keeps the clause
+// effects a replay parked there until the settle judges the invariant: the CI
+// clause closes the gate and a reviewing -> reviewing transition reopens it.
+func TestReplaySelfLoopKeepsPostponedClauseEffects(t *testing.T) {
+	ctx := context.Background()
+	store, _ := replaySelfLoopWithParkedClauseEffect(t)
 	run, err := store.GetRun(ctx, "run-self-loop")
 	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" || run.StateVersion < 2 {
 		t.Fatalf("settled run = %#v, %v (self-loop not taken?)", run, err)
@@ -1587,6 +1596,27 @@ func TestReplaySelfLoopKeepsPostponedClauseEffects(t *testing.T) {
 	claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute)
 	if err != nil || claim == nil || claim.Effect.Kind != "agent.task" {
 		t.Fatalf("claim after settle = %#v, %v (self-loop cancelled the parked clause effect?)", claim, err)
+	}
+}
+
+// A verified self-loop leaves the run active with the parked clause effect
+// until the settle. If that settle fails, the sweep still settles the run, or
+// the effect would stay parked forever.
+func TestReplaySweepSettlesActiveRunWithParkedClauseEffects(t *testing.T) {
+	ctx := context.Background()
+	store, db := replaySelfLoopWithParkedClauseEffect(t)
+	if _, err := db.Exec(`UPDATE workflow_v2_effects SET postponed=1 WHERE run_id='run-self-loop' AND kind='agent.task'`); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+		t.Fatalf("claim before settle = %#v, %v", claim, err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute)
+	if err != nil || claim == nil || claim.Effect.Kind != "agent.task" {
+		t.Fatalf("claim after sweep = %#v, %v (parked effect left behind?)", claim, err)
 	}
 }
 
