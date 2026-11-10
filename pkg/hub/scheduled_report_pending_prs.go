@@ -31,7 +31,8 @@ type scheduledPendingPRTicket struct {
 // of the summaries' open_pr_count, and applies the requires_pr=1 AND
 // analytics_enabled=1 scope of the ticket views, so the digest never names a
 // ticket the linked /analytics page hides. Maintenance runs are deliberately
-// left out: they count at run level but stay out of ticket metrics.
+// left out by run_kind (they may still carry requires_pr=1): they count at run
+// level but stay out of ticket metrics, matching the tickets views.
 // Deliberately no time window on the runs: a ticket of ANY age with a still-open PR is exactly what this report exists
 // to surface.
 // opened_at=0 on an open PR is a row shape the codebase expects (the schema
@@ -55,6 +56,7 @@ const scheduledPendingPRsTicketsSQL = `
 	  FROM task_run_summaries s
 	  JOIN task_run_prs p ON p.tenant_id=s.tenant_id AND p.run_id=s.run_id
 	 WHERE s.tenant_id=? AND s.issue_id != '' AND s.requires_pr=1 AND s.analytics_enabled=1
+	   AND s.run_kind <> 'maintenance'
 	   AND p.state='open' AND p.merged=0
 	   AND NOT EXISTS (
 	       SELECT 1 FROM task_run_prs done
@@ -87,7 +89,7 @@ func buildPendingPRsScheduledReport(ctx context.Context, s *Server) (*notify.Mes
 		    ON p.integration=s.integration
 		   AND p.integration_workspace=s.integration_workspace
 		   AND p.issue_id=s.issue_id
-		 WHERE s.tenant_id=? AND s.requires_pr=1 AND s.analytics_enabled=1
+		 WHERE s.tenant_id=? AND s.requires_pr=1 AND s.analytics_enabled=1 AND s.run_kind <> 'maintenance'
 		 ORDER BY s.started_at DESC`, tenantID, scheduledPendingPRsTicketLimit, tenantID)
 	if err != nil {
 		return nil, false, err

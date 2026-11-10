@@ -315,3 +315,28 @@ func insertPendingPRReportPR(t *testing.T, db *sql.DB, runID string, number int,
 		t.Fatalf("insert PR: %v", err)
 	}
 }
+
+// Maintenance runs stay out of ticket metrics even when their workflow keeps
+// the requires_pr=1 default, matching the tickets views.
+func TestPendingPRsScheduledReportExcludesMaintenanceRuns(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "code", "ENG-1", "eng", "Code task", nowAt.Add(-24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "code", 1, "open", false, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportRun(t, db, "maint", "ENG-2", "eng", "Maintenance", nowAt.Add(-48*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "maint", 2, "open", false, nowAt.Add(-48*time.Hour))
+	if _, err := db.Exec(`UPDATE task_run_summaries SET run_kind='maintenance' WHERE run_id='maint'`); err != nil {
+		t.Fatalf("mark maintenance run: %v", err)
+	}
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if message.Summary[0] != "1 tickets with open PRs" {
+		t.Fatalf("summary = %q — maintenance run leaked into the count", message.Summary[0])
+	}
+	if strings.Contains(message.Body, "ENG-2") {
+		t.Fatalf("body names a maintenance ticket: %q", message.Body)
+	}
+}
