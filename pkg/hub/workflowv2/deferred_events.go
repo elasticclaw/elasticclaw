@@ -79,9 +79,24 @@ func cancelHeldEntryEffects(ctx context.Context, tx *sql.Tx, run Run, now time.T
 // postponeClauseEffects parks the clause effects an event planned while a
 // replay postponed a broken invariant. A live event would have been rejected
 // before planning them, so they wait for settleReplayedInvariant.
-func postponeClauseEffects(ctx context.Context, tx *sql.Tx, runID, eventID string) error {
-	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET postponed=1
-		WHERE run_id=? AND origin_type='event_clause' AND origin_id=? AND status='planned'`, runID, eventID)
+func postponeClauseEffects(ctx context.Context, tx *sql.Tx, runID string, input EventInput) error {
+	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET postponed=1,postponed_subject=?
+		WHERE run_id=? AND origin_type='event_clause' AND origin_id=? AND status='planned'`,
+		input.deferSubject(), runID, input.ID)
+	return err
+}
+
+// supersedeParkedEffects cancels the clause effects a replay parked for an
+// older observation of the subject an event is about to plan clause effects
+// for. The deferred queue keeps only the latest observation per subject, so
+// releasing both would run the outdated work next to its replacement.
+func supersedeParkedEffects(ctx context.Context, tx *sql.Tx, runID string, input EventInput, now time.Time) error {
+	if !input.observation {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',postponed=0,last_error=?,updated_at=?
+		WHERE run_id=? AND postponed=1 AND postponed_subject=? AND status IN ('planned','retryable_failed')`,
+		fmt.Sprintf("superseded by a newer %s observation", input.Kind), now.UnixMilli(), runID, input.deferSubject())
 	return err
 }
 

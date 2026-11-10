@@ -554,6 +554,9 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			return EventResult{}, err
 		}
 		if clause != nil && !clause.Ignore {
+			if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
+				return EventResult{}, err
+			}
 			if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
 				"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
 				return EventResult{}, err
@@ -562,7 +565,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			// effects until it settles: they run if the invariant then holds
 			// and are cancelled if the run suspends or leaves the state.
 			if !valid {
-				if err := postponeClauseEffects(ctx, tx, runID, input.ID); err != nil {
+				if err := postponeClauseEffects(ctx, tx, runID, input); err != nil {
 					return EventResult{}, err
 				}
 				reason = strings.TrimPrefix(reason+"; clause effects wait for the replay to settle the state invariant", "; ")
@@ -629,12 +632,21 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		reason := fmt.Sprintf("destination invariant does not hold for state %s", transitionDef.To)
 		return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
 	}
-	// A verified self-loop verifies the invariant the parked effects wait for
-	// and makes the run active, so it releases them like the settle would; no
-	// active run is left holding parked effects.
-	if transitionDef.To == stored.State && !held {
-		if err := releasePostponedEffects(ctx, tx, runID, now); err != nil {
-			return EventResult{}, err
+	if transitionDef.To == stored.State {
+		// A self-loop re-planning a clause supersedes what an older
+		// observation of the same subject parked.
+		if clause != nil && !clause.Ignore {
+			if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
+				return EventResult{}, err
+			}
+		}
+		// A verified self-loop verifies the invariant the parked effects wait
+		// for and makes the run active, so it releases them like the settle
+		// would; no active run is left holding parked effects.
+		if !held {
+			if err := releasePostponedEffects(ctx, tx, runID, now); err != nil {
+				return EventResult{}, err
+			}
 		}
 	}
 

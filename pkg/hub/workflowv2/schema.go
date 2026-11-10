@@ -318,6 +318,11 @@ func Migrate(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "workflow_v2_effects", "postponed", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
+	// postponed_subject is the deferred-replay subject of the event that parked
+	// the effect, so a newer observation of that subject supersedes it.
+	if err := addColumnIfMissing(db, "workflow_v2_effects", "postponed_subject", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
 	if err := addColumnIfMissing(db, "workflow_v2_delivery_prs", "registered_only", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
