@@ -90,7 +90,12 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 		}
 		// delivery.adopted may itself reach a terminal state.
 		if run.Status != workflowv2.RunActive && run.Status != workflowv2.RunSuspended {
-			s.maybeFinishWorkflowV2Parent(ctx, runID)
+			// Detach from the caller (an HTTP request for manual triggers):
+			// callers skip provisioning, so a cancelled ctx here would leave the
+			// claw unprovisioned with nothing left to finish it.
+			finishCtx, finishCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			s.maybeFinishWorkflowV2Parent(finishCtx, runID)
+			finishCancel()
 			return workflowV2FinishedAtActivationError{status: run.Status}
 		}
 	}
