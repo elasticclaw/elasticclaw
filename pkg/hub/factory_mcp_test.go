@@ -542,6 +542,17 @@ func TestFactoryMCPReadToolWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, token := factoryMCPFixture(t)
+	// One run per kind, so a dropped run_kind filter changes the summary count.
+	ts := time.Now().Add(-time.Hour).UnixMilli()
+	insertTaskRunAnalyticsAPIRun(t, s.db, apiRunFixture{
+		RunID: "mcp-code-run", AttemptID: "mcp-code-attempt", ClawID: "mcp-claw", TenantID: "test-tenant-id",
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, RunKind: taskRunKindCodeTask, StartedAt: ts, FinishedAt: ts + 1000,
+	})
+	insertTaskRunAnalyticsAPIRun(t, s.db, apiRunFixture{
+		RunID: "mcp-maintenance-run", AttemptID: "mcp-maintenance-attempt", ClawID: "mcp-claw", TenantID: "test-tenant-id",
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, RunKind: taskRunKindMaintenance, RequiresPR: boolPtr(false),
+		StartedAt: ts + 2000, FinishedAt: ts + 3000,
+	})
 	session, ctx := factoryMCPClient(t, s, token.Token)
 	run := map[string]any{"run_id": "missing-run"}
 	for _, call := range []struct {
@@ -564,14 +575,15 @@ func TestFactoryMCPReadToolWiring(t *testing.T) {
 		{"get_workflow_attempt_logs", map[string]any{"run_id": "missing-run", "attempt_id": "missing-attempt"}, true, "workflow attempt not found"},
 		{"trigger_workflow", map[string]any{"workspace": "elasticclaw-test", "workflow": "missing-workflow"}, true, "HTTP 404: {\"error\":\"workflow not found\"}"},
 		{"analytics_summary", map[string]any{"status": "failed"}, false, `"totalRuns":0`},
-		{"analytics_summary", map[string]any{"run_kind": "maintenance"}, false, `"totalRuns":0`},
+		{"analytics_summary", map[string]any{}, false, `"totalRuns":2`},
+		{"analytics_summary", map[string]any{"run_kind": "maintenance"}, false, `"totalRuns":1`},
 		{"analytics_general_stats", map[string]any{"tz": "UTC"}, false, `"ticketToPrMs"`},
 		{"analytics_effectiveness", map[string]any{}, false, `"funnel"`},
 		{"analytics_runs", map[string]any{"limit": 5}, false, `"limit":5`},
 		{"analytics_run", run, true, "HTTP 404"},
 		{"analytics_tickets", map[string]any{"limit": 7}, false, `"limit":7`},
 		{"analytics_costs", map[string]any{"days": 7}, false, `"dailySeries"`},
-		{"analytics_cost_drivers", map[string]any{"groupBy": "workflow"}, false, "[]"},
+		{"analytics_cost_drivers", map[string]any{"groupBy": "workflow"}, false, `"runs":2`},
 		{"analytics_filter_options", map[string]any{}, false, `"workspaces"`},
 	} {
 		result := factoryMCPCall(t, ctx, session, call.tool, call.args, call.wantError)
