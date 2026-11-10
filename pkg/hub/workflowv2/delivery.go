@@ -182,32 +182,42 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 		if err != nil {
 			return err
 		}
-		// The policy result facts must describe the delivery as submitted: a
-		// resumed run replays its deferred queue before the policy below is
-		// published, and a result stored for fewer PRs (delivery.satisfied
-		// while every earlier PR was merged) would fire on stale facts. The
-		// revision is left to the publication so it still emits the event.
-		policy, err := evaluateDeliveryPolicy(ctx, tx, runID)
-		if err != nil {
-			return err
-		}
 		input.Payload = map[string]interface{}{"delivery": summary}
 		input.Facts = map[string]interface{}{
 			"delivery.count": summary["count"], "delivery.open": summary["open"],
 			"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
 			"delivery.any_conflicted": summary["any_conflicted"], "delivery.any_behind": summary["any_behind"],
-			"delivery.minimum_met": policy.MinimumMet, "delivery.ci_satisfied": policy.CISatisfied,
-			"delivery.review_satisfied": policy.ReviewSatisfied, "delivery.satisfied": policy.Satisfied,
 		}
-		// The CI and review statuses aggregate the same PRs, so they are
-		// refreshed too, under the producers that own them; their revisions
-		// are likewise left to the publications.
+		// The policy results must describe the delivery as submitted: a
+		// resumed run replays its deferred queue before the policy below is
+		// published, and a result stored for fewer PRs (delivery.satisfied
+		// while every earlier PR was merged) would fire on stale facts. The CI
+		// and review statuses aggregate the same PRs, so they are refreshed
+		// too, each under the producer that owns it. They are owned facts, so
+		// only a suspended run gets them here; an active run receives them
+		// through the policy events its transitions handle. The revisions are
+		// left to the publications so they still emit the events.
+		policy, err := evaluateDeliveryPolicy(ctx, tx, runID)
+		if err != nil {
+			return err
+		}
 		var workflowYAML string
 		if err := tx.QueryRowContext(ctx, `SELECT workflow_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workflowYAML); err != nil {
 			return err
 		}
-		input.ownedFacts, err = policyStatusFacts(workflowYAML, policy)
-		return err
+		owned, err := policyStatusFacts(workflowYAML, policy)
+		if err != nil {
+			return err
+		}
+		if owned == nil {
+			owned = map[Producer]map[string]interface{}{}
+		}
+		owned[ProducerEngine] = map[string]interface{}{
+			"delivery.minimum_met": policy.MinimumMet, "delivery.ci_satisfied": policy.CISatisfied,
+			"delivery.review_satisfied": policy.ReviewSatisfied, "delivery.satisfied": policy.Satisfied,
+		}
+		input.ownedFacts = owned
+		return nil
 	})
 	if err != nil {
 		return nil, EventResult{}, err

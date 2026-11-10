@@ -2611,6 +2611,56 @@ func TestHeadMoveLeavesActiveRunCIStatusToPolicyEvent(t *testing.T) {
 	}
 }
 
+// An active run learns the delivery policy result of a resubmitted head
+// through workflow.delivery.evaluated, not with delivery.verified: a state
+// whose invariant requires satisfied CI must not be suspended by a
+// resubmission it has no transition for, and leaves through its
+// workflow.delivery.evaluated exit once the policy is republished.
+func TestResubmissionLeavesActiveRunDeliveryPolicyToPolicyEvent(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	runID := "run-resubmission-active-invariant"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  ready:\n    phase: review\n    invariant:\n      delivery.ci_satisfied:\n        equals: true\n"+
+			"transitions:\n"+
+			"  ci_passed:\n    from: reviewing\n    on: workflow.delivery.evaluated\n    when:\n"+
+			"      delivery:\n        ci_satisfied:\n          equals: true\n    to: ready\n"+
+			"  ci_reopened:\n    from: ready\n    on: workflow.delivery.evaluated\n    when:\n"+
+			"      delivery:\n        ci_satisfied:\n          equals: false\n    to: reviewing\n", 1)
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: runID, TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, runID, "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/10"}
+	verified, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{claim},
+	}, deliveryVerifier(map[string]string{claim.URL: "head-1"}))
+	if err != nil || len(verified) != 1 {
+		t.Fatalf("delivery = %#v, %v", verified, err)
+	}
+	for _, check := range []string{"lint", "unit"} {
+		recordPolicyEvidence(t, store, runID, verified[0], "ci", "github-actions", check, check, "success",
+			map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	}
+	if run, err := store.GetRun(ctx, runID); err != nil || run.State != "ready" || run.Status != workflowv2.RunActive {
+		t.Fatalf("run after green CI = %#v, %v", run, err)
+	}
+	if _, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{claim},
+	}, deliveryVerifier(map[string]string{claim.URL: "head-2"})); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, runID); err != nil || run.State != "reviewing" || run.Status != workflowv2.RunActive {
+		t.Fatalf("run after resubmission = %#v, %v (suspended on the delivery policy the submission refreshed?)", run, err)
+	}
+}
+
 // Each PR move clears the delivery policy result a suspended run queued, and
 // the caller that recorded the move republishes it afterwards. A later move of
 // another PR therefore drops the result queued after an earlier move only to
