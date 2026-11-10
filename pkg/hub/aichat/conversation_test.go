@@ -398,6 +398,36 @@ func TestStopBeforeTheTurnStartsRefusesIt(t *testing.T) {
 	}
 }
 
+func TestRetryOfRejectsASecondRetryOfTheSameAnswer(t *testing.T) {
+	s := testStore(t)
+	thread := testThread(t, s)
+	ctx := context.Background()
+	first, err := s.BeginTurn(ctx, thread, "question", "model", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Status = "interrupted"
+	if err := s.FinishMessage(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	// One tab retries the dropped answer, and that retry drops too.
+	retry, err := s.beginTurn(ctx, thread, "", "model", true, first.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry.Status = "interrupted"
+	if err := s.FinishMessage(ctx, retry); err != nil {
+		t.Fatal(err)
+	}
+	// Another tab's late retry of the same answer is refused.
+	if _, err := s.beginTurn(ctx, thread, "", "model", true, first.ID, nil); !errors.Is(err, ErrRetry) {
+		t.Fatal(err)
+	}
+	if _, err := s.beginTurn(ctx, thread, "", "model", true, retry.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPromptAndHistory(t *testing.T) {
 	s := testStore(t)
 	thread := testThread(t, s)

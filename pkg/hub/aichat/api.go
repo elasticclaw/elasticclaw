@@ -171,6 +171,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		Answers *InterviewAnswers `json:"answers"`
 		Text    string            `json:"text"`
 		Retry   bool              `json:"retry"`
+		RetryOf string            `json:"retryOf"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -217,7 +218,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unavailable", 500)
 		return
 	}
-	m, err := a.store.beginTurn(ctx, t, body.Text, provider.Model(), body.Retry, body.Answers)
+	m, err := a.store.beginTurn(ctx, t, body.Text, provider.Model(), body.Retry, body.RetryOf, body.Answers)
 	var argErr tools.ArgError
 	if errors.As(err, &argErr) {
 		http.Error(w, argErr.Error(), 400)

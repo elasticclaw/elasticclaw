@@ -180,9 +180,12 @@ func (s *Store) RecoverInterrupted(ctx context.Context, threadID string) error {
 // BeginTurn saves the user and pending assistant atomically. The runner owns the
 // thread's in-flight slot before calling it, so sequence numbers cannot race.
 func (s *Store) BeginTurn(ctx context.Context, t Thread, text, model string, retry bool) (Message, error) {
-	return s.beginTurn(ctx, t, text, model, retry, nil)
+	return s.beginTurn(ctx, t, text, model, retry, "", nil)
 }
-func (s *Store) beginTurn(ctx context.Context, t Thread, text, model string, retry bool, answers *InterviewAnswers) (Message, error) {
+
+// retryOf, when set, names the failed answer a retry replaces; a retry of any
+// other answer is rejected, so two tabs cannot both retry the same answer.
+func (s *Store) beginTurn(ctx context.Context, t Thread, text, model string, retry bool, retryOf string, answers *InterviewAnswers) (Message, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Message{}, err
@@ -205,11 +208,11 @@ func (s *Store) beginTurn(ctx context.Context, t Thread, text, model string, ret
 	}
 	now := time.Now().UnixMilli()
 	if retry {
-		var role, status string
-		if err := tx.QueryRowContext(ctx, `SELECT role,status FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&role, &status); err != nil {
+		var id, role, status string
+		if err := tx.QueryRowContext(ctx, `SELECT id,role,status FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&id, &role, &status); err != nil {
 			return Message{}, ErrRetry
 		}
-		if role != "assistant" || (status != "error" && status != "cancelled" && status != "interrupted" && status != "limit") {
+		if role != "assistant" || (retryOf != "" && id != retryOf) || (status != "error" && status != "cancelled" && status != "interrupted" && status != "limit") {
 			return Message{}, ErrRetry
 		}
 	} else {
