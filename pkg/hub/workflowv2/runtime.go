@@ -553,13 +553,19 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		if err := writeFacts(ctx, tx, runID, input.ID, ProducerEngine, input.Provenance, clauseWrites, now); err != nil {
 			return EventResult{}, err
 		}
-		// A live event with a broken invariant is rejected before its clause
-		// effects are scheduled; a replay that postpones the check must not
-		// plan them either, or they would outlive a failed settle.
-		if clause != nil && !clause.Ignore && valid {
+		if clause != nil && !clause.Ignore {
 			if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
 				"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
 				return EventResult{}, err
+			}
+			// A replay that postponed a broken invariant parks the clause
+			// effects until it settles: they run if the invariant then holds
+			// and are cancelled if the run suspends or leaves the state.
+			if !valid {
+				if err := postponeClauseEffects(ctx, tx, runID, input.ID); err != nil {
+					return EventResult{}, err
+				}
+				reason = strings.TrimPrefix(reason+"; clause effects wait for the replay to settle the state invariant", "; ")
 			}
 		}
 		if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
@@ -610,6 +616,11 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		if err := cancelHeldEntryEffects(ctx, tx, stored, now); err != nil {
 			return EventResult{}, err
 		}
+	}
+	// Leaving the state, or suspending in it, discards the clause effects a
+	// replay parked there.
+	if err := cancelPostponedEffects(ctx, tx, stored, now); err != nil {
+		return EventResult{}, err
 	}
 	if !valid {
 		reason := fmt.Sprintf("destination invariant does not hold for state %s", transitionDef.To)
@@ -812,6 +823,9 @@ func (s *Store) applyEventWithMutation(ctx context.Context, runID string, input 
 }
 
 func (s *Store) rejectAndSuspend(ctx context.Context, tx *sql.Tx, run Run, input EventInput, reason string, now time.Time) (EventResult, error) {
+	if err := cancelPostponedEffects(ctx, tx, run, now); err != nil {
+		return EventResult{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_events SET disposition=?,reason=? WHERE id=?`,
 		string(typesv2.DispositionRejected), reason, input.ID); err != nil {
 		return EventResult{}, err

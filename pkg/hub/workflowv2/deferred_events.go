@@ -70,6 +70,32 @@ func cancelHeldEntryEffects(ctx context.Context, tx *sql.Tx, run Run, now time.T
 	return err
 }
 
+// postponeClauseEffects parks the clause effects an event planned while a
+// replay postponed a broken invariant. A live event would have been rejected
+// before planning them, so they wait for settleReplayedInvariant.
+func postponeClauseEffects(ctx context.Context, tx *sql.Tx, runID, eventID string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET postponed=1
+		WHERE run_id=? AND origin_type='event_clause' AND origin_id=? AND status='planned'`, runID, eventID)
+	return err
+}
+
+// releasePostponedEffects lets the effect worker claim parked clause effects
+// once the replay verified the invariant of the state they were planned in.
+func releasePostponedEffects(ctx context.Context, tx *sql.Tx, runID string, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET postponed=0,updated_at=? WHERE run_id=? AND postponed=1`,
+		now.UnixMilli(), runID)
+	return err
+}
+
+// cancelPostponedEffects cancels parked clause effects when the run suspends
+// or leaves the state they were planned in before its invariant was verified.
+func cancelPostponedEffects(ctx context.Context, tx *sql.Tx, run Run, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',postponed=0,last_error=?,updated_at=?
+		WHERE run_id=? AND postponed=1 AND status IN ('planned','retryable_failed')`,
+		fmt.Sprintf("state %s was left or suspended before the replay verified its invariant", run.State), now.UnixMilli(), run.ID)
+	return err
+}
+
 // holdForReplay suspends an active run whose current invariant a replay found
 // broken, until settleReplayedInvariant judges it.
 func holdForReplay(ctx context.Context, tx *sql.Tx, run Run, now time.Time) error {
@@ -281,6 +307,9 @@ func (s *Store) settleReplayedInvariant(ctx context.Context, runID string) error
 	now := s.now().UTC()
 	switch {
 	case valid:
+		if err := releasePostponedEffects(ctx, tx, runID, now); err != nil {
+			return err
+		}
 		_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='active',waiting_reason='',updated_at=?
 			WHERE id=? AND state_version=? AND status='suspended' AND waiting_reason IN (?,?)`,
 			now.UnixMilli(), runID, stored.StateVersion, replayPendingReason, replayPendingEntryReason)
@@ -291,6 +320,9 @@ func (s *Store) settleReplayedInvariant(ctx context.Context, runID string) error
 			if err := cancelHeldEntryEffects(ctx, tx, stored, now); err != nil {
 				return err
 			}
+		}
+		if err := cancelPostponedEffects(ctx, tx, stored, now); err != nil {
+			return err
 		}
 		reason := fmt.Sprintf("state invariant no longer holds for %s after replaying deferred events", stored.State)
 		_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?

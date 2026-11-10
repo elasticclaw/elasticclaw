@@ -1456,6 +1456,45 @@ func TestReplayDoesNotPlanClauseEffectsUnderBrokenInvariant(t *testing.T) {
 	}
 }
 
+// Clause effects that a replay parks under a broken invariant run once a later
+// replayed event restores the invariant before the settle: the CI clause
+// closes the gate and the review clause reopens it.
+func TestReplayReleasesPostponedClauseEffectsWhenInvariantSettles(t *testing.T) {
+	invariant := "    invariant:\n      work.gate_closed:\n        exists: false\n"
+	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant, 1)
+	noMatch := strings.Replace(withInvariant, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+		"          equals: never\n    to: fixing\n  review_failed:", 1)
+	clauses := "events:\n  ci.policy.evaluated:\n    clauses:\n      - from: reviewing\n        set:\n          work.gate_closed: true\n        effects:\n" +
+		"          - agent.task:\n              prompt: Investigate the CI failure.\n" +
+		"  review.policy.evaluated:\n    clauses:\n      - from: reviewing\n        set:\n          work.gate_closed: null\n"
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	pr := createSuspendedDelivery(t, store, db, "run-postponed", noMatch+clauses)
+	if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id='run-postponed'`); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, "run-postponed", pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	recordPolicyEvidence(t, store, "run-postponed", pr, "review", "github-reviews", "alice", "approval", "approved",
+		nil, workflowv2.ProducerReview)
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-postponed'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, "run-postponed")
+	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("settled run = %#v, %v", run, err)
+	}
+	claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute)
+	if err != nil || claim == nil || claim.Effect.Kind != "agent.task" {
+		t.Fatalf("claim after settle = %#v, %v (postponed clause effect lost?)", claim, err)
+	}
+}
+
 // A live observation on an active run supersedes one queued for the same
 // subject: a failed recovery replay leaves the queue for the sweep, and the
 // sweep must not replay a CI failure that a later live CI result superseded.

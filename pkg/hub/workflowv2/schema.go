@@ -312,6 +312,12 @@ func Migrate(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "workflow_v2_delivery_prs", "mergeable_observed_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
+	// postponed marks event-clause effects that a replay planned while it
+	// postponed a broken invariant; the effect worker skips them until the
+	// replay settles the invariant (see settleReplayedInvariant).
+	if err := addColumnIfMissing(db, "workflow_v2_effects", "postponed", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
 	if err := addColumnIfMissing(db, "workflow_v2_delivery_prs", "registered_only", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
