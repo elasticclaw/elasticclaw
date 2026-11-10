@@ -113,12 +113,16 @@ func TestWorkflowCreationQueuesBehindOlderPendingClaw(t *testing.T) {
 // activation may finish the run without any sandbox.
 func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		activation error
-		want       string
+		name        string
+		activation  error
+		failDequeue bool
+		want        string
 	}{
-		{"finished", workflowV2FinishedAtActivationError{status: "completed"}, "provisioning"},
-		{"activated", nil, "connected"},
+		{"finished", workflowV2FinishedAtActivationError{status: "completed"}, false, "provisioning"},
+		// A failed dequeue must not leave the claw pending for the next
+		// promotion to provision.
+		{"finished dequeue failed", workflowV2FinishedAtActivationError{status: "completed"}, true, "deleted"},
+		{"activated", nil, false, "connected"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
@@ -132,6 +136,12 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 			workflow := &types.WorkflowConfig{Name: "queue-workflow", Provider: "noop", ConcurrencyGroup: "cruise-demo"}
 			id, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
 				beforeProvision: func(_ context.Context, id, _ string) error {
+					if tc.failDequeue {
+						if _, err := db.Exec(`CREATE TRIGGER fail_queue_test_dequeue BEFORE UPDATE OF status ON claws
+							WHEN NEW.status='provisioning' BEGIN SELECT RAISE(FAIL, 'dequeue disabled'); END`); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if _, err := db.Exec(`UPDATE claws SET status='deleted' WHERE id='active001'`); err != nil {
 						t.Fatal(err)
 					}
@@ -149,10 +159,14 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 				waitForQueueTestPromotion(t, db, id)
 				return
 			}
-			s.promotePendingClaws()
-			time.Sleep(100 * time.Millisecond)
+			// The claw already left 'pending' when the creator returned, and
+			// promotion only selects pending claws, so it cannot provision it.
 			if got := queueTestStatus(t, db, id); got != tc.want {
 				t.Fatalf("finished claw status=%q, want %q without provisioning", got, tc.want)
+			}
+			s.promotePendingClaws()
+			if got := queueTestStatus(t, db, id); got != tc.want {
+				t.Fatalf("finished claw status=%q after promotion, want %q", got, tc.want)
 			}
 		})
 	}
