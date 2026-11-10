@@ -109,7 +109,8 @@ type EventInput struct {
 	deferInvariant bool
 	// ownedFacts are hub-derived facts written with the event under the
 	// producer that owns them, such as the CI and review policy statuses a
-	// delivery submission re-aggregates. Only store code sets them.
+	// delivery submission re-aggregates, when the run is suspended. Only
+	// store code sets them.
 	ownedFacts map[Producer]map[string]interface{}
 }
 
@@ -465,9 +466,15 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	if err := writeFacts(ctx, tx, runID, input.ID, input.Producer, input.Provenance, input.Facts, now); err != nil {
 		return EventResult{}, err
 	}
-	for producer, facts := range input.ownedFacts {
-		if err := writeFacts(ctx, tx, runID, input.ID, producer, input.Provenance, facts, now); err != nil {
-			return EventResult{}, err
+	// Owned facts only keep a suspended run current for its replay. An active
+	// run receives them through their own policy events, which its transitions
+	// handle; written here they could break the state invariant on an event the
+	// workflow has no transition for.
+	if stored.Status == RunSuspended {
+		for producer, facts := range input.ownedFacts {
+			if err := writeFacts(ctx, tx, runID, input.ID, producer, input.Provenance, facts, now); err != nil {
+				return EventResult{}, err
+			}
 		}
 	}
 	// The transition engine sees this observation live, so it supersedes one

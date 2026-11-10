@@ -2551,6 +2551,66 @@ func TestHeadMoveRefreshesPolicyStatusFactsBeforeReplay(t *testing.T) {
 	}
 }
 
+// An active run learns the CI status of a moved head through the policy event
+// its transitions handle, not with the head move: a state whose invariant
+// requires satisfied CI must not be suspended by a push it has no transition
+// for, and leaves through its ci.policy.evaluated exit once new evidence lands.
+func TestHeadMoveLeavesActiveRunCIStatusToPolicyEvent(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	runID := "run-head-move-active-invariant"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  ready:\n    phase: review\n    invariant:\n      ci.status:\n        equals: satisfied\n"+
+			"transitions:\n"+
+			"  ci_passed:\n    from: reviewing\n    on: ci.policy.evaluated\n    when:\n"+
+			"      ci:\n        status:\n          equals: satisfied\n    to: ready\n"+
+			"  ci_reopened:\n    from: ready\n    on: ci.policy.evaluated\n    when:\n"+
+			"      ci:\n        status:\n          not_equals: satisfied\n    to: reviewing\n", 1)
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: runID, TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, runID, "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/10"}
+	verified, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{claim},
+	}, deliveryVerifier(map[string]string{claim.URL: "head-1"}))
+	if err != nil || len(verified) != 1 {
+		t.Fatalf("delivery = %#v, %v", verified, err)
+	}
+	for _, check := range []string{"lint", "unit"} {
+		recordPolicyEvidence(t, store, runID, verified[0], "ci", "github-actions", check, check, "success",
+			map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	}
+	if run, err := store.GetRun(ctx, runID); err != nil || run.State != "ready" || run.Status != workflowv2.RunActive {
+		t.Fatalf("run after green CI = %#v, %v", run, err)
+	}
+	targets, err := store.ActiveDeliveryTargetsAll(ctx)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %#v, %v", targets, err)
+	}
+	moved := verified[0]
+	moved.HeadSHA = "head-2"
+	moved.Provenance.ObservedAt = time.Date(2026, 8, 8, 12, 2, 0, 0, time.UTC)
+	if _, err := store.ReconcilePullRequest(ctx, targets[0], "push", "pull_request.head_changed", moved); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, runID); err != nil || run.State != "ready" || run.Status != workflowv2.RunActive {
+		t.Fatalf("run after head move = %#v, %v (suspended on the CI status the move refreshed?)", run, err)
+	}
+	moved.ID = verified[0].ID
+	recordPolicyEvidence(t, store, runID, moved, "ci", "github-actions", "lint-2", "lint", "success",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	if run, err := store.GetRun(ctx, runID); err != nil || run.State != "reviewing" || run.Status != workflowv2.RunActive {
+		t.Fatalf("run after pending CI on the new head = %#v, %v", run, err)
+	}
+}
+
 // Each PR move clears the delivery policy result a suspended run queued, and
 // the caller that recorded the move republishes it afterwards. A later move of
 // another PR therefore drops the result queued after an earlier move only to
