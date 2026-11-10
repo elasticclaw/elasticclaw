@@ -151,17 +151,11 @@ func (a *api) cancelTurn(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// A stop names its turn, so a late request cannot stop the next one. When
-	// the lookup fails, the stop still applies: honoring it is the safer choice.
-	if message := r.URL.Query().Get("message"); message != "" {
-		var latest string
-		err := a.store.DB.QueryRowContext(r.Context(), `SELECT id FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&latest)
-		if (err == nil || errors.Is(err, sql.ErrNoRows)) && latest != message {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	if turn := r.URL.Query().Get("turn"); turn != "" {
+		a.runner.CancelTurn(t, turn)
+	} else {
+		a.runner.Cancel(t)
 	}
-	a.runner.Cancel(t)
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +184,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "message must contain 1 to 32768 bytes", 400)
 		return
 	}
-	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	ctx, release, err := a.runner.AcquireTurn(r.Context(), t, r.URL.Query().Get("turn"))
 	if errors.Is(err, ErrArchived) {
 		http.Error(w, ErrArchived.Error(), 409)
 		return

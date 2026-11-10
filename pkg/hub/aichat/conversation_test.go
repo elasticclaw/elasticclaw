@@ -308,24 +308,20 @@ func TestStopAndDisconnectStatuses(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				req := httptest.NewRequest("POST", "/api/ai-chat/threads/"+thread.ID+"/messages", strings.NewReader(`{"text":"question"}`)).WithContext(ctx)
+				req := httptest.NewRequest("POST", "/api/ai-chat/threads/"+thread.ID+"/messages?turn=k1", strings.NewReader(`{"text":"question"}`)).WithContext(ctx)
 				req.Header.Set("Login", "Octocat")
 				req.Header.Set("Feature", "on")
 				handler.ServeHTTP(httptest.NewRecorder(), req)
 			}()
 			<-started
-			messages, err := s.Messages(context.Background(), thread.ID, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
 			if tc.name == "stop" {
-				request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?message=earlier-turn", "", "Octocat", "on")
+				request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?turn=earlier-turn", "", "Octocat", "on")
 				select {
 				case <-done:
 					t.Fatal("a stop for another turn ended this one")
 				case <-time.After(50 * time.Millisecond):
 				}
-				if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?message="+messages[1].ID, "", "Octocat", "on"); rec.Code != http.StatusNoContent {
+				if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?turn=k1", "", "Octocat", "on"); rec.Code != http.StatusNoContent {
 					t.Fatal(rec.Code)
 				}
 				// The client aborts the stream once the stop is acknowledged.
@@ -334,7 +330,7 @@ func TestStopAndDisconnectStatuses(t *testing.T) {
 				disconnect()
 			}
 			<-done
-			messages, err = s.Messages(context.Background(), thread.ID, 0)
+			messages, err := s.Messages(context.Background(), thread.ID, 0)
 			if err != nil || messages[1].Status != tc.want {
 				t.Fatal(err, messages)
 			}
@@ -342,34 +338,6 @@ func TestStopAndDisconnectStatuses(t *testing.T) {
 				t.Fatalf("retry after %s: %v", tc.want, err)
 			}
 		})
-	}
-}
-
-func TestCancelStopsTheTurnWhenTheLookupFails(t *testing.T) {
-	started := make(chan struct{}, 1)
-	p := fakeProvider{stream: func(ctx context.Context, _ llm.Request, _ func(string) error) (llm.Response, error) {
-		started <- struct{}{}
-		<-ctx.Done()
-		return llm.Response{}, ctx.Err()
-	}}
-	handler, s, _ := apiFixture(t, p)
-	thread := testThread(t, s)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/messages", `{"text":"question"}`, "Octocat", "on")
-	}()
-	<-started
-	if _, err := s.DB.Exec(`ALTER TABLE ai_chat_messages RENAME TO ai_chat_messages_gone`); err != nil {
-		t.Fatal(err)
-	}
-	if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?message=m", "", "Octocat", "on"); rec.Code != http.StatusNoContent {
-		t.Fatal(rec.Code, rec.Body.String())
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the stop did not end the turn")
 	}
 }
 

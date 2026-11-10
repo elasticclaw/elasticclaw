@@ -184,7 +184,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid action", 400)
 		return
 	}
-	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	ctx, release, err := a.runner.AcquireTurn(r.Context(), t, r.URL.Query().Get("turn"))
 	if errors.Is(err, ErrArchived) {
 		http.Error(w, ErrArchived.Error(), 409)
 		return
