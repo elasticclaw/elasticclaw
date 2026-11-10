@@ -23,6 +23,7 @@ const unfinishedNotices: Record<string, string> = {
 // The set outlives a remount, so reopening the thread does not retry it again.
 const autoRetried = new Set<string>()
 const AUTO_RETRY_WINDOW_MS = 2 * 60 * 1000
+const STOP_TIMEOUT_MS = 5000
 
 // randomUUID needs a secure context; a hub served over plain http still needs a key.
 export function newActionKey() {
@@ -212,8 +213,8 @@ export function useConversation() {
     const onEvent = (event: string, payload: Record<string, unknown>) => {
       if (isCurrent()) applyStreamEvent(turn, event, payload, { setMessages, setDraft, setReading })
     }
-    if (turn.action) await streamAIChatAction(turn.threadId, turn.action, signal, onEvent)
-    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers)
+    if (turn.action) await streamAIChatAction(turn.threadId, turn.action, signal, onEvent, turn.turnKey)
+    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers, turn.turnKey)
   }
 
   const finishTurn = async (turn: StreamTurn, isCurrent: () => boolean) => {
@@ -238,6 +239,8 @@ export function useConversation() {
     const isCurrent = () => isSameConversation(version)
     const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
     const afterMessageId = messages[messages.length - 1]?.id
+    // Without a random source, Stop falls back to aborting the stream.
+    try { turn.turnKey = newActionKey() } catch { /* keyless turn */ }
     activeTurn.current = turn
     try {
       if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: newActionKey() }
@@ -267,12 +270,15 @@ export function useConversation() {
     const controller = active.current
     const version = generation.current
     const id = threadRef.current
-    const messageId = activeTurn.current?.assistantId
+    const turn = activeTurn.current
     stopRequested.current = true
-    if (messageId) autoRetried.add(messageId)
+    if (turn?.assistantId) autoRetried.add(turn.assistantId)
     // Telling the hub first saves the turn as stopped; a bare abort reads as a
-    // dropped connection. The message id keeps a late stop off the next turn.
-    if (controller && id && messageId) await cancelAIChatTurn(id, messageId).catch(() => {})
+    // dropped connection. The turn key keeps a late stop off the next turn, and
+    // the wait is bounded so a stuck request cannot block the abort.
+    if (controller && turn?.threadId && turn.turnKey) {
+      await Promise.race([cancelAIChatTurn(turn.threadId, turn.turnKey).catch(() => {}), new Promise((resolve) => setTimeout(resolve, STOP_TIMEOUT_MS))])
+    }
     // Aborting also covers cancellation before the server acquired a turn slot.
     controller?.abort()
     if (controller || !id) return

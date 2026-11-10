@@ -11,6 +11,8 @@ export type StreamTurn = {
   started: boolean
   assistantId: string
   error: string
+  // Names this turn to the hub, so Stop reaches it even before message_started.
+  turnKey?: string
 }
 
 export type StreamView = {

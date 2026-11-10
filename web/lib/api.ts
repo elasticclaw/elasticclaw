@@ -696,9 +696,9 @@ export interface AIChatArtifact {
 export function fetchAIChatArtifact(slug: string, version?: number, signal?: AbortSignal): Promise<AIChatArtifact> {
   return apiFetch(`/api/ai-chat/artifacts/${encodeURIComponent(slug)}${version ? `?v=${version}` : ""}`, { signal })
 }
-export async function streamAIChatAction(id: string, action: AIChatActionRequest, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void): Promise<void> {
+export async function streamAIChatAction(id: string, action: AIChatActionRequest, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, turnKey?: string): Promise<void> {
   const token = await resolveToken()
-  const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/actions`, {
+  const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/actions${turnQuery(turnKey)}`, {
     method: "POST", signal,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "text/event-stream" },
     body: JSON.stringify(action),
@@ -756,13 +756,15 @@ export function fetchAIChatThread(id: string, signal?: AbortSignal): Promise<AIC
 export function dismissAIChatTicketAttempt(id: string, attemptId: string): Promise<void> {
   return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/ticket-attempts/${encodeURIComponent(attemptId)}/dismiss`, { method: "POST" })
 }
-export function cancelAIChatTurn(id: string, messageId?: string): Promise<void> {
-  const query = messageId ? `?message=${encodeURIComponent(messageId)}` : ""
-  return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel${query}`, { method: "POST" })
+function turnQuery(turnKey?: string) {
+  return turnKey ? `?turn=${encodeURIComponent(turnKey)}` : ""
 }
-export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, answers?: AIChatAnswers): Promise<void> {
+export function cancelAIChatTurn(id: string, turnKey?: string): Promise<void> {
+  return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel${turnQuery(turnKey)}`, { method: "POST" })
+}
+export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, answers?: AIChatAnswers, turnKey?: string): Promise<void> {
   const token = await resolveToken()
-  const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/messages`, {
+  const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/messages${turnQuery(turnKey)}`, {
     method: "POST", signal,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "text/event-stream" },
     body: JSON.stringify(answers ? { answers } : { text, retry }),

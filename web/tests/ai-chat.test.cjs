@@ -399,19 +399,21 @@ test("SSE rejects a disconnected stream without done", async () => {
   await assert.rejects(readAIChatEvents(byteStream('event: token\ndata: {"text":"partial"}\n\n'), () => {}), /connection ended/)
 })
 
-test("Stop asks the hub to stop the named turn before aborting it", async () => {
+for (const when of ["after message_started", "before message_started"]) test(`Stop asks the hub to stop the keyed turn ${when}, then aborts it`, async () => {
   let signal
   let emit
+  let streamedKey
   const cancels = []
   const fixture = chatFixture({ api: {
     createAIChatThread: async () => thread("new"),
-    streamAIChatTurn: (_id, _text, _retry, requestSignal, onEvent) => {
+    streamAIChatTurn: (_id, _text, _retry, requestSignal, onEvent, _answers, turnKey) => {
       signal = requestSignal
       emit = onEvent
+      streamedKey = turnKey
       return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted"))))
     },
-    cancelAIChatTurn: async (id, messageId) => { cancels.push({ id, messageId, aborted: signal.aborted }) },
-    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "assistant", role: "assistant", content: "Partial", status: "cancelled" }] }),
+    cancelAIChatTurn: async (id, turnKey) => { cancels.push({ id, turnKey, aborted: signal.aborted }) },
+    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "assistant", role: "assistant", content: "", status: "cancelled" }] }),
   } })
   fixture.render()
   fixture.requests[0].resolve(sources("A", ["A"]))
@@ -419,11 +421,12 @@ test("Stop asks the hub to stop the named turn before aborting it", async () => 
   findElement(fixture.render(), "ChatComposer").props.onChange("Question")
   findElement(fixture.render(), "ChatComposer").props.onSend()
   await flush()
-  emit("message_started", { messageId: "assistant" })
+  if (when === "after message_started") emit("message_started", { messageId: "assistant" })
   findElement(fixture.render(), "ChatComposer").props.onCancel()
   await flush()
   assert.equal(signal.aborted, true)
-  assert.deepEqual(cancels, [{ id: "new", messageId: "assistant", aborted: false }])
+  assert.match(streamedKey, /^[A-Za-z0-9-]{1,64}$/)
+  assert.deepEqual(cancels, [{ id: "new", turnKey: streamedKey, aborted: false }])
   const tree = fixture.render()
   assert.equal(findElement(tree, "ChatComposer").props.streaming, false)
   assert.equal(findElement(tree, "MessageList").props.messages[0].status, "cancelled")
