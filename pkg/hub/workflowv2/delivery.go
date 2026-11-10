@@ -281,11 +281,23 @@ func upsertDeliveryPR(ctx context.Context, tx *sql.Tx, runID string, pr *typesv2
 		return false, err
 	}
 	// A resubmission that moves the head or state invalidates what a suspended
-	// run queued for the previous one, exactly as a reconciled move does.
-	if existingID != "" {
-		if err := clearStaleDeferredEvents(ctx, tx, runID, pr.ID, existingHead != pr.HeadSHA,
-			existingState != pr.State, pr.State == "open"); err != nil {
-			return false, err
+	// run queued for the previous one, exactly as a reconciled move does. A PR
+	// that joins the delivery (new, or registered-only until now) has no queued
+	// observations, but the policy results queued without it no longer
+	// aggregate every subject. Registration leaves the delivery and its policy
+	// untouched, so it keeps them.
+	if !registeredOnly {
+		if existingID != "" && !existingRegisteredOnly {
+			if err := clearStaleDeferredEvents(ctx, tx, runID, pr.ID, existingHead != pr.HeadSHA,
+				existingState != pr.State, pr.State == "open"); err != nil {
+				return false, err
+			}
+		} else {
+			for _, key := range []string{"ci.policy.evaluated", "review.policy.evaluated", "workflow.delivery.evaluated"} {
+				if err := clearDeferredEvent(ctx, tx, runID, key); err != nil {
+					return false, err
+				}
+			}
 		}
 	}
 	if existingHead != pr.HeadSHA {

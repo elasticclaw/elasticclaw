@@ -2199,3 +2199,96 @@ func TestResubmissionDropsDeferredDeliveryPolicyOfPreviousHead(t *testing.T) {
 		t.Fatalf("resubmitted run = %#v, %v (previous head's delivery policy replayed?)", run, err)
 	}
 }
+
+// Registering a PR that is not part of the delivery yet must not drop the
+// delivery policy result a suspended run queued for its submitted PRs: the
+// registered-only PR is outside the policy and registration recomputes nothing.
+func TestRegisteredOnlyHeadMoveKeepsDeferredDeliveryPolicy(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  approved:\n    phase: review\ntransitions:\n"+
+			"  ci_green:\n    from: reviewing\n    on: workflow.delivery.evaluated\n    when:\n"+
+			"      workflow:\n        delivery:\n          ci_satisfied:\n            equals: true\n    to: approved\n", 1)
+	pr := createSuspendedDelivery(t, store, db, "run-registered-move", workflowYAML)
+	for _, check := range []string{"lint", "unit"} {
+		recordPolicyEvidence(t, store, "run-registered-move", pr, "ci", "github-actions", check, check, "success",
+			map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	}
+	queued := func() int {
+		t.Helper()
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events
+			WHERE run_id='run-registered-move' AND defer_key='workflow.delivery.evaluated'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	if queued() != 1 {
+		t.Fatal("delivery policy not deferred")
+	}
+	run, err := store.GetRun(ctx, "run-registered-move")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/11"}
+	for _, head := range []string{"other-1", "other-2"} {
+		if _, _, err := store.RegisterPullRequest(ctx, run.ID, run.CurrentAttemptID, other,
+			deliveryVerifier(map[string]string{other.URL: head})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if queued() != 1 {
+		t.Fatal("registered-only head move dropped the queued delivery policy result")
+	}
+}
+
+// A delivery policy result queued while suspended aggregates the PRs delivered
+// then. A resubmission that adds a PR (new or registered-only until now) and
+// resumes the run must not replay it: the added PR has no CI evidence yet.
+func TestResubmissionAddingPRDropsDeferredDeliveryPolicy(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("registered=%v", registered), func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			runID := fmt.Sprintf("run-added-pr-%v", registered)
+			workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+				"  approved:\n    phase: review\ntransitions:\n"+
+					"  ci_green:\n    from: reviewing\n    on: workflow.delivery.evaluated\n    when:\n"+
+					"      workflow:\n        delivery:\n          ci_satisfied:\n            equals: true\n    to: approved\n"+
+					"  resubmitted:\n    from: reviewing\n    on: delivery.verified\n    to: reviewing\n", 1)
+			pr := createSuspendedDelivery(t, store, db, runID, workflowYAML)
+			for _, check := range []string{"lint", "unit"} {
+				recordPolicyEvidence(t, store, runID, pr, "ci", "github-actions", check, check, "success",
+					map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+			}
+			run, err := store.GetRun(ctx, runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/11"}
+			otherVerifier := deliveryVerifier(map[string]string{other.URL: "other-1"})
+			if registered {
+				if _, _, err := store.RegisterPullRequest(ctx, runID, run.CurrentAttemptID, other, otherVerifier); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.SubmitDelivery(ctx, runID, run.CurrentAttemptID, typesv2.DeliveryManifest{
+				PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}, other},
+			}, workflowv2.PullRequestVerifierFunc(func(ctx context.Context, run workflowv2.Run, workspace *typesv2.Workspace,
+				claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+				if claim.URL == pr.URL {
+					return pr, nil
+				}
+				return otherVerifier.VerifyPullRequest(ctx, run, workspace, claim)
+			})); err != nil {
+				t.Fatal(err)
+			}
+			if run, err := store.GetRun(ctx, runID); err != nil || run.State != "reviewing" || run.Status != workflowv2.RunActive {
+				t.Fatalf("resubmitted run = %#v, %v (delivery policy without the added PR replayed?)", run, err)
+			}
+		})
+	}
+}
