@@ -545,15 +545,23 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 
 	transitionID := uuid.NewString()
 	toVersion := stored.StateVersion + 1
+	activationPending := stored.Status == RunSuspended && stored.WaitingReason == activationPendingReason
 	status := RunActive
+	waitingReason := ""
 	finishedAt := int64(0)
 	if destination.Terminal {
 		status = terminalRunStatus(transitionDef.To)
 		finishedAt = now.UnixMilli()
+	} else if activationPending {
+		// Only CompleteActivation releases the run: a transition taken during
+		// activation (such as context.bundle.ready) must not make its effects
+		// claimable before PR adoption has run.
+		status = RunSuspended
+		waitingReason = activationPendingReason
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET state=?,display_phase=?,state_version=?,status=?,waiting_reason='',updated_at=?,finished_at=?
+	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET state=?,display_phase=?,state_version=?,status=?,waiting_reason=?,updated_at=?,finished_at=?
 		WHERE id=? AND state=? AND state_version=? AND workspace_revision=? AND workflow_revision=?`,
-		transitionDef.To, string(destination.Phase), toVersion, string(status), now.UnixMilli(), finishedAt,
+		transitionDef.To, string(destination.Phase), toVersion, string(status), waitingReason, now.UnixMilli(), finishedAt,
 		runID, stored.State, stored.StateVersion, stored.WorkspaceRevision, stored.WorkflowRevision)
 	if err != nil {
 		return EventResult{}, err
@@ -567,13 +575,14 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	}
 	// A delivery transition during activation (adopting an existing PR,
 	// promoting a registered branch PR, or the policy evaluation they publish)
-	// leaves the initial state before its on_enter effects could be claimed;
-	// they must not run in the destination state. Other activation-time
-	// transitions, such as context.bundle.ready, keep their initial effects.
-	if activationDeliveryEventKinds[input.Kind] && stored.Status == RunSuspended && stored.WaitingReason == activationPendingReason {
+	// leaves a state whose effects could not be claimed yet: the initial
+	// state, or a state entered by an earlier activation-time transition such
+	// as context.bundle.ready. Those effects must not run in the destination
+	// state. Other activation-time transitions keep their effects.
+	if activationDeliveryEventKinds[input.Kind] && activationPending {
 		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',last_error=?,updated_at=?
-			WHERE run_id=? AND origin_type='initial' AND status='planned'`,
-			"initial state left during activation", now.UnixMilli(), runID); err != nil {
+			WHERE run_id=? AND origin_type IN ('initial','transition') AND status='planned'`,
+			"state left during activation", now.UnixMilli(), runID); err != nil {
 			return EventResult{}, err
 		}
 	}

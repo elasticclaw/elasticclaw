@@ -373,6 +373,104 @@ func TestContextTransitionDuringActivationKeepsInitialEffects(t *testing.T) {
 	}
 }
 
+const contextThenAdoptionWorkflowYAML = `
+schema_version: 2
+name: context-then-adoption
+enabled: true
+initial_state: gathering
+states:
+  gathering:
+    phase: context
+  working:
+    phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Update dependencies.
+  awaiting:
+    phase: review
+transitions:
+  context_ready:
+    from: gathering
+    on: context.bundle.ready
+    to: working
+  adopted:
+    from: working
+    on: delivery.adopted
+    to: awaiting
+` + branchDeliveryYAML
+
+// A context.bundle.ready transition during activation keeps the activation
+// barrier, so the entered state's effects stay unclaimable until adoption has
+// run; adoption then leaves that state and cancels them.
+func TestContextTransitionThenAdoptionDuringActivationCancelsEnteredEffects(t *testing.T) {
+	for _, adopt := range []bool{true, false} {
+		t.Run(fmt.Sprintf("adopt=%t", adopt), func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			previous := createDeliveryRun(t, store, "previous")
+			url := "https://github.example/org/api/pull/10"
+			delivered, err := store.SubmitDelivery(ctx, previous.RunID, previous.ID, typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: url}}}, deliveryVerifier(map[string]string{url: "head"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='completed' WHERE id=?`, previous.RunID); err != nil {
+				t.Fatal(err)
+			}
+			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "new", TenantID: "tenant-1", InitialClawID: "new-claw", ActivationPending: true,
+				WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(contextThenAdoptionWorkflowYAML)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.AssembleOrganizationContext(ctx, run.ID, workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, _ string, _ typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+				return typesv2.ContextBundleSource{}, fmt.Errorf("unexpected knowledge resolution")
+			})); err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.GetRun(ctx, run.ID)
+			if err != nil || current.State != "working" || current.Status != workflowv2.RunSuspended || current.SuspendedBeyondActivation() {
+				t.Fatalf("after context run=%+v err=%v", current, err)
+			}
+			// The adoption lookup runs here; nothing may be claimed meanwhile.
+			if claim, err := store.ClaimEffect(ctx, "worker", time.Minute); err != nil || claim != nil {
+				t.Fatalf("claim during activation=%+v err=%v", claim, err)
+			}
+			var candidates []typesv2.VerifiedPullRequest
+			if adopt {
+				candidates = delivered
+			}
+			if _, err := store.AdoptPullRequests(ctx, run.ID, candidates, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CompleteActivation(ctx, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			current, err = store.GetRun(ctx, run.ID)
+			if err != nil || current.Status != workflowv2.RunActive {
+				t.Fatalf("run=%+v err=%v", current, err)
+			}
+			claim, err := store.ClaimEffect(ctx, "worker", time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if adopt {
+				if current.State != "awaiting" || claim != nil {
+					t.Fatalf("state=%s claim=%+v", current.State, claim)
+				}
+				var status string
+				if err := db.QueryRow(`SELECT status FROM workflow_v2_effects WHERE run_id=? AND kind='agent.task'`, run.ID).Scan(&status); err != nil || status != "cancelled" {
+					t.Fatalf("working effect status=%s err=%v", status, err)
+				}
+				return
+			}
+			if current.State != "working" || claim == nil || claim.Effect.RunID != run.ID || claim.Effect.Kind != "agent.task" {
+				t.Fatalf("state=%s claim=%+v", current.State, claim)
+			}
+		})
+	}
+}
+
 // Promoting a registered branch PR during activation also leaves the initial
 // state, so its on_enter effects must not run in the destination state.
 func TestBranchPromotionDuringActivationCancelsInitialEffects(t *testing.T) {
