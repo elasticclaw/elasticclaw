@@ -43,13 +43,7 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 	if observed < previousObserved {
 		return EventResult{}, nil
 	}
-	if previousHead == verified.HeadSHA && previousBase == verified.BaseSHA && previousState == state {
-		// Confirming the current tuple advances the watermark so an older
-		// observation of a different tuple cannot land afterwards.
-		_, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET mergeable_observed_at=?
-			WHERE id=? AND run_id=? AND mergeable_observed_at<?`, observed, target.PRID, target.RunID, observed)
-		return EventResult{}, err
-	}
+	sameTuple := previousHead == verified.HeadSHA && previousBase == verified.BaseSHA && previousState == state
 	kind := "pull_request.mergeability_updated"
 	switch state {
 	case "dirty":
@@ -61,6 +55,10 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 			kind = "pull_request.mergeable"
 		}
 	}
+	if sameTuple && kind == "pull_request.mergeability_updated" {
+		// A confirmed clean tuple can only owe a dropped pull_request.mergeable.
+		kind = "pull_request.mergeable"
+	}
 	digest := sha256.Sum256([]byte(target.RunID + "\x00" + target.PRID + "\x00" + verified.HeadSHA + "\x00" + verified.BaseSHA + "\x00" + state))
 	eventID := fmt.Sprintf("github:mergeability:%x", digest)
 	// A tuple may recur after another state. Refresh facts in that case, but
@@ -68,19 +66,30 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 	// An observation a suspended run deferred only counts while it is still
 	// queued: once superseded or cleared by a push, its transition never ran.
 	// A replay is recorded as a new event with the same payload and counts.
-	var recorded, fired int
-	if err := s.db.QueryRowContext(ctx, `SELECT
-		(SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND id=?),
-		(SELECT COUNT(*) FROM workflow_v2_events e WHERE e.run_id=? AND e.kind=?
+	var recorded, fired, observedTuple int
+	if err := s.db.QueryRowContext(ctx, `WITH tuple AS (SELECT e.id,
+			EXISTS(SELECT 1 FROM workflow_v2_deferred_events d WHERE d.run_id=e.run_id AND d.event_id=e.id)
+			OR NOT EXISTS(SELECT 1 FROM workflow_v2_event_receipts r WHERE r.run_id=e.run_id AND r.event_id=e.id
+				AND r.reason=?) AS fired
+		FROM workflow_v2_events e WHERE e.run_id=? AND e.kind=?
 			AND json_extract(e.payload_json,'$.pull_request.id')=?
 			AND json_extract(e.payload_json,'$.pull_request.head_sha')=?
 			AND json_extract(e.payload_json,'$.pull_request.base_sha')=?
-			AND json_extract(e.payload_json,'$.pull_request.mergeable_state')=?
-			AND (EXISTS(SELECT 1 FROM workflow_v2_deferred_events d WHERE d.run_id=e.run_id AND d.event_id=e.id)
-				OR NOT EXISTS(SELECT 1 FROM workflow_v2_event_receipts r WHERE r.run_id=e.run_id AND r.event_id=e.id
-					AND r.reason=?)))`,
-		target.RunID, eventID, target.RunID, kind, target.PRID, verified.HeadSHA, verified.BaseSHA, state,
-		deferredUntilRecoveryReason).Scan(&recorded, &fired); err != nil {
+			AND json_extract(e.payload_json,'$.pull_request.mergeable_state')=?)
+		SELECT (SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND id=?),
+			(SELECT COUNT(*) FROM tuple WHERE fired), (SELECT COUNT(*) FROM tuple)`,
+		deferredUntilRecoveryReason, target.RunID, kind, target.PRID, verified.HeadSHA, verified.BaseSHA, state,
+		target.RunID, eventID).Scan(&recorded, &fired, &observedTuple); err != nil {
+		return EventResult{}, err
+	}
+	// Confirming the persisted tuple fires nothing, unless a suspended run
+	// deferred its transition and then dropped it (a close/reopen or a push
+	// back to a head whose other observation stayed unknown leaves the tuple
+	// in place). It only advances the watermark so an older observation of a
+	// different tuple cannot land afterwards.
+	if sameTuple && (fired > 0 || observedTuple == 0) {
+		_, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET mergeable_observed_at=?
+			WHERE id=? AND run_id=? AND mergeable_observed_at<?`, observed, target.PRID, target.RunID, observed)
 		return EventResult{}, err
 	}
 	if fired > 0 || kind == "pull_request.mergeability_updated" {

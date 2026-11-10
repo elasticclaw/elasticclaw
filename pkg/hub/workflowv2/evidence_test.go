@@ -1721,3 +1721,79 @@ func TestSuspendedRunRefiresDroppedConflictAfterForcePushBack(t *testing.T) {
 		t.Fatalf("replayed conflict tuple fired again as %s", kind)
 	}
 }
+
+// A dropped conflict also leaves the persisted tuple unchanged when nothing
+// newer replaces it: a close/reopen at the same head and base, or a push back
+// after a head GitHub never resolved. Confirming that tuple must still re-fire
+// the transition the run never ran.
+func TestSuspendedRunRefiresDroppedConflictForUnchangedTuple(t *testing.T) {
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  rebasing:\n    phase: build\ntransitions:\n"+
+			"  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	for _, tc := range []struct {
+		name string
+		drop func(push func(head, state, kind string))
+	}{
+		{"close and reopen", func(push func(head, state, kind string)) {
+			push("head-1", "closed", "pull_request.closed")
+			push("head-1", "open", "pull_request.verified_open")
+		}},
+		{"push back after unknown head", func(push func(head, state, kind string)) {
+			push("head-2", "open", "pull_request.head_changed")
+			push("head-1", "open", "pull_request.head_changed")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			pr := createSuspendedDelivery(t, store, db, "run-unchanged-tuple", workflowYAML)
+			step := func() { pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Second) }
+			observe := func() workflowv2.EventResult {
+				t.Helper()
+				step()
+				pr.BaseSHA, pr.MergeableState = "base-1", "dirty"
+				return reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+					return store.ReconcileMergeability(ctx, target, pr)
+				})
+			}
+			push := func(head, state, kind string) {
+				t.Helper()
+				step()
+				pr.HeadSHA, pr.State, pr.BaseSHA, pr.MergeableState = head, state, "", ""
+				reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+					return store.ReconcilePullRequest(ctx, target, kind+pr.Provenance.ObservedAt.String(), kind, pr)
+				})
+			}
+			if result := observe(); !result.Deferred {
+				t.Fatalf("conflict while suspended was not deferred: %#v", result)
+			}
+			tc.drop(push)
+			result := observe()
+			var kind string
+			if err := db.QueryRow(`SELECT kind FROM workflow_v2_events WHERE id=?`, result.EventID).Scan(&kind); err != nil {
+				t.Fatalf("confirming the dropped tuple emitted no event: %#v, %v", result, err)
+			}
+			if kind != "pull_request.conflicted" || !result.Deferred {
+				t.Fatalf("recurring dropped conflict = %s, deferred=%v", kind, result.Deferred)
+			}
+			// While the re-fired conflict is queued, confirming the tuple again
+			// must not queue another one.
+			if again := observe(); again.EventID != "" {
+				t.Fatalf("queued conflict re-emitted: %#v", again)
+			}
+			if _, err := store.ApplyCommand(ctx, "run-unchanged-tuple", "resume",
+				workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+				t.Fatal(err)
+			}
+			if run, err := store.GetRun(ctx, "run-unchanged-tuple"); err != nil || run.State != "rebasing" {
+				t.Fatalf("recovered run = %#v, %v (conflict not replayed)", run, err)
+			}
+			// Once the replay ran the transition, confirming the tuple is a no-op.
+			if again := observe(); again.EventID != "" {
+				t.Fatalf("replayed conflict fired again: %#v", again)
+			}
+		})
+	}
+}
