@@ -365,6 +365,10 @@ func (s *Store) settleReplayedInvariant(ctx context.Context, runID string) error
 	}
 	now := s.now().UTC()
 	switch {
+	case queued && (!valid || stored.heldForReplay()):
+		// A newer observation queued after the replay's snapshot may
+		// supersede the parked effects, so it replays before they are judged.
+		err = holdForReplay(ctx, tx, stored, now)
 	case valid:
 		if err := releasePostponedEffects(ctx, tx, runID, now); err != nil {
 			return err
@@ -372,8 +376,6 @@ func (s *Store) settleReplayedInvariant(ctx context.Context, runID string) error
 		_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='active',waiting_reason='',updated_at=?
 			WHERE id=? AND state_version=? AND status='suspended' AND waiting_reason IN (?,?)`,
 			now.UnixMilli(), runID, stored.StateVersion, replayPendingReason, replayPendingEntryReason)
-	case queued:
-		err = holdForReplay(ctx, tx, stored, now)
 	default:
 		if stored.heldEntry() {
 			if err := cancelHeldEntryEffects(ctx, tx, stored, now); err != nil {
