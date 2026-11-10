@@ -1197,6 +1197,9 @@ func computeTaskRunStatus(
 	case typesv2.OutcomeClosed:
 		return successStatus(), taskRunPhaseTerminal, "", taskRunWarningPRClosedUnmerged, meta.outcomeAt
 	case typesv2.OutcomeFailed:
+		if definitiveFailure != "" {
+			return taskRunStatusFailed, taskRunPhaseTerminal, definitiveFailure, "", meta.outcomeAt
+		}
 		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.outcomeAt
 	case typesv2.OutcomeCancelled:
 		return taskRunStatusCancelled, taskRunPhaseTerminal, "", "", meta.outcomeAt

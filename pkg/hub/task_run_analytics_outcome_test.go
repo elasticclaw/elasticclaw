@@ -316,6 +316,19 @@ func TestWorkflowV2AnalyticsDisabledOutcomeKeepsExclusionSentinel(t *testing.T) 
 	}
 }
 
+func TestWorkflowV2FailedOutcomeKeepsDefinitiveFailureType(t *testing.T) {
+	meta := taskRunMeta{analyticsEnabled: 1, requiresPR: 1, outcome: "failed", outcomeAt: 10}
+	for _, tc := range []struct{ definitive, want string }{
+		{"", taskRunFailureUnknown},
+		{taskRunFailureManualStopDelivery, taskRunFailureManualStopDelivery},
+	} {
+		status, phase, failureType, _, finishedAt := computeTaskRunStatus(meta, prCountSummary{}, 0, 0, taskRunPhaseTimeSummary{}, tc.definitive, 5, 0, "", 0)
+		if status != taskRunStatusFailed || phase != taskRunPhaseTerminal || failureType != tc.want || finishedAt != 10 {
+			t.Fatalf("definitive=%q: status=%s phase=%s failure=%s finishedAt=%d", tc.definitive, status, phase, failureType, finishedAt)
+		}
+	}
+}
+
 func createTerminalOutcomeRunForTest(t *testing.T, s *Server, clawID, outcome string) (string, string) {
 	t.Helper()
 	runID, _ := startTaskRunWithRequiresPRForTest(t, s, clawID, clawID, false)
