@@ -564,6 +564,7 @@ func TestFactoryMCPReadToolWiring(t *testing.T) {
 		{"get_workflow_attempt_logs", map[string]any{"run_id": "missing-run", "attempt_id": "missing-attempt"}, true, "workflow attempt not found"},
 		{"trigger_workflow", map[string]any{"workspace": "elasticclaw-test", "workflow": "missing-workflow"}, true, "HTTP 404: {\"error\":\"workflow not found\"}"},
 		{"analytics_summary", map[string]any{"status": "failed"}, false, `"totalRuns":0`},
+		{"analytics_summary", map[string]any{"run_kind": "maintenance"}, false, `"totalRuns":0`},
 		{"analytics_general_stats", map[string]any{"tz": "UTC"}, false, `"ticketToPrMs"`},
 		{"analytics_effectiveness", map[string]any{}, false, `"funnel"`},
 		{"analytics_runs", map[string]any{"limit": 5}, false, `"limit":5`},

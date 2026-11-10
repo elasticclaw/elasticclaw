@@ -80,6 +80,7 @@ type mcpAnalyticsFilters struct {
 	Model            string `json:"model,omitempty" jsonschema:"Comma-separated model names"`
 	WarningType      string `json:"warning_type,omitempty" jsonschema:"Comma-separated warning types"`
 	FailureType      string `json:"failure_type,omitempty" jsonschema:"Comma-separated failure types"`
+	RunKind          string `json:"run_kind,omitempty" jsonschema:"Comma-separated run kinds (code_task, pr_task, maintenance)"`
 	RequiresPR       *bool  `json:"requires_pr,omitempty" jsonschema:"Filter runs requiring a pull request"`
 	AnalyticsEnabled *bool  `json:"analytics_enabled,omitempty" jsonschema:"Filter by analytics enabled flag"`
 	HumanTouched     *bool  `json:"human_touched,omitempty" jsonschema:"Filter by human intervention"`
@@ -184,7 +185,7 @@ func (s *Server) registerFactoryMCPTools(server *mcp.Server) {
 		return s.mcpCallHandler(ctx, handler, http.MethodGet, path, values, query, nil)
 	}
 	logFields := []string{"from", "to", "before", "before_id", "limit", "order"}
-	analyticsFields := []string{"from", "to", "status", "owner", "owner_type", "workspace", "workflow", "factory", "integration", "repo", "model", "warning_type", "failure_type", "requires_pr", "analytics_enabled", "human_touched", "merged_prs"}
+	analyticsFields := []string{"from", "to", "status", "owner", "owner_type", "workspace", "workflow", "factory", "integration", "repo", "model", "warning_type", "failure_type", "run_kind", "requires_pr", "analytics_enabled", "human_touched", "merged_prs"}
 	analyticsQuery := func(input any, extra ...string) url.Values {
 		return mcpQuery(input, append(append([]string{}, analyticsFields...), extra...)...)
 	}
