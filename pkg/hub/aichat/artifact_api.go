@@ -185,6 +185,10 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, release, err := a.runner.AcquireTurn(r.Context(), t, r.URL.Query().Get("turn"))
+	if errors.Is(err, ErrStopped) {
+		http.Error(w, ErrStopped.Error(), 409)
+		return
+	}
 	if errors.Is(err, ErrArchived) {
 		http.Error(w, ErrArchived.Error(), 409)
 		return

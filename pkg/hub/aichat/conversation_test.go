@@ -341,6 +341,56 @@ func TestStopAndDisconnectStatuses(t *testing.T) {
 	}
 }
 
+func TestKeyedStopSemantics(t *testing.T) {
+	s := testStore(t)
+	thread := testThread(t, s)
+	runner := &Runner{Store: s}
+	// A keyed stop that arrives first refuses its turn once, and only that turn.
+	runner.CancelTurn(thread, "early")
+	if _, _, err := runner.AcquireTurn(context.Background(), thread, "early"); !errors.Is(err, ErrStopped) {
+		t.Fatal(err)
+	}
+	ctx, release, err := runner.AcquireTurn(context.Background(), thread, "early")
+	if err != nil {
+		t.Fatal("the early stop should be consumed:", err)
+	}
+	release()
+	if ctx.Err() == nil {
+		t.Fatal("release should end the flight")
+	}
+	// A keyless flight (an older client) ignores keyed stops but not a keyless one.
+	ctx, release, err = runner.AcquireTurn(context.Background(), thread, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	runner.CancelTurn(thread, "someone-else")
+	if ctx.Err() != nil {
+		t.Fatal("a keyed stop ended a keyless flight")
+	}
+	runner.CancelTurn(thread, "")
+	if !errors.Is(context.Cause(ctx), errStopped) {
+		t.Fatal(context.Cause(ctx))
+	}
+}
+
+func TestStopBeforeTheTurnStartsRefusesIt(t *testing.T) {
+	handler, s, _ := apiFixture(t, fakeProvider{stream: func(context.Context, llm.Request, func(string) error) (llm.Response, error) {
+		t.Error("a stopped turn reached the model")
+		return llm.Response{}, nil
+	}})
+	thread := testThread(t, s)
+	if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?turn=k1", "", "Octocat", "on"); rec.Code != http.StatusNoContent {
+		t.Fatal(rec.Code)
+	}
+	if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/messages?turn=k1", `{"text":"question"}`, "Octocat", "on"); rec.Code != http.StatusConflict {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if messages, err := s.Messages(context.Background(), thread.ID, 0); err != nil || len(messages) != 0 {
+		t.Fatal(err, messages)
+	}
+}
+
 func TestPromptAndHistory(t *testing.T) {
 	s := testStore(t)
 	thread := testThread(t, s)
