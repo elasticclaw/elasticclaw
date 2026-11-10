@@ -554,3 +554,95 @@ func TestSelfTransitionDuringActivationRunsInitialEffectsOnce(t *testing.T) {
 		t.Fatalf("extra claim=%+v err=%v", extra, err)
 	}
 }
+
+const adoptionThenEvaluationWorkflowYAML = `
+schema_version: 2
+name: adoption-then-evaluation
+enabled: true
+initial_state: working
+states:
+  working:
+    phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Update dependencies.
+  awaiting:
+    phase: review
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Watch CI.
+  reviewing:
+    phase: review
+transitions:
+  adopted:
+    from: working
+    on: delivery.adopted
+    to: awaiting
+    effects:
+      - agent.task:
+          prompt: Trigger CI.
+  evaluated:
+    from: awaiting
+    on: workflow.delivery.evaluated
+    to: reviewing
+` + branchDeliveryYAML
+
+// The policy evaluation adoption publishes may leave the state adoption
+// entered before activation completes; the effects adoption scheduled must
+// survive, and only the pre-adoption initial effect is cancelled.
+func TestEvaluationAfterAdoptionDuringActivationKeepsAdoptionEffects(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	previous := createDeliveryRun(t, store, "previous")
+	url := "https://github.example/org/api/pull/10"
+	delivered, err := store.SubmitDelivery(ctx, previous.RunID, previous.ID, typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: url}}}, deliveryVerifier(map[string]string{url: "head"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='completed' WHERE id=?`, previous.RunID); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "new", TenantID: "tenant-1", InitialClawID: "new-claw", ActivationPending: true,
+		WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(adoptionThenEvaluationWorkflowYAML)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssembleOrganizationContext(ctx, run.ID, workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, _ string, _ typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+		return typesv2.ContextBundleSource{}, fmt.Errorf("unexpected knowledge resolution")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdoptPullRequests(ctx, run.ID, delivered, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteActivation(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetRun(ctx, run.ID)
+	if err != nil || current.State != "reviewing" || current.Status != workflowv2.RunActive {
+		t.Fatalf("run=%+v err=%v", current, err)
+	}
+	rows, err := db.Query(`SELECT json_extract(payload_json,'$.prompt'),status FROM workflow_v2_effects WHERE run_id=?`, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var prompt, status string
+		if err := rows.Scan(&prompt, &status); err != nil {
+			t.Fatal(err)
+		}
+		got[prompt] = status
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"Update dependencies.": "cancelled", "Trigger CI.": "planned", "Watch CI.": "planned"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("effects=%v want %v", got, want)
+	}
+}

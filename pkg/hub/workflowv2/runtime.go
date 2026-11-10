@@ -578,11 +578,16 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	// leaves a state whose effects could not be claimed yet: the initial
 	// state, or a state entered by an earlier activation-time transition such
 	// as context.bundle.ready. Those effects must not run in the destination
-	// state. Other activation-time transitions keep their effects.
+	// state. Effects scheduled by an earlier delivery transition in the same
+	// activation (such as the CI trigger of delivery.adopted, followed by the
+	// workflow.delivery.evaluated it publishes) belong to the adopted path and
+	// are kept. Other activation-time transitions keep their effects.
 	if activationDeliveryEventKinds[input.Kind] && activationPending {
 		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',last_error=?,updated_at=?
-			WHERE run_id=? AND origin_type IN ('initial','transition') AND status='planned'`,
-			"state left during activation", now.UnixMilli(), runID); err != nil {
+			WHERE run_id=? AND status='planned' AND (origin_type='initial' OR (origin_type='transition' AND origin_id NOT IN (
+				SELECT t.id FROM workflow_v2_transitions t JOIN workflow_v2_events e ON e.id=t.event_id
+				WHERE t.run_id=? AND e.kind IN (`+activationDeliveryEventKindList+`))))`,
+			"state left during activation", now.UnixMilli(), runID, runID); err != nil {
 			return EventResult{}, err
 		}
 	}
@@ -1191,6 +1196,16 @@ var activationDeliveryEventKinds = map[string]bool{
 	"workflow.delivery.evaluated": true,
 	"review.policy.evaluated":     true,
 }
+
+// activationDeliveryEventKindList is activationDeliveryEventKinds as a SQL list.
+var activationDeliveryEventKindList = func() string {
+	kinds := make([]string, 0, len(activationDeliveryEventKinds))
+	for kind := range activationDeliveryEventKinds {
+		kinds = append(kinds, "'"+kind+"'")
+	}
+	sort.Strings(kinds)
+	return strings.Join(kinds, ",")
+}()
 
 func terminalRunStatus(state string) RunStatus {
 	lower := strings.ToLower(state)
