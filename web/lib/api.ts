@@ -762,12 +762,12 @@ function turnQuery(turnKey?: string) {
 export function cancelAIChatTurn(id: string, turnKey?: string): Promise<void> {
   return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel${turnQuery(turnKey)}`, { method: "POST" })
 }
-export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, answers?: AIChatAnswers, turnKey?: string): Promise<void> {
+export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, answers?: AIChatAnswers, turnKey?: string, retryOf?: string): Promise<void> {
   const token = await resolveToken()
   const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/messages${turnQuery(turnKey)}`, {
     method: "POST", signal,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(answers ? { answers } : { text, retry }),
+    body: JSON.stringify(answers ? { answers } : retryOf ? { text, retry, retryOf } : { text, retry }),
   })
   if (response.status === 401) return handleSessionExpired<void>()
   if (!response.ok) throw new ApiError((await response.text()).trim() || "Unable to send message.", response.status)

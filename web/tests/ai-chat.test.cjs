@@ -468,7 +468,7 @@ test("a turn that dropped before any output is retried once, never after a Stop"
 
 test("a Stop the hub never heard still blocks the automatic retry after a reload", async () => {
   const store = new Map()
-  globalThis.sessionStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)), removeItem: (key) => store.delete(key) }
+  globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)), removeItem: (key) => store.delete(key) }
   try {
     let signal
     const first = chatFixture({ api: {
@@ -503,7 +503,7 @@ test("a Stop the hub never heard still blocks the automatic retry after a reload
     }
     assert.deepEqual(attempts, [])
   } finally {
-    delete globalThis.sessionStorage
+    delete globalThis.localStorage
   }
 })
 
@@ -520,6 +520,50 @@ test("an automatic retry another tab already started does not leave a rejection"
   }
   const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
   assert.equal(alert.props.children[0].props.children, "The connection dropped before this response finished.")
+})
+
+test("an automatic retry names the answer it replaces, and a Stop hides the stopped turn's error", async () => {
+  const retries = []
+  const auto = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => ({ thread: thread("t"), messages: [{ id: "u1", role: "user", content: "Question", status: "completed" }, { id: "a-named", role: "assistant", content: "", status: "interrupted", createdAt: Date.now() }] }),
+    streamAIChatTurn: async (_id, _text, retry, _signal, _onEvent, _answers, _turnKey, retryOf) => { retries.push({ retry, retryOf }) },
+  } })
+  auto.render()
+  auto.requests[0].resolve(sources("A", ["A"]))
+  for (let i = 0; i < 4; i++) {
+    await flush()
+    auto.render()
+  }
+  assert.deepEqual(retries, [{ retry: true, retryOf: "a-named" }])
+
+  let signal
+  let emit
+  const stopped = chatFixture({ api: {
+    createAIChatThread: async () => thread("new"),
+    streamAIChatTurn: (_id, _text, _retry, requestSignal, onEvent) => {
+      signal = requestSignal
+      emit = onEvent
+      return new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")))
+        // The hub answers the Stop with a storage error while the cancel request is pending.
+        emit("message_started", { messageId: "assistant" })
+        setTimeout(() => { emit("error", { code: "storage_error", message: "Unable to save this response." }); emit("done", { messageId: "assistant", status: "error" }); resolve() }, 0)
+      })
+    },
+    cancelAIChatTurn: () => new Promise((resolve) => setTimeout(resolve, 5)),
+    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "assistant", role: "assistant", content: "", status: "cancelled" }] }),
+  } })
+  stopped.render()
+  stopped.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  findElement(stopped.render(), "ChatComposer").props.onChange("Question")
+  findElement(stopped.render(), "ChatComposer").props.onSend()
+  await flush()
+  findElement(stopped.render(), "ChatComposer").props.onCancel()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await flush()
+  const alert = findElement(stopped.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  assert.equal(alert.props.children[0].props.children, "You stopped this response.")
 })
 
 test("an interrupted turn says the connection dropped", async () => {

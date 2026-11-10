@@ -26,20 +26,20 @@ const AUTO_RETRY_WINDOW_MS = 2 * 60 * 1000
 const STOP_TIMEOUT_MS = 5000
 
 // A Stop blocks the automatic retry on its thread for the retry window, even
-// when the hub never heard the Stop and the page reloads before it syncs.
+// when the hub never heard the Stop, the page reloads, or another tab opens it.
 const stoppedAt = new Map<string, number>()
 const stopStorageKey = (threadId: string) => `ai-chat-stopped:${threadId}`
 function rememberStop(threadId: string) {
   stoppedAt.set(threadId, Date.now())
-  try { sessionStorage.setItem(stopStorageKey(threadId), String(Date.now())) } catch { /* memory only */ }
+  try { localStorage.setItem(stopStorageKey(threadId), String(Date.now())) } catch { /* memory only */ }
 }
 function forgetStop(threadId: string) {
   stoppedAt.delete(threadId)
-  try { sessionStorage.removeItem(stopStorageKey(threadId)) } catch { /* memory only */ }
+  try { localStorage.removeItem(stopStorageKey(threadId)) } catch { /* memory only */ }
 }
 function recentlyStopped(threadId: string) {
   let at = stoppedAt.get(threadId) ?? 0
-  try { at = Math.max(at, Number(sessionStorage.getItem(stopStorageKey(threadId))) || 0) } catch { /* memory only */ }
+  try { at = Math.max(at, Number(localStorage.getItem(stopStorageKey(threadId))) || 0) } catch { /* memory only */ }
   return Date.now() - at < AUTO_RETRY_WINDOW_MS
 }
 
@@ -232,7 +232,7 @@ export function useConversation() {
       if (isCurrent()) applyStreamEvent(turn, event, payload, { setMessages, setDraft, setReading })
     }
     if (turn.action) await streamAIChatAction(turn.threadId, turn.action, signal, onEvent, turn.turnKey)
-    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers, turn.turnKey)
+    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers, turn.turnKey, turn.retryOf)
   }
 
   const finishTurn = async (turn: StreamTurn, isCurrent: () => boolean) => {
@@ -250,14 +250,16 @@ export function useConversation() {
     active.current = null
   }
 
-  // `auto` marks the automatic retry, which never clears a Stop or shows a rejection.
-  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatActionRequest, auto = false) => {
+  // `autoRetryOf` marks the automatic retry of that answer, which never clears a
+  // Stop or shows a rejection.
+  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatActionRequest, autoRetryOf?: string) => {
+    const auto = !!autoRetryOf
     if (!data?.configured || !canStartTurn(action ? "action" : answers ? "answers" : text, retry)) return
     if (!auto && threadRef.current) forgetStop(threadRef.current)
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
-    const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
+    const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "", retryOf: autoRetryOf }
     const afterMessageId = messages[messages.length - 1]?.id
     // Without a random source, Stop falls back to aborting the stream.
     try { turn.turnKey = newActionKey() } catch { /* keyless turn */ }
@@ -266,7 +268,7 @@ export function useConversation() {
       if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: newActionKey() }
       turn.action = action
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
-      if (turn.error) setTurnError({ action, message: turn.error, text, retry: true, afterMessageId })
+      if (turn.error && !stopRequested.current) setTurnError({ action, message: turn.error, text, retry: true, afterMessageId })
     } catch (error) {
       const rejected = error instanceof ApiError && !turn.started
       // After a Stop, a refusal or failure of the stopped turn is expected; an
@@ -356,7 +358,7 @@ export function useConversation() {
     if (streaming || !data?.configured || !last || !firstAnswer || last.status !== "interrupted" || last.content || last.blocks?.length || autoRetried.has(last.id)) return
     if (Date.now() - last.createdAt > AUTO_RETRY_WINDOW_MS || recentlyStopped(threadRef.current)) return
     autoRetried.add(last.id)
-    void send("", true, undefined, undefined, undefined, true)
+    void send("", true, undefined, undefined, undefined, last.id)
   })
   useEffect(() => autoRetry(), [streaming, data?.configured, last?.id, last?.status])
 
