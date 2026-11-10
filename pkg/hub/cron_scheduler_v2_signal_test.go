@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -145,22 +146,57 @@ func TestCronSchedulerV2StopWaitsForTickTerminalCleanup(t *testing.T) {
 	}
 }
 
-// A manual trigger that outlives the HTTP drain can signal after stop began;
-// its cleanup must run inline instead of adding to the group stop waited on.
-func TestCronSchedulerV2SignalAfterStopCleansUpInline(t *testing.T) {
+// A manual trigger that outlives the HTTP drain may still be signaling when
+// stop runs: stop must wait for admitted signal work and refuse new work so
+// nothing writes after the hub closes the database.
+func TestCronSchedulerV2StopWaitsForAdmittedSignalAndRefusesNew(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	store := workflowv2.NewStore(db)
 	raw := signalWorkflowYAML() + "\ntransitions:\n  tick:\n    from: [s]\n    on: cron.tick\n    to: done\n"
 	run := createSignalTestRun(t, store, "run-signal", raw)
 	cs := newCronSchedulerV2(s)
 	s.cronSchedulerV2 = cs
-	cs.stop()
-	if status, err := cs.runWorkflow(signalTestWorkflow(t, raw), "test-tenant-id"); err != nil || status != workflowRunSignaled {
-		t.Fatalf("tick = %s, %v", status, err)
+	if !cs.admit() {
+		t.Fatal("admit refused before stop")
 	}
-	var released int
-	if err := db.QueryRow(`SELECT cron_slot_released FROM workflow_v2_runs WHERE id=?`, run.ID).Scan(&released); err != nil || released != 1 {
-		t.Fatalf("cron_slot_released = %d, %v; cleanup after stop did not run inline", released, err)
+	stopped := make(chan struct{})
+	go func() {
+		cs.stop()
+		close(stopped)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cs.inflightMu.Lock()
+		stopping := cs.stopping
+		cs.inflightMu.Unlock()
+		if stopping {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stop never began")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if status, err := cs.runWorkflow(signalTestWorkflow(t, raw), "test-tenant-id"); !errors.Is(err, errCronSchedulerStopping) || status != workflowRunFailed {
+		t.Fatalf("tick after stop = %s, %v; want refusal", status, err)
+	}
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while signal work was still admitted")
+	case <-time.After(50 * time.Millisecond):
+	}
+	cs.inflight.Done()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not return after admitted work finished")
+	}
+	var events, ticks int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND kind='cron.tick'`, run.ID).Scan(&events); err != nil || events != 0 {
+		t.Fatalf("cron.tick events = %d, %v; refused tick wrote an event", events, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_cron_runs`).Scan(&ticks); err != nil || ticks != 0 {
+		t.Fatalf("cron history rows = %d, %v; refused tick was recorded", ticks, err)
 	}
 }
 

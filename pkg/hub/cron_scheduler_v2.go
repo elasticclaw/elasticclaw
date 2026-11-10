@@ -35,13 +35,16 @@ type cronSchedulerV2 struct {
 	running     map[string]int // workflow key -> in-flight run count
 	signalLocks sync.Map       // workflow key -> *sync.Mutex
 
-	// cleanups tracks terminal cleanup started by ticks so stop can wait for
-	// it before the hub closes the database. cleanupMu guards stopping so no
-	// Add races stop's Wait.
-	cleanups  sync.WaitGroup
-	cleanupMu sync.Mutex
-	stopping  bool
+	// inflight tracks signal work (ticks and manual triggers) and the terminal
+	// cleanup it starts, so stop can wait for it before the hub closes the
+	// database. inflightMu guards stopping so no admission races stop's Wait.
+	inflight   sync.WaitGroup
+	inflightMu sync.Mutex
+	stopping   bool
 }
+
+// errCronSchedulerStopping refuses signal work admitted after stop began.
+var errCronSchedulerStopping = errors.New("cron v2 scheduler is stopping")
 
 type scheduledWorkflowV2 struct {
 	workspace *types.WorkspaceConfig // v1 shell with Files and RawConfig
@@ -63,6 +66,9 @@ func (cs *cronSchedulerV2) start() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
+	cs.inflightMu.Lock()
+	cs.stopping = false
+	cs.inflightMu.Unlock()
 	cs.cron = cron.New(cron.WithSeconds(), cron.WithChain(cron.Recover(cron.DefaultLogger)))
 	if err := cs.reloadWorkflows(); err != nil {
 		return fmt.Errorf("reload v2 cron workflows: %w", err)
@@ -81,27 +87,34 @@ func (cs *cronSchedulerV2) stop() {
 	}
 	cs.mu.Unlock()
 	// Ticks have returned, but a manual trigger that outlived the HTTP drain
-	// can still signal; from here on it cleans up inline. Wait for the cleanup
-	// already in flight so its writes never hit a closed database.
-	cs.cleanupMu.Lock()
+	// can still be signaling. Refuse new signal work and wait for what was
+	// already admitted, including its cleanup, so no write hits a closed
+	// database.
+	cs.inflightMu.Lock()
 	cs.stopping = true
-	cs.cleanupMu.Unlock()
-	cs.cleanups.Wait()
+	cs.inflightMu.Unlock()
+	cs.inflight.Wait()
 }
 
-// startCleanup runs terminal cleanup in the background, or inline once stop
-// has begun so it never adds to cleanups while stop waits on them.
-func (cs *cronSchedulerV2) startCleanup(cleanup func()) {
-	cs.cleanupMu.Lock()
+// admit registers signal work with inflight so stop waits for it. It returns
+// false once stop has begun; the caller must then write nothing.
+func (cs *cronSchedulerV2) admit() bool {
+	cs.inflightMu.Lock()
+	defer cs.inflightMu.Unlock()
 	if cs.stopping {
-		cs.cleanupMu.Unlock()
-		cleanup()
-		return
+		return false
 	}
-	cs.cleanups.Add(1)
-	cs.cleanupMu.Unlock()
+	cs.inflight.Add(1)
+	return true
+}
+
+// startCleanup runs terminal cleanup in the background. The caller holds an
+// admission, so the inflight counter is positive and this Add cannot race
+// stop's Wait.
+func (cs *cronSchedulerV2) startCleanup(cleanup func()) {
+	cs.inflight.Add(1)
 	go func() {
-		defer cs.cleanups.Done()
+		defer cs.inflight.Done()
 		cleanup()
 	}()
 }
@@ -402,6 +415,10 @@ func (cs *cronSchedulerV2) lockSignal(key string) func() {
 // signal lock. handled is false when no run is open, so the caller should
 // start a new run while still holding the lock.
 func (cs *cronSchedulerV2) signalOpenRuns(store *workflowv2.Store, sw *scheduledWorkflowV2, tenantID string, now time.Time) (status workflowRunStartStatus, targets []string, handled bool, err error) {
+	if !cs.admit() {
+		return workflowRunFailed, nil, true, errCronSchedulerStopping
+	}
+	defer cs.inflight.Done()
 	runIDs, pending, err := cs.openV2RunIDs(sw.workspace.Name, sw.workflow.Name)
 	if err != nil {
 		return workflowRunFailed, nil, true, err
@@ -500,7 +517,8 @@ func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWork
 		}
 		// Terminal cleanup runs off the per-workflow signal lock so a slow
 		// teardown never delays concurrent ticks or manual triggers; stop
-		// waits for it so shutdown cannot abandon it.
+		// waits for it so shutdown cannot abandon it. Callers outside
+		// signalOpenRuns must hold an admission.
 		cs.startCleanup(func() { cs.srv.maybeFinishWorkflowV2Parent(ctx, runID) })
 	}
 	if len(targets) == 0 {

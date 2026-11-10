@@ -160,6 +160,8 @@ func (s *Server) signalWorkflowV2ManualTrigger(w http.ResponseWriter, r *http.Re
 	}
 	unlock()
 	switch {
+	case errors.Is(err, errCronSchedulerStopping):
+		jsonError(w, http.StatusServiceUnavailable, err.Error())
 	case err != nil:
 		jsonError(w, http.StatusInternalServerError, "failed to signal workflow v2 run: "+err.Error())
 	case status == workflowRunSkipped:
