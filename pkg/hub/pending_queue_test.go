@@ -117,12 +117,14 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 		activation  error
 		failDequeue bool
 		want        string
+		wantRun     string
 	}{
-		{"finished", workflowV2FinishedAtActivationError{status: "completed"}, false, "provisioning"},
+		{"finished", workflowV2FinishedAtActivationError{status: "completed"}, false, "provisioning", "running"},
 		// A failed dequeue must not leave the claw pending for the next
-		// promotion to provision.
-		{"finished dequeue failed", workflowV2FinishedAtActivationError{status: "completed"}, true, "deleted"},
-		{"activated", nil, false, "connected"},
+		// promotion to provision, and records the run's terminal result.
+		{"finished dequeue failed", workflowV2FinishedAtActivationError{status: "completed"}, true, "deleted", "success"},
+		{"cancelled dequeue failed", workflowV2FinishedAtActivationError{status: "cancelled"}, true, "deleted", "cancelled"},
+		{"activated", nil, false, "connected", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
@@ -136,6 +138,10 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 			workflow := &types.WorkflowConfig{Name: "queue-workflow", Provider: "noop", ConcurrencyGroup: "cruise-demo"}
 			id, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
 				beforeProvision: func(_ context.Context, id, _ string) error {
+					if _, err := db.Exec(`INSERT INTO workflow_runs (id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, started_at, created_at)
+						VALUES ('queue-run', 'default', 'queue-workflow', 'queue-workspace', 'cron', 'running', ?, ?, ?)`, id, time.Now().UTC(), time.Now().UTC()); err != nil {
+						t.Fatal(err)
+					}
 					if tc.failDequeue {
 						if _, err := db.Exec(`CREATE TRIGGER fail_queue_test_dequeue BEFORE UPDATE OF status ON claws
 							WHEN NEW.status='provisioning' BEGIN SELECT RAISE(FAIL, 'dequeue disabled'); END`); err != nil {
@@ -167,6 +173,13 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 			s.promotePendingClaws()
 			if got := queueTestStatus(t, db, id); got != tc.want {
 				t.Fatalf("finished claw status=%q after promotion, want %q", got, tc.want)
+			}
+			var runStatus string
+			if err := db.QueryRow(`SELECT status FROM workflow_runs WHERE id='queue-run'`).Scan(&runStatus); err != nil {
+				t.Fatal(err)
+			}
+			if runStatus != tc.wantRun {
+				t.Fatalf("workflow run status=%q, want %q", runStatus, tc.wantRun)
 			}
 		})
 	}

@@ -12,6 +12,15 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+// workflowV2ClawResult maps a terminal v2 run status to the claw's terminal
+// result. Runs end only as completed or cancelled (see terminalRunStatus).
+func workflowV2ClawResult(status workflowv2.RunStatus) string {
+	if status == workflowv2.RunCancelled {
+		return "cancelled"
+	}
+	return "success"
+}
+
 // maybeFinishWorkflowV2Parent checks whether a v2 workflow run has reached a
 // terminal state and, if so, finishes the parent v1 task run and disconnects
 // the claw. This is the bridge between the v2 deterministic state machine and
@@ -45,11 +54,7 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		return
 	}
 	// Idempotent: finishClawTerminalTx is a no-op if the claw is already deleted.
-	result := "success"
-	if run.Status == workflowv2.RunCancelled {
-		result = "cancelled"
-	}
-	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", result, "workflow v2 terminal state "+string(run.Status), terminalTxOpts{})
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", workflowV2ClawResult(run.Status), "workflow v2 terminal state "+string(run.Status), terminalTxOpts{})
 	if err != nil {
 		log.Printf("[workflow-v2] failed to finish claw %s for terminal run %s: %v", clawID, runID, err)
 		return

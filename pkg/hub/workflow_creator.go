@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
-	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
@@ -305,12 +304,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 				// A claw left pending would be provisioned by the next
 				// promotion once the hold is released; finish it here instead.
 				log.Printf("[workflow] failed to dequeue finished claw %s: %v", clawID[:8], dequeueErr)
-				result := "success"
 				var finished workflowV2FinishedAtActivationError
-				if errors.As(err, &finished) && finished.status == workflowv2.RunCancelled {
-					result = "cancelled"
-				}
-				if _, finishErr := s.finishClawTerminalTx(clawID, "deleted", "", result,
+				errors.As(err, &finished)
+				if _, finishErr := s.finishClawTerminalTx(clawID, "deleted", "", workflowV2ClawResult(finished.status),
 					"workflow v2 run finished during activation", terminalTxOpts{}); finishErr != nil {
 					log.Printf("[workflow] failed to finish dequeue-failed claw %s: %v", clawID[:8], finishErr)
 				}
