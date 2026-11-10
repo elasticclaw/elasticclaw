@@ -92,10 +92,10 @@ func (s *Server) completeWorkflowV2Activation(ctx context.Context, store *workfl
 		if run.Status != workflowv2.RunActive && run.Status != workflowv2.RunSuspended {
 			// Detach from the caller (an HTTP request for manual triggers):
 			// callers skip provisioning, so a cancelled ctx here would leave the
-			// claw unprovisioned with nothing left to finish it.
-			finishCtx, finishCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			s.maybeFinishWorkflowV2Parent(finishCtx, runID)
-			finishCancel()
+			// claw unprovisioned with nothing left to finish it. No deadline,
+			// like every other terminal hook: a timeout mid-way would leave the
+			// parent partially finished with nothing to re-drive it.
+			s.maybeFinishWorkflowV2Parent(context.Background(), runID)
 			return workflowV2FinishedAtActivationError{status: run.Status}
 		}
 	}
