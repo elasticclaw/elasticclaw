@@ -466,6 +466,62 @@ test("a turn that dropped before any output is retried once, never after a Stop"
   }
 })
 
+test("a Stop the hub never heard still blocks the automatic retry after a reload", async () => {
+  const store = new Map()
+  globalThis.sessionStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)), removeItem: (key) => store.delete(key) }
+  try {
+    let signal
+    const first = chatFixture({ api: {
+      createAIChatThread: async () => thread("new"),
+      streamAIChatTurn: (_id, _text, _retry, requestSignal) => {
+        signal = requestSignal
+        return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted"))))
+      },
+      cancelAIChatTurn: async () => { throw new Error("hub unreachable") },
+      fetchAIChatThread: async () => { throw new Error("hub unreachable") },
+    } })
+    first.render()
+    first.requests[0].resolve(sources("A", ["A"]))
+    await flush()
+    findElement(first.render(), "ChatComposer").props.onChange("Question")
+    findElement(first.render(), "ChatComposer").props.onSend()
+    await flush()
+    // Stop before message_started; neither the stop nor the sync reaches the hub.
+    findElement(first.render(), "ChatComposer").props.onCancel()
+    await flush()
+    assert.equal(signal.aborted, true)
+    const attempts = []
+    const reloaded = chatFixture({ thread: "new", api: {
+      fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "u1", role: "user", content: "Question", status: "completed" }, { id: "a1", role: "assistant", content: "", status: "interrupted", createdAt: Date.now() }] }),
+      streamAIChatTurn: async (_id, text, retry) => { attempts.push({ text, retry }) },
+    } })
+    reloaded.render()
+    reloaded.requests[0].resolve(sources("A", ["A"]))
+    for (let i = 0; i < 4; i++) {
+      await flush()
+      reloaded.render()
+    }
+    assert.deepEqual(attempts, [])
+  } finally {
+    delete globalThis.sessionStorage
+  }
+})
+
+test("an automatic retry another tab already started does not leave a rejection", async () => {
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => ({ thread: thread("t"), messages: [{ id: "u1", role: "user", content: "Question", status: "completed" }, { id: "a-tab", role: "assistant", content: "", status: "interrupted", createdAt: Date.now() }] }),
+    streamAIChatTurn: async () => { throw new ApiError("too many in-flight turns", 429) },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  for (let i = 0; i < 4; i++) {
+    await flush()
+    fixture.render()
+  }
+  const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  assert.equal(alert.props.children[0].props.children, "The connection dropped before this response finished.")
+})
+
 test("an interrupted turn says the connection dropped", async () => {
   const fixture = chatFixture({ thread: "t", api: {
     fetchAIChatThread: async () => ({ thread: thread("t"), messages: [{ id: "a", role: "assistant", content: "Partial", status: "interrupted", createdAt: 0 }] }),

@@ -25,6 +25,24 @@ const autoRetried = new Set<string>()
 const AUTO_RETRY_WINDOW_MS = 2 * 60 * 1000
 const STOP_TIMEOUT_MS = 5000
 
+// A Stop blocks the automatic retry on its thread for the retry window, even
+// when the hub never heard the Stop and the page reloads before it syncs.
+const stoppedAt = new Map<string, number>()
+const stopStorageKey = (threadId: string) => `ai-chat-stopped:${threadId}`
+function rememberStop(threadId: string) {
+  stoppedAt.set(threadId, Date.now())
+  try { sessionStorage.setItem(stopStorageKey(threadId), String(Date.now())) } catch { /* memory only */ }
+}
+function forgetStop(threadId: string) {
+  stoppedAt.delete(threadId)
+  try { sessionStorage.removeItem(stopStorageKey(threadId)) } catch { /* memory only */ }
+}
+function recentlyStopped(threadId: string) {
+  let at = stoppedAt.get(threadId) ?? 0
+  try { at = Math.max(at, Number(sessionStorage.getItem(stopStorageKey(threadId))) || 0) } catch { /* memory only */ }
+  return Date.now() - at < AUTO_RETRY_WINDOW_MS
+}
+
 // randomUUID needs a secure context; a hub served over plain http still needs a key.
 export function newActionKey() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID()
@@ -232,8 +250,10 @@ export function useConversation() {
     active.current = null
   }
 
-  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatActionRequest) => {
+  // `auto` marks the automatic retry, which never clears a Stop or shows a rejection.
+  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatActionRequest, auto = false) => {
     if (!data?.configured || !canStartTurn(action ? "action" : answers ? "answers" : text, retry)) return
+    if (!auto && threadRef.current) forgetStop(threadRef.current)
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
@@ -248,8 +268,10 @@ export function useConversation() {
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
       if (turn.error) setTurnError({ action, message: turn.error, text, retry: true, afterMessageId })
     } catch (error) {
-      if (isCurrent() && !controller.signal.aborted) {
-        const rejected = error instanceof ApiError && !turn.started
+      const rejected = error instanceof ApiError && !turn.started
+      // After a Stop, a refusal or failure of the stopped turn is expected; an
+      // automatic retry that another tab already started is not the user's error.
+      if (isCurrent() && !controller.signal.aborted && !stopRequested.current && !(auto && rejected)) {
         setTurnError({ action, message: errorMessage(error, "Unable to send message."), text, retry: turn.started || retry, rejected, afterMessageId, answers: turn.started ? undefined : answers, answersSummary: turn.started ? undefined : answersSummary })
       }
     } finally {
@@ -272,6 +294,8 @@ export function useConversation() {
     const id = threadRef.current
     const turn = activeTurn.current
     stopRequested.current = true
+    const stoppedThread = turn?.threadId || id
+    if (stoppedThread) rememberStop(stoppedThread)
     if (turn?.assistantId) autoRetried.add(turn.assistantId)
     // Telling the hub first saves the turn as stopped; a bare abort reads as a
     // dropped connection. The turn key keeps a late stop off the next turn, and
@@ -330,11 +354,10 @@ export function useConversation() {
     // Only a question's first answer is retried, so repeated drops cannot loop.
     const firstAnswer = messages[messages.length - 2]?.role === "user"
     if (streaming || !data?.configured || !last || !firstAnswer || last.status !== "interrupted" || last.content || last.blocks?.length || autoRetried.has(last.id)) return
-    if (Date.now() - last.createdAt > AUTO_RETRY_WINDOW_MS) return
+    if (Date.now() - last.createdAt > AUTO_RETRY_WINDOW_MS || recentlyStopped(threadRef.current)) return
     autoRetried.add(last.id)
-    void send("", true)
+    void send("", true, undefined, undefined, undefined, true)
   })
-  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => autoRetry(), [streaming, data?.configured, last?.id, last?.status])
 
   return {
