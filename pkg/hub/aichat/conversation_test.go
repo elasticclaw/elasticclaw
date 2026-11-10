@@ -358,6 +358,13 @@ func TestKeyedStopSemantics(t *testing.T) {
 	if ctx.Err() == nil {
 		t.Fatal("release should end the flight")
 	}
+	// An early stop older than its TTL no longer refuses the turn.
+	runner.earlyStops[thread.TenantID+"\x00"+thread.OwnerLogin+"\x00"+"stale"] = time.Now().Add(-2 * earlyStopTTL)
+	if _, release, err := runner.AcquireTurn(context.Background(), thread, "stale"); err != nil {
+		t.Fatal("a stale early stop refused the turn:", err)
+	} else {
+		release()
+	}
 	// A keyless flight (an older client) ignores keyed stops but not a keyless one.
 	ctx, release, err = runner.AcquireTurn(context.Background(), thread, "")
 	if err != nil {
