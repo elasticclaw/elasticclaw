@@ -287,7 +287,8 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		}
 		if err := opts.beforeProvision(callbackCtx, clawID, tenantID); errors.Is(err, errWorkflowV2FinishedAtActivation) {
 			log.Printf("[workflow] run for claw %s finished during activation; skipping provisioning", clawID[:8])
-			go s.promotePendingClaws()
+			// maybeFinishWorkflowV2Parent promotes pending claws after it
+			// deletes this one; promoting here could provision this claw.
 			return clawID, false, nil
 		} else if err != nil {
 			_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed",
