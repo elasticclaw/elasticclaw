@@ -34,6 +34,10 @@ type cronSchedulerV2 struct {
 	runningMu   sync.Mutex
 	running     map[string]int // workflow key -> in-flight run count
 	signalLocks sync.Map       // workflow key -> *sync.Mutex
+
+	// cleanups tracks terminal cleanup started by ticks so stop can wait for
+	// it before the hub closes the database.
+	cleanups sync.WaitGroup
 }
 
 type scheduledWorkflowV2 struct {
@@ -67,12 +71,15 @@ func (cs *cronSchedulerV2) start() error {
 
 func (cs *cronSchedulerV2) stop() {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	if cs.cron != nil {
 		ctx := cs.cron.Stop()
 		<-ctx.Done()
 		log.Println("[cron-v2] scheduler stopped")
 	}
+	cs.mu.Unlock()
+	// Ticks have returned, so no new cleanup can start; wait for the ones in
+	// flight so their writes never hit a closed database.
+	cs.cleanups.Wait()
 }
 
 func (cs *cronSchedulerV2) reload() error {
@@ -468,8 +475,13 @@ func (cs *cronSchedulerV2) signalRuns(store *workflowv2.Store, sw *scheduledWork
 			continue
 		}
 		// Terminal cleanup runs off the per-workflow signal lock so a slow
-		// teardown never delays concurrent ticks or manual triggers.
-		go cs.srv.maybeFinishWorkflowV2Parent(context.Background(), runID)
+		// teardown never delays concurrent ticks or manual triggers; stop
+		// waits for it so shutdown cannot abandon it.
+		cs.cleanups.Add(1)
+		go func(runID string) {
+			defer cs.cleanups.Done()
+			cs.srv.maybeFinishWorkflowV2Parent(ctx, runID)
+		}(runID)
 	}
 	if len(targets) == 0 {
 		return workflowRunFailed, nil, nil

@@ -126,6 +126,25 @@ func TestCronSchedulerV2SignalTicks(t *testing.T) {
 	}
 }
 
+// Terminal cleanup for a run a tick completes runs off the signal lock, but
+// stop must still wait for it so shutdown never closes the database under it.
+func TestCronSchedulerV2StopWaitsForTickTerminalCleanup(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	store := workflowv2.NewStore(db)
+	raw := signalWorkflowYAML() + "\ntransitions:\n  tick:\n    from: [s]\n    on: cron.tick\n    to: done\n"
+	run := createSignalTestRun(t, store, "run-signal", raw)
+	cs := newCronSchedulerV2(s)
+	s.cronSchedulerV2 = cs // terminal cleanup releases the slot through it
+	if status, err := cs.runWorkflow(signalTestWorkflow(t, raw), "test-tenant-id"); err != nil || status != workflowRunSignaled {
+		t.Fatalf("tick = %s, %v", status, err)
+	}
+	cs.stop()
+	var released int
+	if err := db.QueryRow(`SELECT cron_slot_released FROM workflow_v2_runs WHERE id=?`, run.ID).Scan(&released); err != nil || released != 1 {
+		t.Fatalf("cron_slot_released = %d, %v; stop returned before terminal cleanup", released, err)
+	}
+}
+
 func TestCronSchedulerV2SignalTargetsOpenRunsOnly(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	store := workflowv2.NewStore(db)
