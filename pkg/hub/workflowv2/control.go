@@ -407,6 +407,13 @@ func (s *Store) rejectControl(ctx context.Context, runID, attemptID string, rece
 		}
 		reason += ": " + detail
 	}
+	run, _, err := getRunForUpdate(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	if err := discardUnverifiedEffects(ctx, tx, run, time.UnixMilli(now).UTC()); err != nil {
+		return err
+	}
 	result, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
 		WHERE id=? AND current_attempt_id=? AND status IN ('active','suspended')`, reason, now, runID, attemptID)
 	if err != nil {

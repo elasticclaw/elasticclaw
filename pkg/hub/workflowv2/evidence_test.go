@@ -1881,3 +1881,51 @@ func TestSuspendedRunRefiresDroppedConflictForUnchangedTuple(t *testing.T) {
 		})
 	}
 }
+
+// A control rejection that suspends a held run replaces the hold marker, so
+// the unverified entry's effects must be cancelled then: no later settle or
+// transition recognizes the entry as held.
+func TestRejectedControlCancelsHeldEntryEffects(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	invariant := "    invariant:\n      ci.status:\n        not_equals: unsatisfied\n"
+	onEnter := "    on_enter:\n      effects:\n        - agent.task:\n            prompt: Review the delivery.\n"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant+onEnter, 1)
+	workflowYAML = strings.Replace(workflowYAML, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+		"          equals: never\n    to: fixing\n  review_failed:", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	pr := createSuspendedDelivery(t, store, db, "run-held", workflowYAML)
+	if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id='run-held'`); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, "run-held", pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	if _, err := db.Exec(`CREATE TRIGGER fail_replay BEFORE DELETE ON workflow_v2_deferred_events
+		BEGIN SELECT RAISE(ABORT, 'injected replay failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.ApplyCommand(ctx, "run-held", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"})
+	if err != nil || result.Run.Status != workflowv2.RunSuspended {
+		t.Fatalf("resume = %#v, %v (run not held)", result, err)
+	}
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: "sync-rejected", Kind: typesv2.MessageWorkflowSync, RunID: "run-held", AttemptID: result.Run.CurrentAttemptID}
+	if err := store.EnqueueControl(ctx, envelope); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcknowledgeControl(ctx, "run-held", envelope.AttemptID, typesv2.ControlReceipt{
+		MessageID: envelope.MessageID, Disposition: typesv2.DispositionRejected, Reason: "unsupported snapshot",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_effects WHERE run_id='run-held' AND origin_type='transition'
+		AND json_extract(payload_json,'$.prompt')='Review the delivery.' AND status!='succeeded'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(workflowv2.EffectCancelled) {
+		t.Fatalf("held entry effect after control rejection = %s, want cancelled", status)
+	}
+}

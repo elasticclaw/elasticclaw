@@ -826,7 +826,7 @@ func (s *Store) applyEventWithMutation(ctx context.Context, runID string, input 
 }
 
 func (s *Store) rejectAndSuspend(ctx context.Context, tx *sql.Tx, run Run, input EventInput, reason string, now time.Time) (EventResult, error) {
-	if err := cancelPostponedEffects(ctx, tx, run, now); err != nil {
+	if err := discardUnverifiedEffects(ctx, tx, run, now); err != nil {
 		return EventResult{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_events SET disposition=?,reason=? WHERE id=?`,

@@ -102,6 +102,19 @@ func cancelPostponedEffects(ctx context.Context, tx *sql.Tx, run Run, now time.T
 	return err
 }
 
+// discardUnverifiedEffects cancels the effects a replay left waiting for an
+// invariant check when the run suspends for another reason. The new waiting
+// reason replaces the hold marker, so neither the settle nor a later
+// transition would recognize the held entry and cancel its effects.
+func discardUnverifiedEffects(ctx context.Context, tx *sql.Tx, run Run, now time.Time) error {
+	if run.heldEntry() {
+		if err := cancelHeldEntryEffects(ctx, tx, run, now); err != nil {
+			return err
+		}
+	}
+	return cancelPostponedEffects(ctx, tx, run, now)
+}
+
 // holdForReplay suspends an active run whose current invariant a replay found
 // broken, until settleReplayedInvariant judges it.
 func holdForReplay(ctx context.Context, tx *sql.Tx, run Run, now time.Time) error {
