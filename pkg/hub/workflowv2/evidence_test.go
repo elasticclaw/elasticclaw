@@ -1539,3 +1539,82 @@ func TestLiveObservationSupersedesQueuedDeferredEvent(t *testing.T) {
 		t.Fatalf("run after sweep = %#v, %v (stale CI failure replayed?)", run, err)
 	}
 }
+
+// A conflict queued while suspended describes the head it was observed on; an
+// agent resubmission that verifies a new head must not let it replay.
+func TestSuspendedRunDropsDeferredConflictAfterResubmission(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  rebasing:\n    phase: build\ntransitions:\n"+
+			"  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	pr := createSuspendedDelivery(t, store, db, "run-resubmit", workflowYAML)
+	pr.BaseSHA, pr.MergeableState = "base-1", "dirty"
+	pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Second)
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcileMergeability(ctx, target, pr)
+	}); !result.Deferred {
+		t.Fatalf("conflict while suspended was not deferred: %#v", result)
+	}
+	run, err := store.GetRun(ctx, "run-resubmit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resubmitted := pr
+	resubmitted.HeadSHA, resubmitted.MergeableState, resubmitted.BaseSHA = "head-2", "", ""
+	if _, err := store.SubmitDelivery(ctx, "run-resubmit", run.CurrentAttemptID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: pr.URL}},
+	}, workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+		typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		return resubmitted, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE run_id='run-resubmit'`).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("stale conflict still queued after resubmission: %d, %v", queued, err)
+	}
+	if _, err := store.ApplyCommand(ctx, "run-resubmit", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, "run-resubmit"); err != nil || run.State != "reviewing" || run.Status != workflowv2.RunActive {
+		t.Fatalf("recovered run = %#v, %v (stale conflict replayed?)", run, err)
+	}
+}
+
+// Replay itself refuses a queued mergeability observation whose PR head moved,
+// whatever path moved it.
+func TestReplayDropsDeferredMergeabilityForMovedHead(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  rebasing:\n    phase: build\ntransitions:\n"+
+			"  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n", 1)
+	pr := createSuspendedDelivery(t, store, db, "run-moved", workflowYAML)
+	pr.BaseSHA, pr.MergeableState = "base-1", "dirty"
+	pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Second)
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcileMergeability(ctx, target, pr)
+	}); !result.Deferred {
+		t.Fatalf("conflict while suspended was not deferred: %#v", result)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_delivery_prs SET current_head_sha='head-2' WHERE run_id='run-moved'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-moved'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, "run-moved"); err != nil || run.State != "reviewing" || run.Status != workflowv2.RunActive {
+		t.Fatalf("recovered run = %#v, %v (stale conflict replayed?)", run, err)
+	}
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE run_id='run-moved'`).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("stale conflict still queued: %d, %v", queued, err)
+	}
+}

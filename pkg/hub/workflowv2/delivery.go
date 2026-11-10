@@ -247,10 +247,11 @@ func (s *Store) verifyDeliveryClaims(ctx context.Context, runID, attemptID strin
 
 func upsertDeliveryPR(ctx context.Context, tx *sql.Tx, runID string, pr *typesv2.VerifiedPullRequest,
 	registeredOnly bool, now time.Time) (bool, error) {
-	var existingID, existingHead string
+	var existingID, existingHead, existingState string
 	var existingRegisteredOnly bool
-	err := tx.QueryRowContext(ctx, `SELECT id,current_head_sha,registered_only FROM workflow_v2_delivery_prs
-		WHERE run_id=? AND repository=? AND pr_number=?`, runID, pr.Repository, pr.Number).Scan(&existingID, &existingHead, &existingRegisteredOnly)
+	err := tx.QueryRowContext(ctx, `SELECT id,current_head_sha,state,registered_only FROM workflow_v2_delivery_prs
+		WHERE run_id=? AND repository=? AND pr_number=?`, runID, pr.Repository, pr.Number).Scan(&existingID, &existingHead,
+		&existingState, &existingRegisteredOnly)
 	if err != nil && err != sql.ErrNoRows {
 		return false, err
 	}
@@ -278,6 +279,14 @@ func upsertDeliveryPR(ctx context.Context, tx *sql.Tx, runID string, pr *typesv2
 		pr.HeadSHA, pr.State, pr.Supersedes, provenanceJSON, pr.VerifiedAt.UnixMilli(), now.UnixMilli(), registeredOnly)
 	if err != nil {
 		return false, err
+	}
+	// A resubmission that moves the head or state invalidates what a suspended
+	// run queued for the previous one, exactly as a reconciled move does.
+	if existingID != "" {
+		if err := clearStaleDeferredEvents(ctx, tx, runID, pr.ID, existingHead != pr.HeadSHA,
+			existingState != pr.State, pr.State == "open"); err != nil {
+			return false, err
+		}
 	}
 	if existingHead != pr.HeadSHA {
 		var generation int

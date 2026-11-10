@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
@@ -13,8 +14,9 @@ import (
 )
 
 var (
-	errDeferredEventGone = errors.New("deferred event already replayed")
-	errReplayHalted      = errors.New("run no longer replays deferred events")
+	errDeferredEventGone  = errors.New("deferred event already replayed")
+	errReplayHalted       = errors.New("run no longer replays deferred events")
+	errDeferredEventStale = errors.New("deferred event describes a superseded pull request head")
 )
 
 // Held runs stay suspended while their deferred queue replays with the
@@ -242,6 +244,11 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			} else if changed != 1 {
 				return errDeferredEventGone
 			}
+			if stale, err := deferredMergeabilityHeadMoved(ctx, tx, runID, item.key, input); err != nil {
+				return err
+			} else if stale {
+				return errDeferredEventStale
+			}
 			if err := refreshDeferredDelivery(ctx, tx, runID, input); err != nil {
 				return err
 			}
@@ -251,6 +258,13 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			return refreshDeferredReviewFeedback(ctx, tx, runID, input)
 		})
 		if errors.Is(err, errDeferredEventGone) {
+			continue
+		}
+		if errors.Is(err, errDeferredEventStale) {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events
+				WHERE run_id=? AND defer_key=? AND event_id=?`, runID, item.key, item.eventID); err != nil {
+				return err
+			}
 			continue
 		}
 		if errors.Is(err, errReplayHalted) {
@@ -348,6 +362,29 @@ func refreshDeferredDelivery(ctx context.Context, tx *sql.Tx, runID string, inpu
 	}
 	input.Payload["delivery"] = summary
 	return nil
+}
+
+// deferredMergeabilityHeadMoved reports whether a queued mergeability
+// observation describes a PR head that is no longer current. Every path that
+// moves a head clears these queues, but a stale conflict replayed against a
+// new head would ask the agent to resolve a conflict that no longer exists.
+func deferredMergeabilityHeadMoved(ctx context.Context, tx *sql.Tx, runID, key string, input *EventInput) (bool, error) {
+	if !strings.HasPrefix(key, mergeabilityDeferKey("")) {
+		return false, nil
+	}
+	pullRequest, _ := input.Payload["pull_request"].(map[string]interface{})
+	prID, _ := pullRequest["id"].(string)
+	headSHA, _ := pullRequest["head_sha"].(string)
+	if prID == "" || headSHA == "" {
+		return false, nil
+	}
+	var currentHead string
+	err := tx.QueryRowContext(ctx, `SELECT current_head_sha FROM workflow_v2_delivery_prs WHERE id=? AND run_id=?`,
+		prID, runID).Scan(&currentHead)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil && currentHead != headSHA, err
 }
 
 // refreshDeferredMergeability replaces the queued mergeability of a PR with the

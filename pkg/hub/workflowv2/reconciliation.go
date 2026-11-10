@@ -147,6 +147,46 @@ func pullRequestDeferKey(prID, kind string) string {
 	}
 }
 
+// clearStaleDeferredEvents drops observations a suspended run queued for a PR
+// that no longer describe it once its head or state moved, whichever path
+// (reconciler or delivery resubmission) recorded the move. Observations of the
+// old head or of an open PR must not replay; CI and review policy results
+// aggregate head-bound evidence that was just superseded; review feedback is
+// bound to the head it was left on, and the live path rejects it for a stale
+// head. A queued lifecycle observation (closed, merged, verified_open) no
+// longer describes the PR once its state moved, even when the newer
+// observation is not a lifecycle kind (a reopen seen only through a later
+// push); a lifecycle event is re-queued by ApplyEvent afterwards.
+func clearStaleDeferredEvents(ctx context.Context, tx *sql.Tx, runID, prID string, headChanged, stateChanged, open bool) error {
+	var stale []string
+	if headChanged || !open {
+		stale = append(stale, mergeabilityDeferKey(prID), mergeabilityUpdatedDeferKey(prID),
+			pullRequestDeferKey(prID, "pull_request.updated"))
+	}
+	if headChanged {
+		stale = append(stale, "ci.policy.evaluated", "review.policy.evaluated")
+	}
+	if !open {
+		stale = append(stale, pullRequestDeferKey(prID, "pull_request.head_changed"))
+	}
+	if stateChanged {
+		stale = append(stale, pullRequestDeferKey(prID, ""))
+	}
+	for _, key := range stale {
+		if err := clearDeferredEvent(ctx, tx, runID, key); err != nil {
+			return err
+		}
+	}
+	if !headChanged {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events WHERE run_id=?
+		AND defer_key IN ('review.feedback.received','review.feedback.reconciled')
+		AND event_id IN (SELECT id FROM workflow_v2_events WHERE run_id=?
+			AND json_extract(payload_json,'$.review.pull_request_id')=?)`, runID, runID, prID)
+	return err
+}
+
 // ReconcilePullRequest applies a trusted source-control observation to one
 // existing delivery subject, invalidates old-head evidence, emits a typed
 // workflow event, and then recomputes aggregate delivery policy.
@@ -223,42 +263,9 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 				return err
 			}
 		}
-		// Observations queued by a suspended run that describe the old head or
-		// an open PR must not replay once either changed. CI and review policy
-		// results aggregate head-bound evidence that was just superseded.
-		var stale []string
-		if currentHead != verified.HeadSHA || verified.State != "open" {
-			stale = append(stale, mergeabilityDeferKey(target.PRID), mergeabilityUpdatedDeferKey(target.PRID),
-				pullRequestDeferKey(target.PRID, "pull_request.updated"))
-		}
-		if currentHead != verified.HeadSHA {
-			stale = append(stale, "ci.policy.evaluated", "review.policy.evaluated")
-		}
-		if verified.State != "open" {
-			stale = append(stale, pullRequestDeferKey(target.PRID, "pull_request.head_changed"))
-		}
-		// A queued lifecycle observation (closed, merged, verified_open) no
-		// longer describes the PR once its state moved, even when the newer
-		// observation is not a lifecycle kind (a reopen seen only through a
-		// later push). A lifecycle event is re-queued by ApplyEvent afterwards.
-		if currentState != verified.State {
-			stale = append(stale, pullRequestDeferKey(target.PRID, ""))
-		}
-		for _, key := range stale {
-			if err := clearDeferredEvent(ctx, tx, target.RunID, key); err != nil {
-				return err
-			}
-		}
-		// Review feedback is bound to the head it was left on; the live path
-		// rejects feedback for a stale head, so a replay must not deliver it.
-		if currentHead != verified.HeadSHA {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events WHERE run_id=?
-				AND defer_key IN ('review.feedback.received','review.feedback.reconciled')
-				AND event_id IN (SELECT id FROM workflow_v2_events WHERE run_id=?
-					AND json_extract(payload_json,'$.review.pull_request_id')=?)`,
-				target.RunID, target.RunID, target.PRID); err != nil {
-				return err
-			}
+		if err := clearStaleDeferredEvents(ctx, tx, target.RunID, target.PRID,
+			currentHead != verified.HeadSHA, currentState != verified.State, verified.State == "open"); err != nil {
+			return err
 		}
 		summary, err := deliveryFactsFrom(ctx, tx, target.RunID)
 		if err != nil {
