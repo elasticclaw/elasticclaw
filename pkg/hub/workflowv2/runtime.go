@@ -479,7 +479,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		deferred := workflowListensOn(workflow.Workflow, input.Kind)
 		reason := "evidence updated while suspended"
 		if deferred {
-			reason = "evidence updated while suspended; transition deferred until recovery"
+			reason = deferredUntilRecoveryReason
 			if err := deferEvent(ctx, tx, runID, input, now); err != nil {
 				return EventResult{}, err
 			}
@@ -1207,6 +1207,10 @@ func insertEvent(ctx context.Context, tx *sql.Tx, id, runID, messageID, kind str
 	}
 	return nil
 }
+
+// deferredUntilRecoveryReason is the receipt reason of an observation a
+// suspended run queued for replay instead of running its transition.
+const deferredUntilRecoveryReason = "evidence updated while suspended; transition deferred until recovery"
 
 func insertEventReceipt(ctx context.Context, tx *sql.Tx, runID, eventID, messageID string,
 	disposition typesv2.ControlDisposition, version uint64, reason string, now time.Time) error {

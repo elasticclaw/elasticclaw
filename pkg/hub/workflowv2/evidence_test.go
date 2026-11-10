@@ -1659,3 +1659,65 @@ func TestReplayDropsDeferredMergeabilityForMovedHead(t *testing.T) {
 		t.Fatalf("stale conflict still queued: %d, %v", queued, err)
 	}
 }
+
+// A conflict a suspended run deferred and then dropped (the head moved away)
+// never ran its transition, so the same tuple recurring after a force-push back
+// must fire pull_request.conflicted again rather than dedupe against it.
+func TestSuspendedRunRefiresDroppedConflictAfterForcePushBack(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  rebasing:\n    phase: build\ntransitions:\n"+
+			"  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	pr := createSuspendedDelivery(t, store, db, "run-force-back", workflowYAML)
+	step := func() { pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Second) }
+	observe := func(state string) workflowv2.EventResult {
+		t.Helper()
+		step()
+		pr.BaseSHA, pr.MergeableState = "base-1", state
+		return reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+			return store.ReconcileMergeability(ctx, target, pr)
+		})
+	}
+	push := func(head string) {
+		t.Helper()
+		step()
+		pr.HeadSHA = head
+		reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+			return store.ReconcilePullRequest(ctx, target, "push-"+head+pr.Provenance.ObservedAt.String(), "pull_request.head_changed", pr)
+		})
+	}
+	if result := observe("dirty"); !result.Deferred {
+		t.Fatalf("conflict while suspended was not deferred: %#v", result)
+	}
+	push("head-2")
+	observe("clean")
+	push("head-1")
+	result := observe("dirty")
+	var kind string
+	if err := db.QueryRow(`SELECT kind FROM workflow_v2_events WHERE id=?`, result.EventID).Scan(&kind); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "pull_request.conflicted" || !result.Deferred {
+		t.Fatalf("recurring dropped conflict = %s, deferred=%v", kind, result.Deferred)
+	}
+	if _, err := store.ApplyCommand(ctx, "run-force-back", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, "run-force-back"); err != nil || run.State != "rebasing" {
+		t.Fatalf("recovered run = %#v, %v (conflict not replayed)", run, err)
+	}
+	// Once the replay ran the transition, the tuple is spent.
+	push("head-3")
+	observe("clean")
+	push("head-1")
+	result = observe("dirty")
+	if err := db.QueryRow(`SELECT kind FROM workflow_v2_events WHERE id=?`, result.EventID).Scan(&kind); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "pull_request.mergeability_updated" {
+		t.Fatalf("replayed conflict tuple fired again as %s", kind)
+	}
+}

@@ -65,13 +65,28 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 	eventID := fmt.Sprintf("github:mergeability:%x", digest)
 	// A tuple may recur after another state. Refresh facts in that case, but
 	// never fire the same mergeability transition twice for the same tuple.
-	var seen int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND id=?`,
-		target.RunID, eventID).Scan(&seen); err != nil {
+	// An observation a suspended run deferred only counts while it is still
+	// queued: once superseded or cleared by a push, its transition never ran.
+	// A replay is recorded as a new event with the same payload and counts.
+	var recorded, fired int
+	if err := s.db.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND id=?),
+		(SELECT COUNT(*) FROM workflow_v2_events e WHERE e.run_id=? AND e.kind=?
+			AND json_extract(e.payload_json,'$.pull_request.id')=?
+			AND json_extract(e.payload_json,'$.pull_request.head_sha')=?
+			AND json_extract(e.payload_json,'$.pull_request.base_sha')=?
+			AND json_extract(e.payload_json,'$.pull_request.mergeable_state')=?
+			AND (EXISTS(SELECT 1 FROM workflow_v2_deferred_events d WHERE d.run_id=e.run_id AND d.event_id=e.id)
+				OR NOT EXISTS(SELECT 1 FROM workflow_v2_event_receipts r WHERE r.run_id=e.run_id AND r.event_id=e.id
+					AND r.reason=?)))`,
+		target.RunID, eventID, target.RunID, kind, target.PRID, verified.HeadSHA, verified.BaseSHA, state,
+		deferredUntilRecoveryReason).Scan(&recorded, &fired); err != nil {
 		return EventResult{}, err
 	}
-	if seen > 0 || kind == "pull_request.mergeability_updated" {
+	if fired > 0 || kind == "pull_request.mergeability_updated" {
 		eventID, kind = uuid.NewString(), "pull_request.mergeability_updated"
+	} else if recorded > 0 {
+		eventID = uuid.NewString()
 	}
 	deferKey := mergeabilityDeferKey(target.PRID)
 	if kind == "pull_request.mergeability_updated" {
