@@ -1390,6 +1390,72 @@ func TestRecoveryHoldsEffectsUntilReplaySettlesInvariant(t *testing.T) {
 	}
 }
 
+// A replayed event that matches no transition while the invariant is broken
+// must not plan its clause effects: a live event would have been rejected
+// before scheduling them, and once the settle suspends the run they would run
+// on a later recovery.
+func TestReplayDoesNotPlanClauseEffectsUnderBrokenInvariant(t *testing.T) {
+	invariant := "    invariant:\n      ci.status:\n        not_equals: unsatisfied\n"
+	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant, 1)
+	noMatch := strings.Replace(withInvariant, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+		"          equals: never\n    to: fixing\n  review_failed:", 1)
+	clause := "events:\n  ci.policy.evaluated:\n    clauses:\n      - from: reviewing\n        effects:\n" +
+		"          - agent.task:\n              prompt: Investigate the CI failure.\n"
+	workflowYAML := noMatch + clause + "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	for _, tc := range []struct {
+		name    string
+		recover func(t *testing.T, ctx context.Context, store *workflowv2.Store, db *sql.DB)
+	}{
+		{name: "held entry", recover: func(t *testing.T, ctx context.Context, store *workflowv2.Store, db *sql.DB) {
+			if _, err := store.ApplyCommand(ctx, "run-clause", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "held state", recover: func(t *testing.T, ctx context.Context, store *workflowv2.Store, db *sql.DB) {
+			// Recovered outside the event path; the sweep replays the queue.
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-clause'`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ReplayDeferredEvents(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			pr := createSuspendedDelivery(t, store, db, "run-clause", workflowYAML)
+			if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id='run-clause'`); err != nil {
+				t.Fatal(err)
+			}
+			recordPolicyEvidence(t, store, "run-clause", pr, "ci", "github-actions", "lint", "lint", "failure",
+				map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+			tc.recover(t, ctx, store, db)
+			run, err := store.GetRun(ctx, "run-clause")
+			if err != nil || run.Status != workflowv2.RunSuspended || run.State != "reviewing" {
+				t.Fatalf("settled run = %#v, %v (active with a broken invariant?)", run, err)
+			}
+			var planned int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_effects WHERE run_id='run-clause'
+				AND origin_type='event_clause' AND status IN ('planned','retryable_failed')`).Scan(&planned); err != nil {
+				t.Fatal(err)
+			}
+			if planned != 0 {
+				t.Fatalf("%d clause effect(s) planned under a broken invariant", planned)
+			}
+			// A later recovery must not release work planned while the invariant was broken.
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id='run-clause'`); err != nil {
+				t.Fatal(err)
+			}
+			if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+				t.Fatalf("claim after recovery = %#v, %v", claim, err)
+			}
+		})
+	}
+}
+
 // A live observation on an active run supersedes one queued for the same
 // subject: a failed recovery replay leaves the queue for the sweep, and the
 // sweep must not replay a CI failure that a later live CI result superseded.

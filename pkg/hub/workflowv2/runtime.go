@@ -553,7 +553,10 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		if err := writeFacts(ctx, tx, runID, input.ID, ProducerEngine, input.Provenance, clauseWrites, now); err != nil {
 			return EventResult{}, err
 		}
-		if clause != nil && !clause.Ignore {
+		// A live event with a broken invariant is rejected before its clause
+		// effects are scheduled; a replay that postpones the check must not
+		// plan them either, or they would outlive a failed settle.
+		if clause != nil && !clause.Ignore && valid {
 			if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
 				"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
 				return EventResult{}, err
