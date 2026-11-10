@@ -53,7 +53,10 @@ func TestAdoptPullRequestsOwnership(t *testing.T) {
 			oldID := pr.ID
 			pr.SourceBranch = tc.branch
 			pr.Supersedes = "untrusted-link"
-			adopted, err := store.AdoptPullRequests(ctx, run.ID, []typesv2.VerifiedPullRequest{pr, pr}, "")
+			// An invalid candidate is skipped without blocking the valid one.
+			invalid := pr
+			invalid.RepositoryName = "missing"
+			adopted, err := store.AdoptPullRequests(ctx, run.ID, []typesv2.VerifiedPullRequest{invalid, pr, pr}, "")
 			if err != nil || len(adopted) != tc.want {
 				t.Fatalf("adopted=%v err=%v", adopted, err)
 			}
@@ -83,6 +86,11 @@ func TestAdoptPullRequestsOwnership(t *testing.T) {
 				targets, err := store.ActiveDeliveryTargetsAll(ctx)
 				if err != nil || len(targets) != 1 || targets[0].RunID != run.ID {
 					t.Fatalf("targets=%+v err=%v", targets, err)
+				}
+				// Webhooks may spell the repository with different case.
+				targets, err = store.ActiveDeliveryTargets(ctx, strings.ToUpper(pr.Repository), pr.Number)
+				if err != nil || len(targets) != 1 || targets[0].RunID != run.ID {
+					t.Fatalf("case-insensitive targets=%+v err=%v", targets, err)
 				}
 				// A later registration/submission must preserve the hub-owned lineage.
 				if _, err := store.SubmitDelivery(ctx, run.ID, run.CurrentAttemptID, typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: url}}}, deliveryVerifier(map[string]string{url: "head"})); err != nil {

@@ -118,8 +118,9 @@ func (s *Store) AdoptPullRequests(ctx context.Context, runID string, candidates 
 			if pr.State != "open" || !matchesDeliveryBranch(wf, pr) {
 				continue
 			}
+			// An invalid candidate is skipped: adoption must never block activation.
 			if err := validateVerifiedPullRequest(ws, typesv2.PullRequestClaim{URL: pr.URL}, pr); err != nil {
-				return err
+				continue
 			}
 			key := fmt.Sprintf("%s#%d", pr.Repository, pr.Number)
 			if seen[key] {
