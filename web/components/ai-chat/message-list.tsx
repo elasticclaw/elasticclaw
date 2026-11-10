@@ -51,6 +51,7 @@ export function MessageList({ messages, reading, streaming = false, interviewDis
             </div>
           )}
           {message.status === "cancelled" && <p className="mt-2 text-xs text-muted-foreground">Response cancelled.</p>}
+          {message.status === "interrupted" && <p className="mt-2 text-xs text-muted-foreground">Connection lost before this response finished.</p>}
           {(message.status === "error" || message.status === "limit") && <p className="mt-2 text-xs text-destructive">This response did not finish.</p>}
         </article>
       })}

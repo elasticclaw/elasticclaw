@@ -756,8 +756,9 @@ export function fetchAIChatThread(id: string, signal?: AbortSignal): Promise<AIC
 export function dismissAIChatTicketAttempt(id: string, attemptId: string): Promise<void> {
   return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/ticket-attempts/${encodeURIComponent(attemptId)}/dismiss`, { method: "POST" })
 }
-export function cancelAIChatTurn(id: string): Promise<void> {
-  return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel`, { method: "POST" })
+export function cancelAIChatTurn(id: string, messageId?: string): Promise<void> {
+  const query = messageId ? `?message=${encodeURIComponent(messageId)}` : ""
+  return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel${query}`, { method: "POST" })
 }
 export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, answers?: AIChatAnswers): Promise<void> {
   const token = await resolveToken()

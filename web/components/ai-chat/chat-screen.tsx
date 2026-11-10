@@ -28,7 +28,7 @@ export function ChatScreen() {
 
 function Conversation() {
   const {
-    requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry,
+    requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry, retryNotice,
     mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, startTicket, dismissTicket, retryTurn, cancel,
   } = useConversation()
   const latestInterview = messages[messages.length - 1]?.interview
@@ -46,7 +46,7 @@ function Conversation() {
       </div>
       {(turnError || (!streaming && canRetry)) && (
         <div role="alert" className="mx-auto flex w-full max-w-[824px] items-center gap-3 px-4 sm:px-8 pb-3 text-sm">
-          <p className="text-destructive">{turnError?.message ?? "The last response did not finish."}</p>
+          <p className="text-destructive">{turnError?.message ?? retryNotice}</p>
           <Button variant="outline" size="sm" disabled={streaming} onClick={() => void retryTurn()}>Retry</Button>
         </div>
       )}
