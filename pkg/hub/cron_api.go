@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -60,6 +61,8 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusForbidden)
 		} else if _, ok := err.(*cronTriggerSkippedError); ok {
 			http.Error(w, err.Error(), http.StatusConflict)
+		} else if errors.Is(err, errCronSchedulerStopping) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

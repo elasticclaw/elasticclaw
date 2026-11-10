@@ -303,6 +303,35 @@ func TestCronSchedulerV2SignalResumesSuspendedRun(t *testing.T) {
 	}
 }
 
+// A manual /cron/trigger refused because the scheduler is stopping must
+// answer 503, matching the UI /trigger endpoint.
+func TestCronSchedulerV2SignalManualTriggerWhileStoppingIs503(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+	sw := signalTestWorkflow(t, signalWorkflowYAML())
+	SaveWorkspaceForTest(t, sw.workspace, []*types.WorkflowConfig{sw.workflow})
+	cs := newCronSchedulerV2(s)
+	s.cronSchedulerV2 = cs
+	cs.inflightMu.Lock()
+	cs.stopping = true
+	cs.inflightMu.Unlock()
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/cron/trigger", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("trigger while stopping = %d: %s", rr.Code, rr.Body.String())
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("runs = %d, %v; refused trigger started a run", count, err)
+	}
+}
+
 func TestCronSchedulerV2SignalManualTriggerStartsThenSignals(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
