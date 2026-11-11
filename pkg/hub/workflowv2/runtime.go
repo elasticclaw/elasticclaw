@@ -642,6 +642,8 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	// effect worker cannot claim the effects scheduled below until the replay
 	// settles the invariant of the state the run ends in.
 	held := valid && !verified
+	// awaitQueue keeps a verified self-loop held for the replay; see below.
+	awaitQueue := false
 	// Leaving a held entry, or suspending in it, discards its entry effects.
 	if stored.heldEntry() {
 		if err := cancelHeldEntryEffects(ctx, tx, stored, now); err != nil {
@@ -668,9 +670,18 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		}
 		// A verified self-loop verifies the invariant the parked effects wait
 		// for and makes the run active, so it releases them like the settle
-		// would; no active run is left holding parked effects.
+		// would; no active run is left holding parked effects. While newer
+		// observations are still queued, one of them may supersede the parked
+		// work (CI recovered after the failure that parked its task), so the
+		// run stays held and the settle judges them once the queue drains.
 		if !held {
-			if err := releasePostponedEffects(ctx, tx, runID, now); err != nil {
+			waiting, err := parkedEffectsAwaitQueue(ctx, tx, runID)
+			if err != nil {
+				return EventResult{}, err
+			}
+			if waiting {
+				awaitQueue = true
+			} else if err := releasePostponedEffects(ctx, tx, runID, now); err != nil {
 				return EventResult{}, err
 			}
 		}
@@ -686,6 +697,8 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		finishedAt = now.UnixMilli()
 	} else if held {
 		status, waitingReason = RunSuspended, replayPendingEntryReason
+	} else if awaitQueue {
+		status, waitingReason = RunSuspended, replayPendingReason
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET state=?,display_phase=?,state_version=?,status=?,waiting_reason=?,updated_at=?,finished_at=?
 		WHERE id=? AND state=? AND state_version=? AND workspace_revision=? AND workflow_revision=?`,

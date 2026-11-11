@@ -1989,10 +1989,11 @@ func queueUndecodableDeferredEvent(t *testing.T, db *sql.DB, runID string) {
 	}
 }
 
-// A verified self-loop makes the run active, so it releases the clause effects
-// a replay parked in that state itself: if the settle never runs (the replay
-// fails on a later queued event), they must not stay parked on an active run.
-func TestVerifiedSelfLoopReleasesParkedClauseEffects(t *testing.T) {
+// A verified self-loop does not release the clause effects a replay parked
+// while observations are still queued: one of them may supersede the parked
+// work. The run stays held instead of active with parked effects, and the
+// replay that drains the queue releases them.
+func TestVerifiedSelfLoopKeepsParkedClauseEffectsWhileQueued(t *testing.T) {
 	ctx := context.Background()
 	invariant := "    invariant:\n      work.gate_closed:\n        exists: false\n"
 	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
@@ -2022,12 +2023,95 @@ func TestVerifiedSelfLoopReleasesParkedClauseEffects(t *testing.T) {
 		t.Fatal("replay of an undecodable deferred event succeeded")
 	}
 	run, err := store.GetRun(ctx, "run-self-loop")
-	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" || run.StateVersion < 2 {
-		t.Fatalf("run = %#v, %v (self-loop not taken?)", run, err)
+	if err != nil || run.Status != workflowv2.RunSuspended || run.State != "reviewing" || run.StateVersion < 2 {
+		t.Fatalf("run = %#v, %v (self-loop not taken, or released ahead of the queue?)", run, err)
+	}
+	if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+		t.Fatalf("claim while queued = %#v, %v (parked effect released ahead of the queue?)", claim, err)
+	}
+	if _, err := db.Exec(`DELETE FROM workflow_v2_deferred_events WHERE run_id='run-self-loop' AND defer_key='undecodable'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, "run-self-loop"); err != nil || run.Status != workflowv2.RunActive {
+		t.Fatalf("settled run = %#v, %v", run, err)
 	}
 	claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute)
 	if err != nil || claim == nil || claim.Effect.Kind != "agent.task" {
-		t.Fatalf("claim after self-loop = %#v, %v (parked effect left on an active run?)", claim, err)
+		t.Fatalf("claim after settle = %#v, %v (parked effect lost?)", claim, err)
+	}
+}
+
+// A verified self-loop on another subject must not release a parked task that
+// a still-queued observation supersedes. A replay parks the CI failure task and
+// stops; a review approval and then green CI are queued. Replaying the
+// approval self-loop restores the invariant, but the green CI result queued
+// behind it must still cancel the outdated failure task.
+func TestVerifiedSelfLoopDoesNotReleaseParkedEffectsAheadOfQueuedSupersede(t *testing.T) {
+	ctx := context.Background()
+	invariant := "    invariant:\n      work.gate_closed:\n        exists: false\n"
+	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant, 1)
+	noMatch := strings.Replace(withInvariant, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+		"          equals: never\n    to: fixing\n  review_failed:", 1)
+	selfLoop := strings.Replace(noMatch, "ci:\n  policies:",
+		"  review_passed:\n    from: reviewing\n    on: review.policy.evaluated\n    when:\n      review:\n        status:\n          not_equals: unsatisfied\n"+
+			"    set:\n      work.gate_closed: null\n    to: reviewing\nci:\n  policies:", 1)
+	clauses := "events:\n  ci.policy.evaluated:\n    clauses:\n      - from: reviewing\n        when:\n          ci:\n" +
+		"            status:\n              equals: unsatisfied\n        set:\n          work.gate_closed: true\n        effects:\n" +
+		"          - agent.task:\n              prompt: Investigate the CI failure.\n"
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	const runID = "run-cross-subject"
+	pr := createSuspendedDelivery(t, store, db, runID, selfLoop+clauses)
+	if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, runID, pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	// The replay parks the failure's task and holds the run, then stops before
+	// the settle.
+	queueUndecodableDeferredEvent(t, db, runID)
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err == nil {
+		t.Fatal("replay of an undecodable deferred event succeeded")
+	}
+	if _, err := db.Exec(`DELETE FROM workflow_v2_deferred_events WHERE run_id=? AND defer_key='undecodable'`, runID); err != nil {
+		t.Fatal(err)
+	}
+	var parked int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_effects WHERE run_id=? AND postponed=1
+		AND status='planned'`, runID).Scan(&parked); err != nil || parked != 1 {
+		t.Fatalf("parked effects = %d, %v", parked, err)
+	}
+	// While the run is held, the approval and then green CI are queued.
+	recordPolicyEvidence(t, store, runID, pr, "review", "github-reviews", "alice", "approval", "approved",
+		nil, workflowv2.ProducerReview)
+	recordPolicyEvidence(t, store, runID, pr, "ci", "github-actions", "lint", "lint", "success",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	recordPolicyEvidence(t, store, runID, pr, "ci", "github-actions", "unit", "unit", "success",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, runID)
+	if err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" || run.StateVersion < 2 {
+		t.Fatalf("settled run = %#v, %v (self-loop not taken?)", run, err)
+	}
+	if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+		t.Fatalf("claim after replay = %#v, %v (superseded failure task released by the approval self-loop?)", claim, err)
+	}
+	var status, lastError string
+	if err := db.QueryRow(`SELECT status,last_error FROM workflow_v2_effects WHERE run_id=?
+		AND origin_type='event_clause'`, runID).Scan(&status, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(workflowv2.EffectCancelled) || !strings.Contains(lastError, "superseded") {
+		t.Fatalf("parked failure task = %s (%q), want superseded", status, lastError)
 	}
 }
 

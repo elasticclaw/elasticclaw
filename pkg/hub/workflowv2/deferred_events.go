@@ -114,6 +114,16 @@ func releasePostponedEffects(ctx context.Context, tx *sql.Tx, runID string, now 
 	return err
 }
 
+// parkedEffectsAwaitQueue reports whether the run has parked clause effects
+// and queued observations that may still supersede them.
+func parkedEffectsAwaitQueue(ctx context.Context, tx *sql.Tx, runID string) (bool, error) {
+	var waiting bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_v2_effects WHERE run_id=? AND postponed=1
+		AND status IN ('planned','retryable_failed'))
+		AND EXISTS(SELECT 1 FROM workflow_v2_deferred_events WHERE run_id=?)`, runID, runID).Scan(&waiting)
+	return waiting, err
+}
+
 // cancelPostponedEffects cancels parked clause effects when the run suspends
 // or leaves the state they were planned in before its invariant was verified.
 func cancelPostponedEffects(ctx context.Context, tx *sql.Tx, run Run, now time.Time) error {
