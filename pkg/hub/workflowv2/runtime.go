@@ -577,6 +577,11 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 				"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
 				return EventResult{}, err
 			}
+			if input.deferInvariant {
+				if err := snapshotReplayedTaskFacts(ctx, tx, runID, input.ID); err != nil {
+					return EventResult{}, err
+				}
+			}
 			// A replay that postponed a broken invariant parks the clause
 			// effects until it settles: they run if the invariant then holds
 			// and are cancelled if the run suspends or leaves the state.
@@ -720,6 +725,11 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		if destination.OnEnter != nil {
 			if err := scheduleEffects(ctx, tx, runID, "transition", transitionID,
 				"states."+transitionDef.To+".on_enter.effects", destination.OnEnter.Effects, now); err != nil {
+				return EventResult{}, err
+			}
+		}
+		if input.deferInvariant {
+			if err := snapshotReplayedTaskFacts(ctx, tx, runID, input.ID, transitionID); err != nil {
 				return EventResult{}, err
 			}
 		}

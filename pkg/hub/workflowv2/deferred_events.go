@@ -31,6 +31,10 @@ const (
 	replayPendingEntryReason = "replaying deferred events before judging the entered state invariant"
 )
 
+// replayedFactSnapshotKey holds, in an agent.task effect payload, the included
+// facts as of the replayed event that scheduled it; see snapshotReplayedTaskFacts.
+const replayedFactSnapshotKey = "replayed_fact_snapshot"
+
 // replayedDeferredReason is the receipt reason that marks a deferred event as
 // replayed, so its transition counts as fired.
 const replayedDeferredReason = "deferred transition replayed"
@@ -536,4 +540,71 @@ func refreshRecordedReviewFeedback(ctx context.Context, tx *sql.Tx, runID string
 		review["feedback"] = recorded.feedback
 	}
 	return err
+}
+
+// snapshotReplayedTaskFacts binds the facts that agent tasks scheduled by a
+// replayed event include to their values as of that event. The tasks run only
+// once the queue drains, and later replayed observations replace run-global
+// facts meanwhile (feedback on a sibling PR replaces review.feedback without
+// firing a transition), so reading them at materialization would hand the task
+// another event's context; a live event's task would have read them promptly.
+func snapshotReplayedTaskFacts(ctx context.Context, tx *sql.Tx, runID string, originIDs ...string) error {
+	type planned struct{ id, payloadJSON string }
+	var effects []planned
+	for _, originID := range originIDs {
+		rows, err := tx.QueryContext(ctx, `SELECT id,payload_json FROM workflow_v2_effects
+			WHERE run_id=? AND origin_id=? AND kind='agent.task' AND status='planned'`, runID, originID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var effect planned
+			if err := rows.Scan(&effect.id, &effect.payloadJSON); err != nil {
+				rows.Close()
+				return err
+			}
+			effects = append(effects, effect)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	for _, effect := range effects {
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(effect.payloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode agent task effect: %w", err)
+		}
+		keys, _ := payload["include_facts"].([]interface{})
+		snapshot := map[string]json.RawMessage{}
+		for _, key := range keys {
+			name, _ := key.(string)
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			var raw string
+			err := tx.QueryRowContext(ctx, `SELECT value_json FROM workflow_v2_facts WHERE run_id=? AND fact_key=?`,
+				runID, name).Scan(&raw)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			snapshot[name] = json.RawMessage(raw)
+		}
+		if len(snapshot) == 0 {
+			continue
+		}
+		payload[replayedFactSnapshotKey] = snapshot
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET payload_json=? WHERE id=?`,
+			string(encoded), effect.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

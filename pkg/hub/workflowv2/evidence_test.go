@@ -1320,6 +1320,76 @@ func TestSuspendedRunRecordsFeedbackEditAfterSiblingFeedback(t *testing.T) {
 	}
 }
 
+// A task scheduled by a replayed feedback transition includes the feedback
+// that fired it, even when sibling PR feedback replays after it without
+// firing a transition.
+func TestReplayedFeedbackTaskKeepsTriggeringFeedback(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	runID := "run-replayed-feedback-task"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"transitions:\n  feedback:\n    from: reviewing\n    on: review.feedback.received\n    to: fixing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: runID, TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, runID, "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/10"}
+	second := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/11"}
+	if verified, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{first, second},
+	}, deliveryVerifier(map[string]string{first.URL: "head-1", second.URL: "other-1"})); err != nil || len(verified) != 2 {
+		t.Fatalf("delivery = %#v, %v", verified, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := store.ActiveDeliveryTargetsAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, number := range []int{10, 11} {
+		var target workflowv2.DeliveryTarget
+		for _, candidate := range targets {
+			if candidate.Number == number {
+				target = candidate
+			}
+		}
+		eventID := fmt.Sprintf("comment-%d", number)
+		result, err := store.ApplyReviewFeedback(ctx, target, eventID,
+			map[string]interface{}{"kind": "comment", "body": fmt.Sprintf("fix PR %d", number)},
+			typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerReview), Principal: "alice",
+				ExternalID: eventID, ObservedAt: time.Date(2026, 8, 8, 12, number-9, 0, 0, time.UTC)})
+		if err != nil || !result.Deferred {
+			t.Fatalf("feedback on PR #%d while suspended = %#v, %v", number, result, err)
+		}
+	}
+	if _, err := store.ApplyCommand(ctx, runID, "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, runID)
+	if err != nil || run.State != "fixing" {
+		t.Fatalf("recovered run = %#v, %v", run, err)
+	}
+	claim, err := store.ClaimEffect(ctx, "feedback-worker", time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	task, err := store.MaterializeAgentTask(ctx, claim.Effect.ID, claim.AttemptID, "feedback-worker", time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(task.Instructions, "fix PR 10") || strings.Contains(task.Instructions, "fix PR 11") {
+		t.Fatalf("task instructions = %s (later sibling PR feedback included?)", task.Instructions)
+	}
+}
+
 // A pull_request.mergeable queued while suspended survives a later
 // mergeability change that keeps the PR out of dirty/behind: the reconciler
 // already persisted the state and will not emit pull_request.mergeable again.
