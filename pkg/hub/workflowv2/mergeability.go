@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"time"
 
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
@@ -121,7 +122,7 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 			return fmt.Errorf("delivery changed while reconciling mergeability")
 		}
-		if err := supersedeDeferredMergeability(ctx, tx, target.RunID, target.PRID, kind, state); err != nil {
+		if err := supersedeDeferredMergeability(ctx, tx, target.RunID, target.PRID, kind, state, s.now().UTC()); err != nil {
 			return err
 		}
 		summary, err := deliveryFactsFrom(ctx, tx, target.RunID)
@@ -146,16 +147,20 @@ func (s *Store) ReconcileMergeability(ctx context.Context, target DeliveryTarget
 	})
 }
 
-// supersedeDeferredMergeability keeps the queues of a suspended run consistent
-// with a new mergeability observation. A conflicted, behind or mergeable event
-// supersedes a queued pull_request.mergeability_updated. A
-// pull_request.mergeability_updated never fires those transitions, so it only
-// drops a queued one whose state class the PR has left: a PR that went from
+// supersedeDeferredMergeability keeps the queues of a suspended run, and the
+// clause effects a replay parked for them, consistent with a new mergeability
+// observation. A conflicted, behind or mergeable event supersedes a queued or
+// parked pull_request.mergeability_updated. A pull_request.mergeability_updated
+// never fires those transitions, so it only drops a queued one, and the work a
+// replayed one parked, whose state class the PR has left: a PR that went from
 // clean to blocked is still mergeable, and the reconciler will not emit
-// pull_request.mergeable again for it.
-func supersedeDeferredMergeability(ctx context.Context, tx *sql.Tx, runID, prID, kind, state string) error {
+// pull_request.mergeable again for it. Its own subject is separate, so the
+// generic supersede of its subject would miss them: a conflict task parked by
+// a replayed pull_request.conflicted would be released once the PR returned
+// to an already observed clean tuple.
+func supersedeDeferredMergeability(ctx context.Context, tx *sql.Tx, runID, prID, kind, state string, now time.Time) error {
 	if kind != "pull_request.mergeability_updated" {
-		return clearDeferredEvent(ctx, tx, runID, mergeabilityUpdatedDeferKey(prID))
+		return invalidateDeferredSubject(ctx, tx, runID, mergeabilityUpdatedDeferKey(prID), now)
 	}
 	current := "pull_request.mergeable"
 	switch state {
@@ -164,8 +169,16 @@ func supersedeDeferredMergeability(ctx context.Context, tx *sql.Tx, runID, prID,
 	case "behind":
 		current = "pull_request.behind"
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events WHERE run_id=? AND defer_key=?
+	key := mergeabilityDeferKey(prID)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workflow_v2_deferred_events WHERE run_id=? AND defer_key=?
 		AND event_id IN (SELECT id FROM workflow_v2_events WHERE run_id=? AND kind<>?)`,
-		runID, mergeabilityDeferKey(prID), runID, current)
+		runID, key, runID, current); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',postponed=0,last_error=?,updated_at=?
+		WHERE run_id=? AND postponed=1 AND postponed_subject=? AND status IN ('planned','retryable_failed')
+		AND origin_type='event_clause'
+		AND origin_id IN (SELECT id FROM workflow_v2_events WHERE run_id=? AND kind<>?)`,
+		fmt.Sprintf("superseded by a newer %s mergeability observation", state), now.UnixMilli(), runID, key, runID, current)
 	return err
 }

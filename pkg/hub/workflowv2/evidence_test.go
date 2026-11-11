@@ -2421,6 +2421,81 @@ func TestUnlistenedObservationSupersedesParkedClauseEffects(t *testing.T) {
 	}
 }
 
+// A PR that returns to an already observed clean tuple emits
+// pull_request.mergeability_updated under its own subject, so the generic
+// supersede misses the conflict task a replayed pull_request.conflicted parked.
+// The clean observation restores the invariant, so the settle must not release
+// that outdated task.
+func TestReturnToObservedCleanTupleSupersedesParkedConflictTask(t *testing.T) {
+	ctx := context.Background()
+	invariant := "    invariant:\n      delivery.any_conflicted:\n        not_equals: true\n"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant, 1) +
+		"events:\n  pull_request.conflicted:\n    clauses:\n      - from: reviewing\n        effects:\n" +
+		"          - agent.task:\n              prompt: Resolve the merge conflict.\n"
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	const runID = "run-return-clean"
+	pr := createSuspendedDelivery(t, store, db, runID, workflowYAML)
+	if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	observe := func(base, state string) workflowv2.EventResult {
+		t.Helper()
+		pr.BaseSHA, pr.MergeableState = base, state
+		pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Minute)
+		return reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+			return store.ReconcileMergeability(ctx, target, pr)
+		})
+	}
+	observe("base-1", "dirty")
+	observe("base-1", "clean")
+	if result := observe("base-2", "dirty"); !result.Deferred {
+		t.Fatalf("conflict on the new base was not deferred: %#v", result)
+	}
+	// The replay parks the conflict's task and holds the run, then stops
+	// before the settle.
+	queueUndecodableDeferredEvent(t, db, runID)
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err == nil {
+		t.Fatal("replay of an undecodable deferred event succeeded")
+	}
+	if _, err := db.Exec(`DELETE FROM workflow_v2_deferred_events WHERE run_id=? AND defer_key='undecodable'`, runID); err != nil {
+		t.Fatal(err)
+	}
+	var parked int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_effects WHERE run_id=? AND postponed=1
+		AND status='planned'`, runID).Scan(&parked); err != nil || parked != 1 {
+		t.Fatalf("parked effects = %d, %v", parked, err)
+	}
+	// The base is reverted: the PR is back on its already observed clean tuple.
+	result := observe("base-1", "clean")
+	var kind string
+	if err := db.QueryRow(`SELECT kind FROM workflow_v2_events WHERE id=?`, result.EventID).Scan(&kind); err != nil ||
+		kind != "pull_request.mergeability_updated" {
+		t.Fatalf("return to observed clean tuple = %q, %v", kind, err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, runID); err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("settled run = %#v, %v", run, err)
+	}
+	if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+		t.Fatalf("claim after settle = %#v, %v (superseded conflict task released?)", claim, err)
+	}
+	var status, lastError string
+	if err := db.QueryRow(`SELECT status,last_error FROM workflow_v2_effects WHERE run_id=?
+		AND origin_type='event_clause'`, runID).Scan(&status, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(workflowv2.EffectCancelled) || !strings.Contains(lastError, "superseded") {
+		t.Fatalf("parked conflict task = %s (%q), want superseded", status, lastError)
+	}
+}
+
 // A conflict queued while suspended describes the head it was observed on; an
 // agent resubmission that verifies a new head must not let it replay.
 func TestSuspendedRunDropsDeferredConflictAfterResubmission(t *testing.T) {
