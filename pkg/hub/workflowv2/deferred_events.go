@@ -531,40 +531,9 @@ func refreshDeferredReviewFeedback(ctx context.Context, tx *sql.Tx, runID string
 func refreshRecordedReviewFeedback(ctx context.Context, tx *sql.Tx, runID string, input *EventInput,
 	review, queued map[string]interface{}) error {
 	prID, _ := review["pull_request_id"].(string)
-	queuedID := input.Provenance.ExternalID
-	if queuedID == "" || prID == "" {
-		return nil
+	recorded, found, err := recordedReviewFeedback(ctx, tx, runID, prID, queued["kind"], input.Provenance.ExternalID)
+	if found {
+		review["feedback"] = recorded.feedback
 	}
-	// Replayed events carry the feedback they replayed, which is at least as
-	// recent as the observation it was refreshed from.
-	rows, err := tx.QueryContext(ctx, `SELECT provenance_json,json_extract(facts_json,'$."review.feedback"')
-		FROM workflow_v2_events WHERE run_id=? AND disposition='accepted'
-		AND kind IN ('review.feedback.received','review.feedback.reconciled')
-		AND json_extract(payload_json,'$.review.pull_request_id')=?
-		AND json_type(facts_json,'$."review.feedback"')='object' ORDER BY rowid DESC`, runID, prID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var provenanceJSON, valueJSON string
-		if err := rows.Scan(&provenanceJSON, &valueJSON); err != nil {
-			return err
-		}
-		var provenance typesv2.EvidenceProvenance
-		if err := json.Unmarshal([]byte(provenanceJSON), &provenance); err != nil {
-			return fmt.Errorf("decode recorded review feedback provenance: %w", err)
-		}
-		var current map[string]interface{}
-		if err := json.Unmarshal([]byte(valueJSON), &current); err != nil {
-			return fmt.Errorf("decode recorded review feedback: %w", err)
-		}
-		currentID := provenance.ExternalID
-		if current["kind"] == queued["kind"] &&
-			(reviewFeedbackExternalIDsMatch(currentID, queuedID) || reviewFeedbackExternalIDsMatch(queuedID, currentID)) {
-			review["feedback"] = current
-			return nil
-		}
-	}
-	return rows.Err()
+	return err
 }

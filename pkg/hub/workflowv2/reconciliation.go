@@ -342,45 +342,66 @@ func (s *Store) ReconcileReviewFeedback(ctx context.Context, target DeliveryTarg
 	if err != nil || received.Disposition != typesv2.DispositionDuplicate {
 		return received, err
 	}
-	current, sameObject, sameContent, err := s.currentReviewFeedback(ctx, target.RunID, feedback, provenance)
-	if err != nil || !sameObject || sameContent || current.ObservedAt.After(provenance.ObservedAt) {
+	recorded, found, err := recordedReviewFeedback(ctx, s.db, target.RunID, target.PRID, feedback["kind"], provenance.ExternalID)
+	if err != nil || !found || recorded.provenance.ObservedAt.After(provenance.ObservedAt) {
 		return received, err
 	}
 	encoded, err := json.Marshal(feedback)
 	if err != nil {
 		return EventResult{}, err
 	}
+	recordedJSON, err := json.Marshal(recorded.feedback)
+	if err != nil || bytes.Equal(recordedJSON, encoded) {
+		return received, err
+	}
 	digest := sha256.Sum256(encoded)
 	revisionID := eventID + ":revision:" + hex.EncodeToString(digest[:])
 	return s.applyReviewFeedbackEvent(ctx, target, revisionID, "review.feedback.reconciled", feedback, provenance)
 }
 
-func (s *Store) currentReviewFeedback(ctx context.Context, runID string, feedback map[string]interface{},
-	provenance typesv2.EvidenceProvenance) (typesv2.EvidenceProvenance, bool, bool, error) {
-	var valueJSON, provenanceJSON string
-	err := s.db.QueryRowContext(ctx, `SELECT value_json,provenance_json FROM workflow_v2_facts
-		WHERE run_id=? AND fact_key='review.feedback'`, runID).Scan(&valueJSON, &provenanceJSON)
-	if err == sql.ErrNoRows {
-		return typesv2.EvidenceProvenance{}, false, false, nil
+type recordedFeedback struct {
+	feedback   map[string]interface{}
+	provenance typesv2.EvidenceProvenance
+}
+
+// recordedReviewFeedback returns the latest content recorded for a provider
+// feedback object on one PR. The run-global review.feedback fact cannot
+// identify it: feedback on a sibling PR replaces that fact. Replayed events
+// carry the feedback they replayed, which is at least as recent as the
+// observation it was refreshed from.
+func recordedReviewFeedback(ctx context.Context, queryer policyQueryer, runID, prID string, kind interface{},
+	externalID string) (recordedFeedback, bool, error) {
+	if prID == "" || externalID == "" {
+		return recordedFeedback{}, false, nil
 	}
+	rows, err := queryer.QueryContext(ctx, `SELECT provenance_json,json_extract(payload_json,'$.review.feedback')
+		FROM workflow_v2_events WHERE run_id=? AND disposition='accepted'
+		AND kind IN ('review.feedback.received','review.feedback.reconciled')
+		AND json_extract(payload_json,'$.review.pull_request_id')=?
+		AND json_type(payload_json,'$.review.feedback')='object' ORDER BY rowid DESC`, runID, prID)
 	if err != nil {
-		return typesv2.EvidenceProvenance{}, false, false, err
+		return recordedFeedback{}, false, err
 	}
-	var current typesv2.EvidenceProvenance
-	if err := json.Unmarshal([]byte(provenanceJSON), &current); err != nil {
-		return typesv2.EvidenceProvenance{}, false, false, err
+	defer rows.Close()
+	for rows.Next() {
+		var provenanceJSON, valueJSON string
+		if err := rows.Scan(&provenanceJSON, &valueJSON); err != nil {
+			return recordedFeedback{}, false, err
+		}
+		var record recordedFeedback
+		if err := json.Unmarshal([]byte(provenanceJSON), &record.provenance); err != nil {
+			return recordedFeedback{}, false, fmt.Errorf("decode recorded review feedback provenance: %w", err)
+		}
+		if err := json.Unmarshal([]byte(valueJSON), &record.feedback); err != nil {
+			return recordedFeedback{}, false, fmt.Errorf("decode recorded review feedback: %w", err)
+		}
+		recordedID := record.provenance.ExternalID
+		if record.feedback["kind"] == kind && (reviewFeedbackExternalIDsMatch(recordedID, externalID) ||
+			reviewFeedbackExternalIDsMatch(externalID, recordedID)) {
+			return record, true, rows.Err()
+		}
 	}
-	encoded, err := json.Marshal(feedback)
-	if err != nil {
-		return typesv2.EvidenceProvenance{}, false, false, err
-	}
-	var currentFeedback map[string]interface{}
-	if err := json.Unmarshal([]byte(valueJSON), &currentFeedback); err != nil {
-		return typesv2.EvidenceProvenance{}, false, false, err
-	}
-	return current, currentFeedback["kind"] == feedback["kind"] &&
-			reviewFeedbackExternalIDsMatch(current.ExternalID, provenance.ExternalID),
-		bytes.Equal([]byte(valueJSON), encoded), nil
+	return recordedFeedback{}, false, rows.Err()
 }
 
 func reviewFeedbackExternalIDsMatch(current, incoming string) bool {
@@ -400,9 +421,14 @@ func (s *Store) applyReviewFeedbackEvent(ctx context.Context, target DeliveryTar
 		Producer: ProducerReview, Provenance: provenance, observation: true,
 		deferKey: reviewFeedbackDeferKey(target.PRID, eventKind),
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
-		var currentValue, currentProvenance string
-		err := tx.QueryRowContext(ctx, `SELECT value_json,provenance_json FROM workflow_v2_facts
-			WHERE run_id=? AND fact_key='review.feedback'`, target.RunID).Scan(&currentValue, &currentProvenance)
+		// A revision of feedback the fact no longer names (feedback on a
+		// sibling PR replaced it) is still recorded, so a replay of the queued
+		// feedback refreshes from it, but it does not take the fact back from
+		// newer feedback.
+		writeFact := true
+		var currentProvenance string
+		err := tx.QueryRowContext(ctx, `SELECT provenance_json FROM workflow_v2_facts
+			WHERE run_id=? AND fact_key='review.feedback'`, target.RunID).Scan(&currentProvenance)
 		if err != nil && err != sql.ErrNoRows {
 			return err
 		}
@@ -412,17 +438,22 @@ func (s *Store) applyReviewFeedbackEvent(ctx context.Context, target DeliveryTar
 				return fmt.Errorf("decode current review feedback provenance: %w", err)
 			}
 			if current.ObservedAt.After(provenance.ObservedAt) {
-				return fmt.Errorf("review feedback observation is older than the current fact")
+				if eventKind != "review.feedback.reconciled" {
+					return fmt.Errorf("review feedback observation is older than the current fact")
+				}
+				writeFact = false
 			}
-			if eventKind == "review.feedback.reconciled" {
-				var currentFeedback map[string]interface{}
-				if err := json.Unmarshal([]byte(currentValue), &currentFeedback); err != nil {
-					return fmt.Errorf("decode current review feedback: %w", err)
-				}
-				if currentFeedback["kind"] != feedback["kind"] ||
-					!reviewFeedbackExternalIDsMatch(current.ExternalID, provenance.ExternalID) {
-					return fmt.Errorf("review feedback object changed while reconciling")
-				}
+		}
+		if eventKind == "review.feedback.reconciled" {
+			recorded, found, err := recordedReviewFeedback(ctx, tx, target.RunID, target.PRID, feedback["kind"], provenance.ExternalID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("review feedback object changed while reconciling")
+			}
+			if recorded.provenance.ObservedAt.After(provenance.ObservedAt) {
+				return fmt.Errorf("review feedback observation is older than the recorded feedback")
 			}
 		}
 		var headSHA string
@@ -437,7 +468,9 @@ func (s *Store) applyReviewFeedbackEvent(ctx context.Context, target DeliveryTar
 		input.Payload = map[string]interface{}{"review": map[string]interface{}{
 			"feedback": feedback, "pull_request_id": target.PRID, "head_sha": headSHA,
 		}}
-		input.Facts = map[string]interface{}{"review.feedback": feedback}
+		if writeFact {
+			input.Facts = map[string]interface{}{"review.feedback": feedback}
+		}
 		return nil
 	})
 }
