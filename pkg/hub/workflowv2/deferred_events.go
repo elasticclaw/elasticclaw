@@ -500,10 +500,12 @@ func refreshDeferredMergeability(ctx context.Context, tx *sql.Tx, runID string, 
 }
 
 // refreshDeferredReviewFeedback replaces the queued feedback content with the
-// current review.feedback fact when both describe the same provider object. An
-// edit made while suspended is recorded as review.feedback.reconciled, which
-// does not supersede the queued received event; replaying the original payload
-// would override the refreshed fact in guard evaluation.
+// latest content recorded for the same provider object on the same PR. An edit
+// made while suspended is recorded as review.feedback.reconciled, which does
+// not supersede the queued received event; replaying the original payload
+// would override the edit in guard evaluation. The run-global review.feedback
+// fact cannot be used: feedback on a sibling PR replaces it while this PR's
+// feedback stays queued.
 func refreshDeferredReviewFeedback(ctx context.Context, tx *sql.Tx, runID string, input *EventInput) error {
 	if input.Kind != "review.feedback.received" && input.Kind != "review.feedback.reconciled" {
 		return nil
@@ -513,28 +515,40 @@ func refreshDeferredReviewFeedback(ctx context.Context, tx *sql.Tx, runID string
 		return nil
 	}
 	queued, _ := review["feedback"].(map[string]interface{})
-	var valueJSON, provenanceJSON string
-	err := tx.QueryRowContext(ctx, `SELECT value_json,provenance_json FROM workflow_v2_facts
-		WHERE run_id=? AND fact_key='review.feedback'`, runID).Scan(&valueJSON, &provenanceJSON)
-	if err == sql.ErrNoRows {
+	prID, _ := review["pull_request_id"].(string)
+	queuedID := input.Provenance.ExternalID
+	if queuedID == "" || prID == "" {
 		return nil
 	}
+	// Replayed events carry no facts, so facts_json only matches observations.
+	rows, err := tx.QueryContext(ctx, `SELECT provenance_json,json_extract(facts_json,'$."review.feedback"')
+		FROM workflow_v2_events WHERE run_id=? AND disposition='accepted'
+		AND kind IN ('review.feedback.received','review.feedback.reconciled')
+		AND json_extract(payload_json,'$.review.pull_request_id')=?
+		AND json_type(facts_json,'$."review.feedback"')='object' ORDER BY rowid DESC`, runID, prID)
 	if err != nil {
 		return err
 	}
-	var current map[string]interface{}
-	if err := json.Unmarshal([]byte(valueJSON), &current); err != nil {
-		return fmt.Errorf("decode current review feedback: %w", err)
+	defer rows.Close()
+	for rows.Next() {
+		var provenanceJSON, valueJSON string
+		if err := rows.Scan(&provenanceJSON, &valueJSON); err != nil {
+			return err
+		}
+		var provenance typesv2.EvidenceProvenance
+		if err := json.Unmarshal([]byte(provenanceJSON), &provenance); err != nil {
+			return fmt.Errorf("decode recorded review feedback provenance: %w", err)
+		}
+		var current map[string]interface{}
+		if err := json.Unmarshal([]byte(valueJSON), &current); err != nil {
+			return fmt.Errorf("decode recorded review feedback: %w", err)
+		}
+		currentID := provenance.ExternalID
+		if current["kind"] == queued["kind"] &&
+			(reviewFeedbackExternalIDsMatch(currentID, queuedID) || reviewFeedbackExternalIDsMatch(queuedID, currentID)) {
+			review["feedback"] = current
+			return nil
+		}
 	}
-	var currentProvenance typesv2.EvidenceProvenance
-	if err := json.Unmarshal([]byte(provenanceJSON), &currentProvenance); err != nil {
-		return fmt.Errorf("decode current review feedback provenance: %w", err)
-	}
-	queuedID, currentID := input.Provenance.ExternalID, currentProvenance.ExternalID
-	if queuedID == "" || current["kind"] != queued["kind"] ||
-		!(reviewFeedbackExternalIDsMatch(currentID, queuedID) || reviewFeedbackExternalIDsMatch(queuedID, currentID)) {
-		return nil
-	}
-	review["feedback"] = current
-	return nil
+	return rows.Err()
 }
