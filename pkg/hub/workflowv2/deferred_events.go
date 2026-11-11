@@ -592,6 +592,13 @@ func refreshRecordedReviewFeedback(ctx context.Context, tx *sql.Tx, runID string
 	recorded, found, err := recordedReviewFeedback(ctx, tx, runID, prID, queued["kind"], input.Provenance.ExternalID)
 	if found {
 		review["feedback"] = recorded.feedback
+		// The refreshed content keeps the provenance it was observed with: the
+		// replayed event becomes the latest recorded feedback, so the queued
+		// event's older observation time would let a late observation older
+		// than the edit pass the stale-data guards and overwrite it.
+		if recorded.provenance.ObservedAt.After(input.Provenance.ObservedAt) {
+			input.Provenance = recorded.provenance
+		}
 	}
 	return err
 }

@@ -1177,6 +1177,46 @@ func TestSuspendedRunReplaysEditedFeedbackContent(t *testing.T) {
 	}
 }
 
+// A replayed feedback event refreshed with edited content carries the edit's
+// observation time, so a late observation older than the edit cannot pass the
+// stale-data guards and overwrite the edited content.
+func TestReplayedEditedFeedbackRejectsOlderObservation(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"transitions:\n  feedback:\n    from: reviewing\n    on: review.feedback.received\n    when:\n      review:\n        feedback:\n          severity:\n            equals: blocking\n    to: fixing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	createSuspendedDelivery(t, store, db, "run-late-feedback", workflowYAML)
+	provenance := func(minute int) typesv2.EvidenceProvenance {
+		return typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerReview), Principal: "alice",
+			ExternalID: "comment-1", ObservedAt: time.Date(2026, 8, 8, 12, minute, 0, 0, time.UTC)}
+	}
+	reconcile := func(feedback map[string]interface{}, minute int) workflowv2.EventResult {
+		return reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+			return store.ReconcileReviewFeedback(ctx, target, "comment-1", feedback, provenance(minute))
+		})
+	}
+	if result := reconcile(map[string]interface{}{"kind": "comment", "body": "first", "severity": "nit"}, 1); !result.Deferred {
+		t.Fatalf("feedback while suspended was not deferred: %#v", result)
+	}
+	if result := reconcile(map[string]interface{}{"kind": "comment", "body": "third", "severity": "nit"}, 3); result.Disposition != typesv2.DispositionAccepted {
+		t.Fatalf("feedback edit while suspended = %#v", result)
+	}
+	if _, err := store.ApplyCommand(ctx, "run-late-feedback", "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(map[string]interface{}{"kind": "comment", "body": "second", "severity": "nit"}, 2)
+	var body string
+	if err := db.QueryRow(`SELECT json_extract(value_json,'$.body') FROM workflow_v2_facts
+		WHERE run_id='run-late-feedback' AND fact_key='review.feedback'`).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body != "third" {
+		t.Fatalf("review.feedback body = %q, want the edit (older observation overwrote it)", body)
+	}
+}
+
 // Feedback edited while suspended replays with its edited content even when
 // feedback on a sibling PR replaced the run-global review.feedback fact.
 func TestSuspendedRunReplaysEditedFeedbackContentPerPullRequest(t *testing.T) {
