@@ -499,8 +499,15 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			if err := deferEvent(ctx, tx, runID, input, now); err != nil {
 				return EventResult{}, err
 			}
-		} else if err := clearDeferredEvent(ctx, tx, runID, input.deferSubject()); err != nil {
-			return EventResult{}, err
+		} else {
+			if err := clearDeferredEvent(ctx, tx, runID, input.deferSubject()); err != nil {
+				return EventResult{}, err
+			}
+			// Never replayed, so it supersedes now the clause effects a replay
+			// parked for the subject; the settle would otherwise release them.
+			if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
+				return EventResult{}, err
+			}
 		}
 		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID,
 			typesv2.DispositionAccepted, stored.StateVersion, reason, now); err != nil {

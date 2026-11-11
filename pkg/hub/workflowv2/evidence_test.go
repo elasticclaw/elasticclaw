@@ -2353,6 +2353,74 @@ func TestLiveObservationSupersedesQueuedDeferredEvent(t *testing.T) {
 	}
 }
 
+// A newer observation that the workflow does not listen on is never replayed,
+// so it must supersede the clause effects a replay parked for its subject when
+// it is recorded. The conflict parks its task and holds the run; the PR turns
+// clean (pull_request.mergeable, no listener) and restores the invariant, so
+// the settle must not release the outdated conflict task.
+func TestUnlistenedObservationSupersedesParkedClauseEffects(t *testing.T) {
+	ctx := context.Background()
+	invariant := "    invariant:\n      delivery.any_conflicted:\n        not_equals: true\n"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant, 1) +
+		"events:\n  pull_request.conflicted:\n    clauses:\n      - from: reviewing\n        effects:\n" +
+		"          - agent.task:\n              prompt: Resolve the merge conflict.\n"
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	const runID = "run-unlistened"
+	pr := createSuspendedDelivery(t, store, db, runID, workflowYAML)
+	if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	pr.BaseSHA, pr.MergeableState = "base-1", "dirty"
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcileMergeability(ctx, target, pr)
+	}); !result.Deferred {
+		t.Fatalf("conflict while suspended was not deferred: %#v", result)
+	}
+	// The replay parks the conflict's task and holds the run, then stops
+	// before the settle.
+	queueUndecodableDeferredEvent(t, db, runID)
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err == nil {
+		t.Fatal("replay of an undecodable deferred event succeeded")
+	}
+	if _, err := db.Exec(`DELETE FROM workflow_v2_deferred_events WHERE run_id=? AND defer_key='undecodable'`, runID); err != nil {
+		t.Fatal(err)
+	}
+	var parked int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_effects WHERE run_id=? AND postponed=1
+		AND status='planned'`, runID).Scan(&parked); err != nil || parked != 1 {
+		t.Fatalf("parked effects = %d, %v", parked, err)
+	}
+	pr.MergeableState = "clean"
+	pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Minute)
+	if result := reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcileMergeability(ctx, target, pr)
+	}); result.Deferred {
+		t.Fatalf("unlistened mergeable observation was deferred: %#v", result)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, runID); err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("settled run = %#v, %v", run, err)
+	}
+	if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+		t.Fatalf("claim after settle = %#v, %v (superseded conflict task released?)", claim, err)
+	}
+	var status, lastError string
+	if err := db.QueryRow(`SELECT status,last_error FROM workflow_v2_effects WHERE run_id=?
+		AND origin_type='event_clause'`, runID).Scan(&status, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(workflowv2.EffectCancelled) || !strings.Contains(lastError, "superseded") {
+		t.Fatalf("parked conflict task = %s (%q), want superseded", status, lastError)
+	}
+}
+
 // A conflict queued while suspended describes the head it was observed on; an
 // agent resubmission that verifies a new head must not let it replay.
 func TestSuspendedRunDropsDeferredConflictAfterResubmission(t *testing.T) {
