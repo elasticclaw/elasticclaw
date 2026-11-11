@@ -304,6 +304,7 @@ func (s *Store) replayDeferredEvents(ctx context.Context, runID string) error {
 			if err := refreshDeferredMergeability(ctx, tx, runID, input); err != nil {
 				return err
 			}
+			restoreDeferredPullRequestFacts(input)
 			return refreshDeferredReviewFeedback(ctx, tx, runID, input)
 		})
 		if errors.Is(err, errDeferredEventGone) {
@@ -501,6 +502,35 @@ func refreshDeferredMergeability(ctx context.Context, tx *sql.Tx, runID string, 
 	}
 	pullRequest["base_sha"], pullRequest["mergeable_state"] = baseSHA, mergeableState
 	return nil
+}
+
+// replayedPullRequestFacts are the pull_request facts a live observation
+// writes with its event.
+var replayedPullRequestFacts = []string{"id", "repository", "number", "url", "head_sha", "state",
+	"head_changed", "base_sha", "mergeable_state"}
+
+// restoreDeferredPullRequestFacts writes the replayed PR observation back to
+// the run's pull_request facts. A sibling PR observed while suspended replaces
+// them, so a task the replayed transition schedules would otherwise include
+// the sibling's context (and act on the wrong PR) instead of the PR that fired
+// it, as live.
+func restoreDeferredPullRequestFacts(input *EventInput) {
+	pullRequest, ok := input.Payload["pull_request"].(map[string]interface{})
+	if !ok || input.Producer != ProducerSourceControl {
+		return
+	}
+	if input.Facts == nil {
+		input.Facts = map[string]interface{}{}
+	}
+	for _, key := range replayedPullRequestFacts {
+		if value, ok := pullRequest[key]; ok {
+			input.Facts["pull_request."+key] = value
+		}
+	}
+	// Mergeability observations describe an unchanged head.
+	if _, ok := pullRequest["head_changed"]; !ok {
+		input.Facts["pull_request.head_changed"] = false
+	}
 }
 
 // refreshDeferredReviewFeedback replaces the queued feedback content with the

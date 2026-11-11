@@ -1390,6 +1390,85 @@ func TestReplayedFeedbackTaskKeepsTriggeringFeedback(t *testing.T) {
 	}
 }
 
+// A task scheduled by a replayed conflict includes the conflicted PR's
+// context, even when a sibling PR observed later while suspended replaced the
+// run-global pull_request facts.
+func TestReplayedConflictTaskKeepsConflictedPullRequest(t *testing.T) {
+	ctx := context.Background()
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	runID := "run-replayed-conflict-task"
+	workflowYAML := strings.Replace(policyWorkflowYAML, "transitions:\n",
+		"  rebasing:\n    phase: build\n    on_enter:\n      effects:\n        - agent.task:\n"+
+			"            prompt: Resolve the merge conflict.\n            include_facts: [pull_request.url, pull_request.number]\n"+
+			"transitions:\n  conflicted:\n    from: reviewing\n    on: pull_request.conflicted\n    to: rebasing\n", 1)
+	workflowYAML += "commands:\n  resume:\n    from: reviewing\n    to: reviewing\n"
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: runID, TenantID: "tenant-1", WorkspaceYAML: []byte(policyWorkspaceYAML), WorkflowYAML: []byte(workflowYAML),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(ctx, runID, "claw-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/10"}
+	second := typesv2.PullRequestClaim{URL: "https://github.example/org/api/pull/11"}
+	verified, err := store.SubmitDelivery(ctx, runID, attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{first, second},
+	}, deliveryVerifier(map[string]string{first.URL: "head-1", second.URL: "other-1"}))
+	if err != nil || len(verified) != 2 {
+		t.Fatalf("delivery = %#v, %v", verified, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := store.ActiveDeliveryTargetsAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		number int
+		state  string
+	}{{10, "dirty"}, {11, "clean"}} {
+		var target workflowv2.DeliveryTarget
+		for _, candidate := range targets {
+			if candidate.Number == step.number {
+				target = candidate
+			}
+		}
+		var pr typesv2.VerifiedPullRequest
+		for _, candidate := range verified {
+			if candidate.Number == step.number {
+				pr = candidate
+			}
+		}
+		pr.BaseSHA, pr.MergeableState = "base-1", step.state
+		pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Duration(step.number) * time.Second)
+		if _, err := store.ReconcileMergeability(ctx, target, pr); err != nil {
+			t.Fatalf("PR #%d %s while suspended: %v", step.number, step.state, err)
+		}
+	}
+	if _, err := store.ApplyCommand(ctx, runID, "resume", workflowv2.CommandInput{ID: "resume-1", MessageID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(ctx, runID)
+	if err != nil || run.State != "rebasing" {
+		t.Fatalf("recovered run = %#v, %v", run, err)
+	}
+	claim, err := store.ClaimEffect(ctx, "conflict-worker", time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	task, err := store.MaterializeAgentTask(ctx, claim.Effect.ID, claim.AttemptID, "conflict-worker", time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(task.Instructions, first.URL) || strings.Contains(task.Instructions, second.URL) {
+		t.Fatalf("task instructions = %s (sibling PR context included?)", task.Instructions)
+	}
+}
+
 // A pull_request.mergeable queued while suspended survives a later
 // mergeability change that keeps the PR out of dirty/behind: the reconciler
 // already persisted the state and will not emit pull_request.mergeable again.
