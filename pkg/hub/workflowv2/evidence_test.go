@@ -2244,6 +2244,70 @@ func TestSettleKeepsParkedEffectsWhileNewerObservationsAreQueued(t *testing.T) {
 	}
 }
 
+// A push while a replay holds the run supersedes the CI evidence a parked
+// failure task was planned from. The head move resets ci.status to pending,
+// which restores the invariant, so the settle must not release the old head's
+// failure task: the invalidation cancels it with the queued result.
+func TestHeadMoveCancelsParkedEffectsOfInvalidatedSubjects(t *testing.T) {
+	ctx := context.Background()
+	invariant := "    invariant:\n      ci.status:\n        not_equals: unsatisfied\n"
+	withInvariant := strings.Replace(policyWorkflowYAML, "  reviewing:\n    phase: review\n",
+		"  reviewing:\n    phase: review\n"+invariant, 1)
+	noMatch := strings.Replace(withInvariant, "          equals: unsatisfied\n    to: fixing\n  review_failed:",
+		"          equals: never\n    to: fixing\n  review_failed:", 1)
+	clauses := "events:\n  ci.policy.evaluated:\n    clauses:\n      - from: reviewing\n        when:\n          ci:\n" +
+		"            status:\n              equals: unsatisfied\n        effects:\n" +
+		"          - agent.task:\n              prompt: Investigate the CI failure.\n"
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	const runID = "run-head-parked"
+	pr := createSuspendedDelivery(t, store, db, runID, noMatch+clauses)
+	if _, err := db.Exec(`UPDATE workflow_v2_effects SET status='succeeded' WHERE run_id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, runID, pr, "ci", "github-actions", "lint", "lint", "failure",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	// The replay parks the failure's task and holds the run, then stops before
+	// the settle.
+	queueUndecodableDeferredEvent(t, db, runID)
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='active',waiting_reason='' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplayDeferredEvents(ctx); err == nil {
+		t.Fatal("replay of an undecodable deferred event succeeded")
+	}
+	if _, err := db.Exec(`DELETE FROM workflow_v2_deferred_events WHERE run_id=? AND defer_key='undecodable'`, runID); err != nil {
+		t.Fatal(err)
+	}
+	var parked int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_effects WHERE run_id=? AND postponed=1
+		AND status='planned'`, runID).Scan(&parked); err != nil || parked != 1 {
+		t.Fatalf("parked effects = %d, %v", parked, err)
+	}
+	pr.HeadSHA = "head-2"
+	pr.Provenance.ObservedAt = pr.Provenance.ObservedAt.Add(time.Minute)
+	reconcileOnlyTarget(t, store, func(target workflowv2.DeliveryTarget) (workflowv2.EventResult, error) {
+		return store.ReconcilePullRequest(ctx, target, "push", "pull_request.head_changed", pr)
+	})
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.GetRun(ctx, runID); err != nil || run.Status != workflowv2.RunActive || run.State != "reviewing" {
+		t.Fatalf("settled run = %#v, %v", run, err)
+	}
+	if claim, err := store.ClaimEffect(ctx, "worker-1", time.Minute); err != nil || claim != nil {
+		t.Fatalf("claim after settle = %#v, %v (old head's failure task released?)", claim, err)
+	}
+	var status, lastError string
+	if err := db.QueryRow(`SELECT status,last_error FROM workflow_v2_effects WHERE run_id=?
+		AND origin_type='event_clause'`, runID).Scan(&status, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(workflowv2.EffectCancelled) || !strings.Contains(lastError, "superseded") {
+		t.Fatalf("parked failure task = %s (%q), want cancelled as superseded", status, lastError)
+	}
+}
+
 // A live observation on an active run supersedes one queued for the same
 // subject: a failed recovery replay leaves the queue for the sweep, and the
 // sweep must not replay a CI failure that a later live CI result superseded.

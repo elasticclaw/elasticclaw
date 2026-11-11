@@ -343,12 +343,12 @@ func upsertDeliveryPR(ctx context.Context, tx *sql.Tx, runID string, pr *typesv2
 	if !registeredOnly {
 		if existingID != "" && !existingRegisteredOnly {
 			if err := clearStaleDeferredEvents(ctx, tx, runID, pr.ID, existingHead != pr.HeadSHA,
-				existingState != pr.State, pr.State == "open"); err != nil {
+				existingState != pr.State, pr.State == "open", now); err != nil {
 				return false, err
 			}
 		} else {
 			for _, key := range []string{"ci.policy.evaluated", "review.policy.evaluated", "workflow.delivery.evaluated"} {
-				if err := clearDeferredEvent(ctx, tx, runID, key); err != nil {
+				if err := invalidateDeferredSubject(ctx, tx, runID, key, now); err != nil {
 					return false, err
 				}
 			}

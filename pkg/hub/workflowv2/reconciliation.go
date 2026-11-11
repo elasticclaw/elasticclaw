@@ -168,8 +168,11 @@ func reviewFeedbackDeferKey(prID, kind string) string {
 // head. A queued lifecycle observation (closed, merged, verified_open) no
 // longer describes the PR once its state moved, even when the newer
 // observation is not a lifecycle kind (a reopen seen only through a later
-// push); a lifecycle event is re-queued by ApplyEvent afterwards.
-func clearStaleDeferredEvents(ctx context.Context, tx *sql.Tx, runID, prID string, headChanged, stateChanged, open bool) error {
+// push); a lifecycle event is re-queued by ApplyEvent afterwards. Clause
+// effects a replay parked for a dropped subject were planned from the same
+// superseded evidence, so they are cancelled with it.
+func clearStaleDeferredEvents(ctx context.Context, tx *sql.Tx, runID, prID string, headChanged, stateChanged, open bool,
+	now time.Time) error {
 	var stale []string
 	if headChanged || !open {
 		stale = append(stale, mergeabilityDeferKey(prID), mergeabilityUpdatedDeferKey(prID),
@@ -190,7 +193,7 @@ func clearStaleDeferredEvents(ctx context.Context, tx *sql.Tx, runID, prID strin
 		stale = append(stale, "workflow.delivery.evaluated")
 	}
 	for _, key := range stale {
-		if err := clearDeferredEvent(ctx, tx, runID, key); err != nil {
+		if err := invalidateDeferredSubject(ctx, tx, runID, key, now); err != nil {
 			return err
 		}
 	}
@@ -274,7 +277,7 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 			}
 		}
 		if err := clearStaleDeferredEvents(ctx, tx, target.RunID, target.PRID,
-			currentHead != verified.HeadSHA, currentState != verified.State, verified.State == "open"); err != nil {
+			currentHead != verified.HeadSHA, currentState != verified.State, verified.State == "open", s.now().UTC()); err != nil {
 			return err
 		}
 		summary, err := deliveryFactsFrom(ctx, tx, target.RunID)

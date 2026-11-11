@@ -172,6 +172,20 @@ func clearDeferredEvent(ctx context.Context, tx *sql.Tx, runID, key string) erro
 	return err
 }
 
+// invalidateDeferredSubject drops a subject whose evidence was superseded (a
+// PR head or state moved): its queued observation and the clause effects a
+// replay parked for it. Released later, the parked work would run against the
+// superseded evidence (a CI failure task after a push reset CI to pending).
+func invalidateDeferredSubject(ctx context.Context, tx *sql.Tx, runID, key string, now time.Time) error {
+	if err := clearDeferredEvent(ctx, tx, runID, key); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',postponed=0,last_error=?,updated_at=?
+		WHERE run_id=? AND postponed=1 AND postponed_subject=? AND status IN ('planned','retryable_failed')`,
+		fmt.Sprintf("%s evidence was superseded before the replay verified its invariant", key), now.UnixMilli(), runID, key)
+	return err
+}
+
 // ReplayDeferredEvents fires the transitions that suspended runs deferred, for
 // every run that is active again, and settles runs a failed replay left held.
 // The transition that resumes a run replays its queue immediately; this sweep
