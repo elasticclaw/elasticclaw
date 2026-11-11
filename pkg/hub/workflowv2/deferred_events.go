@@ -505,7 +505,10 @@ func refreshDeferredMergeability(ctx context.Context, tx *sql.Tx, runID string, 
 // not supersede the queued received event; replaying the original payload
 // would override the edit in guard evaluation. The run-global review.feedback
 // fact cannot be used: feedback on a sibling PR replaces it while this PR's
-// feedback stays queued.
+// feedback stays queued. For the same reason the replay writes the feedback
+// back to that fact, so a task the replayed transition schedules includes the
+// feedback that fired it, as live, and not a sibling PR's (possibly dropped
+// because its head moved).
 func refreshDeferredReviewFeedback(ctx context.Context, tx *sql.Tx, runID string, input *EventInput) error {
 	if input.Kind != "review.feedback.received" && input.Kind != "review.feedback.reconciled" {
 		return nil
@@ -514,13 +517,26 @@ func refreshDeferredReviewFeedback(ctx context.Context, tx *sql.Tx, runID string
 	if !ok {
 		return nil
 	}
-	queued, _ := review["feedback"].(map[string]interface{})
+	queued, ok := review["feedback"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if err := refreshRecordedReviewFeedback(ctx, tx, runID, input, review, queued); err != nil {
+		return err
+	}
+	input.Facts = map[string]interface{}{"review.feedback": review["feedback"]}
+	return nil
+}
+
+func refreshRecordedReviewFeedback(ctx context.Context, tx *sql.Tx, runID string, input *EventInput,
+	review, queued map[string]interface{}) error {
 	prID, _ := review["pull_request_id"].(string)
 	queuedID := input.Provenance.ExternalID
 	if queuedID == "" || prID == "" {
 		return nil
 	}
-	// Replayed events carry no facts, so facts_json only matches observations.
+	// Replayed events carry the feedback they replayed, which is at least as
+	// recent as the observation it was refreshed from.
 	rows, err := tx.QueryContext(ctx, `SELECT provenance_json,json_extract(facts_json,'$."review.feedback"')
 		FROM workflow_v2_events WHERE run_id=? AND disposition='accepted'
 		AND kind IN ('review.feedback.received','review.feedback.reconciled')

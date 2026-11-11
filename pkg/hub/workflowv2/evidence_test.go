@@ -1060,7 +1060,9 @@ func TestSuspendedRunDropsDeferredFeedbackAfterHeadMove(t *testing.T) {
 }
 
 // Feedback queued while suspended is kept per PR: feedback on a sibling PR
-// must not supersede it, and the sibling's head move must not drop it.
+// must not supersede it, and the sibling's head move must not drop it. The
+// task the replayed transition schedules includes the replayed feedback, not
+// the sibling's, which replaced the run-global fact while suspended.
 func TestSuspendedRunKeepsDeferredFeedbackPerPullRequest(t *testing.T) {
 	ctx := context.Background()
 	db := openRuntimeDB(t)
@@ -1106,7 +1108,7 @@ func TestSuspendedRunKeepsDeferredFeedbackPerPullRequest(t *testing.T) {
 	for i, number := range []int{10, 11} {
 		eventID := fmt.Sprintf("comment-%d", number)
 		result, err := store.ApplyReviewFeedback(ctx, target(number), eventID,
-			map[string]interface{}{"kind": "comment", "body": "fix this"},
+			map[string]interface{}{"kind": "comment", "body": fmt.Sprintf("fix PR %d", number)},
 			typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerReview), Principal: "alice",
 				ExternalID: eventID, ObservedAt: time.Date(2026, 8, 8, 12, 1+i, 0, 0, time.UTC)})
 		if err != nil || !result.Deferred {
@@ -1125,6 +1127,17 @@ func TestSuspendedRunKeepsDeferredFeedbackPerPullRequest(t *testing.T) {
 	run, err := store.GetRun(ctx, runID)
 	if err != nil || run.State != "fixing" {
 		t.Fatalf("recovered run = %#v, %v (PR #10 feedback lost?)", run, err)
+	}
+	claim, err := store.ClaimEffect(ctx, "feedback-worker", time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	task, err := store.MaterializeAgentTask(ctx, claim.Effect.ID, claim.AttemptID, "feedback-worker", time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(task.Instructions, "fix PR 10") || strings.Contains(task.Instructions, "fix PR 11") {
+		t.Fatalf("task instructions = %s (sibling PR feedback included?)", task.Instructions)
 	}
 }
 
