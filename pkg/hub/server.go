@@ -2142,6 +2142,10 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		if s.cronScheduler != nil {
 			s.cronScheduler.finishRunByClawID(clawID, "canceled", "manually killed")
 		}
+		// The soft delete above bypasses finishClawTerminalTx, so cancel the
+		// workflow v2 run here. Left open, a run without a timeout would absorb
+		// every later tick of a signal-overlap workflow and never be reaped.
+		s.cancelWorkflowV2RunForClaw(context.Background(), clawID, "manually killed")
 		// Notify dashboards before provider cleanup so the card disappears immediately.
 		s.broadcastToUsers(tenantID, types.WSMessage{
 			Type:    "claw_status",

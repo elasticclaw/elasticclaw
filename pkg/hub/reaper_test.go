@@ -825,3 +825,42 @@ func TestReaperOfflineVMLookupBudgetSpentRechecksLaterClaws(t *testing.T) {
 		t.Fatalf("stopped %d reconnected claws; want 0", stopped)
 	}
 }
+
+// TestDeleteClawCancelsBoundWorkflowV2Run guards the manual kill path (UI and
+// `elasticclaw kill`): it soft-deletes the claw without finishClawTerminalTx,
+// so it must cancel the bound v2 run itself or the run stays active forever.
+func TestDeleteClawCancelsBoundWorkflowV2Run(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"claw-killed", "tenant", "killed", "ws", "replicated", "connected", now); err != nil {
+		t.Fatal(err)
+	}
+	insertWorkflowV2Run(t, db, "run-killed", "att-killed", time.Time{}, now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-killed", "att-killed"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/claws/claw-killed", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "tenant"))
+	req.SetPathValue("id", "claw-killed")
+	rec := httptest.NewRecorder()
+	s.handleClawDetail(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var runStatus, attemptStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-killed'`).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "cancelled" {
+		t.Fatalf("run status = %q, want cancelled", runStatus)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-killed'`).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != "cancelled" {
+		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
+	}
+}
