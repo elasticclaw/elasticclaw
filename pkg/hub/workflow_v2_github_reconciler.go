@@ -108,7 +108,7 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 				strconv.Itoa(target.Number), verified.HeadSHA, verified.State,
 				verified.Provenance.ObservedAt.UTC().Format(time.RFC3339Nano))
 			targetCtx, cancel = context.WithTimeout(ctx, workflowV2GitHubReconcileTimeout)
-			_, reconcileErr := store.ReconcilePullRequest(targetCtx, target, eventID, kind, verified)
+			reconcileErr := s.reconcileWorkflowV2PullRequest(targetCtx, store, target, eventID, kind, verified)
 			cancel()
 			if reconcileErr != nil {
 				log.Printf("[workflow-v2 github] reconcile %s#%d for run %s: %v",

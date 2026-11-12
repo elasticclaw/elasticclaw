@@ -302,6 +302,109 @@ func assertAdoptedPRReconciles(t *testing.T, s *Server, store *workflowv2.Store,
 	}
 }
 
+// A merge or close the v2 path observes on an adopted PR (which has no
+// claw_prs row) must update task_run_prs right away, so the summary written at
+// the run's terminal state counts it without waiting for the dead-claw sweep.
+func TestWorkflowV2ObservedPRCloseUpdatesTaskRunPRs(t *testing.T) {
+	workflow := strings.Replace(adoptionWorkflow, `    phase: review
+`, `    phase: review
+  delivered:
+    phase: done
+    terminal: true
+    outcome: delivered
+  abandoned:
+    phase: done
+    terminal: true
+    outcome: failed
+`, 1)
+	workflow = strings.Replace(workflow, "delivery:\n", `  merged:
+    from: reviewing
+    on: pull_request.merged
+    to: delivered
+  closed:
+    from: reviewing
+    on: pull_request.closed
+    to: abandoned
+delivery:
+`, 1)
+	for _, tc := range []struct {
+		name            string
+		merged, webhook bool
+	}{
+		{name: "reconciler merge", merged: true},
+		{name: "webhook merge", merged: true, webhook: true},
+		{name: "webhook close", webhook: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, db := newTaskRunAnalyticsTestServer(t, "adoption-claw")
+			parent, _ := startTaskRunForTest(t, s, "adoption-claw", "adoption")
+			branchSweepTestToken(s)
+			oldClient := defaultGitHubClient
+			defaultGitHubClient = newGitHubClient()
+			t.Cleanup(func() { defaultGitHubClient = oldClient })
+			defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body, _ := json.Marshal([]any{map[string]any{"number": 1, "html_url": "https://github.com/owner/repo/pull/1", "state": "open",
+					"user": map[string]string{"login": "factory-app[bot]", "type": "Bot"},
+					"head": map[string]any{"ref": "deps/ts-minor-1", "sha": "head", "repo": map[string]string{"full_name": "owner/repo"}},
+					"base": map[string]string{"ref": "main"}}})
+				return githubAppTokenResponse(200, string(body)), nil
+			})}
+			store := workflowv2.NewStore(db)
+			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "adoption-run", TenantID: "test-tenant-id", InitialClawID: "adoption-claw",
+				TaskRunID: parent, WorkspaceYAML: []byte(adoptionWorkspace), WorkflowYAML: []byte(workflow), ActivationPending: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(nil)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.completeWorkflowV2Activation(ctx, store, run.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/repos/owner/repo/pulls/1" {
+					return githubAppTokenResponse(404, `{}`), nil
+				}
+				body, _ := json.Marshal(map[string]any{"id": 1, "number": 1, "html_url": "https://github.com/owner/repo/pull/1",
+					"state": "closed", "merged": tc.merged,
+					"head": map[string]any{"ref": "deps/ts-minor-1", "sha": "head"}, "base": map[string]string{"ref": "main"}})
+				return githubAppTokenResponse(200, string(body)), nil
+			})}
+			if tc.webhook {
+				var payload githubPRPayload
+				payload.Action, payload.Number = "closed", 1
+				payload.Repository.FullName = "owner/repo"
+				payload.PullRequest.HTMLURL, payload.PullRequest.Merged = "https://github.com/owner/repo/pull/1", tc.merged
+				s.processWorkflowV2GitHubPREvent(payload)
+			} else if err := s.reconcileWorkflowV2GitHub(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := store.GetRun(ctx, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != workflowv2.RunCompleted {
+				t.Fatalf("run=%+v", got)
+			}
+			var state string
+			var merged, mergedCount, closedCount int
+			if err := db.QueryRow(`SELECT state, merged FROM task_run_prs WHERE run_id=?`, parent).Scan(&state, &merged); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT merged_pr_count, closed_pr_count FROM task_run_summaries WHERE run_id=?`, parent).Scan(&mergedCount, &closedCount); err != nil {
+				t.Fatal(err)
+			}
+			want := map[bool]int{true: 1, false: 0}
+			if state != taskRunPRStateClosed || merged != want[tc.merged] || mergedCount != want[tc.merged] || closedCount != want[!tc.merged] {
+				t.Fatalf("task_run_prs state=%s merged=%d; summary merged=%d closed=%d", state, merged, mergedCount, closedCount)
+			}
+		})
+	}
+}
+
 // assertAdoptionLookupRequest checks that the adoption lookup lists open PRs
 // on the configured repository with the repo token and a bounded context.
 func assertAdoptionLookupRequest(t *testing.T, r *http.Request) bool {
