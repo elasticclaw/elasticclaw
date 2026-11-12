@@ -5558,6 +5558,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			lastPayload = payload
 		}
 	}()
+	if control != nil {
+		control.setActivitySink(writeActivity)
+	}
 
 	// Replay any queued entries that accumulated while we were disconnected.
 	// Completed replies/notices are delivered directly; only unprocessed inputs

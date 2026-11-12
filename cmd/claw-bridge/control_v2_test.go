@@ -358,3 +358,38 @@ func TestAgentTaskWithUndeliverableTurnReportsFailed(t *testing.T) {
 		t.Fatalf("failure reason = %q", result.Task.Error)
 	}
 }
+
+func TestAgentTaskForwardsActivityToHub(t *testing.T) {
+	store := openTestBridgeControlStore(t)
+	binding := workflowControlBinding{RunID: "run-activity", AttemptID: "attempt-activity"}
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor.binding = &binding
+	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 4}
+	gs := startLifecycleEndGateway(t, map[string]interface{}{"phase": "end", "livenessState": "working", "stopReason": "stop"})
+	gs.ready = true
+	supervisor.setGatewaySession(gs)
+	activities := make(chan agentActivity, 16)
+	supervisor.setActivitySink(func(activity agentActivity) { activities <- activity })
+
+	task := typesv2.AgentTask{ID: "task-activity", RunID: binding.RunID, AttemptID: binding.AttemptID,
+		State: "repair", StateVersion: 4, Status: typesv2.AgentTaskAssigned, Instructions: "Fix the build.",
+		Deadline: time.Now().Add(time.Minute)}
+	payload, _ := json.Marshal(task)
+	version := task.StateVersion
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: "assign-activity", Kind: typesv2.MessageAgentTaskAssign, RunID: binding.RunID,
+		AttemptID: binding.AttemptID, TaskID: task.ID, ExpectedStateVersion: &version, Payload: payload}
+	if _, accepted, err := supervisor.acceptHubEnvelope(context.Background(), binding, envelope); err != nil || accepted == nil {
+		t.Fatalf("accept assignment: task=%#v err=%v", accepted, err)
+	}
+	supervisor.startTask(context.Background(), binding, envelope.MessageID, task)
+
+	select {
+	case activity := <-activities:
+		if activity.Kind != "model_started" {
+			t.Fatalf("first activity = %#v, want model_started", activity)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("task activity never reached the hub sink")
+	}
+}
