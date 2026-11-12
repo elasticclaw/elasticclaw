@@ -328,12 +328,13 @@ func TestWorkflowV2ObservedPRCloseUpdatesTaskRunPRs(t *testing.T) {
 delivery:
 `, 1)
 	for _, tc := range []struct {
-		name            string
-		merged, webhook bool
+		name                         string
+		merged, webhook, mirrorFails bool
 	}{
 		{name: "reconciler merge", merged: true},
 		{name: "webhook merge", merged: true, webhook: true},
 		{name: "webhook close", webhook: true},
+		{name: "reconciler merge retries failed mirror", merged: true, mirrorFails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -372,6 +373,22 @@ delivery:
 					"head": map[string]any{"ref": "deps/ts-minor-1", "sha": "head"}, "base": map[string]string{"ref": "main"}})
 				return githubAppTokenResponse(200, string(body)), nil
 			})}
+			if tc.mirrorFails {
+				// A failed mirror must leave the run open so the next pass
+				// retries it instead of terminalizing without the PR row.
+				if _, err := db.Exec(`CREATE TRIGGER fail_task_run_prs BEFORE INSERT ON task_run_prs BEGIN SELECT RAISE(ABORT, 'mirror down'); END`); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.reconcileWorkflowV2GitHub(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if got, err := store.GetRun(ctx, run.ID); err != nil || got.Status != workflowv2.RunActive {
+					t.Fatalf("run after failed mirror=%+v err=%v; want active", got, err)
+				}
+				if _, err := db.Exec(`DROP TRIGGER fail_task_run_prs`); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.webhook {
 				var payload githubPRPayload
 				payload.Action, payload.Number = "closed", 1

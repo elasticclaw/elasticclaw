@@ -3,8 +3,10 @@ package hub
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path"
@@ -76,9 +78,13 @@ func (s *Server) reconcileWorkflowV2PullRequest(ctx context.Context, store *work
 				URL: verified.URL, State: taskRunPRStateClosed, Merged: verified.State == "merged",
 				OccurredAt: verified.Provenance.ObservedAt})
 		}
-		if err != nil {
-			log.Printf("[workflow-v2 github] record %s#%d %s for run %s: %v",
-				verified.Repository, verified.Number, verified.State, target.RunID, err)
+		// Apply the event only once the mirror is written: a terminal run is
+		// no longer a delivery target, so nothing would retry the mirror.
+		// The caller logs the error and the reconciler retries next pass. A
+		// missing parent task run has nothing to mirror.
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("record %s#%d %s in task run PRs: %w",
+				verified.Repository, verified.Number, verified.State, err)
 		}
 	}
 	_, err := store.ReconcilePullRequest(ctx, target, eventID, kind, verified)
