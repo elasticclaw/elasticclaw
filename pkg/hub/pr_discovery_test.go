@@ -1272,3 +1272,31 @@ func TestPRDiscoveryTerminalBackfillIsAtomic(t *testing.T) {
 		t.Fatalf("retry: scanned=%d count=%d", scanned, count)
 	}
 }
+
+func TestPRDiscoverySkipsWorkflowV2Runs(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		t.Run(fmt.Sprint(terminal), func(t *testing.T) {
+			s, mock := discoveryServer(t)
+			started := time.Now().Add(-time.Hour).Truncate(time.Second)
+			run := discoveryRun(t, s, "claw-v2", started)
+			insertWorkflowV2Run(t, s.db, "v2-run", "v2-attempt", time.Time{}, started)
+			if _, err := s.db.Exec(`UPDATE workflow_v2_runs SET task_run_id=? WHERE id='v2-run'`, run); err != nil {
+				t.Fatal(err)
+			}
+			mock.prs = []map[string]interface{}{discoveryPR(1281, started.Add(time.Minute), started.Add(20*time.Minute))}
+			if terminal {
+				recordTaskRunEventForTest(t, s, TaskRunEvent{RunID: run, EventKey: "stop", EventType: taskRunEventManualStopBeforeDelivery, OccurredAt: started.Add(30 * time.Minute)})
+				s.reconcileUnreportedPRs("")
+			} else {
+				if strings.Contains(s.agentIdleResumeMessageForClaw("claw-v2", 30*time.Minute), "[DONE]") {
+					t.Error("v2 claw got the [DONE] delivery reminder")
+				}
+				s.discoverClawPRs("claw-v2", run)
+			}
+			var rows int
+			if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM claw_prs)+(SELECT COUNT(*) FROM task_run_prs)`).Scan(&rows); err != nil || rows != 0 || mock.calls != 0 {
+				t.Fatalf("v2 run was discovered: rows=%d calls=%d err=%v", rows, mock.calls, err)
+			}
+		})
+	}
+}

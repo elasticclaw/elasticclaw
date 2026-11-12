@@ -28,13 +28,17 @@ func issueTokenMatches(text, issue string) bool {
 	return regexp.MustCompile("(?i)(^|[^a-z0-9])" + regexp.QuoteMeta(issue) + "($|[^a-z0-9])").MatchString(text)
 }
 
+// Workflow v2 runs deliver and adopt their own PRs; discovery would arm v1
+// watchers on PRs the v2 runtime already owns.
+const prDiscoveryWorkflowV2Run = `EXISTS(SELECT 1 FROM workflow_v2_runs v WHERE v.task_run_id=tr.id)`
+
 func (s *Server) prDiscoveryRun(runID string) (prDiscoveryRun, error) {
 	var r prDiscoveryRun
 	err := s.db.QueryRow(`
 		SELECT tr.id, tr.claw_id, tr.issue_id, tr.workspace_name, tr.workflow_name,
 		       trs.started_at, trs.finished_at, COALESCE(c.github_repos,'')
 		FROM task_runs tr JOIN task_run_summaries trs ON trs.run_id=tr.id
-		LEFT JOIN claws c ON c.id=tr.claw_id WHERE tr.id=?`, runID).
+		LEFT JOIN claws c ON c.id=tr.claw_id WHERE tr.id=? AND NOT `+prDiscoveryWorkflowV2Run, runID).
 		Scan(&r.id, &r.clawID, &r.issue, &r.workspace, &r.workflow, &r.started, &r.finished, &r.repos)
 	return r, err
 }
@@ -279,6 +283,7 @@ func (s *Server) reconcileUnreportedPRs(after string) string {
 		WHERE trs.phase='terminal' AND tr.requires_pr=1 AND trs.finished_at>=?
 		  AND tr.pr_discovery_scanned=0 AND tr.id>?
 		  AND NOT EXISTS(SELECT 1 FROM task_run_prs p WHERE p.run_id=tr.id AND p.inferred=0)
+		  AND NOT `+prDiscoveryWorkflowV2Run+`
 		ORDER BY tr.id LIMIT ?`, time.Now().Add(-14*24*time.Hour).UnixMilli(), after, prDiscoveryRunLimit)
 	if err != nil {
 		log.Printf("[pr-discovery] query terminal runs: %v", err)

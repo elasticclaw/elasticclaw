@@ -817,7 +817,8 @@ func (s *Server) agentIdleResumeMessageForClaw(clawID string, idleFor time.Durat
 	message := agentIdleResumeMessage(idleFor)
 	var needsReminder int
 	if s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claws c JOIN task_runs tr ON tr.id=c.task_run_id
-		WHERE c.id=? AND tr.requires_pr=1 AND NOT EXISTS(SELECT 1 FROM claw_prs p WHERE p.claw_id=c.id AND p.mention_only=0))`, clawID).Scan(&needsReminder) == nil && needsReminder == 1 {
+		WHERE c.id=? AND tr.requires_pr=1 AND NOT EXISTS(SELECT 1 FROM claw_prs p WHERE p.claw_id=c.id AND p.mention_only=0)
+		AND NOT `+prDiscoveryWorkflowV2Run+`)`, clawID).Scan(&needsReminder) == nil && needsReminder == 1 {
 		message += " Hub rule: if you already opened pull requests, the hub has not registered them. Reply with [DONE] on the first line followed by every full PR URL."
 	}
 	return message
