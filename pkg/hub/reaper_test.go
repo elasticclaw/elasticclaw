@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -831,6 +832,75 @@ func TestReaperOfflineVMLookupBudgetSpentRechecksLaterClaws(t *testing.T) {
 // so it must cancel the bound v2 run itself or the run stays active forever.
 func TestDeleteClawCancelsBoundWorkflowV2Run(t *testing.T) {
 	s, db := newReaperTestServer(t, &types.HubConfig{})
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, id := range []string{"claw-killed", "claw-other", "claw-plain"} {
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+			id, "tenant", id, "ws", "replicated", "connected", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertWorkflowV2Run(t, db, "run-killed", "att-killed", time.Time{}, now)
+	insertWorkflowV2Run(t, db, "run-other", "att-other", time.Time{}, now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-killed", "att-killed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-other", "att-other"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET trigger_type='cron' WHERE id='run-killed'`); err != nil {
+		t.Fatal(err)
+	}
+	store := workflowv2.NewStore(db)
+	cronRunID, err := store.RecordCronRunStarted(ctx, "tenant", "ws", "wf", "cron", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateCronRunForV2Run(ctx, cronRunID, "run-killed", "claw-killed"); err != nil {
+		t.Fatal(err)
+	}
+	// Record the run status at the moment the claw becomes deleted: a cron
+	// tick in between would be absorbed by a still-active run.
+	if _, err := db.Exec(`CREATE TABLE delete_probe(run_status TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER probe_claw_delete AFTER UPDATE OF status ON claws
+		WHEN NEW.status='deleted' AND NEW.id='claw-killed'
+		BEGIN INSERT INTO delete_probe SELECT status FROM workflow_v2_runs WHERE id='run-killed'; END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := deleteClawForTest(s, "claw-killed"); code != http.StatusNoContent {
+		t.Fatalf("delete status = %d", code)
+	}
+	if code := deleteClawForTest(s, "claw-plain"); code != http.StatusNoContent {
+		t.Fatalf("delete of claw without a v2 run: status = %d", code)
+	}
+
+	for _, want := range []struct{ query, status string }{
+		{`SELECT status FROM workflow_v2_runs WHERE id='run-killed'`, "cancelled"},
+		{`SELECT status FROM workflow_v2_attempts WHERE id='att-killed'`, "cancelled"},
+		{`SELECT run_status FROM delete_probe`, "cancelled"},
+		{`SELECT status FROM workflow_v2_cron_runs WHERE id='` + cronRunID + `'`, "canceled"},
+		{`SELECT status FROM workflow_v2_runs WHERE id='run-other'`, "active"},
+		{`SELECT status FROM workflow_v2_attempts WHERE id='att-other'`, "active"},
+		{`SELECT status FROM claws WHERE id='claw-plain'`, "deleted"},
+	} {
+		var got string
+		if err := db.QueryRow(want.query).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", want.query, err)
+		}
+		if got != want.status {
+			t.Fatalf("%s = %q, want %q", want.query, got, want.status)
+		}
+	}
+}
+
+// A kill whose v2 cancel fails must not soft-delete the claw: nothing would
+// retry the cancel afterwards, so the run would stay active on a dead claw.
+func TestDeleteClawKeepsClawWhenWorkflowV2CancelFails(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
 	now := time.Now().UTC()
 	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
 		"claw-killed", "tenant", "killed", "ws", "replicated", "connected", now); err != nil {
@@ -840,27 +910,41 @@ func TestDeleteClawCancelsBoundWorkflowV2Run(t *testing.T) {
 	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-killed", "att-killed"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_run_cancel BEFORE UPDATE OF status ON workflow_v2_runs
+		WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT, 'db busy'); END`); err != nil {
+		t.Fatal(err)
+	}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/claws/claw-killed", nil)
+	if code := deleteClawForTest(s, "claw-killed"); code != http.StatusInternalServerError {
+		t.Fatalf("delete status = %d, want 500", code)
+	}
+	var clawStatus, runStatus string
+	if err := db.QueryRow(`SELECT c.status, r.status FROM claws c, workflow_v2_runs r WHERE c.id='claw-killed' AND r.id='run-killed'`).Scan(&clawStatus, &runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if clawStatus != "connected" || runStatus != "active" {
+		t.Fatalf("after failed cancel claw=%q run=%q; want connected/active", clawStatus, runStatus)
+	}
+
+	if _, err := db.Exec(`DROP TRIGGER fail_run_cancel`); err != nil {
+		t.Fatal(err)
+	}
+	if code := deleteClawForTest(s, "claw-killed"); code != http.StatusNoContent {
+		t.Fatalf("retried delete status = %d", code)
+	}
+	if err := db.QueryRow(`SELECT c.status, r.status FROM claws c, workflow_v2_runs r WHERE c.id='claw-killed' AND r.id='run-killed'`).Scan(&clawStatus, &runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if clawStatus != "deleted" || runStatus != "cancelled" {
+		t.Fatalf("after retried delete claw=%q run=%q; want deleted/cancelled", clawStatus, runStatus)
+	}
+}
+
+func deleteClawForTest(s *Server, clawID string) int {
+	req := httptest.NewRequest(http.MethodDelete, "/api/claws/"+clawID, nil)
 	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "tenant"))
-	req.SetPathValue("id", "claw-killed")
+	req.SetPathValue("id", clawID)
 	rec := httptest.NewRecorder()
 	s.handleClawDetail(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("delete status = %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var runStatus, attemptStatus string
-	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-killed'`).Scan(&runStatus); err != nil {
-		t.Fatal(err)
-	}
-	if runStatus != "cancelled" {
-		t.Fatalf("run status = %q, want cancelled", runStatus)
-	}
-	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-killed'`).Scan(&attemptStatus); err != nil {
-		t.Fatal(err)
-	}
-	if attemptStatus != "cancelled" {
-		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
-	}
+	return rec.Code
 }

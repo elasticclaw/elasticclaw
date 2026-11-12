@@ -2125,6 +2125,24 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Cancel the bound workflow v2 run before the soft delete, which
+		// bypasses finishClawTerminalTx. A tick landing after the delete would
+		// otherwise be absorbed by the dying run of a signal-overlap workflow,
+		// and a cancel failure would leave that run active forever. On failure
+		// the claw stays alive so the kill can be retried. clawStatus is only
+		// set when the tenant owns the claw.
+		if clawStatus != "" && clawStatus != "deleted" {
+			runID, err := s.cancelBoundWorkflowV2Run(context.Background(), clawID, "manually killed")
+			if err != nil {
+				log.Printf("kill: claw %s: %v", clawID, err)
+				http.Error(w, "failed to cancel workflow run", http.StatusInternalServerError)
+				return
+			}
+			if runID != "" {
+				// Close the cron history and parent once the claw is deleted.
+				defer s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+			}
+		}
 		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
 		if err != nil {
 			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
@@ -2142,10 +2160,6 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		if s.cronScheduler != nil {
 			s.cronScheduler.finishRunByClawID(clawID, "canceled", "manually killed")
 		}
-		// The soft delete above bypasses finishClawTerminalTx, so cancel the
-		// workflow v2 run here. Left open, a run without a timeout would absorb
-		// every later tick of a signal-overlap workflow and never be reaped.
-		s.cancelWorkflowV2RunForClaw(context.Background(), clawID, "manually killed")
 		// Notify dashboards before provider cleanup so the card disappears immediately.
 		s.broadcastToUsers(tenantID, types.WSMessage{
 			Type:    "claw_status",

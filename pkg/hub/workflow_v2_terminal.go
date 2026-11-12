@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -307,8 +308,23 @@ func (s *Server) releaseWorkflowV2CronSlot(ctx context.Context, runID string) {
 // assigned to the dead claw. It is used when a claw fails before the v2 run
 // can reach a terminal state on its own (e.g. provisioning failed).
 func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason string) {
-	if s == nil || s.db == nil {
+	runID, err := s.cancelBoundWorkflowV2Run(ctx, clawID, reason)
+	if err != nil {
+		log.Printf("[workflow-v2] %v", err)
 		return
+	}
+	if runID != "" {
+		s.maybeFinishWorkflowV2Parent(ctx, runID)
+	}
+}
+
+// cancelBoundWorkflowV2Run cancels the active/suspended workflow v2 run bound
+// to the claw without finishing its parent, and returns the cancelled run's ID
+// ("" when no run is bound). Callers must call maybeFinishWorkflowV2Parent
+// afterwards to close the cron history and tear down the parent.
+func (s *Server) cancelBoundWorkflowV2Run(ctx context.Context, clawID, reason string) (string, error) {
+	if s == nil || s.db == nil {
+		return "", nil
 	}
 	var runID string
 	err := s.db.QueryRowContext(ctx, `
@@ -316,16 +332,15 @@ func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason 
 		JOIN workflow_v2_runs r ON r.id=a.run_id
 		WHERE a.claw_id=? AND a.status='active' AND r.status IN ('active','suspended')
 		LIMIT 1`, clawID).Scan(&runID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			log.Printf("[workflow-v2] failed to find active run for claw %s: %v", shortID(clawID), err)
-		}
-		return
+		return "", fmt.Errorf("failed to find active run for claw %s: %w", shortID(clawID), err)
 	}
 	if err := workflowv2.NewStore(s.db).CancelActivation(ctx, runID, reason); err != nil {
-		log.Printf("[workflow-v2] failed to cancel run %s for claw %s: %v", shortID(runID), shortID(clawID), err)
-		return
+		return "", fmt.Errorf("failed to cancel run %s for claw %s: %w", shortID(runID), shortID(clawID), err)
 	}
 	log.Printf("[workflow-v2] cancelled run %s because claw %s %s", shortID(runID), shortID(clawID), reason)
-	s.maybeFinishWorkflowV2Parent(ctx, runID)
+	return runID, nil
 }
