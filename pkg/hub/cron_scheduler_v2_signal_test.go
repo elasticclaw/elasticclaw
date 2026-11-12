@@ -350,7 +350,7 @@ func TestCronSchedulerV2SignalManualTriggerStartsThenSignals(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("trigger %d = %d: %s", i, rr.Code, rr.Body.String())
 		}
-		var resp map[string]string
+		var resp map[string]interface{}
 		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 			t.Fatal(err)
 		}
@@ -358,8 +358,19 @@ func TestCronSchedulerV2SignalManualTriggerStartsThenSignals(t *testing.T) {
 		if i == 0 {
 			want = "triggered"
 		}
-		if resp["status"] != want {
-			t.Fatalf("trigger %d status = %q, want %q", i, resp["status"], want)
+		if resp["status"] != want || resp["workflow"] != "engineering/delivery" {
+			t.Fatalf("trigger %d = %v, want status %q", i, resp, want)
+		}
+		if i == 0 {
+			continue
+		}
+		var runID string
+		if err := db.QueryRow(`SELECT id FROM workflow_v2_runs`).Scan(&runID); err != nil {
+			t.Fatal(err)
+		}
+		// Matches the UI /trigger response for a signaled run.
+		if targets, _ := resp["target_run_ids"].([]interface{}); len(targets) != 1 || targets[0] != runID {
+			t.Fatalf("trigger %d target_run_ids = %v, want [%s]", i, resp["target_run_ids"], runID)
 		}
 	}
 	var count int
@@ -400,7 +411,7 @@ func TestCronSchedulerV2SignalManualTriggerStartsThenSignals(t *testing.T) {
 	if err := workflowv2.NewStore(db).CancelActivation(context.Background(), runID, "test completed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.cronSchedulerV2.manualTrigger("engineering", "delivery", "test-tenant-id"); err != nil {
+	if _, _, _, err := s.cronSchedulerV2.manualTrigger("engineering", "delivery", "test-tenant-id"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs`).Scan(&count); err != nil || count != 2 {
