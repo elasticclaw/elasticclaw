@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -95,6 +96,22 @@ type EventInput struct {
 	Payload              map[string]interface{}
 	Facts                map[string]interface{}
 	mutation             eventMutation
+	// observation marks provider-reconciled input (PR state, mergeability,
+	// CI/review evidence and policy). Only these reach suspended runs as
+	// evidence; see ApplyEvent.
+	observation bool
+	// deferKey names the subject a deferred observation describes, so a
+	// suspended run keeps only the latest one per subject. Empty uses Kind.
+	deferKey string
+	// deferInvariant marks a deferred-queue replay: evidence recorded while
+	// suspended may break an invariant that a later queued transition
+	// resolves, so replayDeferredEvents checks it once the queue drains.
+	deferInvariant bool
+	// ownedFacts are hub-derived facts written with the event under the
+	// producer that owns them, such as the CI and review policy statuses a
+	// delivery submission re-aggregates, when the run is suspended. Only
+	// store code sets them.
+	ownedFacts map[Producer]map[string]interface{}
 }
 
 type eventMutation func(context.Context, *sql.Tx, *EventInput) error
@@ -105,6 +122,9 @@ type EventResult struct {
 	Reason      string                     `json:"reason,omitempty"`
 	Run         Run                        `json:"run"`
 	Transition  *Transition                `json:"transition,omitempty"`
+	// Deferred reports that a suspended run recorded the observation but
+	// postponed its transition until the run is active again.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 type Transition struct {
@@ -458,6 +478,64 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	if err := writeFacts(ctx, tx, runID, input.ID, input.Producer, input.Provenance, input.Facts, now); err != nil {
 		return EventResult{}, err
 	}
+	// An activation-pending run is suspended only until CompleteActivation:
+	// the delivery events adoption and branch promotion publish during
+	// activation drive its transitions live (see applyTransition), so it is
+	// handled like an active run below, never deferred or replayed.
+	deferring := stored.SuspendedBeyondActivation()
+	// Owned facts only keep a suspended run current for its replay. An active
+	// run receives them through their own policy events, which its transitions
+	// handle; written here they could break the state invariant on an event the
+	// workflow has no transition for.
+	if deferring {
+		for producer, facts := range input.ownedFacts {
+			if err := writeFacts(ctx, tx, runID, input.ID, producer, input.Provenance, facts, now); err != nil {
+				return EventResult{}, err
+			}
+		}
+	}
+	// The transition engine sees this observation live, so it supersedes one
+	// queued for the same subject; replaying the older one later (a sweep after
+	// a failed recovery replay) would fire a transition on outdated state.
+	if !deferring && input.observation && !input.deferInvariant {
+		if err := clearDeferredEvent(ctx, tx, runID, input.deferSubject()); err != nil {
+			return EventResult{}, err
+		}
+	}
+
+	// Provider observations keep suspended runs current (domain state, facts,
+	// receipts) without resuming them or scheduling effects. Once persisted,
+	// the reconciler no longer sees the change as drift, so an observation the
+	// workflow listens on is also queued, latest per subject, and replayed
+	// through the transition engine when the run is active again.
+	if deferring && input.observation && !input.deferInvariant {
+		deferred := workflowListensOn(workflow.Workflow, input.Kind)
+		reason := "evidence updated while suspended"
+		if deferred {
+			reason = deferredUntilRecoveryReason
+			if err := deferEvent(ctx, tx, runID, input, now); err != nil {
+				return EventResult{}, err
+			}
+		} else {
+			if err := clearDeferredEvent(ctx, tx, runID, input.deferSubject()); err != nil {
+				return EventResult{}, err
+			}
+			// Never replayed, so it supersedes now the clause effects a replay
+			// parked for the subject; the settle would otherwise release them.
+			if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
+				return EventResult{}, err
+			}
+		}
+		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID,
+			typesv2.DispositionAccepted, stored.StateVersion, reason, now); err != nil {
+			return EventResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return EventResult{}, err
+		}
+		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionAccepted, Reason: reason,
+			Run: stored, Deferred: deferred}, nil
+	}
 
 	facts, err := loadFacts(ctx, tx, runID)
 	if err != nil {
@@ -494,9 +572,15 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		if err != nil {
 			return EventResult{}, err
 		}
-		if !valid {
+		if !valid && !input.deferInvariant {
 			reason = fmt.Sprintf("state invariant no longer holds for %s and no transition matched %s", stored.State, input.Kind)
 			return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
+		}
+		if !valid && stored.Status == RunActive {
+			// Hold the run until the replay settles the invariant; see applyTransition.
+			if err := holdForReplay(ctx, tx, stored, now); err != nil {
+				return EventResult{}, err
+			}
 		}
 		// Transitions listened on this event but every guard evaluated false.
 		// That is almost always a guard/fact mismatch in the workflow document
@@ -509,10 +593,27 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		if err := writeFacts(ctx, tx, runID, input.ID, ProducerEngine, input.Provenance, clauseWrites, now); err != nil {
 			return EventResult{}, err
 		}
+		if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
+			return EventResult{}, err
+		}
 		if clause != nil && !clause.Ignore {
 			if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
 				"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
 				return EventResult{}, err
+			}
+			if input.deferInvariant {
+				if err := snapshotReplayedTaskFacts(ctx, tx, runID, input.ID); err != nil {
+					return EventResult{}, err
+				}
+			}
+			// A replay that postponed a broken invariant parks the clause
+			// effects until it settles: they run if the invariant then holds
+			// and are cancelled if the run suspends or leaves the state.
+			if !valid {
+				if err := postponeClauseEffects(ctx, tx, runID, input); err != nil {
+					return EventResult{}, err
+				}
+				reason = strings.TrimPrefix(reason+"; clause effects wait for the replay to settle the state invariant", "; ")
 			}
 		}
 		if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
@@ -544,9 +645,63 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	if err != nil {
 		return EventResult{}, err
 	}
+	verified := valid
+	if !valid && !destination.Terminal && !input.deferInvariant && stored.SuspendedBeyondActivation() {
+		// Evidence recorded while suspended may break the invariant that a
+		// queued transition resolves; replay judges it once the queue drains.
+		if valid, err = hasDeferredEvents(ctx, tx, runID); err != nil {
+			return EventResult{}, err
+		}
+	} else if !valid && !destination.Terminal && input.deferInvariant {
+		valid = true
+	}
+	// An entry whose invariant is postponed keeps the run suspended, so the
+	// effect worker cannot claim the effects scheduled below until the replay
+	// settles the invariant of the state the run ends in.
+	held := valid && !verified
+	// awaitQueue keeps a verified self-loop held for the replay; see below.
+	awaitQueue := false
+	// Leaving a held entry, or suspending in it, discards its entry effects.
+	if stored.heldEntry() {
+		if err := cancelHeldEntryEffects(ctx, tx, stored, now); err != nil {
+			return EventResult{}, err
+		}
+	}
+	// Leaving the state discards the clause effects a replay parked there
+	// (rejectAndSuspend discards them when the run suspends in it). A self-loop
+	// stays in the state, so it keeps them; see below.
+	if transitionDef.To != stored.State {
+		if err := cancelPostponedEffects(ctx, tx, stored, now); err != nil {
+			return EventResult{}, err
+		}
+	}
 	if !valid {
 		reason := fmt.Sprintf("destination invariant does not hold for state %s", transitionDef.To)
 		return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
+	}
+	if transitionDef.To == stored.State {
+		// A self-loop supersedes what an older observation of the same
+		// subject parked, whether or not it re-plans a clause.
+		if err := supersedeParkedEffects(ctx, tx, runID, input, now); err != nil {
+			return EventResult{}, err
+		}
+		// A verified self-loop verifies the invariant the parked effects wait
+		// for and makes the run active, so it releases them like the settle
+		// would; no active run is left holding parked effects. While newer
+		// observations are still queued, one of them may supersede the parked
+		// work (CI recovered after the failure that parked its task), so the
+		// run stays held and the settle judges them once the queue drains.
+		if !held {
+			waiting, err := parkedEffectsAwaitQueue(ctx, tx, runID)
+			if err != nil {
+				return EventResult{}, err
+			}
+			if waiting {
+				awaitQueue = true
+			} else if err := releasePostponedEffects(ctx, tx, runID, now); err != nil {
+				return EventResult{}, err
+			}
+		}
 	}
 
 	transitionID := uuid.NewString()
@@ -564,6 +719,10 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		// claimable before PR adoption has run.
 		status = RunSuspended
 		waitingReason = activationPendingReason
+	} else if held {
+		status, waitingReason = RunSuspended, replayPendingEntryReason
+	} else if awaitQueue {
+		status, waitingReason = RunSuspended, replayPendingReason
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET state=?,display_phase=?,state_version=?,status=?,waiting_reason=?,updated_at=?,finished_at=?
 		WHERE id=? AND state=? AND state_version=? AND workspace_revision=? AND workflow_revision=?`,
@@ -631,6 +790,11 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 				return EventResult{}, err
 			}
 		}
+		if input.deferInvariant {
+			if err := snapshotReplayedTaskFacts(ctx, tx, runID, input.ID, transitionID); err != nil {
+				return EventResult{}, err
+			}
+		}
 	}
 	if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
 		return EventResult{}, err
@@ -640,6 +804,14 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	}
 	if err := tx.Commit(); err != nil {
 		return EventResult{}, err
+	}
+	if stored.SuspendedBeyondActivation() && !destination.Terminal && !input.deferInvariant {
+		// Recovery: fire what the run deferred while suspended. The result
+		// still describes this transition; a failure keeps the queue (and a
+		// held run) for the provider reconciler's ReplayDeferredEvents sweep.
+		if err := s.replayDeferredEvents(ctx, runID); err != nil {
+			log.Printf("[workflow-v2] replay deferred events for run %s: %v", runID, err)
+		}
 	}
 	updated, err := s.GetRun(ctx, runID)
 	if err != nil {
@@ -783,6 +955,9 @@ func (s *Store) applyEventWithMutation(ctx context.Context, runID string, input 
 }
 
 func (s *Store) rejectAndSuspend(ctx context.Context, tx *sql.Tx, run Run, input EventInput, reason string, now time.Time) (EventResult, error) {
+	if err := discardUnverifiedEffects(ctx, tx, run, now); err != nil {
+		return EventResult{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_events SET disposition=?,reason=? WHERE id=?`,
 		string(typesv2.DispositionRejected), reason, input.ID); err != nil {
 		return EventResult{}, err
@@ -939,6 +1114,20 @@ func matchingTransition(workflow *typesv2.Workflow, kind, state string, facts ma
 		}
 	}
 	return matchedName, matched, count, listeners, nil
+}
+
+// workflowListensOn reports whether any state's transition or event clause
+// handles kind. Recovery may move a run to any state, so all are considered.
+func workflowListensOn(workflow *typesv2.Workflow, kind string) bool {
+	if _, ok := workflow.Events[kind]; ok {
+		return true
+	}
+	for _, definition := range workflow.Transitions {
+		if definition.On == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func matchingEventClause(workflow *typesv2.Workflow, kind, state string, facts map[string]interface{}) (string, *typesv2.EventClause, int, error) {
@@ -1155,6 +1344,10 @@ func insertEvent(ctx context.Context, tx *sql.Tx, id, runID, messageID, kind str
 	}
 	return nil
 }
+
+// deferredUntilRecoveryReason is the receipt reason of an observation a
+// suspended run queued for replay instead of running its transition.
+const deferredUntilRecoveryReason = "evidence updated while suspended; transition deferred until recovery"
 
 func insertEventReceipt(ctx context.Context, tx *sql.Tx, runID, eventID, messageID string,
 	disposition typesv2.ControlDisposition, version uint64, reason string, now time.Time) error {

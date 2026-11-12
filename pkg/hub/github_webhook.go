@@ -139,6 +139,22 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
 			s.safeGo("github issue comment webhook", func() { s.processGitHubIssueComment(payload) })
 		}
+	case "status":
+		// Requires the GitHub App to subscribe to the status event (commit
+		// statuses: read). Pending statuses are skipped: policy already treats
+		// missing evidence as pending and the reconciler covers re-runs.
+		var payload githubStatusPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse status payload: %v", err)
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		log.Printf("[github-webhook] status repo=%q sha=%q state=%q", payload.Repository.FullName, payload.SHA, payload.State)
+		check, ok := payload.checkPayload()
+		if !ok {
+			break
+		}
+		s.safeGo("github status webhook", func() { s.processWorkflowV2GitHubCheckEvent("check_run", check) })
 	case "check_run", "check_suite":
 		var payload githubCheckPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -452,6 +468,29 @@ type githubPRReviewPayload struct {
 // githubCheckPayload holds the fields we need from check_run and check_suite
 // webhook events. One struct serves both: the handler reads the sub-object that
 // matches the event name.
+// githubStatusPayload is the subset of a commit status delivery the v2
+// evidence refresh needs.
+type githubStatusPayload struct {
+	SHA        string `json:"sha"`
+	State      string `json:"state"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// checkPayload converts a settled commit status into the completed check_run
+// shape processWorkflowV2GitHubCheckEvent consumes. Pending statuses report
+// false.
+func (p githubStatusPayload) checkPayload() (githubCheckPayload, bool) {
+	if p.State == "pending" || p.SHA == "" {
+		return githubCheckPayload{}, false
+	}
+	check := githubCheckPayload{Action: "completed"}
+	check.Repository.FullName = p.Repository.FullName
+	check.CheckRun.HeadSHA = p.SHA
+	return check, true
+}
+
 type githubCheckPayload struct {
 	Action   string `json:"action"` // "completed", "created", "rerequested", "requested"
 	CheckRun struct {

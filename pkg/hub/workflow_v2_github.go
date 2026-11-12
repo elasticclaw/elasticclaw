@@ -64,6 +64,11 @@ func (s *Server) verifyWorkflowV2PullRequest(ctx context.Context, run workflowv2
 	headSHA, _ := head["sha"].(string)
 	headRef, _ := head["ref"].(string)
 	baseRef, _ := base["ref"].(string)
+	baseSHA, _ := base["sha"].(string)
+	mergeableState, _ := data["mergeable_state"].(string)
+	if data["mergeable"] == nil || mergeableState == "unknown" {
+		mergeableState = ""
+	}
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
 	if merged {
@@ -83,7 +88,7 @@ func (s *Server) verifyWorkflowV2PullRequest(ctx context.Context, run workflowv2
 	}
 	return typesv2.VerifiedPullRequest{
 		URL: canonicalURL, Repository: repository, RepositoryName: repositoryName, Number: number,
-		SourceBranch: headRef, BaseBranch: baseRef, HeadSHA: headSHA, State: state, VerifiedAt: observed,
+		SourceBranch: headRef, BaseBranch: baseRef, HeadSHA: headSHA, BaseSHA: baseSHA, MergeableState: mergeableState, State: state, VerifiedAt: observed,
 		Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl),
 			Connection: connection, ExternalID: externalID, ObservedAt: observed, Reconciled: true},
 	}, nil

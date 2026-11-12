@@ -82,7 +82,43 @@ func deliveryEventFacts(ctx context.Context, tx *sql.Tx, runID string, input *Ev
 	input.Facts = map[string]interface{}{
 		"delivery.count": summary["count"], "delivery.open": summary["open"],
 		"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
+		"delivery.any_conflicted": summary["any_conflicted"], "delivery.any_behind": summary["any_behind"],
 	}
+	return nil
+}
+
+// deliveryPolicyOwnedFacts attaches the delivery policy results to an event
+// that changes the verified delivery set.
+func deliveryPolicyOwnedFacts(ctx context.Context, tx *sql.Tx, runID string, input *EventInput) error {
+	// The policy results must describe the delivery as verified: a
+	// resumed run replays its deferred queue before the policy below is
+	// published, and a result stored for fewer PRs (delivery.satisfied
+	// while every earlier PR was merged) would fire on stale facts. The CI
+	// and review statuses aggregate the same PRs, so they are refreshed
+	// too, each under the producer that owns it. They are owned facts, so
+	// only a suspended run gets them here; an active run receives them
+	// through the policy events its transitions handle. The revisions are
+	// left to the publications so they still emit the events.
+	policy, err := evaluateDeliveryPolicy(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	var workflowYAML string
+	if err := tx.QueryRowContext(ctx, `SELECT workflow_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workflowYAML); err != nil {
+		return err
+	}
+	owned, err := policyStatusFacts(workflowYAML, policy)
+	if err != nil {
+		return err
+	}
+	if owned == nil {
+		owned = map[Producer]map[string]interface{}{}
+	}
+	owned[ProducerEngine] = map[string]interface{}{
+		"delivery.minimum_met": policy.MinimumMet, "delivery.ci_satisfied": policy.CISatisfied,
+		"delivery.review_satisfied": policy.ReviewSatisfied, "delivery.satisfied": policy.Satisfied,
+	}
+	input.ownedFacts = owned
 	return nil
 }
 
@@ -210,7 +246,10 @@ func (s *Store) registerBranchPullRequests(ctx context.Context, runID, attemptID
 			return errNoBranchPromotion
 		}
 		input.Kind = "delivery.verified"
-		return deliveryEventFacts(ctx, tx, runID, input)
+		if err := deliveryEventFacts(ctx, tx, runID, input); err != nil {
+			return err
+		}
+		return deliveryPolicyOwnedFacts(ctx, tx, runID, input)
 	})
 	if err != nil {
 		return nil, false, typesv2.ControlReceipt{}, err
