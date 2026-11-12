@@ -100,3 +100,39 @@ func TestRecordCronRunStartedStoresRunContext(t *testing.T) {
 		t.Fatalf("run_context = %s, want %s", actual, expected)
 	}
 }
+
+func TestCronRunSignaledHistory(t *testing.T) {
+	store := workflowv2.NewStore(openRuntimeDB(t))
+	ctx := context.Background()
+	id, err := store.RecordCronRunStarted(ctx, "tenant-1", "ws", "wf", "cron", map[string]interface{}{
+		"slot_id": "slot-1", "scheduled_at": "2026-08-08T12:00:00Z", "target_run_ids": []string{"run-1", "run-2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishCronRunSignaled(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	// A signaled tick is independent of its targets' subsequent lifecycle.
+	if err := store.FinishCronRunByV2RunID(ctx, "run-1", workflowv2.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FailCronRun(ctx, id, "late failure"); err != nil {
+		t.Fatal(err)
+	}
+	history, err := store.ListCronRunHistory(ctx, "tenant-1", "ws", "wf", 50)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("history = %#v, %v", history, err)
+	}
+	row, err := store.GetCronRun(ctx, "tenant-1", "ws", "wf", id)
+	if err != nil || row == nil {
+		t.Fatalf("get history = %#v, %v", row, err)
+	}
+	if row.Status != "signaled" || row.Result != "signaled" || row.FinishedAt == nil || row.V2RunID != "" || row.ClawID != "" {
+		t.Fatalf("signaled history = %#v", row)
+	}
+	ids := row.RunContext["target_run_ids"].([]interface{})
+	if len(ids) != 2 || ids[0] != "run-1" || ids[1] != "run-2" {
+		t.Fatalf("target run IDs = %v", ids)
+	}
+}

@@ -276,8 +276,8 @@ func Migrate(db *sql.DB) error {
 		workspace_name TEXT NOT NULL,
 		workflow_name  TEXT NOT NULL,
 		trigger_type   TEXT NOT NULL DEFAULT 'cron',
-		status         TEXT NOT NULL DEFAULT 'pending',  -- 'pending','running','completed','failed','skipped','canceled'
-		result         TEXT NOT NULL DEFAULT '',           -- 'success','failure','skipped','canceled'
+		status         TEXT NOT NULL DEFAULT 'pending',  -- 'pending','running','completed','failed','skipped','canceled','signaled'
+		result         TEXT NOT NULL DEFAULT '',           -- 'success','failure','skipped','canceled','signaled'
 		claw_id        TEXT NOT NULL DEFAULT '',
 		v2_run_id      TEXT NOT NULL DEFAULT '',
 		run_context    TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(run_context) AND json_type(run_context)='object'),

@@ -1,8 +1,8 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
-import { Zap, Play, AlertCircle } from "lucide-react"
+import { Zap, Play, AlertCircle, Info } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -26,38 +26,59 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
-  const [seededWorkflow, setSeededWorkflow] = useState<Workflow | null | undefined>(undefined)
+  const [signaledNotice, setSignaledNotice] = useState<string | null>(null)
+  const [seededKey, setSeededKey] = useState<string | null>(null)
+  const [wasOpen, setWasOpen] = useState(open)
+  const [feedbackSeen, setFeedbackSeen] = useState(false)
   const router = useRouter()
 
-  // Seed defaults when workflow changes. Done during render with a guarded
-  // comparison (React's "adjusting state when props change" pattern) instead
-  // of a setState-in-effect, so no stale-values render is committed.
-  if (workflow !== seededWorkflow) {
-    setSeededWorkflow(workflow)
-    // Clear on every workflow change, not just the has-inputs branch —
-    // otherwise an error from the previous workflow survives the switch.
+  // Seed defaults when a different workflow is selected. Done during render
+  // with a guarded comparison (React's "adjusting state when props change"
+  // pattern) instead of a setState-in-effect, so no stale-values render is
+  // committed. Keyed by workflow identity, and ignoring the null the parent
+  // passes while closed, so closing and reopening the same workflow does not
+  // wipe feedback the user has not seen yet.
+  const workflowKey = workflow ? `${workflow.workspaceName}/${workflow.name}` : null
+  if (workflow && workflowKey !== seededKey) {
+    setSeededKey(workflowKey)
+    // Clear on every workflow change — otherwise an error from the previous
+    // workflow survives the switch.
     setTriggerError(null)
-    if (!workflow?.inputs) {
-      setInputValues({})
-    } else {
-      const defaults: Record<string, string> = {}
-      for (const input of workflow.inputs) {
-        if (input.default) {
-          defaults[input.name] = input.default
-        } else if (input.type === "bool") {
-          defaults[input.name] = "false"
-        } else if (input.type === "enum" && input.options && input.options.length > 0) {
-          defaults[input.name] = input.options[0]
-        }
+    setSignaledNotice(null)
+    setInputValues(defaultInputValues(workflow))
+  }
+
+  // The modal stays mounted between openings, so reset inputs and clear
+  // feedback the user already saw each time it reopens (same render-time
+  // pattern as above). Closing mid-trigger does not count as seen: that result
+  // lands while the modal is closed and must still be shown on the next open.
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (!open && !triggering) {
+      setFeedbackSeen(true)
+    } else if (open) {
+      if (workflow) setInputValues(defaultInputValues(workflow))
+      if (feedbackSeen) {
+        setFeedbackSeen(false)
+        setTriggerError(null)
+        setSignaledNotice(null)
       }
-      setInputValues(defaults)
     }
   }
 
+  // Latest selected workflow, so a trigger result that lands after the user
+  // switched to another workflow is not shown against the wrong one.
+  const currentKey = useRef(workflowKey)
+  useEffect(() => {
+    if (workflowKey !== null) currentKey.current = workflowKey
+  }, [workflowKey])
+
   const handleTrigger = useCallback(async () => {
     if (!workflow) return
+    const triggeredKey = `${workflow.workspaceName}/${workflow.name}`
     setTriggering(true)
     setTriggerError(null)
+    setSignaledNotice(null)
     try {
       const inputs: Record<string, unknown> = {}
       if (workflow.inputs) {
@@ -86,11 +107,21 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           }
         }
       }
-      await triggerWorkflow(workflow, inputs)
+      const result = await triggerWorkflow(workflow, inputs)
       setTriggering(false)
+      if (currentKey.current !== triggeredKey) return
+      if (result?.status === "signaled") {
+        // signal overlap policy: the open run(s) received a cron.tick and no
+        // new run was created, so keep the modal open to say so.
+        const count = result.target_run_ids?.length ?? 0
+        const target = count === 1 ? "the open run" : `${count} open runs`
+        setSignaledNotice(`No new run was started. The trigger was sent to ${target}, and the inputs were not applied.`)
+        return
+      }
       onOpenChange(false)
     } catch (e) {
       setTriggering(false)
+      if (currentKey.current !== triggeredKey) return
       // Keep modal open so user sees the backend validation error
       setTriggerError(e instanceof Error ? e.message : String(e))
     }
@@ -133,9 +164,16 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           </div>
         )}
 
+        {signaledNotice && (
+          <div className="flex items-center gap-1.5 text-sm text-blue-700 bg-blue-50 p-2 rounded">
+            <Info className="size-4 shrink-0" />
+            <span>{signaledNotice}</span>
+          </div>
+        )}
+
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={triggering}>
-            Cancel
+            {signaledNotice ? "Close" : "Cancel"}
           </Button>
           <Button onClick={handleTrigger} disabled={triggering}>
             {triggering ? (
@@ -154,6 +192,20 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
       </DialogContent>
     </Dialog>
   )
+}
+
+function defaultInputValues(workflow: Workflow): Record<string, string> {
+  const defaults: Record<string, string> = {}
+  for (const input of workflow.inputs ?? []) {
+    if (input.default) {
+      defaults[input.name] = input.default
+    } else if (input.type === "bool") {
+      defaults[input.name] = "false"
+    } else if (input.type === "enum" && input.options && input.options.length > 0) {
+      defaults[input.name] = input.options[0]
+    }
+  }
+  return defaults
 }
 
 function WorkflowInputField({
