@@ -265,13 +265,20 @@ func (j *cronJobV2) Run() {
 }
 
 func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string) (workflowRunStartStatus, error) {
+	status, _, err := cs.runWorkflowTargets(sw, tenantID)
+	return status, err
+}
+
+// runWorkflowTargets is runWorkflow that also returns the runs a signal-overlap
+// trigger reached; targets is nil when the trigger started a new run.
+func (cs *cronSchedulerV2) runWorkflowTargets(sw *scheduledWorkflowV2, tenantID string) (workflowRunStartStatus, []string, error) {
 	key := sw.key
 	if strings.TrimSpace(tenantID) == "" {
 		var err error
 		tenantID, err = cs.tenantIDForWorkspace(sw.workspace.Name)
 		if err != nil {
 			log.Printf("[cron-v2] no tenant for %s: %v", key, err)
-			return workflowRunFailed, err
+			return workflowRunFailed, nil, err
 		}
 	}
 
@@ -287,11 +294,11 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 		// Hold the signal lock through activation so a concurrent tick cannot
 		// miss a run that is still being provisioned.
 		defer cs.lockSignal(key)()
-		if status, _, handled, err := cs.signalOpenRuns(store, sw, tenantID, now); handled {
+		if status, targets, handled, err := cs.signalOpenRuns(store, sw, tenantID, now); handled {
 			if err != nil {
 				log.Printf("[cron-v2] failed to signal open runs for %s: %v", key, err)
 			}
-			return status, err
+			return status, targets, err
 		}
 	}
 
@@ -308,7 +315,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 	if dbErr != nil {
 		cs.runningMu.Unlock()
 		log.Printf("[cron-v2] failed to count active runs for %s: %v", key, dbErr)
-		return workflowRunFailed, dbErr
+		return workflowRunFailed, nil, dbErr
 	}
 	active := inMemActive + dbActive
 	if active > 0 && overlapPolicy != "parallel" && overlapPolicy != "signal" {
@@ -318,7 +325,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 			"reason": reason,
 		})
 		log.Printf("[cron-v2] skipping %s (%s)", key, reason)
-		return workflowRunSkipped, nil
+		return workflowRunSkipped, nil, nil
 	}
 	cs.running[key]++
 	cs.runningMu.Unlock()
@@ -333,7 +340,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 	if err != nil {
 		cs.decrementRunning(key)
 		log.Printf("[cron-v2] failed to record start for %s: %v", key, err)
-		return workflowRunFailed, err
+		return workflowRunFailed, nil, err
 	}
 
 	workspaceYAML := []byte(sw.workspace.Files["elasticclaw-config.yaml"])
@@ -397,15 +404,15 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 			// run to release our admission slot.
 			cs.decrementRunning(key)
 		}
-		return workflowRunFailed, err
+		return workflowRunFailed, nil, err
 	}
 
 	if finishedAtActivation {
 		log.Printf("[cron-v2] run %s for %s finished at activation via PR adoption (claw %s released)", cronRunID, key, clawID)
-		return workflowRunStarted, nil
+		return workflowRunStarted, nil, nil
 	}
 	log.Printf("[cron-v2] started run %s for %s (claw %s)", cronRunID, key, clawID)
-	return workflowRunStarted, nil
+	return workflowRunStarted, nil, nil
 }
 
 // lockSignal takes the per-workflow signal lock and returns its unlock. It is
@@ -562,10 +569,10 @@ func (cs *cronSchedulerV2) decrementRunning(key string) {
 // manualTrigger triggers a v2 cron workflow run manually. It matches v1
 // cronScheduler.manualTrigger: any enabled cron workflow can be triggered.
 // The returned status tells a started run apart from a signal-only tick.
-func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID string) (string, workflowRunStartStatus, error) {
+func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID string) (string, workflowRunStartStatus, []string, error) {
 	workspaces, err := cs.srv.loadAllWorkspaces()
 	if err != nil {
-		return "", workflowRunFailed, err
+		return "", workflowRunFailed, nil, err
 	}
 	for _, ws := range workspaces {
 		if ws.Name != workspaceName {
@@ -577,10 +584,10 @@ func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID s
 			}
 			trigger, ok := cronTriggerFromV2Workflow(wf)
 			if !ok {
-				return "", workflowRunFailed, &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s is not cron-triggered", workspaceName, workflowName)}
+				return "", workflowRunFailed, nil, &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s is not cron-triggered", workspaceName, workflowName)}
 			}
 			if !isWorkflowEnabled(wf) {
-				return "", workflowRunFailed, &cronTriggerDisabledError{msg: fmt.Sprintf("workflow %s/%s is disabled", workspaceName, workflowName)}
+				return "", workflowRunFailed, nil, &cronTriggerDisabledError{msg: fmt.Sprintf("workflow %s/%s is disabled", workspaceName, workflowName)}
 			}
 			sw := &scheduledWorkflowV2{
 				workspace: ws,
@@ -588,17 +595,17 @@ func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID s
 				trigger:   trigger,
 				key:       workspaceName + "/" + workflowName,
 			}
-			status, err := cs.runWorkflow(sw, tenantID)
+			status, targets, err := cs.runWorkflowTargets(sw, tenantID)
 			if status == workflowRunSkipped {
-				return "", workflowRunFailed, &cronTriggerSkippedError{msg: fmt.Sprintf("workflow %s/%s: run skipped due to overlap policy", workspaceName, workflowName)}
+				return "", workflowRunFailed, nil, &cronTriggerSkippedError{msg: fmt.Sprintf("workflow %s/%s: run skipped due to overlap policy", workspaceName, workflowName)}
 			}
 			if err != nil {
-				return "", workflowRunFailed, err
+				return "", workflowRunFailed, nil, err
 			}
-			return sw.key, status, nil
+			return sw.key, status, targets, nil
 		}
 	}
-	return "", workflowRunFailed, &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s not found", workspaceName, workflowName)}
+	return "", workflowRunFailed, nil, &cronTriggerNotFoundError{msg: fmt.Sprintf("workflow %s/%s not found", workspaceName, workflowName)}
 }
 
 func (cs *cronSchedulerV2) firstTenantID() (string, error) {

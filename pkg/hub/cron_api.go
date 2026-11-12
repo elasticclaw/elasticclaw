@@ -36,6 +36,7 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 	}
 
 	var key string
+	var targets []string
 	status := "triggered"
 	if isV2 {
 		if s.cronSchedulerV2 == nil {
@@ -43,7 +44,7 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		var runStatus workflowRunStartStatus
-		key, runStatus, err = s.cronSchedulerV2.manualTrigger(workspace, workflow, tenantFromCtx(r))
+		key, runStatus, targets, err = s.cronSchedulerV2.manualTrigger(workspace, workflow, tenantFromCtx(r))
 		if runStatus == workflowRunSignaled {
 			status = string(workflowRunSignaled)
 		}
@@ -69,11 +70,16 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	resp := map[string]interface{}{
 		"status":   status,
 		"workflow": key,
-	})
+	}
+	if status == string(workflowRunSignaled) {
+		// Same shape as the UI /trigger endpoint for a signaled run.
+		resp["target_run_ids"] = targets
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleCronWorkflowRuns handles GET /api/workspaces/{workspace}/workflows/{workflow}/cron/runs

@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -823,5 +825,196 @@ func TestReaperOfflineVMLookupBudgetSpentRechecksLaterClaws(t *testing.T) {
 	}
 	if stopped != 0 {
 		t.Fatalf("stopped %d reconnected claws; want 0", stopped)
+	}
+}
+
+// TestDeleteClawCancelsBoundWorkflowV2Run guards the manual kill path (UI and
+// `elasticclaw kill`): it soft-deletes the claw without finishClawTerminalTx,
+// so it must cancel the bound v2 run itself or the run stays active forever.
+func TestDeleteClawCancelsBoundWorkflowV2Run(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, id := range []string{"claw-killed", "claw-other", "claw-plain"} {
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+			id, "tenant", id, "ws", "replicated", "connected", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertWorkflowV2Run(t, db, "run-killed", "att-killed", time.Time{}, now)
+	insertWorkflowV2Run(t, db, "run-other", "att-other", time.Time{}, now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-killed", "att-killed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-other", "att-other"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET trigger_type='cron' WHERE id='run-killed'`); err != nil {
+		t.Fatal(err)
+	}
+	store := workflowv2.NewStore(db)
+	cronRunID, err := store.RecordCronRunStarted(ctx, "tenant", "ws", "wf", "cron", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateCronRunForV2Run(ctx, cronRunID, "run-killed", "claw-killed"); err != nil {
+		t.Fatal(err)
+	}
+	// Record the run status at the moment the claw becomes deleted: a cron
+	// tick in between would be absorbed by a still-active run.
+	if _, err := db.Exec(`CREATE TABLE delete_probe(run_status TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER probe_claw_delete AFTER UPDATE OF status ON claws
+		WHEN NEW.status='deleted' AND NEW.id='claw-killed'
+		BEGIN INSERT INTO delete_probe SELECT status FROM workflow_v2_runs WHERE id='run-killed'; END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusNoContent {
+		t.Fatalf("delete status = %d", code)
+	}
+	if code := deleteClawForTest(t, s, db, "claw-plain"); code != http.StatusNoContent {
+		t.Fatalf("delete of claw without a v2 run: status = %d", code)
+	}
+
+	for _, want := range []struct{ query, status string }{
+		{`SELECT status FROM workflow_v2_runs WHERE id='run-killed'`, "cancelled"},
+		{`SELECT status FROM workflow_v2_attempts WHERE id='att-killed'`, "cancelled"},
+		{`SELECT run_status FROM delete_probe`, "cancelled"},
+		{`SELECT status FROM workflow_v2_cron_runs WHERE id='` + cronRunID + `'`, "canceled"},
+		{`SELECT status FROM workflow_v2_runs WHERE id='run-other'`, "active"},
+		{`SELECT status FROM workflow_v2_attempts WHERE id='att-other'`, "active"},
+		{`SELECT status FROM claws WHERE id='claw-plain'`, "deleted"},
+	} {
+		var got string
+		if err := db.QueryRow(want.query).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", want.query, err)
+		}
+		if got != want.status {
+			t.Fatalf("%s = %q, want %q", want.query, got, want.status)
+		}
+	}
+}
+
+// A kill whose v2 cancel fails must not soft-delete the claw: nothing would
+// retry the cancel afterwards, so the run would stay active on a dead claw.
+func TestDeleteClawKeepsClawWhenWorkflowV2CancelFails(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"claw-killed", "tenant", "killed", "ws", "replicated", "connected", now); err != nil {
+		t.Fatal(err)
+	}
+	insertWorkflowV2Run(t, db, "run-killed", "att-killed", time.Time{}, now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-killed", "att-killed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_run_cancel BEFORE UPDATE OF status ON workflow_v2_runs
+		WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT, 'db busy'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusInternalServerError {
+		t.Fatalf("delete status = %d, want 500", code)
+	}
+	var clawStatus, runStatus string
+	if err := db.QueryRow(`SELECT c.status, r.status FROM claws c, workflow_v2_runs r WHERE c.id='claw-killed' AND r.id='run-killed'`).Scan(&clawStatus, &runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if clawStatus != "connected" || runStatus != "active" {
+		t.Fatalf("after failed cancel claw=%q run=%q; want connected/active", clawStatus, runStatus)
+	}
+
+	if _, err := db.Exec(`DROP TRIGGER fail_run_cancel`); err != nil {
+		t.Fatal(err)
+	}
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusNoContent {
+		t.Fatalf("retried delete status = %d", code)
+	}
+	if err := db.QueryRow(`SELECT c.status, r.status FROM claws c, workflow_v2_runs r WHERE c.id='claw-killed' AND r.id='run-killed'`).Scan(&clawStatus, &runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if clawStatus != "deleted" || runStatus != "cancelled" {
+		t.Fatalf("after retried delete claw=%q run=%q; want deleted/cancelled", clawStatus, runStatus)
+	}
+}
+
+// deleteClawForTest kills a claw through the handler. After a successful kill
+// it waits for the async cleanup, whose last step deletes the claw's PR rows,
+// so the goroutine never outlives the test's database and temp dir.
+func deleteClawForTest(t *testing.T, s *Server, db *sql.DB, clawID string) int {
+	t.Helper()
+	if _, err := db.Exec(`INSERT OR REPLACE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`,
+		"kill-sentinel-"+clawID, clawID, "acme/app", 1, "https://github.com/acme/app/pull/1", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/api/claws/"+clawID, nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "tenant"))
+	req.SetPathValue("id", clawID)
+	rec := httptest.NewRecorder()
+	s.handleClawDetail(rec, req)
+	if rec.Code == http.StatusNoContent {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			var n int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("kill cleanup for %s did not finish", clawID)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return rec.Code
+}
+
+// A kill retried after a failed v2 cancel must comment the linked story once:
+// the comment is only posted after the delete commits.
+func TestDeleteClawCommentsTrackerOnceAcrossRetriedKill(t *testing.T) {
+	var comments atomic.Int32
+	shortcut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments") {
+			comments.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer shortcut.Close()
+	factory := taskRunLifecycleFactoryConfig("kill-factory", "shortcut")
+	s, db := newReaperTestServer(t, &types.HubConfig{
+		Factories:    []*types.FactoryConfig{factory},
+		Integrations: &types.IntegrationsConfig{Shortcut: []*types.ShortcutIntegrationConfig{{Workspace: factory.Workspace, Token: "token"}}},
+	})
+	s.shortcutBaseURL = shortcut.URL
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at,shortcut_story_id,tags) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"claw-killed", "tenant", "killed", "ws", "replicated", "connected", now, "42", `["factory:kill-factory"]`); err != nil {
+		t.Fatal(err)
+	}
+	insertWorkflowV2Run(t, db, "run-killed", "att-killed", time.Time{}, now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-killed", "att-killed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_run_cancel BEFORE UPDATE OF status ON workflow_v2_runs
+		WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT, 'db busy'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusInternalServerError {
+		t.Fatalf("delete status = %d, want 500", code)
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_run_cancel`); err != nil {
+		t.Fatal(err)
+	}
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusNoContent {
+		t.Fatalf("retried delete status = %d", code)
+	}
+	if got := comments.Load(); got != 1 {
+		t.Fatalf("tracker comments = %d, want 1", got)
 	}
 }

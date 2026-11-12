@@ -3,8 +3,10 @@ package hub
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path"
@@ -44,7 +46,7 @@ func (s *Server) processWorkflowV2GitHubPREvent(payload githubPRPayload) {
 			eventID := workflowV2GitHubEventID(target.RunID, "pull_request", payload.Action,
 				verified.Repository, strconv.Itoa(verified.Number), verified.HeadSHA, verified.State,
 				payload.PullRequest.UpdatedAt)
-			if _, err := workflowv2.NewStore(s.db).ReconcilePullRequest(context.Background(), target, eventID, kind, verified); err != nil {
+			if err := s.reconcileWorkflowV2PullRequest(context.Background(), workflowv2.NewStore(s.db), target, eventID, kind, verified); err != nil {
 				log.Printf("[workflow-v2 github] reconcile %s#%d for run %s: %v",
 					payload.Repository.FullName, payload.Number, target.RunID, err)
 				continue
@@ -59,6 +61,34 @@ func (s *Server) processWorkflowV2GitHubPREvent(payload githubPRPayload) {
 			log.Printf("[workflow-v2 github] reconcile mergeability for run %s: %v", target.RunID, err)
 		}
 	}
+}
+
+// reconcileWorkflowV2PullRequest applies a verified PR observation to its v2
+// run. A merge or close is first mirrored into the parent task run's PR rows:
+// adopted PRs have no claw_prs row and the v1 webhook update only runs for
+// factories, so otherwise the summary materialized at the run's terminal state
+// would still count the PR as open until the dead-claw sweep.
+func (s *Server) reconcileWorkflowV2PullRequest(ctx context.Context, store *workflowv2.Store,
+	target workflowv2.DeliveryTarget, eventID, kind string, verified typesv2.VerifiedPullRequest) error {
+	if verified.State == "merged" || verified.State == "closed" {
+		var taskRunID string
+		err := s.db.QueryRowContext(ctx, `SELECT task_run_id FROM workflow_v2_runs WHERE id=?`, target.RunID).Scan(&taskRunID)
+		if err == nil && taskRunID != "" {
+			err = s.associateTaskRunPR(TaskRunPR{RunID: taskRunID, Repo: verified.Repository, PRNumber: verified.Number,
+				URL: verified.URL, State: taskRunPRStateClosed, Merged: verified.State == "merged",
+				OccurredAt: verified.Provenance.ObservedAt})
+		}
+		// Apply the event only once the mirror is written: a terminal run is
+		// no longer a delivery target, so nothing would retry the mirror.
+		// The caller logs the error and the reconciler retries next pass. A
+		// missing parent task run has nothing to mirror.
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("record %s#%d %s in task run PRs: %w",
+				verified.Repository, verified.Number, verified.State, err)
+		}
+	}
+	_, err := store.ReconcilePullRequest(ctx, target, eventID, kind, verified)
+	return err
 }
 
 func workflowV2PullRequestEventKind(action, state string, headChanged bool) string {

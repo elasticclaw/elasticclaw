@@ -738,21 +738,35 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	if changed != 1 {
 		return EventResult{}, fmt.Errorf("state compare-and-swap failed for run %s version %d", runID, stored.StateVersion)
 	}
-	// A delivery transition during activation (adopting an existing PR,
-	// promoting a registered branch PR, or the policy evaluation they publish)
-	// leaves a state whose effects could not be claimed yet: the initial
-	// state, or a state entered by an earlier activation-time transition such
-	// as context.bundle.ready. Those effects must not run in the destination
-	// state. Effects scheduled by an earlier delivery transition in the same
-	// activation (such as the CI trigger of delivery.adopted, followed by the
-	// workflow.delivery.evaluated it publishes) belong to the adopted path and
-	// are kept. Other activation-time transitions keep their effects.
-	if activationDeliveryEventKinds[input.Kind] && activationPending {
+	// Nothing can claim effects during activation, so a transition taken then
+	// leaves a state whose effects never ran: the initial state, or a state
+	// entered by an earlier activation-time transition. Those effects must not
+	// run in the destination state; on an active run the worker would have
+	// claimed them before the state was left. Two steps of activation itself
+	// carry effects forward instead:
+	//   - The context step (context.bundle.*) keeps every effect.
+	//   - A delivery transition (adopting an existing PR, promoting a
+	//     registered branch PR, or the policy evaluation they publish) keeps
+	//     the effects an earlier delivery transition in the same activation
+	//     scheduled (such as the CI trigger of delivery.adopted, followed by
+	//     the workflow.delivery.evaluated it publishes): they belong to the
+	//     adopted path and remain valid in its destination. It cancels the
+	//     rest even on a self-transition, which schedules them again.
+	// Any other transition that leaves the state, such as a PR, CI, or review
+	// observation reaching the run before CompleteActivation, cancels every
+	// planned effect: all of them belong to the state being left, because the
+	// effects of earlier states were either cancelled or carried into it.
+	if activationPending && activationDeliveryEventKinds[input.Kind] {
 		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',last_error=?,updated_at=?
 			WHERE run_id=? AND status='planned' AND (origin_type='initial' OR (origin_type='transition' AND origin_id NOT IN (
 				SELECT t.id FROM workflow_v2_transitions t JOIN workflow_v2_events e ON e.id=t.event_id
 				WHERE t.run_id=? AND e.kind IN (`+activationDeliveryEventKindList+`))))`,
 			"state left during activation", now.UnixMilli(), runID, runID); err != nil {
+			return EventResult{}, err
+		}
+	} else if activationPending && transitionDef.To != stored.State && input.Producer != ProducerContext {
+		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',last_error=?,updated_at=?
+			WHERE run_id=? AND status='planned'`, "state left during activation", now.UnixMilli(), runID); err != nil {
 			return EventResult{}, err
 		}
 	}
