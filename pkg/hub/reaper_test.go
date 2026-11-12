@@ -871,10 +871,10 @@ func TestDeleteClawCancelsBoundWorkflowV2Run(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if code := deleteClawForTest(s, "claw-killed"); code != http.StatusNoContent {
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusNoContent {
 		t.Fatalf("delete status = %d", code)
 	}
-	if code := deleteClawForTest(s, "claw-plain"); code != http.StatusNoContent {
+	if code := deleteClawForTest(t, s, db, "claw-plain"); code != http.StatusNoContent {
 		t.Fatalf("delete of claw without a v2 run: status = %d", code)
 	}
 
@@ -915,7 +915,7 @@ func TestDeleteClawKeepsClawWhenWorkflowV2CancelFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if code := deleteClawForTest(s, "claw-killed"); code != http.StatusInternalServerError {
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusInternalServerError {
 		t.Fatalf("delete status = %d, want 500", code)
 	}
 	var clawStatus, runStatus string
@@ -929,7 +929,7 @@ func TestDeleteClawKeepsClawWhenWorkflowV2CancelFails(t *testing.T) {
 	if _, err := db.Exec(`DROP TRIGGER fail_run_cancel`); err != nil {
 		t.Fatal(err)
 	}
-	if code := deleteClawForTest(s, "claw-killed"); code != http.StatusNoContent {
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusNoContent {
 		t.Fatalf("retried delete status = %d", code)
 	}
 	if err := db.QueryRow(`SELECT c.status, r.status FROM claws c, workflow_v2_runs r WHERE c.id='claw-killed' AND r.id='run-killed'`).Scan(&clawStatus, &runStatus); err != nil {
@@ -940,11 +940,35 @@ func TestDeleteClawKeepsClawWhenWorkflowV2CancelFails(t *testing.T) {
 	}
 }
 
-func deleteClawForTest(s *Server, clawID string) int {
+// deleteClawForTest kills a claw through the handler. After a successful kill
+// it waits for the async cleanup, whose last step deletes the claw's PR rows,
+// so the goroutine never outlives the test's database and temp dir.
+func deleteClawForTest(t *testing.T, s *Server, db *sql.DB, clawID string) int {
+	t.Helper()
+	if _, err := db.Exec(`INSERT OR REPLACE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`,
+		"kill-sentinel-"+clawID, clawID, "acme/app", 1, "https://github.com/acme/app/pull/1", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodDelete, "/api/claws/"+clawID, nil)
 	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "tenant"))
 	req.SetPathValue("id", clawID)
 	rec := httptest.NewRecorder()
 	s.handleClawDetail(rec, req)
+	if rec.Code == http.StatusNoContent {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			var n int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("kill cleanup for %s did not finish", clawID)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	return rec.Code
 }
