@@ -44,13 +44,15 @@ func (s *Store) ActiveDeliveryTargets(ctx context.Context, repository string, nu
 	if repository == "" || number <= 0 {
 		return nil, fmt.Errorf("repository and positive pull request number are required")
 	}
+	// GitHub owner/repo names are case-insensitive; delivery rows store the
+	// workspace spelling, which may differ from the webhook's.
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.current_attempt_id,p.id,p.repository_name,p.repository,
 		p.pr_number,p.url,p.current_head_sha,p.state,r.workspace_yaml,r.workflow_yaml,
 		COALESCE((SELECT h.observed_at FROM workflow_v2_delivery_heads h WHERE h.pr_id=p.id
 			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
-		WHERE p.repository=? AND p.pr_number=? AND p.active=1 AND p.registered_only=0 AND r.status='active'
+		WHERE p.repository=? COLLATE NOCASE AND p.pr_number=? AND p.active=1 AND p.registered_only=0 AND r.status='active'
 		AND a.status='active' ORDER BY r.id`, repository, number)
 	if err != nil {
 		return nil, err

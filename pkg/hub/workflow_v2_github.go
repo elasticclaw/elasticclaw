@@ -32,15 +32,22 @@ func (s *Server) verifyWorkflowV2PullRequest(ctx context.Context, run workflowv2
 	}
 	repositoryName := ""
 	repositoryConfig := typesv2.Repository{}
+	// GitHub owner/repo names are case-insensitive, and its canonical URL case
+	// may differ from the workspace declaration; the workspace spelling is the
+	// identity stored on delivery rows.
 	for name, candidate := range workspace.Repositories {
 		if candidate.Repository == repository {
 			repositoryName, repositoryConfig = name, candidate
 			break
 		}
+		if repositoryName == "" && strings.EqualFold(candidate.Repository, repository) {
+			repositoryName, repositoryConfig = name, candidate
+		}
 	}
 	if repositoryName == "" {
 		return typesv2.VerifiedPullRequest{}, fmt.Errorf("repository %q is not in workspace %q", repository, workspace.Name)
 	}
+	repository = repositoryConfig.Repository
 	if !strings.EqualFold(strings.TrimSpace(repositoryConfig.Provider), "github") {
 		return typesv2.VerifiedPullRequest{}, fmt.Errorf("repository %q uses unsupported provider %q", repositoryName, repositoryConfig.Provider)
 	}

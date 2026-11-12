@@ -340,6 +340,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 	workflowYAML := []byte(sw.workflow.RawConfig)
 
 	createdV2Run := false
+	finishedAtActivation := false
 	clawID, _, err := cs.srv.createClawFromWorkflowWithOptions(
 		sw.workspace,
 		sw.workflow,
@@ -367,9 +368,11 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 				}
 				_, err = store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(sw.workspace.Files))
 				if err == nil {
-					err = store.CompleteActivation(ctx, run.ID)
+					err = cs.srv.completeWorkflowV2Activation(ctx, store, run.ID)
 				}
-				if err != nil {
+				if errors.Is(err, errWorkflowV2FinishedAtActivation) {
+					finishedAtActivation = true
+				} else if err != nil {
 					cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
 					if cleanupErr := store.CancelActivation(cleanupCtx, run.ID, err.Error()); cleanupErr != nil {
@@ -379,9 +382,8 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 					// immediately; the terminal cleanup hook will not run because
 					// cancelWorkflowV2RunForClaw only looks for active/suspended runs.
 					cs.srv.releaseWorkflowV2CronSlot(cleanupCtx, run.ID)
-					return err
 				}
-				return nil
+				return err
 			},
 		},
 	)
@@ -398,6 +400,10 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 		return workflowRunFailed, err
 	}
 
+	if finishedAtActivation {
+		log.Printf("[cron-v2] run %s for %s finished at activation via PR adoption (claw %s released)", cronRunID, key, clawID)
+		return workflowRunStarted, nil
+	}
 	log.Printf("[cron-v2] started run %s for %s (claw %s)", cronRunID, key, clawID)
 	return workflowRunStarted, nil
 }

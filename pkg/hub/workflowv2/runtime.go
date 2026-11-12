@@ -242,6 +242,12 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 
 const activationPendingReason = "workflow activation pending organization context"
 
+// SuspendedBeyondActivation reports a deliberate suspension, such as a failed
+// required context source, that activation must not release.
+func (r Run) SuspendedBeyondActivation() bool {
+	return r.Status == RunSuspended && r.WaitingReason != activationPendingReason
+}
+
 // IsActivationPending reports whether a run with this status and waiting
 // reason is still suspended for activation and cannot accept events yet.
 func IsActivationPending(status, waitingReason string) bool {
@@ -545,15 +551,23 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 
 	transitionID := uuid.NewString()
 	toVersion := stored.StateVersion + 1
+	activationPending := stored.Status == RunSuspended && stored.WaitingReason == activationPendingReason
 	status := RunActive
+	waitingReason := ""
 	finishedAt := int64(0)
 	if destination.Terminal {
 		status = terminalRunStatus(transitionDef.To)
 		finishedAt = now.UnixMilli()
+	} else if activationPending {
+		// Only CompleteActivation releases the run: a transition taken during
+		// activation (such as context.bundle.ready) must not make its effects
+		// claimable before PR adoption has run.
+		status = RunSuspended
+		waitingReason = activationPendingReason
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET state=?,display_phase=?,state_version=?,status=?,waiting_reason='',updated_at=?,finished_at=?
+	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET state=?,display_phase=?,state_version=?,status=?,waiting_reason=?,updated_at=?,finished_at=?
 		WHERE id=? AND state=? AND state_version=? AND workspace_revision=? AND workflow_revision=?`,
-		transitionDef.To, string(destination.Phase), toVersion, string(status), now.UnixMilli(), finishedAt,
+		transitionDef.To, string(destination.Phase), toVersion, string(status), waitingReason, now.UnixMilli(), finishedAt,
 		runID, stored.State, stored.StateVersion, stored.WorkspaceRevision, stored.WorkflowRevision)
 	if err != nil {
 		return EventResult{}, err
@@ -564,6 +578,24 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	}
 	if changed != 1 {
 		return EventResult{}, fmt.Errorf("state compare-and-swap failed for run %s version %d", runID, stored.StateVersion)
+	}
+	// A delivery transition during activation (adopting an existing PR,
+	// promoting a registered branch PR, or the policy evaluation they publish)
+	// leaves a state whose effects could not be claimed yet: the initial
+	// state, or a state entered by an earlier activation-time transition such
+	// as context.bundle.ready. Those effects must not run in the destination
+	// state. Effects scheduled by an earlier delivery transition in the same
+	// activation (such as the CI trigger of delivery.adopted, followed by the
+	// workflow.delivery.evaluated it publishes) belong to the adopted path and
+	// are kept. Other activation-time transitions keep their effects.
+	if activationDeliveryEventKinds[input.Kind] && activationPending {
+		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',last_error=?,updated_at=?
+			WHERE run_id=? AND status='planned' AND (origin_type='initial' OR (origin_type='transition' AND origin_id NOT IN (
+				SELECT t.id FROM workflow_v2_transitions t JOIN workflow_v2_events e ON e.id=t.event_id
+				WHERE t.run_id=? AND e.kind IN (`+activationDeliveryEventKindList+`))))`,
+			"state left during activation", now.UnixMilli(), runID, runID); err != nil {
+			return EventResult{}, err
+		}
 	}
 
 	deltaJSON, err := marshalObject(writes)
@@ -1192,6 +1224,25 @@ func finishRunScan(run *Run, phase, status string, created, updated, finished in
 		run.FinishedAt = &value
 	}
 }
+
+// activationDeliveryEventKinds are the events adoption and branch promotion
+// publish while a run is still activation-pending.
+var activationDeliveryEventKinds = map[string]bool{
+	"delivery.adopted":            true,
+	"delivery.verified":           true,
+	"workflow.delivery.evaluated": true,
+	"review.policy.evaluated":     true,
+}
+
+// activationDeliveryEventKindList is activationDeliveryEventKinds as a SQL list.
+var activationDeliveryEventKindList = func() string {
+	kinds := make([]string, 0, len(activationDeliveryEventKinds))
+	for kind := range activationDeliveryEventKinds {
+		kinds = append(kinds, "'"+kind+"'")
+	}
+	sort.Strings(kinds)
+	return strings.Join(kinds, ",")
+}()
 
 func terminalRunStatus(state string) RunStatus {
 	lower := strings.ToLower(state)
