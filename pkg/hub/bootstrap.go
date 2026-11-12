@@ -217,7 +217,7 @@ if model.startswith('grok/'):
             'input': ['text', 'image'],
             'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
             'contextWindow': 256000,
-            'maxTokens': 8192,
+            'maxTokens': 32768,
             'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
         }],
     }
@@ -225,7 +225,8 @@ if model.startswith('fireworks/'):
     # OpenClaw 2026.9.x dropped the built-in Fireworks catalog (full-path
     # accounts/fireworks/models/* ids); register it as a custom provider so
     # the pinned model still resolves. The suffix is the native Fireworks
-    # API model name.
+    # API model name. maxTokens covers reasoning plus the answer: at 8192
+    # glm-5p3 spent the whole budget reasoning and never emitted a tool call.
     model_id = model.split('/', 1)[1]
     config.setdefault('models', {})['mode'] = 'merge'
     providers = config['models'].setdefault('providers', {})
@@ -240,7 +241,7 @@ if model.startswith('fireworks/'):
             'input': ['text'],
             'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
             'contextWindow': 256000,
-            'maxTokens': 8192,
+            'maxTokens': 32768,
             'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
         }],
     }
