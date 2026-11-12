@@ -279,12 +279,152 @@ func TestRunnerCancellationAndConcurrency(t *testing.T) {
 		t.Fatal("foreign owner cancelled turn")
 	}
 	runner.Cancel(threads[0])
+	// The aborted stream fails the next heartbeat; that must not relabel the stop.
+	runner.Interrupt(threads[0])
 	if err := <-finished; !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	messages, _ := s.Messages(context.Background(), threads[0].ID, 0)
 	if messages[1].Status != "cancelled" || messages[1].Content != "Partial" || messages[1].InputTokens != 4 {
 		t.Fatal(messages)
+	}
+}
+
+// A stop through the cancel route is saved as cancelled and only stops the
+// turn it names; a client that goes away leaves a retryable interrupted turn.
+func TestStopAndDisconnectStatuses(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{{"stop", "cancelled"}, {"disconnect", "interrupted"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			started := make(chan struct{}, 1)
+			p := fakeProvider{stream: func(ctx context.Context, _ llm.Request, _ func(string) error) (llm.Response, error) {
+				started <- struct{}{}
+				<-ctx.Done()
+				return llm.Response{}, ctx.Err()
+			}}
+			handler, s, _ := apiFixture(t, p)
+			thread := testThread(t, s)
+			ctx, disconnect := context.WithCancel(context.Background())
+			defer disconnect()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				req := httptest.NewRequest("POST", "/api/ai-chat/threads/"+thread.ID+"/messages?turn=k1", strings.NewReader(`{"text":"question"}`)).WithContext(ctx)
+				req.Header.Set("Login", "Octocat")
+				req.Header.Set("Feature", "on")
+				handler.ServeHTTP(httptest.NewRecorder(), req)
+			}()
+			<-started
+			if tc.name == "stop" {
+				request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?turn=earlier-turn", "", "Octocat", "on")
+				select {
+				case <-done:
+					t.Fatal("a stop for another turn ended this one")
+				case <-time.After(50 * time.Millisecond):
+				}
+				if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?turn=k1", "", "Octocat", "on"); rec.Code != http.StatusNoContent {
+					t.Fatal(rec.Code)
+				}
+				// The client aborts the stream once the stop is acknowledged.
+				disconnect()
+			} else {
+				disconnect()
+			}
+			<-done
+			messages, err := s.Messages(context.Background(), thread.ID, 0)
+			if err != nil || messages[1].Status != tc.want {
+				t.Fatal(err, messages)
+			}
+			if _, err := s.BeginTurn(context.Background(), thread, "", "fake", true); err != nil {
+				t.Fatalf("retry after %s: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestKeyedStopSemantics(t *testing.T) {
+	s := testStore(t)
+	thread := testThread(t, s)
+	runner := &Runner{Store: s}
+	// A keyed stop that arrives first refuses its turn once, and only that turn.
+	runner.CancelTurn(thread, "early")
+	if _, _, err := runner.AcquireTurn(context.Background(), thread, "early"); !errors.Is(err, ErrStopped) {
+		t.Fatal(err)
+	}
+	ctx, release, err := runner.AcquireTurn(context.Background(), thread, "early")
+	if err != nil {
+		t.Fatal("the early stop should be consumed:", err)
+	}
+	release()
+	if ctx.Err() == nil {
+		t.Fatal("release should end the flight")
+	}
+	// An early stop older than its TTL no longer refuses the turn.
+	runner.earlyStops[thread.TenantID+"\x00"+thread.OwnerLogin+"\x00"+"stale"] = time.Now().Add(-2 * earlyStopTTL)
+	if _, release, err := runner.AcquireTurn(context.Background(), thread, "stale"); err != nil {
+		t.Fatal("a stale early stop refused the turn:", err)
+	} else {
+		release()
+	}
+	// A keyless flight (an older client) ignores keyed stops but not a keyless one.
+	ctx, release, err = runner.AcquireTurn(context.Background(), thread, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	runner.CancelTurn(thread, "someone-else")
+	if ctx.Err() != nil {
+		t.Fatal("a keyed stop ended a keyless flight")
+	}
+	runner.CancelTurn(thread, "")
+	if !errors.Is(context.Cause(ctx), errStopped) {
+		t.Fatal(context.Cause(ctx))
+	}
+}
+
+func TestStopBeforeTheTurnStartsRefusesIt(t *testing.T) {
+	handler, s, _ := apiFixture(t, fakeProvider{stream: func(context.Context, llm.Request, func(string) error) (llm.Response, error) {
+		t.Error("a stopped turn reached the model")
+		return llm.Response{}, nil
+	}})
+	thread := testThread(t, s)
+	if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/cancel?turn=k1", "", "Octocat", "on"); rec.Code != http.StatusNoContent {
+		t.Fatal(rec.Code)
+	}
+	if rec := request(handler, "POST", "/api/ai-chat/threads/"+thread.ID+"/messages?turn=k1", `{"text":"question"}`, "Octocat", "on"); rec.Code != http.StatusConflict {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if messages, err := s.Messages(context.Background(), thread.ID, 0); err != nil || len(messages) != 0 {
+		t.Fatal(err, messages)
+	}
+}
+
+func TestRetryOfRejectsASecondRetryOfTheSameAnswer(t *testing.T) {
+	s := testStore(t)
+	thread := testThread(t, s)
+	ctx := context.Background()
+	first, err := s.BeginTurn(ctx, thread, "question", "model", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Status = "interrupted"
+	if err := s.FinishMessage(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	// One tab retries the dropped answer, and that retry drops too.
+	retry, err := s.beginTurn(ctx, thread, "", "model", true, first.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry.Status = "interrupted"
+	if err := s.FinishMessage(ctx, retry); err != nil {
+		t.Fatal(err)
+	}
+	// Another tab's late retry of the same answer is refused.
+	if _, err := s.beginTurn(ctx, thread, "", "model", true, first.ID, nil); !errors.Is(err, ErrRetry) {
+		t.Fatal(err)
+	}
+	if _, err := s.beginTurn(ctx, thread, "", "model", true, retry.ID, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 

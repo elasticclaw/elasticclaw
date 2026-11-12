@@ -19,7 +19,7 @@ func (a *api) dismissTicketAttempt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "thread is archived", 409)
 		return
 	}
-	ctx, release, err := a.runner.acquire(r.Context(), t, false)
+	ctx, release, err := a.runner.acquire(r.Context(), t, false, "")
 	if errors.Is(err, ErrArchived) {
 		http.Error(w, ErrArchived.Error(), 409)
 		return

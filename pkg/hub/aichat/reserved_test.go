@@ -197,7 +197,7 @@ func TestReservedBlockOffsetAfterRedactorTail(t *testing.T) {
 }
 
 func TestInterruptedInterviewRejectsAnswers(t *testing.T) {
-	for _, status := range []string{"cancelled", "error"} {
+	for _, status := range []string{"interrupted", "error"} {
 		t.Run(status, func(t *testing.T) {
 			p := fakeProvider{stream: func(_ context.Context, _ llm.Request, _ func(string) error) (llm.Response, error) {
 				return llm.Response{ToolCalls: []llm.ToolCall{{ID: "i", Name: tools.AskInterview, Arguments: testInterviewArgs}}}, nil
@@ -218,7 +218,7 @@ func TestInterruptedInterviewRejectsAnswers(t *testing.T) {
 					if err := json.Unmarshal(payload.(json.RawMessage), &interview); err != nil {
 						t.Fatal(err)
 					}
-					if status == "cancelled" {
+					if status == "interrupted" {
 						cancel()
 					} else {
 						return writeErr

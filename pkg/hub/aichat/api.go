@@ -151,7 +151,11 @@ func (a *api) cancelTurn(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	a.runner.Cancel(t)
+	if turn := r.URL.Query().Get("turn"); turn != "" {
+		a.runner.CancelTurn(t, turn)
+	} else {
+		a.runner.Cancel(t)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +171,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		Answers *InterviewAnswers `json:"answers"`
 		Text    string            `json:"text"`
 		Retry   bool              `json:"retry"`
+		RetryOf string            `json:"retryOf"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -180,7 +185,11 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "message must contain 1 to 32768 bytes", 400)
 		return
 	}
-	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	ctx, release, err := a.runner.AcquireTurn(r.Context(), t, r.URL.Query().Get("turn"))
+	if errors.Is(err, ErrStopped) {
+		http.Error(w, ErrStopped.Error(), 409)
+		return
+	}
 	if errors.Is(err, ErrArchived) {
 		http.Error(w, ErrArchived.Error(), 409)
 		return
@@ -209,7 +218,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unavailable", 500)
 		return
 	}
-	m, err := a.store.beginTurn(ctx, t, body.Text, provider.Model(), body.Retry, body.Answers)
+	m, err := a.store.beginTurn(ctx, t, body.Text, provider.Model(), body.Retry, body.RetryOf, body.Answers)
 	var argErr tools.ArgError
 	if errors.As(err, &argErr) {
 		http.Error(w, argErr.Error(), 400)
@@ -226,7 +235,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
-	emit, stopHeartbeat := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Cancel(t) })
+	emit, stopHeartbeat := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Interrupt(t) })
 	defer stopHeartbeat()
 	_ = a.runner.Run(ctx, t, m, cfg, provider, emit)
 	stopHeartbeat()
