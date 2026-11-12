@@ -267,3 +267,32 @@ func TestSelectFailureSummaryModelRejectsBlankExternalAPIKey(t *testing.T) {
 		t.Fatal("expected blank external API key to be rejected")
 	}
 }
+
+func TestBridgeArtifactUnavailableIsNotRetryable(t *testing.T) {
+	for _, prefix := range []string{"", "Bootstrap failed: ", "connector download: ", "Factory provision failed: "} {
+		msg := classifyAgentFailure(prefix + "bridge artifact unavailable: ttl.sh/owner/claw-bridge:1w")
+		if msg.Kind != agentFailureBridgeArtifact {
+			t.Errorf("prefix %q: kind = %s, want %s", prefix, msg.Kind, agentFailureBridgeArtifact)
+		}
+		if retryableAgentFailure(msg.Kind) {
+			t.Errorf("prefix %q: missing artifact must not retry", prefix)
+		}
+	}
+}
+
+func TestProviderCreditsFailureIsNotRetryable(t *testing.T) {
+	for _, prefix := range []string{"restore provision failed", "provision failed", "factory provision failed"} {
+		t.Run(prefix, func(t *testing.T) {
+			msg := classifyAgentFailure(prefix + ": create VM: HTTP 400 from /vendor/v3/vm: Request exceeds available credits")
+			if msg.Kind != agentFailureProviderQuota || msg.StatusCode != 400 {
+				t.Fatalf("unexpected classification: %+v", msg)
+			}
+			if retryableAgentFailure(msg.Kind) {
+				t.Fatal("credit exhaustion must not be retryable")
+			}
+			if got := taskRunFailureTypeForAgentFailure(msg.Kind); got != taskRunFailureProvisionFailed {
+				t.Fatalf("failure type=%q, want %q", got, taskRunFailureProvisionFailed)
+			}
+		})
+	}
+}

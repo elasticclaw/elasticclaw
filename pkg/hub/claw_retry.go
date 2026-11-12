@@ -49,7 +49,7 @@ func retryableAgentFailure(kind agentFailureKind) bool {
 
 func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
 	switch kind {
-	case agentFailureProvisioning:
+	case agentFailureProvisioning, agentFailureProviderQuota:
 		return taskRunFailureProvisionFailed
 	case agentFailureSandboxTerminated, agentFailureProviderLost:
 		return taskRunFailureProviderLost
@@ -59,7 +59,7 @@ func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
 		// is starting. Folding them into bootstrap_failed made the two
 		// indistinguishable in analytics.
 		return taskRunFailureWorkspaceUnresponsive
-	case agentFailureBootstrap, agentFailureRestore, agentFailureWorkspaceFiles:
+	case agentFailureBootstrap, agentFailureBridgeArtifact, agentFailureRestore, agentFailureWorkspaceFiles:
 		return taskRunFailureBootstrapFailed
 	case agentFailureGitHubCredentials:
 		return taskRunFailurePermissionOrAuth
@@ -554,6 +554,12 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	}
 	rows, _ := res.RowsAffected()
 	if rows > 0 {
+		// The reaper ages provisioning/starting claws by first-seen time keyed on
+		// claw ID and status. The successor reuses both, so without this reset it
+		// would inherit the predecessor's age and be reaped again within a tick
+		// instead of getting its own provisioningMaxAge window.
+		s.firstSeen(reaperClawKey(clawID, "provisioning"), false, time.Time{})
+		s.firstSeen(reaperClawKey(clawID, "starting"), false, time.Time{})
 		// The gateway health counters are keyed by claw ID, and a retry reuses
 		// the ID while replacing the sandbox behind it. They must be cleared for
 		// the same reason idle_resume_count is cleared above: the successor is a

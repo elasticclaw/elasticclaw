@@ -235,6 +235,12 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claw_prs", "mention_only", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// source records how the row was found. gh_create/branch_sweep rows are
+	// PRs the claw created but has not delivered yet: they stay mention_only=1
+	// until [DONE] promotes them, so creation alone never finalizes a claw.
+	if err := addColumn(db, "claw_prs", "source", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	// token_miss_count bounds how long a row whose repo has NO resolvable
 	// GitHub App token keeps blocking finalization. It is deliberately separate
 	// from permanent_failure_count: that counter belongs to checkPRMerged's
@@ -751,7 +757,7 @@ func migrate(db *sql.DB) error {
 		initial_attempt_id    TEXT NOT NULL,
 		current_attempt_id    TEXT NOT NULL DEFAULT '',
 		attempt_count         INTEGER NOT NULL DEFAULT 1 CHECK(attempt_count >= 1),
-		run_kind              TEXT NOT NULL CHECK(run_kind IN ('code_task','pr_task')),
+		run_kind              TEXT NOT NULL CHECK(run_kind IN ('code_task','pr_task','maintenance')),
 		owner_type            TEXT NOT NULL CHECK(owner_type IN ('workflow','factory','manual','external')),
 		workspace_name        TEXT NOT NULL DEFAULT '',
 		workflow_name         TEXT NOT NULL DEFAULT '',
@@ -936,7 +942,7 @@ func migrate(db *sql.DB) error {
 		run_id                  TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
 		initial_attempt_id      TEXT NOT NULL DEFAULT '',
 		current_attempt_id      TEXT NOT NULL DEFAULT '',
-		status                  TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed')),
+		status                  TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed','cancelled')),
 		phase                   TEXT NOT NULL CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
 		attempt_count           INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
 		owner_type              TEXT NOT NULL DEFAULT '',
@@ -945,7 +951,7 @@ func migrate(db *sql.DB) error {
 		factory_name            TEXT NOT NULL DEFAULT '',
 		owner_id                TEXT NOT NULL DEFAULT '',
 		owner_display_name      TEXT NOT NULL DEFAULT '',
-		run_kind                TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')),
+		run_kind                TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task','maintenance')),
 		integration             TEXT NOT NULL DEFAULT '',
 		integration_workspace   TEXT NOT NULL DEFAULT '',
 		issue_id                TEXT NOT NULL DEFAULT '',
@@ -997,7 +1003,7 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
-	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status, run_kind, requires_pr);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_detail ON task_run_summaries(tenant_id, integration, integration_workspace, issue_id, started_at);
 
 	CREATE TABLE IF NOT EXISTS hub_templates (
@@ -1020,6 +1026,31 @@ func migrate(db *sql.DB) error {
 		added_by TEXT NOT NULL DEFAULT ''
 	);
 
+	CREATE TABLE IF NOT EXISTS api_token_audit (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		token_id TEXT NOT NULL,
+		owner_login TEXT NOT NULL,
+		tool TEXT NOT NULL,
+		args_summary TEXT NOT NULL,
+		status TEXT NOT NULL,
+		error TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_api_token_audit_created_at ON api_token_audit(created_at);
+
+	CREATE TABLE IF NOT EXISTS api_tokens (
+		id TEXT PRIMARY KEY,
+		owner_login TEXT NOT NULL,
+		name TEXT NOT NULL,
+		token_hash TEXT NOT NULL UNIQUE,
+		token_prefix TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER,
+		last_used_at INTEGER,
+		revoked_at INTEGER
+	);
+	CREATE INDEX IF NOT EXISTS idx_api_tokens_owner_login ON api_tokens(owner_login COLLATE NOCASE);
+
 	CREATE TABLE IF NOT EXISTS claw_prs (
 		id          TEXT PRIMARY KEY,
 		claw_id     TEXT NOT NULL REFERENCES claws(id),
@@ -1038,11 +1069,22 @@ func migrate(db *sql.DB) error {
 		last_review_id INTEGER NOT NULL DEFAULT 0, -- last top-level PR review ID seen
 		pr_conditions_fired INTEGER NOT NULL DEFAULT 0,
 		permanent_failure_count INTEGER NOT NULL DEFAULT 0,
-		mention_only INTEGER NOT NULL DEFAULT 0, -- 1 = URL scanned from a message, not delivered via [DONE]; never gates finalization
+		source      TEXT NOT NULL DEFAULT '',
+		mention_only INTEGER NOT NULL DEFAULT 0, -- 1 = not delivered via [DONE]/gate/trigger (a mention, or a gh_create/branch_sweep registration); never gates finalization
 		token_miss_count INTEGER NOT NULL DEFAULT 0, -- consecutive polls with no resolvable GitHub token for the repo; separate from permanent_failure_count (see migrate)
 		last_mergeable_state TEXT NOT NULL DEFAULT '', -- last GitHub mergeable_state observed (e.g. "dirty"); used for one-shot conflict notifications
 		created_at  DATETIME NOT NULL,
 		UNIQUE(claw_id, pr_url)
+	);
+
+	CREATE TABLE IF NOT EXISTS claw_branches (
+		claw_id TEXT NOT NULL REFERENCES claws(id),
+		repo TEXT NOT NULL,
+		branch TEXT NOT NULL,
+		head_sha TEXT NOT NULL,
+		checked_at DATETIME,
+		pr_url TEXT NOT NULL DEFAULT '',
+		UNIQUE(claw_id, repo, branch)
 	);
 
 	CREATE TABLE IF NOT EXISTS claw_pr_feedback_deliveries (
@@ -1229,6 +1271,9 @@ func migrate(db *sql.DB) error {
 	if err := rebuildTaskRunSummariesStatusV3(db); err != nil {
 		return err
 	}
+	if err := migrateTaskRunAnalyticsOutcomes(db); err != nil {
+		return err
+	}
 	if err := rebuildTaskRunEventsAgentIdleV1(db); err != nil {
 		return err
 	}
@@ -1263,7 +1308,7 @@ func migrate(db *sql.DB) error {
 	if err := backfillCheckpointTelemetryV1(db); err != nil {
 		return err
 	}
-	if err := rebuildTaskRunSummariesTicketPageV3(db); err != nil {
+	if err := rebuildTaskRunSummariesTicketPageV4(db); err != nil {
 		return err
 	}
 	for _, p := range []struct {
@@ -1371,8 +1416,17 @@ func widenFailureTypeCheckV1(db *sql.DB, table string) error {
 		return nil
 	}
 
+	return rebuildTaskRunCheck(db, table, schema, oldCheck, newCheck)
+}
+
+// rebuildTaskRunCheck widens a CHECK while preserving data, rowids and indexes.
+func rebuildTaskRunCheck(db interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}, table, schema, oldCheck, newCheck string) error {
 	indexes := []string{}
-	rows, err := db.Query(`SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL`, table)
+	rows, err := db.QueryContext(context.Background(), `SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL`, table)
 	if err != nil {
 		return fmt.Errorf("read %s indexes: %w", table, err)
 	}
@@ -1401,12 +1455,12 @@ func widenFailureTypeCheckV1(db *sql.DB, table string) error {
 	// table still has one, so ErrNoRows is not a negative result.
 	withRowid := true
 	var rowidProbe int64
-	if err := db.QueryRow(fmt.Sprintf(`SELECT rowid FROM %q LIMIT 1`, table)).Scan(&rowidProbe); err != nil && err != sql.ErrNoRows {
+	if err := db.QueryRowContext(context.Background(), fmt.Sprintf(`SELECT rowid FROM %q LIMIT 1`, table)).Scan(&rowidProbe); err != nil && err != sql.ErrNoRows {
 		withRowid = false
 	}
 
 	columns := []string{}
-	colRows, err := db.Query(fmt.Sprintf(`SELECT name FROM pragma_table_info(%q)`, table))
+	colRows, err := db.QueryContext(context.Background(), fmt.Sprintf(`SELECT name FROM pragma_table_info(%q)`, table))
 	if err != nil {
 		return fmt.Errorf("read %s columns: %w", table, err)
 	}
@@ -1434,7 +1488,7 @@ func widenFailureTypeCheckV1(db *sql.DB, table string) error {
 	createTmp := strings.Replace(schema, oldCheck, newCheck, 1)
 	createTmp = strings.Replace(createTmp, table, tmp, 1)
 
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
 	}
@@ -1475,9 +1529,9 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 	if _, err := tx.Exec(`CREATE TABLE task_run_summaries_new (
 		id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
 		initial_attempt_id TEXT NOT NULL DEFAULT '', current_attempt_id TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed')),
+		status TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed','cancelled')),
 		phase TEXT NOT NULL CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
-		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, cost_approximate INTEGER NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
+		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task','maintenance')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, cost_approximate INTEGER NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
 	)`); err != nil {
 		return fmt.Errorf("create task run summaries v3: %w", err)
 	}
@@ -1495,7 +1549,7 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		CREATE INDEX idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
-		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status);
+		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status, run_kind, requires_pr);
 		CREATE INDEX idx_task_run_summaries_ticket_detail ON task_run_summaries(tenant_id, integration, integration_workspace, issue_id, started_at)`); err != nil {
 		return fmt.Errorf("replace task run summaries v3: %w", err)
 	}
@@ -1688,14 +1742,11 @@ func backfillTaskRunAnalyticsStatusV3(db *sql.DB) error {
 	return err
 }
 
-// rebuildTaskRunSummariesTicketPageV3 rebuilds idx_task_run_summaries_ticket_page
-// with a started-at window adjacent to tenant_id so SQLite can seek it before
-// grouping tickets. This is a one-time rebuild: the definition already lives
-// in the CREATE INDEX IF NOT EXISTS above, so without the hub_migrations
-// gate every hub start would re-sort the (potentially large) index for no
-// reason.
-func rebuildTaskRunSummariesTicketPageV3(db *sql.DB) error {
-	const migration = "task_run_summaries_ticket_page_v3"
+// rebuildTaskRunSummariesTicketPageV4 covers ticket queries that now include
+// non-PR runs. requires_pr is no longer an equality prefix; run_kind covers
+// the maintenance exclusion without a table lookup.
+func rebuildTaskRunSummariesTicketPageV4(db *sql.DB) error {
+	const migration = "task_run_summaries_ticket_page_v4"
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
 		return fmt.Errorf("create hub migrations: %w", err)
 	}
@@ -1706,7 +1757,7 @@ func rebuildTaskRunSummariesTicketPageV3(db *sql.DB) error {
 	if applied > 0 {
 		return nil
 	}
-	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status)`); err != nil {
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status, run_kind, requires_pr)`); err != nil {
 		return fmt.Errorf("create ticket page index: %w", err)
 	}
 	_, err := db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())

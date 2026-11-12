@@ -17,9 +17,11 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
   const [v1Runs, setV1Runs] = useState<WorkflowRun[]>([])
+  const [cronTicks, setCronTicks] = useState<WorkflowRun[]>([])
   const [v2Runs, setV2Runs] = useState<WorkflowV2Run[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [cronTicksError, setCronTicksError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -30,10 +32,27 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
       setError(null)
       setV1Runs([])
       setV2Runs([])
+      setCronTicks([])
+      setCronTicksError(null)
       const fetchRuns = isV2Workflow(workflow)
-        ? fetchV2WorkflowRuns(workflow.workspaceName, workflow.name).then((response) => {
+        ? Promise.all([
+            fetchV2WorkflowRuns(workflow.workspaceName, workflow.name),
+            // Cron ticks are supplementary and must never hide the v2 runs. The v2
+            // runs request already answers whether the workflow exists, so a 404 here
+            // only means there is no cron tick history; other failures are surfaced.
+            fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).catch((err) => {
+              if (err instanceof ApiError && err.status === 404) return { runs: [], count: 0 }
+              return {
+                runs: [],
+                count: 0,
+                error: (err instanceof Error && err.message) || "Unable to load cron ticks",
+              }
+            }),
+          ]).then(([response, history]) => {
             if (cancelled) return
             setV2Runs(response.runs || [])
+            if ("error" in history && history.error) setCronTicksError(history.error)
+            setCronTicks((history.runs || []).filter(isCronTickRow))
           })
         : fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).then((response) => {
             if (cancelled) return
@@ -75,7 +94,12 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
           <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
             {loading && <LoadingState label="Loading run history…" />}
             {!loading && error && <Notice destructive>{error}</Notice>}
-            {!loading && !error && runs.length === 0 && (
+            {!loading && !error && cronTicksError && (
+              <div className="mb-4">
+                <Notice>Cron ticks could not be loaded: {cronTicksError}</Notice>
+              </div>
+            )}
+            {!loading && !error && !cronTicksError && runs.length === 0 && cronTicks.length === 0 && (
               <EmptyState>No runs have been recorded for this workflow yet.</EmptyState>
             )}
             {!loading && !error && runs.length > 0 && (
@@ -148,6 +172,34 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
                 </Table>
               </div>
             )}
+            {!loading && !error && cronTicks.length > 0 && (
+              <div className="mt-4 rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Scheduled tick</TableHead>
+                      <TableHead>Target runs</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {cronTicks.map((tick) => (
+                      <TableRow key={tick.id}>
+                        <TableCell><StatusBadge status={tick.status} /></TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {formatTimestamp(tick.created_at)}
+                        </TableCell>
+                        <TableCell className="text-xs font-mono break-all text-muted-foreground">
+                          {Array.isArray(tick.run_context?.target_run_ids)
+                            ? tick.run_context.target_run_ids.join(", ")
+                            : "—"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
           </div>
           <div className="shrink-0 border-t bg-background px-6 py-3">
             <Button
@@ -181,6 +233,13 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
+// Ticks that did not start a run: skipped and signaled ones, plus signal ticks
+// that failed during delivery (they carry a slot_id but no run of their own).
+function isCronTickRow(run: WorkflowRun) {
+  return run.status === "skipped" || run.status === "signaled" ||
+    (run.status === "failed" && typeof run.run_context?.slot_id === "string")
+}
+
 function statusVariant(status: string) {
   switch (status.toLowerCase()) {
     case "completed":
@@ -189,6 +248,7 @@ function statusVariant(status: string) {
     case "failed":
     case "error":
       return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300"
+    case "signaled":
     case "running":
       return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"
     case "skipped":

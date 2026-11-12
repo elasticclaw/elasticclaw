@@ -525,12 +525,13 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.RLock()
-	var fireworksAPIKey string
+	// First API key per provider, used to list that provider's models.
+	providerAPIKeys := map[string]string{}
 	// LLM keys — mask actual key values
 	view.LLMKeys = []LLMKeyView{}
 	for _, k := range s.hubCfg.LLMKeys {
-		if k.Provider == "fireworks" && k.APIKey != "" && fireworksAPIKey == "" {
-			fireworksAPIKey = k.APIKey
+		if k.APIKey != "" && providerAPIKeys[k.Provider] == "" {
+			providerAPIKeys[k.Provider] = k.APIKey
 		}
 		view.LLMKeys = append(view.LLMKeys, LLMKeyView{
 			Name:         k.Name,
@@ -692,9 +693,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	view.Auth = authView
-	view.ModelOptions = map[string][]LLMModelOption{
-		"fireworks": s.fireworksModelOptions(r.Context(), fireworksAPIKey),
-	}
+	view.ModelOptions = s.modelOptionsByProvider(r.Context(), providerAPIKeys)
 
 	// Read SSH public keys outside the lock (file I/O)
 	for name, pv := range view.Providers {

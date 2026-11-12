@@ -379,8 +379,17 @@ export async function updateWorkflowControls(
   )
 }
 
-export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
-  return apiFetch<{ claw_id: string; status: string }>(
+// A started run returns run_id and claw_id; a signal-policy trigger that
+// ticked an open run returns status "signaled" and target_run_ids instead.
+export type TriggerWorkflowResponse = {
+  status: string
+  run_id?: string
+  claw_id?: string
+  target_run_ids?: string[]
+}
+
+export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<TriggerWorkflowResponse> {
+  return apiFetch<TriggerWorkflowResponse>(
     `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}/trigger`,
     {
       method: "POST",
@@ -431,6 +440,7 @@ function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
   if (!filters) return ""
   const entries: Array<[string, string | number | boolean | undefined]> = [
     ["status", filters.status],
+    ["run_kind", filters.runKind],
     ["ownerType", filters.ownerType],
     ["workspace", filters.workspace],
     ["workflow", filters.workflow],
@@ -794,4 +804,32 @@ export function fetchAIChatArtifacts(signal?: AbortSignal): Promise<AIChatArtifa
 }
 export function deleteAIChatArtifact(slug: string): Promise<void> {
   return apiFetch(`/api/ai-chat/artifacts/${encodeURIComponent(slug)}`, { method: "DELETE" })
+}
+
+export interface PersonalApiToken {
+  id: string
+  name: string
+  prefix: string
+  created_at: string
+  expires_at: string | null
+  last_used_at: string | null
+  revoked_at: string | null
+  status: "active" | "expired" | "revoked"
+}
+
+export type ApiTokenExpirationDays = 7 | 30 | 90 | 180 | null
+
+export function fetchApiTokens(): Promise<{ tokens: PersonalApiToken[] }> {
+  return apiFetch("/api/settings/api-tokens")
+}
+
+export function createApiToken(name: string, expiresInDays: ApiTokenExpirationDays): Promise<PersonalApiToken & { token: string }> {
+  return apiFetch("/api/settings/api-tokens", {
+    method: "POST",
+    body: JSON.stringify({ name, expires_in_days: expiresInDays }),
+  })
+}
+
+export function revokeApiToken(id: string): Promise<void> {
+  return apiFetch(`/api/settings/api-tokens/${encodeURIComponent(id)}`, { method: "DELETE" })
 }

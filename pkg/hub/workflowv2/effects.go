@@ -72,7 +72,7 @@ func (s *Store) ClaimEffect(ctx context.Context, worker string, lease time.Durat
 	}
 	row := tx.QueryRowContext(ctx, `SELECT e.id,e.run_id,e.effect_key,e.kind,e.payload_json,e.status,e.attempt_count,e.next_attempt_at,e.last_error,r.current_attempt_id
 		FROM workflow_v2_effects e JOIN workflow_v2_runs r ON r.id=e.run_id
-		WHERE e.status IN ('planned','retryable_failed') AND e.next_attempt_at<=? AND r.status='active'
+		WHERE e.status IN ('planned','retryable_failed') AND e.postponed=0 AND e.next_attempt_at<=? AND r.status='active'
 		ORDER BY e.next_attempt_at,e.created_at,e.id LIMIT 1`, now.UnixMilli())
 	var effect Effect
 	var payloadJSON string

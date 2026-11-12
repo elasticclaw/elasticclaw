@@ -134,6 +134,19 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 			resolvedCI[name] = ResolveCapabilities(conn.Provider, conn.CapabilityRestrictions)
 		}
 		for name, pipe := range ws.CI.Pipelines {
+			if pipe.CheckName != "" {
+				if strings.TrimSpace(pipe.CheckName) == "" {
+					return nil, fmt.Errorf("ci.pipelines.%s.check_name must not be blank", name)
+				}
+				if pipe.Workflow != "" {
+					return nil, fmt.Errorf("ci.pipelines.%s: check_name and workflow are mutually exclusive", name)
+				}
+				if _, err := MatchCheckName(pipe.CheckName, ""); err != nil {
+					return nil, fmt.Errorf("ci.pipelines.%s.check_name: invalid glob: %w", name, err)
+				}
+			} else if pipe.AppSlug != "" {
+				return nil, fmt.Errorf("ci.pipelines.%s.app_slug requires check_name", name)
+			}
 			if err := validateResourceName("ci.pipelines", name); err != nil {
 				return nil, err
 			}
@@ -362,4 +375,11 @@ func isKnownCapability(name string) bool {
 		}
 	}
 	return false
+}
+
+// MatchCheckName matches a CI check-run or commit-status name against a
+// pipeline check_name glob. Unlike path.Match, wildcards also span '/', since
+// GitHub check names such as "CI / unit" routinely contain it.
+func MatchCheckName(pattern, name string) (bool, error) {
+	return pathpkg.Match(strings.ReplaceAll(pattern, "/", "\x00"), strings.ReplaceAll(name, "/", "\x00"))
 }

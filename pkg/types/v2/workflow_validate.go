@@ -3,6 +3,7 @@ package v2
 import (
 	"bytes"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -28,19 +29,20 @@ var writableNamespaces = []string{
 }
 
 var knownWorkflowKeys = map[string]bool{
-	"schema_version":  true,
-	"name":            true,
-	"enabled":         true,
-	"manual_trigger":  true,
-	"initial_state":   true,
-	"states":          true,
-	"transitions":     true,
-	"commands":        true,
-	"ci":              true,
-	"review":          true,
-	"delivery":        true,
-	"events":          true,
-	"trigger":         true,
+	"schema_version": true,
+	"name":           true,
+	"enabled":        true,
+	"manual_trigger": true,
+	"initial_state":  true,
+	"states":         true,
+	"transitions":    true,
+	"commands":       true,
+	"ci":             true,
+	"review":         true,
+	"delivery":       true,
+	"events":         true,
+	"trigger":        true,
+	"analytics":      true,
 }
 
 // ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
@@ -95,7 +97,14 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 		return nil, fmt.Errorf("workflow %q: initial_state %q is not defined in states", wf.Name, wf.InitialState)
 	}
 
+	if wf.Analytics != nil && wf.Analytics.RunKind != "" && wf.Analytics.RunKind != "code_task" && wf.Analytics.RunKind != "maintenance" {
+		return nil, fmt.Errorf("workflow %q: analytics.run_kind %q is unsupported", wf.Name, wf.Analytics.RunKind)
+	}
+
 	for name, st := range wf.States {
+		if st.Outcome != "" && (!st.Terminal || !IsTerminalOutcome(st.Outcome)) {
+			return nil, fmt.Errorf("workflow %q: states.%s.outcome %q requires a terminal state and a supported outcome", wf.Name, name, st.Outcome)
+		}
 		if err := validateResourceName("states", name); err != nil {
 			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 		}
@@ -388,8 +397,8 @@ func validateTrigger(wf *Workflow) error {
 	if _, err := parseCronSchedule(ct.Schedule); err != nil {
 		return fmt.Errorf("trigger.cron.schedule %q is invalid: %w", ct.Schedule, err)
 	}
-	if ct.OverlapPolicy != "" && ct.OverlapPolicy != "skip" && ct.OverlapPolicy != "parallel" {
-		return fmt.Errorf("trigger.cron.overlap_policy %q is invalid (must be skip or parallel)", ct.OverlapPolicy)
+	if ct.OverlapPolicy != "" && ct.OverlapPolicy != "skip" && ct.OverlapPolicy != "parallel" && ct.OverlapPolicy != "signal" {
+		return fmt.Errorf("trigger.cron.overlap_policy %q is invalid (must be skip, parallel, or signal)", ct.OverlapPolicy)
 	}
 	if ct.Timezone != "" {
 		if _, err := time.LoadLocation(ct.Timezone); err != nil {
@@ -490,6 +499,14 @@ func validateDelivery(wf *Workflow) error {
 		return nil
 	}
 	pr := wf.Delivery.PullRequests
+	for i, branch := range pr.Branches {
+		if strings.TrimSpace(branch.Repository) == "" || strings.TrimSpace(branch.Pattern) == "" {
+			return fmt.Errorf("delivery.pull_requests.branches[%d]: repository and pattern are required", i)
+		}
+		if _, err := path.Match(branch.Pattern, ""); err != nil {
+			return fmt.Errorf("delivery.pull_requests.branches[%d].pattern: %w", i, err)
+		}
+	}
 	if pr.Minimum < 0 {
 		return fmt.Errorf("delivery.pull_requests.minimum cannot be negative")
 	}
@@ -528,6 +545,13 @@ func ValidateWorkflowAgainstWorkspace(wf *Workflow, rws *ResolvedWorkspace) (*Re
 		return nil, fmt.Errorf("workflow %q: workspace is required for pair validation", wf.Name)
 	}
 	ws := rws.Workspace
+	if wf.Delivery != nil && wf.Delivery.PullRequests != nil {
+		for i, branch := range wf.Delivery.PullRequests.Branches {
+			if _, ok := ws.Repositories[branch.Repository]; !ok {
+				return nil, fmt.Errorf("delivery.pull_requests.branches[%d].repository %q is not a workspace repository key", i, branch.Repository)
+			}
+		}
+	}
 
 	// CI policies must reference known pipelines.
 	if wf.CI != nil {

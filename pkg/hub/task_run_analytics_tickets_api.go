@@ -41,6 +41,7 @@ type taskRunAnalyticsTicketsResponse struct {
 }
 
 type taskRunAnalyticsTicketRunSummary struct {
+	Outcome      string  `json:"outcome,omitempty"`
 	Approximate  bool    `json:"approximate,omitempty"`
 	RunID        string  `json:"runId"`
 	Status       string  `json:"status"`
@@ -300,6 +301,7 @@ func (s *Server) readTaskRunAnalyticsTicketTimingForRuns(tenantID string, runIDs
 // until a materialized per-issue ordering column can provide the real fix.
 func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, bool, taskRunAnalyticsTicketGroup, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
+	where += ` AND run_kind <> 'maintenance'`
 	total, err := s.readTaskRunAnalyticsTicketTotal(where, args)
 	if err != nil {
 		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
@@ -397,6 +399,7 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 		return nil, errInvalidTaskRunAnalyticsTicketKey
 	}
 	where, args := taskRunAnalyticsSummaryWhere(filters)
+	where += ` AND run_kind <> 'maintenance'`
 	runWhere := where + ` AND integration = ? AND integration_workspace = ? AND issue_id = ?`
 	rows, err := s.db.QueryContext(ctx, `SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+runWhere, append(args, parts[0], parts[1], parts[2])...)
 	if err != nil {
@@ -645,7 +648,7 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		runEvents := eventsByRun[run.RunID]
 		ticket.RunIDs = append(ticket.RunIDs, run.RunID)
 		cost, tokens := taskRunTicketCostAndTokens(run)
-		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{RunID: run.RunID, Status: run.Status, Phase: run.Phase, Model: run.Model, AttemptCount: len(attempts), Cost: cost, Approximate: run.CostApproximate, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
+		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{Outcome: run.Outcome, RunID: run.RunID, Status: run.Status, Phase: run.Phase, Model: run.Model, AttemptCount: len(attempts), Cost: cost, Approximate: run.CostApproximate, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
 		ticket.AttemptCount += len(attempts)
 		ticket.Cost += cost
 		ticket.Approximate = ticket.Approximate || run.CostApproximate
@@ -724,7 +727,19 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	}
 	// A replacement PR still open keeps the clock running even when an earlier
 	// closed PR already labels the ticket delivered.
-	waitingOnOpenPR := mergedAt == 0 && ticket.MergedPRCount == 0 && ticket.OpenPRCount > 0
+	// PRs left open by an abandoned run (taskRunOutcomeAbandoned) do not count.
+	waitingOnOpenPR := false
+	if mergedAt == 0 && ticket.MergedPRCount == 0 {
+		abandonedRuns := map[string]bool{}
+		for _, run := range ticket.Runs {
+			if taskRunOutcomeAbandoned(run.Outcome) {
+				abandonedRuns[run.RunID] = true
+			}
+		}
+		for _, pr := range ticket.PRs {
+			waitingOnOpenPR = waitingOnOpenPR || (pr.State == "open" && !abandonedRuns[pr.RunID])
+		}
+	}
 	// A run still in flight keeps the clock running through silent stalls,
 	// also when a retry follows a closed PR; failed tickets stop at their
 	// last activity. The reaper closes runs whose claws were deleted.
@@ -831,16 +846,37 @@ func taskRunTicketCostAndTokens(run taskRunAnalyticsRunView) (float64, int64) {
 	return cost, tokens
 }
 
+// taskRunOutcomeAbandoned reports whether a run's explicit v2 outcome gave up
+// on delivery, so PRs it left open or closed do not count for the ticket.
+func taskRunOutcomeAbandoned(outcome string) bool {
+	return outcome == "failed" || outcome == "cancelled"
+}
+
 func deriveTaskRunAnalyticsTicketStatus(runs []taskRunAnalyticsTicketRunSummary, prs []taskRunAnalyticsTicketPRView) string {
+	failedRuns := map[string]bool{}
+	for _, run := range runs {
+		if taskRunOutcomeAbandoned(run.Outcome) {
+			failedRuns[run.RunID] = true
+		}
+		if run.Outcome == "no_changes" || run.Outcome == "delivered" || run.Outcome == "closed" {
+			return "delivered"
+		}
+	}
 	// Delivered means the PR reached a terminal state on purpose: merged, or
 	// closed after its content landed some other way (squash elsewhere, direct
 	// push). Closed-unmerged PRs are therefore delivery, not abandonment.
 	for _, pr := range prs {
+		if failedRuns[pr.RunID] {
+			continue
+		}
 		if pr.Merged || pr.State == "closed" {
 			return "delivered"
 		}
 	}
 	for _, pr := range prs {
+		if failedRuns[pr.RunID] {
+			continue
+		}
 		if pr.State == "open" {
 			return "pr_open"
 		}
@@ -850,7 +886,7 @@ func deriveTaskRunAnalyticsTicketStatus(runs []taskRunAnalyticsTicketRunSummary,
 		if run.Status == "running" {
 			return "in_progress"
 		}
-		if run.Status != "failed" {
+		if run.Status != "failed" && run.Status != "cancelled" {
 			allFailed = false
 		}
 	}

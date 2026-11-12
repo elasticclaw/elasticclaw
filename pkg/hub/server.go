@@ -54,6 +54,9 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
+	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
+	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
+
 	db        *sql.DB
 	addr      string
 	hubCfg    *types.HubConfig
@@ -139,11 +142,12 @@ type Server struct {
 	agentIdleResumeBaselineCleared bool
 
 	replicatedBootstrapEnvMu sync.Mutex
-	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
+	replicatedBootstrapEnv   map[string]replicatedBootstrapEnvEntry // temporary handoff while a Replicated VM becomes reachable
 
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
-	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
+	// linearBaseURL overrides the Linear API base for tests and E2E runs
+	// (ELASTICCLAW_E2E_LINEAR_API_URL; default: https://api.linear.app)
 	linearBaseURL string
 	// shortcutBaseURL overrides the Shortcut API base for testing (default: https://api.app.shortcut.com)
 	shortcutBaseURL string
@@ -156,15 +160,21 @@ type Server struct {
 	fireworksModelsCacheKey   string
 	fireworksModelsCache      []LLMModelOption
 	fireworksModelsCacheUntil time.Time
-	modelAuthJobsMu           sync.Mutex
-	modelAuthJobs             map[string]*modelAuthLoginJob
-	modelAuthRefreshMu        sync.Mutex
-	modelAuthPending          map[string]string // rotated auth state awaiting durable config persistence
-	grokTokenEndpoint         string            // test seam; defaults to the xAI OAuth token endpoint
-	pollWarningMu             sync.Mutex
-	pollWarnings              map[string]struct{}
-	noProgressMu              sync.Mutex // serializes pause/resume state across the DB and active connection
-	llmLimitMu                sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
+	// anthropicBaseURL and openAIBaseURL override the model-listing API bases
+	// for testing (defaults: https://api.anthropic.com, https://api.openai.com)
+	anthropicBaseURL    string
+	openAIBaseURL       string
+	providerModelsMu    sync.Mutex
+	providerModelsCache map[string]providerModelsCacheEntry
+	modelAuthJobsMu     sync.Mutex
+	modelAuthJobs       map[string]*modelAuthLoginJob
+	modelAuthRefreshMu  sync.Mutex
+	modelAuthPending    map[string]string // rotated auth state awaiting durable config persistence
+	grokTokenEndpoint   string            // test seam; defaults to the xAI OAuth token endpoint
+	pollWarningMu       sync.Mutex
+	pollWarnings        map[string]struct{}
+	noProgressMu        sync.Mutex // serializes pause/resume state across the DB and active connection
+	llmLimitMu          sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
 	// llmLimitProbing holds keys whose latch was released on a deadline and
 	// whose lift is not yet proven by a turn (see releaseLLMUsageLimit).
 	// Guarded by llmLimitMu.
@@ -178,6 +188,9 @@ type Server struct {
 	// promoteMu serializes promotePendingClaws to prevent TOCTOU race where
 	// multiple terminating claws each read active < max and promote, exceeding limit.
 	promoteMu sync.Mutex
+	// activatingClaws holds workflow claws whose beforeProvision activation
+	// is still running; promotePendingClaws must not provision them yet.
+	activatingClaws sync.Map
 
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
@@ -187,11 +200,13 @@ type Server struct {
 
 	// Reaper state is deliberately in-memory: its conservative timers reset on
 	// a hub restart rather than treating an uncertain outage as an agent failure.
-	reaperMu            sync.Mutex
-	reaperFirstSeen     map[string]time.Time
-	usageCostRatios     sync.Map
-	nowFunc             func() time.Time
-	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
+	reaperMu                       sync.Mutex
+	reaperFirstSeen                map[string]time.Time
+	usageCostRatios                sync.Map
+	nowFunc                        func() time.Time
+	terminateVMOverride            func(provider, id string) error // test seam for terminal cleanup
+	replicatedVMTerminatedOverride func(context.Context, string, time.Time) (bool, error)
+	vmSyncGo                       func(func()) // test seam for VM sync goroutines; nil spawns
 
 	// Constructed notifiers are cached per notifier name so instances are
 	// genuinely reused across features (the lifecycle poller, the manual test
@@ -661,6 +676,9 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		nowFunc:                  now,
 		ticketMetadataEnrichment: make(chan struct{}, 32),
 		ticketCursorKey:          randomTicketCursorKey(),
+		// E2E runs point Linear at an in-process fake so they never touch a
+		// real workspace (and its issue quota).
+		linearBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_LINEAR_API_URL")), "/"),
 	}
 	if err := srv.loadTaskRunAnalyticsTicketCursorKey(); err != nil {
 		_ = db.Close()
@@ -677,6 +695,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
 	go srv.runRetention()
+	go srv.runAPITokenAuditPruner()
 	if srv.livenessEnabled() {
 		go srv.runReaper()
 	}
@@ -836,6 +855,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/feature-flags/{key}", s.withWebAdminAuth(s.handleFeatureFlag))
 	mux.HandleFunc("/api/settings/beta-testers", s.withWebAdminAuth(s.handleBetaTesters))
 	mux.HandleFunc("/api/settings/beta-testers/{login}", s.withWebAdminAuth(s.handleBetaTester))
+	mux.HandleFunc("/api/settings/api-tokens", s.withWebAdminAuth(s.handleAPITokens))
+	mux.HandleFunc("/api/settings/api-tokens/{id}", s.withWebAdminAuth(s.handleAPIToken))
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
@@ -895,8 +916,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/secrets", s.withWebAdminAuth(s.handleSecretsCRUD)) // secrets CRUD (GET names, PUT upsert, DELETE)
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
+	mux.Handle("/mcp", s.withAPITokenAuth(s.factoryMCPHandler()))
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
+	mux.HandleFunc("POST /api/claws/{id}/branches", s.handleClawBranches)  // claw-token auth
+	mux.HandleFunc("POST /api/claws/{id}/prs", s.handleClawPRRegistration) // claw-token auth
 	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
 	mux.HandleFunc("/api/checkpoints/", s.handleCheckpointInternal)
 	mux.HandleFunc("/api/volumes/leases/{lease}/archive", s.handleVolumeArchive)
@@ -1545,6 +1569,7 @@ func settingsStaticSection(section string) bool {
 		"models",
 		"github",
 		"authentication",
+		"api-tokens",
 		"issue-trackers",
 		"workspaces",
 		"workflows",
@@ -2043,9 +2068,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodDelete {
-		// Resolve short ID prefix to full UUID
+		// Resolve short ID prefix to full UUID; an exact match always wins.
 		var fullID string
-		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?)`, tenantID, clawID, clawID+"%").Scan(&fullID)
+		_ = s.db.QueryRow(`SELECT id FROM claws WHERE tenant_id = ? AND (id = ? OR id LIKE ?) ORDER BY id = ? DESC LIMIT 1`, tenantID, clawID, clawID+"%", clawID).Scan(&fullID)
 		if fullID != "" {
 			clawID = fullID
 		}
@@ -2071,8 +2096,40 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		var provider, providerID, clawStatus string
 		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,''), COALESCE(status,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID, &clawStatus)
 
-		// Post a comment on the linked issue/story when a factory-created claw is killed manually
+		// Resolve the linked issue/story before the delete; it is commented only
+		// once the kill is committed, so a retried kill does not comment twice.
 		factory, issueID := s.findFactoryForClaw(clawID)
+
+		// Cancel the bound workflow v2 run before the soft delete, which
+		// bypasses finishClawTerminalTx. A tick landing after the delete would
+		// otherwise be absorbed by the dying run of a signal-overlap workflow,
+		// and a cancel failure would leave that run active forever. On failure
+		// the claw stays alive so the kill can be retried. clawStatus is only
+		// set when the tenant owns the claw.
+		if clawStatus != "" && clawStatus != "deleted" {
+			runID, err := s.cancelBoundWorkflowV2Run(context.Background(), clawID, "manually killed")
+			if err != nil {
+				log.Printf("kill: claw %s: %v", clawID, err)
+				http.Error(w, "failed to cancel workflow run", http.StatusInternalServerError)
+				return
+			}
+			if runID != "" {
+				// Close the cron history and parent once the claw is deleted.
+				defer s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+			}
+		}
+		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
+		if err != nil {
+			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
+			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		rowsAffected, err := res.RowsAffected()
+		if err != nil || rowsAffected == 0 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Post a comment on the linked issue/story when a factory-created claw is killed manually
 		if factory != nil && issueID != "" {
 			switch factory.Integration {
 			case "linear":
@@ -2110,18 +2167,6 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-		}
-
-		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
-		if err != nil {
-			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
-			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
-			return
-		}
-		rowsAffected, err := res.RowsAffected()
-		if err != nil || rowsAffected == 0 {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
 		}
 		if clawStatus != "error" {
 			s.recordTaskRunManualStopBeforeDelivery(clawID, ghLogin)
@@ -3572,11 +3617,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if s.hasFailedRequiredGate(clawID) {
 					s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
 				} else {
-					prURLs := extractDonePRURLs(turnContent)
+					prURLs, fallback := s.donePRURLs(clawID, turnContent)
 					// Register before the stage transition so pr_merged/pr_closed
 					// monitoring is armed even if the agent only listed URLs next
 					// to [DONE] and never elsewhere in chat.
-					if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+					if fallback && s.rejectInvalidDoneFallback(clawID, prURLs) {
+						// Validation already sent the retry instructions.
+					} else if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
 						s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
 					} else {
 						s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
@@ -3638,7 +3685,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// A transport error can quote a repository URL (git and CI
 					// failures routinely do). Arming the PR watcher on text the
 					// agent never wrote would watch a PR nobody opened.
-					go s.scanMessageForPRs(clawID, turnContent, true)
+					go s.scanMessageForPRs(clawID, turnContent, true, "mention")
 				}
 			}
 			// Detect tool error loops and inject a corrective message
@@ -4158,6 +4205,12 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	if err != nil {
 		return fmt.Errorf("daytona init: %w", err)
 	}
+	// Fail before creating a sandbox when the connector artifact is definitively missing.
+	if bridgeURL := s.bridgeDownloadURL(); bridgeURL != "" {
+		if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+			return err
+		}
+	}
 	s.setBootstrapStatus(clawID, "Creating sandbox")
 	// Resolve snapshot: template snapshot > hub default_snapshot
 	snapshot := req.Snapshot
@@ -4198,6 +4251,9 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			if lastErr == nil {
 				return
 			}
+			if errors.Is(lastErr, errBridgeArtifactUnavailable) {
+				break
+			}
 			if s.daytonaBridgeRunning(context.Background(), instance.ID, p) {
 				log.Printf("[daytona] bootstrap attempt %d/%d for claw %s returned error after claw-bridge started; treating bootstrap as complete: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 				return
@@ -4205,7 +4261,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 			log.Printf("[daytona] bootstrap attempt %d/%d failed for claw %s: %v", attempt, maxBootstrapAttempts, clawName, lastErr)
 		}
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
+		s.stopAgentIfInstance(clawID, instance.ID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
 		// stopAgentWithReason already terminates the VM; no need to destroy again
 	}()
 	return nil
@@ -4577,6 +4633,9 @@ exit 1`
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml (e.g. bridge_image: ttl.sh/your/claw-bridge:tag) or build a tagged release")
 	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
+	}
 	var downloadCmd string
 	if strings.HasPrefix(bridgeURL, "http://") || strings.HasPrefix(bridgeURL, "https://") {
 		downloadCmd = fmt.Sprintf(`rm -f /tmp/claw-bridge.download && curl -fsSL %q -o /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv -f /tmp/claw-bridge.download /tmp/claw-bridge && echo downloaded`, bridgeURL)
@@ -4755,7 +4814,7 @@ command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1`
 			configureGitHubTokenRefresh := `export HOME=/home/daytona
 set +x
 ` + buildGitHubTokenProfileInstallScript() + `
-` + buildGitHubCLIWrapperInstallScript() + `
+` + buildGitHubCLIWrapperInstallScript(s.clawHubURL(), clawID, clawToken) + `
 . /etc/profile.d/elasticclaw-github.sh
 command -v gh
 [ -n "${GH_TOKEN:-}" ]
@@ -5777,7 +5836,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 	go func() {
 		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files, env); err != nil {
 			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
+			s.stopAgentIfInstance(clawID, instance.ID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
 	}()
 
@@ -5845,6 +5904,9 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
+	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
 	}
 
 	// Generate a random gateway password for this VM
@@ -6150,6 +6212,9 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	if !strings.HasPrefix(bridgeURL, "http://") && !strings.HasPrefix(bridgeURL, "https://") {
 		return fmt.Errorf("docker provider requires an HTTP(S) claw-bridge URL, got %q", bridgeURL)
 	}
+	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
+		return err
+	}
 	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL)
 	if err != nil {
 		return err
@@ -6331,17 +6396,19 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		return fmt.Errorf("replicated provision: %w", err)
 	}
 	recordE2EReplicatedVMID(vmID)
-	s.rememberReplicatedBootstrapEnv(clawID, env)
+	s.rememberReplicatedBootstrapEnv(clawID, vmID, env)
 	// Store vm_id in the claw record — keep status='provisioning' so the poller can detect
 	// the provisioning→running transition and trigger bootstrap. Skip if already deleted.
-	_, _ = s.db.Exec(
-		`UPDATE claws SET provider='replicated', provider_id=? WHERE id=? AND status NOT IN ('deleted','starting','connected','idle')`, vmID, clawID,
-	)
+	if err := s.assignReplicatedVM(clawID, vmID); err != nil {
+		s.forgetReplicatedBootstrapEnvForVM(clawID, vmID)
+		_ = p.DeleteVM(ctx, vmID)
+		return fmt.Errorf("store replicated VM: %w", err)
+	}
 	// If deleted, clean up the VM and bail
 	var currentStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 	if currentStatus == "deleted" {
-		s.forgetReplicatedBootstrapEnv(clawID)
+		s.forgetReplicatedBootstrapEnvForVM(clawID, vmID)
 		log.Printf("[provision] claw %s deleted mid-provision, destroying VM %s", clawID[:8], vmID)
 		_ = p.DeleteVM(ctx, vmID)
 		return fmt.Errorf("claw deleted mid-provision")
@@ -6372,26 +6439,43 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	return nil
 }
 
-func (s *Server) rememberReplicatedBootstrapEnv(clawID string, env map[string]string) {
+// replicatedBootstrapEnvEntry binds a staged bootstrap env to the VM it was
+// provisioned for, so a bootstrap outliving its VM cannot drop a successor's.
+type replicatedBootstrapEnvEntry struct {
+	vmID string
+	env  map[string]string
+}
+
+func (s *Server) rememberReplicatedBootstrapEnv(clawID, vmID string, env map[string]string) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
 	if s.replicatedBootstrapEnv == nil {
-		s.replicatedBootstrapEnv = make(map[string]map[string]string)
+		s.replicatedBootstrapEnv = make(map[string]replicatedBootstrapEnvEntry)
 	}
-	s.replicatedBootstrapEnv[clawID] = cloneStringMap(env)
+	s.replicatedBootstrapEnv[clawID] = replicatedBootstrapEnvEntry{vmID: vmID, env: cloneStringMap(env)}
 }
 
 func (s *Server) loadReplicatedBootstrapEnv(clawID string) (map[string]string, bool) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
-	env, ok := s.replicatedBootstrapEnv[clawID]
-	return cloneStringMap(env), ok
+	entry, ok := s.replicatedBootstrapEnv[clawID]
+	return cloneStringMap(entry.env), ok
 }
 
 func (s *Server) forgetReplicatedBootstrapEnv(clawID string) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
 	delete(s.replicatedBootstrapEnv, clawID)
+}
+
+// forgetReplicatedBootstrapEnvForVM drops the staged env only while it still
+// belongs to vmID; a retry may have re-staged it for a successor VM.
+func (s *Server) forgetReplicatedBootstrapEnvForVM(clawID, vmID string) {
+	s.replicatedBootstrapEnvMu.Lock()
+	defer s.replicatedBootstrapEnvMu.Unlock()
+	if entry, ok := s.replicatedBootstrapEnv[clawID]; ok && entry.vmID == vmID {
+		delete(s.replicatedBootstrapEnv, clawID)
+	}
 }
 
 // ─── Provider status polling ──────────────────────────────────────────────────
@@ -6694,6 +6778,16 @@ func (s *Server) checkClawStatus() {
 	}
 }
 
+// goVMSync runs a VM sync side effect off the poll loop. The stops it runs
+// check c.providerID because a lookup can return after a retry replaced the VM.
+func (s *Server) goVMSync(f func()) {
+	if s.vmSyncGo != nil {
+		s.vmSyncGo(f)
+		return
+	}
+	go f()
+}
+
 func (s *Server) syncReplicatedVMs() {
 	s.mu.RLock()
 	replicatedCfg, ok := s.hubCfg.Providers["replicated"]
@@ -6747,7 +6841,9 @@ func (s *Server) syncReplicatedVMs() {
 			// retry/terminal funnel as an explicit terminated status.
 			if strings.Contains(err.Error(), "HTTP 404") {
 				log.Printf("pollProviderStatus: VM %s not found (404) for claw %s", c.providerID, c.id[:8])
-				go s.stopAgentWithReason(c.id, "Provider VM lost: replicated VM no longer exists", true)
+				s.goVMSync(func() {
+					s.stopAgentIfInstance(c.id, c.providerID, "Provider VM lost: replicated VM no longer exists", true)
+				})
 			} else {
 				log.Printf("pollProviderStatus: get VM %s error: %v", c.providerID, err)
 			}
@@ -6773,14 +6869,16 @@ func (s *Server) syncReplicatedVMs() {
 					// starting an agent without its configured environment.
 					const reason = "Bootstrap failed: transient environment unavailable after hub restart; recreate the claw"
 					log.Printf("Claw %s (%s): %s", c.name, c.id[:8], reason)
-					go s.stopAgentWithReason(c.id, reason, false)
+					s.goVMSync(func() { s.stopAgentIfInstance(c.id, c.providerID, reason, false) })
 					continue
 				}
 				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg, env)
 			}
 		case "terminated", "error":
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
-			go s.stopAgentWithReason(c.id, "Provider VM lost: sandbox terminated (TTL expired or external shutdown)", true)
+			s.goVMSync(func() {
+				s.stopAgentIfInstance(c.id, c.providerID, "Provider VM lost: sandbox terminated (TTL expired or external shutdown)", true)
+			})
 			// Note: stopAgentWithReason handles disconnect, status, broadcast, VM cleanup
 			// Spawned in goroutine so slow issue-tracker APIs don't stall the poll loop.
 			// Skip the rest of the status update logic for this claw
@@ -7274,7 +7372,7 @@ func (s *Server) clawHasMessages(clawID string) bool {
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
 func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig, env map[string]string) {
-	defer s.forgetReplicatedBootstrapEnv(clawID)
+	defer s.forgetReplicatedBootstrapEnvForVM(clawID, vmID)
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
 	// Bail immediately if claw was deleted while VM was spinning up
 	var checkStatus string
@@ -7294,13 +7392,13 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		clawID,
 	).Scan(&filesJSON, &templateName); err != nil {
 		log.Printf("[bootstrap] failed to load template_files for claw %s: %v", clawID[:8], err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
 		return
 	}
 	var files map[string]string
 	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
 		log.Printf("[bootstrap] failed to parse template_files for claw %s: %v", clawID[:8], err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
 		return
 	}
 	// Load github repos config for this claw
@@ -7340,7 +7438,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	bridgeURL := s.bridgeDownloadURL()
 	if bridgeURL == "" {
 		log.Printf("[bootstrap] ERROR: bridge_image not set and hub version is 'dev' — set bridge_image in hub.yaml")
-		s.stopAgentWithReason(clawID, "Bootstrap failed: bridge_image not configured", false)
+		s.stopAgentIfInstance(clawID, vmID, "Bootstrap failed: bridge_image not configured", false)
+		return
+	}
+	if err := bootstrapBridgePreflight.check(context.Background(), bridgeURL); err != nil {
+		s.stopAgentWithReason(clawID, err.Error(), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
@@ -7362,7 +7464,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	sshHome, err := sshHomeDir(sshUser)
 	if err != nil {
 		log.Printf("bootstrap: invalid SSH user %q: %v", sshUser, err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: invalid SSH user: %s", sanitizeBootstrapError(err)), false)
 		return
 	}
 	sshHost := fmt.Sprintf("%s:%d", vm.DirectSSHEndpoint, vm.DirectSSHPort)
@@ -7375,10 +7477,13 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	}
 	log.Printf("Bootstrap SSH: %s@%s", sshUser, sshHost)
 	// Store SSH connection details in the DB for terminal access
-	_, _ = s.db.Exec(
-		`UPDATE claws SET ssh_host=?, ssh_port=?, ssh_user=? WHERE id=?`,
-		vm.DirectSSHEndpoint, vm.DirectSSHPort, sshUser, clawID,
-	)
+	if err := s.storeReplicatedSSHEndpoint(clawID, vmID, vm.DirectSSHEndpoint, vm.DirectSSHPort, sshUser); err != nil {
+		log.Printf("bootstrap: could not store SSH endpoint for VM %s: %v", vmID, err)
+		if !errors.Is(err, errReplicatedVMUnassigned) {
+			s.stopAgentWithReason(clawID, "Bootstrap failed: could not store SSH endpoint: "+err.Error(), false)
+		}
+		return
+	}
 
 	// Generate a random gateway password for this VM so claw-bridge can connect with full scopes
 	gatewayPassword := randomHex(16)
@@ -7480,7 +7585,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 			},
 		}); err != nil {
 			log.Printf("[bootstrap] failed to stage flake before bootstrap for claw %s: %v", clawID[:8], err)
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not stage flake files: %s", err), false)
 			return
 		}
 	}
@@ -7498,7 +7603,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 		},
 	}); err != nil {
 		log.Printf("Bootstrap failed for claw %s: %v", clawID, err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", err), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: %s", err), false)
 		return
 	}
 	s.setBootstrapStatus(clawID, "Writing workspace files")
@@ -7524,7 +7629,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshWriteFiles(sshUser, sshHost, replicatedFinalWorkspaceDir(sshHome), files)
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
 			return
 		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
@@ -7536,7 +7641,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(replicatedFinalWorkspaceDir(sshHome), files))
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
 			return
 		}
 		log.Printf("Template files written for claw %s", clawName)
@@ -7544,7 +7649,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 
 	if err := s.restoreCheckpointToSSH(clawID, sshUser, sshHost); err != nil {
 		log.Printf("[bootstrap] restore checkpoint failed: %v", err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore checkpoint failed: %s", sanitizeBootstrapError(err)), false)
+		s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Restore checkpoint failed: %s", sanitizeBootstrapError(err)), false)
 		return
 	}
 
@@ -7557,7 +7662,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
 		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
 		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
 			return
 		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
@@ -7569,7 +7674,7 @@ This should return "username=x-access-token" and a password. The helper is the s
 				return s.sshRun(sshUser, sshHost, credHelper)
 			},
 		}); err != nil {
-			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
+			s.stopAgentIfInstance(clawID, vmID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
 			return
 		}
 		log.Printf("[bootstrap] GitHub credential helper installed for claw %s workspace=%q", clawName, workspaceName)
@@ -7842,13 +7947,51 @@ sudo chmod +x /etc/profile.d/elasticclaw-github.sh
 [ -s /etc/profile.d/elasticclaw-github.sh ] || exit 1`
 }
 
-func buildGitHubCLIWrapperInstallScript() string {
-	return `if command -v gh >/dev/null 2>&1; then
+func buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken string) string {
+	// Bake the same bootstrap credentials as the git helper instead of parsing
+	// its shell source or relying on the agent's environment.
+	reportURL := strings.TrimRight(hubURL, "/") + "/api/claws/" + url.PathEscape(clawID) + "/prs?claw_token=" + url.QueryEscape(clawToken)
+	return `sudo tee /usr/local/bin/elasticclaw-report-pr > /dev/null << 'REPORTEOF'
+#!/bin/bash
+set +x
+url="$(python3 - "$1" "$2" << 'PYEOF'
+import json, re, sys
+PR_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")
+try:
+    text = open(sys.argv[2], errors="replace").read()
+    if sys.argv[1] == "api":
+        body = text
+        if body.startswith("HTTP/"):
+            # --include prefixes the JSON body with response headers.
+            body = re.split(r"\r?\n\r?\n", body, maxsplit=1)[-1]
+        # Only the response object identifies the created PR. --jq/--template
+        # output is arbitrary text that may quote other PRs; the branch sweep
+        # covers those commands instead.
+        data = json.loads(body)
+        candidate = (data.get("html_url") or "") if isinstance(data, dict) else ""
+        if PR_URL.fullmatch(candidate):
+            print(candidate)
+    else:
+        # gh pr create prints the URL of the new PR on its own line; other lines
+        # (warnings, forwarded output) may quote unrelated PRs.
+        urls = [line.strip() for line in text.splitlines() if PR_URL.fullmatch(line.strip())]
+        if urls:
+            print(urls[-1])
+except (OSError, ValueError, AttributeError, TypeError):
+    pass
+PYEOF
+)"
+[ -n "$url" ] || exit 0
+curl -sf --max-time 10 -H 'Content-Type: application/json' \
+  --data "{\"url\":\"$url\",\"source\":\"gh_create\"}" ` + shellQuote(reportURL) + ` >/dev/null 2>&1
+REPORTEOF
+sudo chmod +x /usr/local/bin/elasticclaw-report-pr
+if command -v gh >/dev/null 2>&1; then
   REAL_GH="$(command -v gh)"
   if [ "$REAL_GH" = "/usr/local/bin/gh" ]; then
     if grep -q "ElasticClaw GitHub App token refresh wrapper" /usr/local/bin/gh 2>/dev/null; then
-      echo "GitHub gh wrapper already configured"
-      REAL_GH=""
+      echo "GitHub gh wrapper already configured; refreshing"
+      REAL_GH="$(sed -n 's/^REAL_GH="\(.*\)"$/\1/p' /usr/local/bin/gh | head -n1)"
     elif [ -x /usr/local/bin/gh.elasticclaw-real ]; then
       REAL_GH="/usr/local/bin/gh.elasticclaw-real"
     else
@@ -7884,6 +8027,10 @@ if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
   if [ -n "$target_repo" ]; then
     target_repo="${target_repo%.git}"
     target_repo="${target_repo#/}"
+    if [[ "$target_repo" =~ ^repos/[^/]+/[^/]+/pulls$ ]]; then
+      target_repo="${target_repo#repos/}"
+      target_repo="${target_repo%/pulls}"
+    fi
   fi
   if [ -n "$target_repo" ]; then
     token="$(printf 'protocol=https\nhost=github.com\npath=%s.git\n\n' "$target_repo" | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
@@ -7895,7 +8042,90 @@ if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
   fi
   unset token target_repo prev arg
 fi
-exec "$REAL_GH" "$@"
+# Only creation commands need to return through the reporting path.
+report_kind=""
+positional=()
+no_create=0
+prev=""
+for arg in "$@"; do
+  # Flags may precede the subcommand (gh -R owner/repo pr create).
+  case "$prev" in
+    --repo|-R|--head|-H|--body|-b|--title|-t|--base|-B) prev=""; continue ;;
+  esac
+  case "$arg" in
+    --repo|-R|--head|-H|--body|-b|--title|-t|--base|-B) prev="$arg"; continue ;;
+    # These finish without creating a PR, and may print text quoting other PRs.
+    --dry-run|--dry-run=*|--web|-w|--help|-h) no_create=1 ;;
+    -*) ;;
+    *) [ "${#positional[@]}" -lt 2 ] && positional+=("$arg") ;;
+  esac
+  prev=""
+done
+if [ "${positional[0]:-}" = "pr" ] && [ "${positional[1]:-}" = "create" ]; then
+  [ "$no_create" = 1 ] || report_kind="pr"
+elif [ "${positional[0]:-}" = "api" ]; then
+  api_path=""
+  api_method=""
+  api_fields=0
+  api_transformed=0
+  skip_value=0
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "method" ]; then
+      api_method="$arg"
+      prev=""
+      continue
+    fi
+    if [ "$skip_value" = 1 ]; then
+      skip_value=0
+      continue
+    fi
+    case "$arg" in
+      -X|--method) prev="method" ;;
+      -X?*) api_method="${arg#-X}" ;;
+      --method=*) api_method="${arg#--method=}" ;;
+      -f|-F|--field|--raw-field) api_fields=1; skip_value=1 ;;
+      --input) api_fields=1; skip_value=1 ;;
+      -f?*|-F?*|--field=*|--raw-field=*|--input=*) api_fields=1 ;;
+      # --jq/--template output is shaped by the caller (even {html_url: .body}
+      # is valid JSON), so it cannot identify the created PR.
+      -q|--jq|-t|--template) api_transformed=1; skip_value=1 ;;
+      -q?*|--jq=*|-t?*|--template=*) api_transformed=1 ;;
+      # Grouped short flags (-iq, -it) can carry --jq/--template too.
+      -[!XfFH-]*) [[ "$arg" == *[qt]* ]] && api_transformed=1 ;;
+      -H|--header|--hostname|--cache|-R|--repo) skip_value=1 ;;
+      *)
+        if [[ "$arg" =~ ^/?repos/[^/]+/[^/]+/pulls$ ]]; then
+          api_path="$arg"
+        fi
+        ;;
+    esac
+  done
+  if [ -n "$api_path" ] && [ "$api_transformed" = 0 ] && { [ "$api_method" = "POST" ] || { [ -z "$api_method" ] && [ "$api_fields" = 1 ]; }; }; then
+    report_kind="api"
+  fi
+fi
+if [ -z "$report_kind" ]; then
+  exec "$REAL_GH" "$@"
+fi
+# With a TTY attached gh may prompt, and capturing stdout would change its
+# behavior; interactive creations are left to the branch sweep.
+if [ -t 1 ]; then
+  exec "$REAL_GH" "$@"
+fi
+output="$(mktemp 2>/dev/null)" || exec "$REAL_GH" "$@"
+"$REAL_GH" "$@" | tee "$output" 2>/dev/null
+status=${PIPESTATUS[0]}
+if [ "$status" = 0 ]; then
+  (
+    trap 'rm -f "$output"' EXIT
+    /usr/local/bin/elasticclaw-report-pr "$report_kind" "$output"
+  ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+else
+  rm -f "$output" 2>/dev/null
+fi
+exit "$status"
 GHEOF
     REAL_GH_ESCAPED="$(printf '%s' "$REAL_GH" | sed 's/[&\\|]/\\&/g')"
     sudo sed -i "s|__ELASTICCLAW_REAL_GH__|$REAL_GH_ESCAPED|g" /usr/local/bin/gh
@@ -8296,7 +8526,7 @@ if command -v git &>/dev/null && [ -d "$HOME/.openclaw/workspace" ]; then
     esac
   done
 fi
-%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
+%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.

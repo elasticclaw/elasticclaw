@@ -134,7 +134,7 @@ func (s *Store) InspectRun(ctx context.Context, runID string) (Inspection, error
 		COALESCE(SUM(CASE WHEN active=1 AND state='open' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN active=1 AND state='merged' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN active=1 AND state='closed' THEN 1 ELSE 0 END),0)
-		FROM workflow_v2_delivery_prs WHERE run_id=?`, runID).Scan(
+		FROM workflow_v2_delivery_prs WHERE run_id=? AND registered_only=0`, runID).Scan(
 		&inspection.Delivery.ActivePullRequests, &inspection.Delivery.OpenPullRequests,
 		&inspection.Delivery.MergedPullRequests, &inspection.Delivery.ClosedPullRequests); err != nil {
 		return Inspection{}, err

@@ -329,7 +329,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
-	if groupLimit > 0 && activeCount >= groupLimit {
+	if groupLimit > 0 && (activeCount >= groupLimit || s.hasPendingInGroup(groupName)) {
 		isPending = true
 		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for factory %s as pending", groupName, activeCount, groupLimit, factory.Name)
 	}
@@ -405,6 +405,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	})
 
 	if isPending {
+		go s.promotePendingClaws()
 		return clawID, true, nil
 	}
 

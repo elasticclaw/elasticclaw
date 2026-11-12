@@ -276,8 +276,8 @@ func Migrate(db *sql.DB) error {
 		workspace_name TEXT NOT NULL,
 		workflow_name  TEXT NOT NULL,
 		trigger_type   TEXT NOT NULL DEFAULT 'cron',
-		status         TEXT NOT NULL DEFAULT 'pending',  -- 'pending','running','completed','failed','skipped','canceled'
-		result         TEXT NOT NULL DEFAULT '',           -- 'success','failure','skipped','canceled'
+		status         TEXT NOT NULL DEFAULT 'pending',  -- 'pending','running','completed','failed','skipped','canceled','signaled'
+		result         TEXT NOT NULL DEFAULT '',           -- 'success','failure','skipped','canceled','signaled'
 		claw_id        TEXT NOT NULL DEFAULT '',
 		v2_run_id      TEXT NOT NULL DEFAULT '',
 		run_context    TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(run_context) AND json_type(run_context)='object'),
@@ -291,8 +291,39 @@ func Migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_claw ON workflow_v2_cron_runs(claw_id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_v2_run ON workflow_v2_cron_runs(v2_run_id);
 
+	CREATE TABLE IF NOT EXISTS workflow_v2_deferred_events (
+		run_id     TEXT NOT NULL REFERENCES workflow_v2_runs(id) ON DELETE CASCADE,
+		defer_key  TEXT NOT NULL,
+		event_id   TEXT NOT NULL,
+		seq        INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY(run_id, defer_key)
+	);
+
 	`)
 	if err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	for _, column := range []string{"mergeable_state", "mergeable_head_sha", "base_sha"} {
+		if err := addColumnIfMissing(db, "workflow_v2_delivery_prs", column, "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("workflow v2 migrate: %w", err)
+		}
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_delivery_prs", "mergeable_observed_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	// postponed marks event-clause effects that a replay planned while it
+	// postponed a broken invariant; the effect worker skips them until the
+	// replay settles the invariant (see settleReplayedInvariant).
+	if err := addColumnIfMissing(db, "workflow_v2_effects", "postponed", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	// postponed_subject is the deferred-replay subject of the event that parked
+	// the effect, so a newer observation of that subject supersedes it.
+	if err := addColumnIfMissing(db, "workflow_v2_effects", "postponed_subject", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_delivery_prs", "registered_only", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	if err := addColumnIfMissing(db, "workflow_v2_runs", "trigger_type", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {

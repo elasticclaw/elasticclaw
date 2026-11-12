@@ -621,7 +621,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
-	if groupLimit > 0 && activeCount >= groupLimit {
+	if groupLimit > 0 && (activeCount >= groupLimit || s.hasPendingInGroup(groupName)) {
 		isPending = true
 		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for external trigger %s as pending",
 			groupName, activeCount, groupLimit, triggerID)
@@ -653,6 +653,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	})
 
 	if isPending {
+		go s.promotePendingClaws()
 		return clawID, nil
 	}
 
