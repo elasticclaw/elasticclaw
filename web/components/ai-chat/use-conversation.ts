@@ -11,7 +11,37 @@ import { useChatSources } from "./use-chat-sources"
 // error such as 429): it was never sent, so it must be resent, not retried.
 type TurnError = { action?: AIChatActionRequest; answers?: AIChatAnswers; answersSummary?: AIChatAnswersSummary; message: string; text: string; retry: boolean; rejected?: boolean; afterMessageId?: string }
 
-const unfinishedStatuses = ["error", "cancelled", "limit"]
+const unfinishedStatuses = ["error", "cancelled", "interrupted", "limit"]
+
+const unfinishedNotices: Record<string, string> = {
+  cancelled: "You stopped this response.",
+  interrupted: "The connection dropped before this response finished.",
+  limit: "The last response reached its turn limit.",
+}
+
+// A first answer whose connection dropped before any output is retried once.
+// The set outlives a remount, so reopening the thread does not retry it again.
+const autoRetried = new Set<string>()
+const AUTO_RETRY_WINDOW_MS = 2 * 60 * 1000
+const STOP_TIMEOUT_MS = 5000
+
+// A Stop blocks the automatic retry on its thread for the retry window, even
+// when the hub never heard the Stop, the page reloads, or another tab opens it.
+const stoppedAt = new Map<string, number>()
+const stopStorageKey = (threadId: string) => `ai-chat-stopped:${threadId}`
+function rememberStop(threadId: string) {
+  stoppedAt.set(threadId, Date.now())
+  try { localStorage.setItem(stopStorageKey(threadId), String(Date.now())) } catch { /* memory only */ }
+}
+function forgetStop(threadId: string) {
+  stoppedAt.delete(threadId)
+  try { localStorage.removeItem(stopStorageKey(threadId)) } catch { /* memory only */ }
+}
+function recentlyStopped(threadId: string) {
+  let at = stoppedAt.get(threadId) ?? 0
+  try { at = Math.max(at, Number(localStorage.getItem(stopStorageKey(threadId))) || 0) } catch { /* memory only */ }
+  return Date.now() - at < AUTO_RETRY_WINDOW_MS
+}
 
 // randomUUID needs a secure context; a hub served over plain http still needs a key.
 export function newActionKey() {
@@ -46,6 +76,8 @@ export function useConversation() {
   // conversation is replaced; `syncRevision` whenever a newer thread sync or
   // turn starts.
   const active = useRef<AbortController | null>(null)
+  const activeTurn = useRef<StreamTurn | null>(null)
+  const stopRequested = useRef(false)
   const generation = useRef(0)
   const syncRevision = useRef(0)
   // The syncRevision of the last thread sync shown on screen.
@@ -182,6 +214,7 @@ export function useConversation() {
     syncRevision.current++
     const controller = new AbortController()
     active.current = controller
+    stopRequested.current = false
     setStreaming(true)
     setTurnError(null)
     return controller
@@ -198,36 +231,49 @@ export function useConversation() {
     const onEvent = (event: string, payload: Record<string, unknown>) => {
       if (isCurrent()) applyStreamEvent(turn, event, payload, { setMessages, setDraft, setReading })
     }
-    if (turn.action) await streamAIChatAction(turn.threadId, turn.action, signal, onEvent)
-    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers)
+    if (turn.action) await streamAIChatAction(turn.threadId, turn.action, signal, onEvent, turn.turnKey)
+    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers, turn.turnKey, turn.retryOf)
   }
 
   const finishTurn = async (turn: StreamTurn, isCurrent: () => boolean) => {
     if (isCurrent()) sending.current = false
     // Keep streamed content if the connection is unavailable.
-    if (turn.threadId && isCurrent()) await syncThread(turn.threadId).catch(() => {})
+    const saved = turn.threadId && isCurrent() ? await syncThread(turn.threadId).catch(() => undefined) : undefined
+    // A turn stopped before it started may still be saved as interrupted.
+    const last = saved?.messages.at(-1)
+    if (stopRequested.current && last) autoRetried.add(last.id)
     if (!isCurrent()) return
+    activeTurn.current = null
     sending.current = false
     setStreaming(false)
     setReading("")
     active.current = null
   }
 
-  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatActionRequest) => {
+  // `autoRetryOf` marks the automatic retry of that answer, which never clears a
+  // Stop or shows a rejection.
+  const send = async (text: string, retry = false, answers?: AIChatAnswers, answersSummary?: AIChatAnswersSummary, action?: AIChatActionRequest, autoRetryOf?: string) => {
+    const auto = !!autoRetryOf
     if (!data?.configured || !canStartTurn(action ? "action" : answers ? "answers" : text, retry)) return
+    if (!auto && threadRef.current) forgetStop(threadRef.current)
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
-    const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "" }
+    const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "", retryOf: autoRetryOf }
     const afterMessageId = messages[messages.length - 1]?.id
+    // Without a random source, Stop falls back to aborting the stream.
+    try { turn.turnKey = newActionKey() } catch { /* keyless turn */ }
+    activeTurn.current = turn
     try {
       if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: newActionKey() }
       turn.action = action
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
-      if (turn.error) setTurnError({ action, message: turn.error, text, retry: true, afterMessageId })
+      if (turn.error && !stopRequested.current) setTurnError({ action, message: turn.error, text, retry: true, afterMessageId })
     } catch (error) {
-      if (isCurrent() && !controller.signal.aborted) {
-        const rejected = error instanceof ApiError && !turn.started
+      const rejected = error instanceof ApiError && !turn.started
+      // After a Stop, a refusal or failure of the stopped turn is expected; an
+      // automatic retry that another tab already started is not the user's error.
+      if (isCurrent() && !controller.signal.aborted && !stopRequested.current && !(auto && rejected)) {
         setTurnError({ action, message: errorMessage(error, "Unable to send message."), text, retry: turn.started || retry, rejected, afterMessageId, answers: turn.started ? undefined : answers, answersSummary: turn.started ? undefined : answersSummary })
       }
     } finally {
@@ -248,10 +294,19 @@ export function useConversation() {
     const controller = active.current
     const version = generation.current
     const id = threadRef.current
+    const turn = activeTurn.current
+    stopRequested.current = true
+    const stoppedThread = turn?.threadId || id
+    if (stoppedThread) rememberStop(stoppedThread)
+    if (turn?.assistantId) autoRetried.add(turn.assistantId)
+    // Telling the hub first saves the turn as stopped; a bare abort reads as a
+    // dropped connection. The turn key keeps a late stop off the next turn, and
+    // the wait is bounded so a stuck request cannot block the abort.
+    if (controller && turn?.threadId && turn.turnKey) {
+      await Promise.race([cancelAIChatTurn(turn.threadId, turn.turnKey).catch(() => {}), new Promise((resolve) => setTimeout(resolve, STOP_TIMEOUT_MS))])
+    }
     // Aborting also covers cancellation before the server acquired a turn slot.
     controller?.abort()
-    // The request context cancels this turn. Avoid a delayed /cancel request
-    // accidentally cancelling a subsequent turn on the same thread.
     if (controller || !id) return
     try { await cancelAIChatTurn(id) }
     catch {
@@ -295,9 +350,20 @@ export function useConversation() {
     return () => { stopped = true; clearTimeout(timer) }
   }, [streaming, last?.id, last?.status])
   const canRetry = isUnfinishedReply(last) && !last?.blocks?.some((block) => block.type === "action")
+  const retryNotice = canRetry && last ? unfinishedNotices[last.status] ?? "The last response did not finish." : ""
+
+  const autoRetry = useEffectEvent(() => {
+    // Only a question's first answer is retried, so repeated drops cannot loop.
+    const firstAnswer = messages[messages.length - 2]?.role === "user"
+    if (streaming || !data?.configured || !last || !firstAnswer || last.status !== "interrupted" || last.content || last.blocks?.length || autoRetried.has(last.id)) return
+    if (Date.now() - last.createdAt > AUTO_RETRY_WINDOW_MS || recentlyStopped(threadRef.current)) return
+    autoRetried.add(last.id)
+    void send("", true, undefined, undefined, undefined, last.id)
+  })
+  useEffect(() => autoRetry(), [streaming, data?.configured, last?.id, last?.status])
 
   return {
-    requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry,
+    requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry, retryNotice,
     mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, startTicket, dismissTicket, retryTurn, cancel,
   }
 }

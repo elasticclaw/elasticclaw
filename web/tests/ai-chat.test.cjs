@@ -98,6 +98,7 @@ function chatFixture(options = {}) {
   const api = {
     ApiError,
     fetchAIChatSources: (workspace, refresh) => new Promise((resolve) => requests.push({ workspace, refresh, resolve })),
+    cancelAIChatTurn: async () => {},
     ...options.api,
   }
   const shared = {
@@ -398,19 +399,21 @@ test("SSE rejects a disconnected stream without done", async () => {
   await assert.rejects(readAIChatEvents(byteStream('event: token\ndata: {"text":"partial"}\n\n'), () => {}), /connection ended/)
 })
 
-test("cancel aborts the active request without a delayed cancel that could affect a new turn", async () => {
+for (const when of ["after message_started", "before message_started"]) test(`Stop asks the hub to stop the keyed turn ${when}, then aborts it`, async () => {
   let signal
   let emit
-  let cancelCalls = 0
+  let streamedKey
+  const cancels = []
   const fixture = chatFixture({ api: {
     createAIChatThread: async () => thread("new"),
-    streamAIChatTurn: (_id, _text, _retry, requestSignal, onEvent) => {
+    streamAIChatTurn: (_id, _text, _retry, requestSignal, onEvent, _answers, turnKey) => {
       signal = requestSignal
       emit = onEvent
+      streamedKey = turnKey
       return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted"))))
     },
-    cancelAIChatTurn: async () => { cancelCalls++ },
-    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "assistant", role: "assistant", content: "Partial", status: "cancelled" }] }),
+    cancelAIChatTurn: async (id, turnKey) => { cancels.push({ id, turnKey, aborted: signal.aborted }) },
+    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "assistant", role: "assistant", content: "", status: "cancelled" }] }),
   } })
   fixture.render()
   fixture.requests[0].resolve(sources("A", ["A"]))
@@ -418,14 +421,160 @@ test("cancel aborts the active request without a delayed cancel that could affec
   findElement(fixture.render(), "ChatComposer").props.onChange("Question")
   findElement(fixture.render(), "ChatComposer").props.onSend()
   await flush()
-  emit("message_started", { messageId: "assistant" })
+  if (when === "after message_started") emit("message_started", { messageId: "assistant" })
   findElement(fixture.render(), "ChatComposer").props.onCancel()
   await flush()
   assert.equal(signal.aborted, true)
-  assert.equal(cancelCalls, 0)
+  assert.match(streamedKey, /^[A-Za-z0-9-]{1,64}$/)
+  assert.deepEqual(cancels, [{ id: "new", turnKey: streamedKey, aborted: false }])
   const tree = fixture.render()
   assert.equal(findElement(tree, "ChatComposer").props.streaming, false)
   assert.equal(findElement(tree, "MessageList").props.messages[0].status, "cancelled")
+  const alert = findElement(tree, "section").props.children.find((child) => child?.props?.role === "alert")
+  assert.equal(alert.props.children[0].props.children, "You stopped this response.")
+})
+
+test("a turn that dropped before any output is retried once, never after a Stop", async () => {
+  for (const scenario of ["dropped", "stopped"]) {
+    const attempts = []
+    let saved = { thread: thread("t"), messages: [{ id: "u1", role: "user", content: "Question", status: "completed" }, { id: `a-${scenario}`, role: "assistant", content: "", status: "interrupted", createdAt: Date.now() }] }
+    const fixture = chatFixture({ thread: "t", api: {
+      fetchAIChatThread: async () => saved,
+      streamAIChatTurn: (_id, text, retry, signal) => {
+        attempts.push({ text, retry })
+        if (scenario === "stopped" && attempts.length === 1) return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted"))))
+        // The retry drops too and is saved as a second interrupted answer.
+        saved = { ...saved, messages: [...saved.messages, { id: `a-${scenario}-${attempts.length}`, role: "assistant", content: "", status: "interrupted", createdAt: Date.now() }] }
+        return Promise.reject(new Error("connection lost"))
+      },
+    } })
+    fixture.render()
+    fixture.requests[0].resolve(sources("A", ["A"]))
+    for (let i = 0; i < 4; i++) {
+      await flush()
+      fixture.render()
+    }
+    if (scenario === "stopped") {
+      // The automatic retry is under way; the user stops it before it starts.
+      findElement(fixture.render(), "ChatComposer").props.onCancel()
+      for (let i = 0; i < 4; i++) {
+        await flush()
+        fixture.render()
+      }
+    }
+    assert.deepEqual(attempts, [{ text: "", retry: true }], scenario)
+  }
+})
+
+test("a Stop the hub never heard still blocks the automatic retry after a reload", async () => {
+  const store = new Map()
+  globalThis.localStorage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, String(value)), removeItem: (key) => store.delete(key) }
+  try {
+    let signal
+    const first = chatFixture({ api: {
+      createAIChatThread: async () => thread("new"),
+      streamAIChatTurn: (_id, _text, _retry, requestSignal) => {
+        signal = requestSignal
+        return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted"))))
+      },
+      cancelAIChatTurn: async () => { throw new Error("hub unreachable") },
+      fetchAIChatThread: async () => { throw new Error("hub unreachable") },
+    } })
+    first.render()
+    first.requests[0].resolve(sources("A", ["A"]))
+    await flush()
+    findElement(first.render(), "ChatComposer").props.onChange("Question")
+    findElement(first.render(), "ChatComposer").props.onSend()
+    await flush()
+    // Stop before message_started; neither the stop nor the sync reaches the hub.
+    findElement(first.render(), "ChatComposer").props.onCancel()
+    await flush()
+    assert.equal(signal.aborted, true)
+    const attempts = []
+    const reloaded = chatFixture({ thread: "new", api: {
+      fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "u1", role: "user", content: "Question", status: "completed" }, { id: "a1", role: "assistant", content: "", status: "interrupted", createdAt: Date.now() }] }),
+      streamAIChatTurn: async (_id, text, retry) => { attempts.push({ text, retry }) },
+    } })
+    reloaded.render()
+    reloaded.requests[0].resolve(sources("A", ["A"]))
+    for (let i = 0; i < 4; i++) {
+      await flush()
+      reloaded.render()
+    }
+    assert.deepEqual(attempts, [])
+  } finally {
+    delete globalThis.localStorage
+  }
+})
+
+test("an automatic retry another tab already started does not leave a rejection", async () => {
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => ({ thread: thread("t"), messages: [{ id: "u1", role: "user", content: "Question", status: "completed" }, { id: "a-tab", role: "assistant", content: "", status: "interrupted", createdAt: Date.now() }] }),
+    streamAIChatTurn: async () => { throw new ApiError("too many in-flight turns", 429) },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  for (let i = 0; i < 4; i++) {
+    await flush()
+    fixture.render()
+  }
+  const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  assert.equal(alert.props.children[0].props.children, "The connection dropped before this response finished.")
+})
+
+test("an automatic retry names the answer it replaces, and a Stop hides the stopped turn's error", async () => {
+  const retries = []
+  const auto = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => ({ thread: thread("t"), messages: [{ id: "u1", role: "user", content: "Question", status: "completed" }, { id: "a-named", role: "assistant", content: "", status: "interrupted", createdAt: Date.now() }] }),
+    streamAIChatTurn: async (_id, _text, retry, _signal, _onEvent, _answers, _turnKey, retryOf) => { retries.push({ retry, retryOf }) },
+  } })
+  auto.render()
+  auto.requests[0].resolve(sources("A", ["A"]))
+  for (let i = 0; i < 4; i++) {
+    await flush()
+    auto.render()
+  }
+  assert.deepEqual(retries, [{ retry: true, retryOf: "a-named" }])
+
+  let signal
+  let emit
+  const stopped = chatFixture({ api: {
+    createAIChatThread: async () => thread("new"),
+    streamAIChatTurn: (_id, _text, _retry, requestSignal, onEvent) => {
+      signal = requestSignal
+      emit = onEvent
+      return new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")))
+        // The hub answers the Stop with a storage error while the cancel request is pending.
+        emit("message_started", { messageId: "assistant" })
+        setTimeout(() => { emit("error", { code: "storage_error", message: "Unable to save this response." }); emit("done", { messageId: "assistant", status: "error" }); resolve() }, 0)
+      })
+    },
+    cancelAIChatTurn: () => new Promise((resolve) => setTimeout(resolve, 5)),
+    fetchAIChatThread: async () => ({ thread: thread("new"), messages: [{ id: "assistant", role: "assistant", content: "", status: "cancelled" }] }),
+  } })
+  stopped.render()
+  stopped.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  findElement(stopped.render(), "ChatComposer").props.onChange("Question")
+  findElement(stopped.render(), "ChatComposer").props.onSend()
+  await flush()
+  findElement(stopped.render(), "ChatComposer").props.onCancel()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await flush()
+  const alert = findElement(stopped.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  assert.equal(alert.props.children[0].props.children, "You stopped this response.")
+})
+
+test("an interrupted turn says the connection dropped", async () => {
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => ({ thread: thread("t"), messages: [{ id: "a", role: "assistant", content: "Partial", status: "interrupted", createdAt: 0 }] }),
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"]))
+  await flush()
+  const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  assert.equal(alert.props.children[0].props.children, "The connection dropped before this response finished.")
 })
 
 test("lost message_started reconciles the persisted turn before retrying", async () => {

@@ -184,7 +184,11 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid action", 400)
 		return
 	}
-	ctx, release, err := a.runner.Acquire(r.Context(), t)
+	ctx, release, err := a.runner.AcquireTurn(r.Context(), t, r.URL.Query().Get("turn"))
+	if errors.Is(err, ErrStopped) {
+		http.Error(w, ErrStopped.Error(), 409)
+		return
+	}
 	if errors.Is(err, ErrArchived) {
 		http.Error(w, ErrArchived.Error(), 409)
 		return
@@ -271,7 +275,7 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
-	emit, stop := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Cancel(t) })
+	emit, stop := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Interrupt(t) })
 	defer stop()
 	if body.Kind == "ticket" {
 		_ = a.runner.RunTicket(ctx, t, m, cfg, p, tools.TicketRequest{Title: body.Title, Body: body.Body, ArtifactID: body.ArtifactID}, body.ActionKey, body.ConfirmUnknown, emit)

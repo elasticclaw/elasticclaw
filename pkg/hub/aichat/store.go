@@ -120,7 +120,7 @@ func (s *Store) History(ctx context.Context, threadID string) ([]Message, error)
 func (s *Store) messages(ctx context.Context, threadID string, limit int, completedOnly bool) ([]Message, error) {
 	query := `SELECT id,thread_id,seq,role,content,COALESCE(model,''),input_tokens,output_tokens,status,created_at,blocks_json,interview_json FROM ai_chat_messages WHERE thread_id=?`
 	if completedOnly {
-		query += ` AND (status='completed' OR (status IN ('error','cancelled') AND EXISTS(SELECT 1 FROM json_each(COALESCE(blocks_json,'[]')) WHERE json_extract(value,'$.type')='action')))`
+		query += ` AND (status='completed' OR (status IN ('error','cancelled','interrupted') AND EXISTS(SELECT 1 FROM json_each(COALESCE(blocks_json,'[]')) WHERE json_extract(value,'$.type')='action')))`
 	}
 	query += ` ORDER BY seq DESC`
 	args := []any{threadID}
@@ -180,9 +180,12 @@ func (s *Store) RecoverInterrupted(ctx context.Context, threadID string) error {
 // BeginTurn saves the user and pending assistant atomically. The runner owns the
 // thread's in-flight slot before calling it, so sequence numbers cannot race.
 func (s *Store) BeginTurn(ctx context.Context, t Thread, text, model string, retry bool) (Message, error) {
-	return s.beginTurn(ctx, t, text, model, retry, nil)
+	return s.beginTurn(ctx, t, text, model, retry, "", nil)
 }
-func (s *Store) beginTurn(ctx context.Context, t Thread, text, model string, retry bool, answers *InterviewAnswers) (Message, error) {
+
+// retryOf, when set, names the failed answer a retry replaces; a retry of any
+// other answer is rejected, so two tabs cannot both retry the same answer.
+func (s *Store) beginTurn(ctx context.Context, t Thread, text, model string, retry bool, retryOf string, answers *InterviewAnswers) (Message, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return Message{}, err
@@ -205,11 +208,11 @@ func (s *Store) beginTurn(ctx context.Context, t Thread, text, model string, ret
 	}
 	now := time.Now().UnixMilli()
 	if retry {
-		var role, status string
-		if err := tx.QueryRowContext(ctx, `SELECT role,status FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&role, &status); err != nil {
+		var id, role, status string
+		if err := tx.QueryRowContext(ctx, `SELECT id,role,status FROM ai_chat_messages WHERE thread_id=? ORDER BY seq DESC LIMIT 1`, t.ID).Scan(&id, &role, &status); err != nil {
 			return Message{}, ErrRetry
 		}
-		if role != "assistant" || (status != "error" && status != "cancelled" && status != "limit") {
+		if role != "assistant" || (retryOf != "" && id != retryOf) || (status != "error" && status != "cancelled" && status != "interrupted" && status != "limit") {
 			return Message{}, ErrRetry
 		}
 	} else {

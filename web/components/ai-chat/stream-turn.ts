@@ -11,6 +11,10 @@ export type StreamTurn = {
   started: boolean
   assistantId: string
   error: string
+  // Names this turn to the hub, so Stop reaches it even before message_started.
+  turnKey?: string
+  // The failed answer an automatic retry replaces, so the hub can refuse a duplicate.
+  retryOf?: string
 }
 
 export type StreamView = {
