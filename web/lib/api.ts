@@ -439,6 +439,7 @@ function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
   if (!filters) return ""
   const entries: Array<[string, string | number | boolean | undefined]> = [
     ["status", filters.status],
+    ["run_kind", filters.runKind],
     ["ownerType", filters.ownerType],
     ["workspace", filters.workspace],
     ["workflow", filters.workflow],

@@ -57,7 +57,7 @@ var validFactoryInputTypes = map[string]bool{
 }
 
 var validTaskRunKinds = map[string]bool{
-	"code_task": true, "pr_task": true,
+	"code_task": true, "pr_task": true, "maintenance": true,
 }
 
 // Valid GitHub trigger actions
@@ -91,7 +91,7 @@ var volumeNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func validateRunKind(entityType, entityName, runKind string) error {
 	if runKind != "" && !validTaskRunKinds[runKind] {
-		return fmt.Errorf("%s %q: invalid run_kind %q (must be one of: code_task, pr_task)", entityType, entityName, runKind)
+		return fmt.Errorf("%s %q: invalid run_kind %q (must be one of: code_task, pr_task, maintenance)", entityType, entityName, runKind)
 	}
 	return nil
 }

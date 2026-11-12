@@ -20,8 +20,37 @@ type Workflow struct {
 	Review        *WorkflowReview            `yaml:"review,omitempty" json:"review,omitempty"`
 	Delivery      *WorkflowDelivery          `yaml:"delivery,omitempty" json:"delivery,omitempty"`
 	Events        map[string]EventDefinition `yaml:"events,omitempty" json:"events,omitempty"`
+	Analytics     *WorkflowAnalytics         `yaml:"analytics,omitempty" json:"analytics,omitempty"`
 	Trigger       *WorkflowTrigger           `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 	Raw           map[string]interface{}     `yaml:"-" json:"-"`
+}
+
+// WorkflowAnalytics overrides the default code-task analytics contract.
+type WorkflowAnalytics struct {
+	RunKind    string `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`
+	RequiresPR *bool  `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`
+	Enabled    *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// TerminalOutcome is an explicit result independent of the authored state name.
+type TerminalOutcome string
+
+const (
+	OutcomeDelivered TerminalOutcome = "delivered"
+	OutcomeNoChanges TerminalOutcome = "no_changes"
+	OutcomeClosed    TerminalOutcome = "closed"
+	OutcomeFailed    TerminalOutcome = "failed"
+	OutcomeCancelled TerminalOutcome = "cancelled"
+)
+
+// IsTerminalOutcome reports whether outcome is one of the known terminal outcomes.
+func IsTerminalOutcome(outcome TerminalOutcome) bool {
+	switch outcome {
+	case OutcomeDelivered, OutcomeNoChanges, OutcomeClosed, OutcomeFailed, OutcomeCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 // WorkflowTrigger declares how the hub may create new runs outside the state
@@ -42,6 +71,7 @@ type CronTrigger struct {
 type State struct {
 	Description string                 `yaml:"description,omitempty" json:"description,omitempty"`
 	Phase       DisplayPhase           `yaml:"phase,omitempty" json:"phase,omitempty"`
+	Outcome     TerminalOutcome        `yaml:"outcome,omitempty" json:"outcome,omitempty"`
 	Terminal    bool                   `yaml:"terminal,omitempty" json:"terminal,omitempty"`
 	Invariant   map[string]interface{} `yaml:"invariant,omitempty" json:"invariant,omitempty"`
 	OnEnter     *StateActions          `yaml:"on_enter,omitempty" json:"on_enter,omitempty"`

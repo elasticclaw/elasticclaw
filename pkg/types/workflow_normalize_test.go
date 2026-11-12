@@ -759,3 +759,11 @@ func TestNormalizeWorkflowPreservesInitialPlan(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkflowConfigAcceptsMaintenanceRunKind(t *testing.T) {
+	// Hub-loaded v2 workflows may set analytics.run_kind: maintenance.
+	workflow := &WorkflowConfig{Name: "deps", RunKind: "maintenance"}
+	if err := workflow.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}

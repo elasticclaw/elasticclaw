@@ -220,7 +220,7 @@ func (s *Server) readTaskRunAnalyticsUsageCost(f taskRunAnalyticsFilters, start,
 }
 
 func taskRunAnalyticsCostsUseRunFilters(f taskRunAnalyticsFilters) bool {
-	return len(f.Status) > 0 || len(f.Owner) > 0 || len(f.OwnerType) > 0 || len(f.Integration) > 0 || len(f.Repo) > 0 || len(f.WarningType) > 0 || len(f.FailureType) > 0 || f.HumanTouched != nil || f.MergedPRs != nil || f.RequiresPR != nil || f.AnalyticsEnabled != nil
+	return len(f.RunKind) > 0 || len(f.Status) > 0 || len(f.Owner) > 0 || len(f.OwnerType) > 0 || len(f.Integration) > 0 || len(f.Repo) > 0 || len(f.WarningType) > 0 || len(f.FailureType) > 0 || f.HumanTouched != nil || f.MergedPRs != nil || f.RequiresPR != nil || f.AnalyticsEnabled != nil
 }
 
 func taskRunAnalyticsUsageDimensionsWhere(f taskRunAnalyticsFilters, table string) ([]string, []any) {

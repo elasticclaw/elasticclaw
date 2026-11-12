@@ -189,7 +189,7 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 		triggerType = "manual"
 	}
 	if initial.Terminal {
-		status = terminalRunStatus(rwf.Workflow.InitialState)
+		status = terminalRunStatus(rwf.Workflow.InitialState, initial.Outcome)
 		finishedAt = now.UnixMilli()
 	} else if req.ActivationPending {
 		status = RunSuspended
@@ -711,7 +711,7 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	waitingReason := ""
 	finishedAt := int64(0)
 	if destination.Terminal {
-		status = terminalRunStatus(transitionDef.To)
+		status = terminalRunStatus(transitionDef.To, destination.Outcome)
 		finishedAt = now.UnixMilli()
 	} else if activationPending {
 		// Only CompleteActivation releases the run: a transition taken during
@@ -1437,7 +1437,13 @@ var activationDeliveryEventKindList = func() string {
 	return strings.Join(kinds, ",")
 }()
 
-func terminalRunStatus(state string) RunStatus {
+func terminalRunStatus(state string, outcome typesv2.TerminalOutcome) RunStatus {
+	if outcome == typesv2.OutcomeCancelled {
+		return RunCancelled
+	}
+	if outcome != "" {
+		return RunCompleted
+	}
 	lower := strings.ToLower(state)
 	if strings.Contains(lower, "cancel") {
 		return RunCancelled

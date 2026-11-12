@@ -299,7 +299,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			log.Printf("[workflow] run for claw %s finished during activation; skipping provisioning", clawID[:8])
 			var finished workflowV2FinishedAtActivationError
 			errors.As(err, &finished)
-			result := workflowV2ClawResult(finished.status)
+			result := workflowV2ClawResult(finished.status, "")
 			// Leave the pending queue without provisioning, like a claw that
 			// was never queued; the parent finish below deletes it and then
 			// promotes pending claws.

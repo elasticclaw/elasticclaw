@@ -156,6 +156,7 @@ export interface CreateClawRequest {
 }
 
 export interface TaskRunAnalyticsFilters {
+  runKind?: string
   status?: string
   ownerType?: string
   workspace?: string
@@ -245,7 +246,8 @@ export interface GeneralStats {
 }
 
 export interface AnalyticsEffectiveness {
-  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[] | null
+  ticketCostUsd?: number
+  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number; cancelled?: number }[] | null
   funnel: { agentStarted: number; prOpened: number; prFinished: number }
   costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[] | null; average: number }
   mergeRate: number
@@ -256,6 +258,7 @@ export interface AnalyticsEffectiveness {
   runsPerTicket: { bucket: string; tickets: number }[] | null
   topTicketsByCost: { ticketKey: string; issueId: string; issueTitle: string; costUsd: number; approximate?: boolean; runs: number; outcome: string }[] | null
   prior?: {
+    ticketCostUsd?: number
     successRate: number
     ticketSuccessRate: number
     uniqueTickets: number
@@ -275,6 +278,7 @@ export interface AnalyticsCostDriver {
 }
 
 export interface TaskRunSummary {
+  outcome?: "delivered" | "no_changes" | "closed" | "failed" | "cancelled"
   runId: string
   initialAttemptId: string
   currentAttemptId: string
@@ -354,6 +358,7 @@ export interface TaskRunsResponse {
 }
 
 export interface AnalyticsTicketRunSummary {
+  outcome?: string
   approximate?: boolean
   runId: string
   status: string
