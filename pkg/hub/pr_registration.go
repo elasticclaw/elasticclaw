@@ -17,7 +17,8 @@ import (
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
-// handleClawPRRegistration records creation without signaling completion.
+// handleClawPRRegistration records creation; declared delivery branches may
+// automatically publish delivery facts and advance the workflow.
 func (s *Server) handleClawPRRegistration(w http.ResponseWriter, r *http.Request) {
 	clawToken := r.URL.Query().Get("claw_token")
 	if clawToken == "" {
@@ -90,7 +91,7 @@ func (s *Server) handleClawPRRegistration(w http.ResponseWriter, r *http.Request
 
 var errNoActivePRAttempt = errors.New("no active workflow V2 attempt")
 
-// registerClawPR associates a PR without emitting a completion signal.
+// registerClawPR associates a PR through the owning workflow runtime.
 func (s *Server) registerClawPR(ctx context.Context, clawID, tenantID, repo string, number int, prURL, source string) (bool, error) {
 	var err error
 	s.mu.RLock()
@@ -116,6 +117,7 @@ func (s *Server) registerClawPR(ctx context.Context, clawID, tenantID, repo stri
 			typesv2.PullRequestClaim{URL: prURL}, s.workflowV2PullRequestVerifier())
 		if err == nil {
 			err = s.associateWorkflowV2TaskRunPR(clawID, pr)
+			go s.maybeFinishWorkflowV2Parent(context.Background(), binding.RunID)
 		}
 	} else {
 		registered, err = s.storePRRegistration(clawID, repo, number, prURL, source)

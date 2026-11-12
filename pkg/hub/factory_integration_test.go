@@ -13,11 +13,10 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/factorytest"
 )
 
-func TestMain(m *testing.M) {
-	// All integration tests need the noop provider. Set once for the test binary
-	// lifetime — no cleanup, no per-test race.
+// All integration tests need the noop provider. Set once for the test binary
+// lifetime — no cleanup, no per-test race. TestMain lives in main_test.go.
+func init() {
 	_ = os.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
-	os.Exit(m.Run())
 }
 
 func buildLinearWebhookPayload(issueID, prevStatus, newStatus string) []byte {

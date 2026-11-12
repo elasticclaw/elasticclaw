@@ -108,6 +108,107 @@ func TestWorkflowCreationQueuesBehindOlderPendingClaw(t *testing.T) {
 	}
 }
 
+// A slot freed while workflow v2 activation is still running (for example
+// during the PR adoption lookup) must not provision the pending claw: the
+// activation may finish the run without any sandbox.
+func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		activation  error
+		failDequeue bool
+		want        string
+		wantRun     string
+	}{
+		// The run does not exist, so the parent finish exits early and the
+		// creator's backstop deletes the claw and promotes the queue.
+		{"finished", workflowV2FinishedAtActivationError{runID: "missing-run", status: "completed"}, false, "deleted", "success"},
+		// A failed dequeue must not leave the claw pending for the next
+		// promotion to provision, and records the run's terminal result.
+		{"finished dequeue failed", workflowV2FinishedAtActivationError{status: "completed"}, true, "deleted", "success"},
+		{"cancelled dequeue failed", workflowV2FinishedAtActivationError{status: "cancelled"}, true, "deleted", "cancelled"},
+		{"activated", nil, false, "connected", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+			t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+			s, db := newReaperTestServer(t, &types.HubConfig{
+				ConcurrencyGroups: []*types.ConcurrencyGroup{{Name: "cruise-demo", Limit: 1}},
+				Providers:         map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+			})
+			insertQueueTestClaw(t, db, "active001", "connected", "cruise-demo", time.Now().UTC())
+			workspace := &types.WorkspaceConfig{Name: "queue-workspace", Files: map[string]string{"README.md": "Queue test workspace"}}
+			workflow := &types.WorkflowConfig{Name: "queue-workflow", Provider: "noop", ConcurrencyGroup: "cruise-demo"}
+			id, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+				beforeProvision: func(_ context.Context, id, _ string) error {
+					if _, err := db.Exec(`INSERT INTO workflow_runs (id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, started_at, created_at)
+						VALUES ('queue-run', 'default', 'queue-workflow', 'queue-workspace', 'cron', 'running', ?, ?, ?)`, id, time.Now().UTC(), time.Now().UTC()); err != nil {
+						t.Fatal(err)
+					}
+					if tc.failDequeue {
+						if _, err := db.Exec(`CREATE TRIGGER fail_queue_test_dequeue BEFORE UPDATE OF status ON claws
+							WHEN NEW.status='provisioning' BEGIN SELECT RAISE(FAIL, 'dequeue disabled'); END`); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if _, err := db.Exec(`UPDATE claws SET status='deleted' WHERE id='active001'`); err != nil {
+						t.Fatal(err)
+					}
+					s.promotePendingClaws()
+					if got := queueTestStatus(t, db, id); got != "pending" {
+						t.Fatalf("claw status=%q during activation, want pending", got)
+					}
+					if tc.activation != nil && !tc.failDequeue {
+						// Queued behind the finished claw's slot until it is deleted.
+						insertQueueTestClaw(t, db, "next0001", "pending", "cruise-demo", time.Now().UTC())
+					}
+					return tc.activation
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "connected" {
+				waitForQueueTestPromotion(t, db, id)
+				return
+			}
+			// The claw already left 'pending' when the creator returned, and
+			// promotion only selects pending claws, so it cannot provision it.
+			if got := queueTestStatus(t, db, id); got != "provisioning" && got != "deleted" {
+				t.Fatalf("finished claw status=%q, want it out of the pending queue", got)
+			}
+			s.promotePendingClaws()
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				var status, providerID string
+				if err := db.QueryRow(`SELECT status, COALESCE(provider_id,'') FROM claws WHERE id=?`, id).Scan(&status, &providerID); err != nil {
+					t.Fatal(err)
+				}
+				if providerID != "" {
+					t.Fatalf("finished claw was provisioned: status=%q provider=%q", status, providerID)
+				}
+				if status == tc.want {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("finished claw status=%q, want %q", status, tc.want)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !tc.failDequeue {
+				// Deleting the finished claw freed the slot it held.
+				waitForQueueTestPromotion(t, db, "next0001")
+			}
+			var runStatus string
+			if err := db.QueryRow(`SELECT status FROM workflow_runs WHERE id='queue-run'`).Scan(&runStatus); err != nil {
+				t.Fatal(err)
+			}
+			if runStatus != tc.wantRun {
+				t.Fatalf("workflow run status=%q, want %q", runStatus, tc.wantRun)
+			}
+		})
+	}
+}
+
 func TestReaperPromotesPendingClawWithoutOtherActions(t *testing.T) {
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	s, db := newReaperTestServer(t, &types.HubConfig{MaxConcurrentClaws: 1})

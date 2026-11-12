@@ -27,8 +27,8 @@ func (f PullRequestVerifierFunc) VerifyPullRequest(ctx context.Context, run Run,
 }
 
 // SubmitDelivery verifies every untrusted PR claim before atomically amending
-// the run-owned delivery collection. Workflows never declare repository lists;
-// authority comes solely from the pinned workspace repository map.
+// the run-owned delivery collection. Repository authority comes solely from
+// the pinned workspace repository map.
 func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, manifest typesv2.DeliveryManifest,
 	verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, error) {
 	verified, eventResult, err := s.submitDelivery(ctx, runID, attemptID, uuid.NewString(), "", nil, manifest, verifier)
@@ -134,6 +134,31 @@ func (s *Store) preflightDeliveryControlTx(ctx context.Context, tx *sql.Tx,
 		StateVersion: run.StateVersion, Reason: reason}, true, nil
 }
 
+// policyStatusFacts returns the CI and review policy statuses of policy under
+// the producers that own them, for the policies the pinned workflow uses.
+// Writers that change the policy inputs (the delivered PRs or their heads) set
+// them with their event: a resumed run replays its deferred queue before the
+// policy events are published, and must not see the statuses of the previous
+// inputs.
+func policyStatusFacts(workflowYAML string, policy DeliveryPolicyResult) (map[Producer]map[string]interface{}, error) {
+	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
+	if err != nil {
+		return nil, fmt.Errorf("load pinned workflow: %w", err)
+	}
+	delivery := workflow.Workflow.Delivery
+	if delivery == nil || delivery.PullRequests == nil {
+		return nil, nil
+	}
+	facts := map[Producer]map[string]interface{}{}
+	if delivery.PullRequests.CIPolicy != "" {
+		facts[ProducerCI] = map[string]interface{}{"ci.status": policy.CIStatus}
+	}
+	if delivery.PullRequests.ReviewPolicy != "" {
+		facts[ProducerReview] = map[string]interface{}{"review.status": policy.ReviewStatus}
+	}
+	return facts, nil
+}
+
 func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, messageID string,
 	expectedStateVersion *uint64, manifest typesv2.DeliveryManifest,
 	verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, EventResult, error) {
@@ -153,16 +178,10 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 				return err
 			}
 		}
-		summary, err := deliveryFactsFrom(ctx, tx, runID)
-		if err != nil {
+		if err := deliveryEventFacts(ctx, tx, runID, input); err != nil {
 			return err
 		}
-		input.Payload = map[string]interface{}{"delivery": summary}
-		input.Facts = map[string]interface{}{
-			"delivery.count": summary["count"], "delivery.open": summary["open"],
-			"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
-		}
-		return nil
+		return deliveryPolicyOwnedFacts(ctx, tx, runID, input)
 	})
 	if err != nil {
 		return nil, EventResult{}, err
@@ -246,10 +265,11 @@ func (s *Store) verifyDeliveryClaims(ctx context.Context, runID, attemptID strin
 
 func upsertDeliveryPR(ctx context.Context, tx *sql.Tx, runID string, pr *typesv2.VerifiedPullRequest,
 	registeredOnly bool, now time.Time) (bool, error) {
-	var existingID, existingHead string
+	var existingID, existingHead, existingState string
 	var existingRegisteredOnly bool
-	err := tx.QueryRowContext(ctx, `SELECT id,current_head_sha,registered_only FROM workflow_v2_delivery_prs
-		WHERE run_id=? AND repository=? AND pr_number=?`, runID, pr.Repository, pr.Number).Scan(&existingID, &existingHead, &existingRegisteredOnly)
+	err := tx.QueryRowContext(ctx, `SELECT id,current_head_sha,state,registered_only FROM workflow_v2_delivery_prs
+		WHERE run_id=? AND repository=? AND pr_number=?`, runID, pr.Repository, pr.Number).Scan(&existingID, &existingHead,
+		&existingState, &existingRegisteredOnly)
 	if err != nil && err != sql.ErrNoRows {
 		return false, err
 	}
@@ -271,12 +291,32 @@ func upsertDeliveryPR(ctx context.Context, tx *sql.Tx, runID string, pr *typesv2
 		active,supersedes_id,provenance_json,verified_at,updated_at,registered_only) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)
 		ON CONFLICT(run_id,repository,pr_number) DO UPDATE SET url=excluded.url,repository_name=excluded.repository_name,
 		source_branch=excluded.source_branch,base_branch=excluded.base_branch,current_head_sha=excluded.current_head_sha,
-		state=excluded.state,active=1,supersedes_id=excluded.supersedes_id,provenance_json=excluded.provenance_json,
+		state=excluded.state,active=1,supersedes_id=COALESCE(NULLIF(excluded.supersedes_id,''),workflow_v2_delivery_prs.supersedes_id),provenance_json=excluded.provenance_json,
 		verified_at=excluded.verified_at,updated_at=excluded.updated_at,registered_only=excluded.registered_only`,
 		pr.ID, runID, pr.URL, pr.RepositoryName, pr.Repository, pr.Number, pr.SourceBranch, pr.BaseBranch,
 		pr.HeadSHA, pr.State, pr.Supersedes, provenanceJSON, pr.VerifiedAt.UnixMilli(), now.UnixMilli(), registeredOnly)
 	if err != nil {
 		return false, err
+	}
+	// A resubmission that moves the head or state invalidates what a suspended
+	// run queued for the previous one, exactly as a reconciled move does. A PR
+	// that joins the delivery (new, or registered-only until now) has no queued
+	// observations, but the policy results queued without it no longer
+	// aggregate every subject. Registration leaves the delivery and its policy
+	// untouched, so it keeps them.
+	if !registeredOnly {
+		if existingID != "" && !existingRegisteredOnly {
+			if err := clearStaleDeferredEvents(ctx, tx, runID, pr.ID, existingHead != pr.HeadSHA,
+				existingState != pr.State, pr.State == "open", now); err != nil {
+				return false, err
+			}
+		} else {
+			for _, key := range []string{"ci.policy.evaluated", "review.policy.evaluated", "workflow.delivery.evaluated"} {
+				if err := invalidateDeferredSubject(ctx, tx, runID, key, now); err != nil {
+					return false, err
+				}
+			}
+		}
 	}
 	if existingHead != pr.HeadSHA {
 		var generation int
@@ -328,13 +368,15 @@ type rowQueryer interface {
 }
 
 func deliveryFactsFrom(ctx context.Context, queryer rowQueryer, runID string) (map[string]interface{}, error) {
-	var count, open, merged int
+	var count, open, merged, conflicted, behind int
 	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN state='open' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN state='merged' THEN 1 ELSE 0 END),0)
-		FROM workflow_v2_delivery_prs WHERE run_id=? AND active=1 AND registered_only=0`, runID).Scan(&count, &open, &merged); err != nil {
+		COALESCE(SUM(CASE WHEN state='merged' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN state='open' AND mergeable_head_sha=current_head_sha AND mergeable_state='dirty' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN state='open' AND mergeable_head_sha=current_head_sha AND mergeable_state='behind' THEN 1 ELSE 0 END),0)
+		FROM workflow_v2_delivery_prs WHERE run_id=? AND active=1 AND registered_only=0`, runID).Scan(&count, &open, &merged, &conflicted, &behind); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{"count": count, "open": open, "merged": merged,
-		"all_merged": merged == count}, nil
+		"all_merged": merged == count, "any_conflicted": conflicted > 0, "any_behind": behind > 0}, nil
 }

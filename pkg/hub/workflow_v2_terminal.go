@@ -119,6 +119,18 @@ func (s *Server) markTerminalWorkflowV2TaskRunRecovered(runID string, finishedAt
 	}
 }
 
+// workflowV2ClawResult maps a terminal v2 run status and outcome to the claw's
+// terminal result. Runs end only as completed or cancelled (see terminalRunStatus).
+func workflowV2ClawResult(status workflowv2.RunStatus, outcome typesv2.TerminalOutcome) string {
+	if status == workflowv2.RunCancelled {
+		return "cancelled"
+	}
+	if outcome == typesv2.OutcomeFailed {
+		return "failed"
+	}
+	return "success"
+}
+
 // maybeFinishWorkflowV2Parent checks whether a v2 workflow run has reached a
 // terminal state and, if so, finishes the parent v1 task run and disconnects
 // the claw. This is the bridge between the v2 deterministic state machine and
@@ -136,10 +148,7 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if run.Status != workflowv2.RunCompleted && run.Status != workflowv2.RunCancelled {
 		return
 	}
-	if s.cronSchedulerV2 != nil && run.TriggerType == "cron" {
-		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
-	}
-	s.releaseWorkflowV2CronSlot(ctx, run.ID)
+	s.finishWorkflowV2CronRun(ctx, run)
 	if strings.TrimSpace(run.TaskRunID) == "" {
 		// No parent task run; nothing to finish.
 		return
@@ -168,13 +177,7 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		return
 	}
 	// Idempotent: finishClawTerminalTx is a no-op if the claw is already deleted.
-	result := "success"
-	if run.Status == workflowv2.RunCancelled {
-		result = "cancelled"
-	} else if outcome == typesv2.OutcomeFailed {
-		result = "failed"
-	}
-	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", result, "workflow v2 terminal state "+string(run.Status), terminalTxOpts{})
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", workflowV2ClawResult(run.Status, outcome), "workflow v2 terminal state "+string(run.Status), terminalTxOpts{})
 	if err != nil {
 		log.Printf("[workflow-v2] failed to finish claw %s for terminal run %s: %v", clawID, runID, err)
 		return
@@ -233,6 +236,37 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
+}
+
+// finishWorkflowV2ClawAfterActivation finishes the parent of a run that
+// reached a terminal state during activation. It runs in the background, like
+// every other terminal hook: it must outlive the caller's ctx (an HTTP request
+// for manual triggers), has no deadline because a timeout mid-way would leave
+// the parent partially finished, and cannot block activation if it stalls.
+// The claw was never provisioned, so if the parent finish exits early (for
+// example on a failed run lookup) the claw is deleted here instead of holding
+// its concurrency slot until the reaper's provisioning timeout.
+func (s *Server) finishWorkflowV2ClawAfterActivation(runID, clawID, result string) {
+	s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", result,
+		"workflow v2 run finished during activation", terminalTxOpts{})
+	if err != nil {
+		log.Printf("[workflow-v2] failed to finish claw %s of run %s finished at activation: %v", shortID(clawID), runID, err)
+		return
+	}
+	if applied {
+		log.Printf("[workflow-v2] parent finish left claw %s of run %s alive; deleted it", shortID(clawID), runID)
+		s.promotePendingClaws()
+	}
+}
+
+// finishWorkflowV2CronRun finishes the cron history row of a terminal run and
+// releases its overlap slot. Both steps are idempotent.
+func (s *Server) finishWorkflowV2CronRun(ctx context.Context, run workflowv2.Run) {
+	if s.cronSchedulerV2 != nil && run.TriggerType == "cron" {
+		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
+	}
+	s.releaseWorkflowV2CronSlot(ctx, run.ID)
 }
 
 // releaseWorkflowV2CronSlot releases the in-memory overlap slot for a terminal

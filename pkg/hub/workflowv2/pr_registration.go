@@ -8,8 +8,8 @@ import (
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
-// RegisterPullRequest associates a verified PR without publishing delivery facts
-// or evaluating workflow transitions. The bool reports a newly inserted PR.
+// RegisterPullRequest associates a verified PR and delivers matching declared
+// branches automatically. The bool reports a newly inserted PR.
 func (s *Store) RegisterPullRequest(ctx context.Context, runID, attemptID string, claim typesv2.PullRequestClaim,
 	verifier PullRequestVerifier) (typesv2.VerifiedPullRequest, bool, error) {
 	verified, inserted, _, err := s.registerPullRequests(ctx, runID, attemptID,
@@ -26,6 +26,22 @@ func (s *Store) registerPullRequests(ctx context.Context, runID, attemptID strin
 	if err != nil {
 		return nil, false, typesv2.ControlReceipt{}, err
 	}
+	wf, _, err := s.branchDeliveryConfig(ctx, runID)
+	if err != nil {
+		return nil, false, typesv2.ControlReceipt{}, err
+	}
+	for _, pr := range verified {
+		if matchesDeliveryBranch(wf, pr) {
+			prs, inserted, receipt, err := s.registerBranchPullRequests(ctx, runID, attemptID, wf, verified, envelope)
+			if err != errNoBranchPromotion {
+				return prs, inserted, receipt, err
+			}
+			// No promotion: retain registration-only receipt semantics, including
+			// for delayed reports of already delivered PRs.
+			break
+		}
+	}
+
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, false, typesv2.ControlReceipt{}, err
