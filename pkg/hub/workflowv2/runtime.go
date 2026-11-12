@@ -262,6 +262,18 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 
 const activationPendingReason = "workflow activation pending organization context"
 
+// SuspendedBeyondActivation reports a deliberate suspension, such as a failed
+// required context source, that activation must not release.
+func (r Run) SuspendedBeyondActivation() bool {
+	return r.Status == RunSuspended && r.WaitingReason != activationPendingReason
+}
+
+// IsActivationPending reports whether a run with this status and waiting
+// reason is still suspended for activation and cannot accept events yet.
+func IsActivationPending(status, waitingReason string) bool {
+	return status == string(RunSuspended) && waitingReason == activationPendingReason
+}
+
 // CompleteActivation releases a context-pinned run for effect execution. It is
 // idempotent when context assembly already advanced the run or deliberately
 // suspended it on a domain-level context failure.
@@ -466,11 +478,16 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	if err := writeFacts(ctx, tx, runID, input.ID, input.Producer, input.Provenance, input.Facts, now); err != nil {
 		return EventResult{}, err
 	}
+	// An activation-pending run is suspended only until CompleteActivation:
+	// the delivery events adoption and branch promotion publish during
+	// activation drive its transitions live (see applyTransition), so it is
+	// handled like an active run below, never deferred or replayed.
+	deferring := stored.SuspendedBeyondActivation()
 	// Owned facts only keep a suspended run current for its replay. An active
 	// run receives them through their own policy events, which its transitions
 	// handle; written here they could break the state invariant on an event the
 	// workflow has no transition for.
-	if stored.Status == RunSuspended {
+	if deferring {
 		for producer, facts := range input.ownedFacts {
 			if err := writeFacts(ctx, tx, runID, input.ID, producer, input.Provenance, facts, now); err != nil {
 				return EventResult{}, err
@@ -480,7 +497,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	// The transition engine sees this observation live, so it supersedes one
 	// queued for the same subject; replaying the older one later (a sweep after
 	// a failed recovery replay) would fire a transition on outdated state.
-	if stored.Status == RunActive && input.observation && !input.deferInvariant {
+	if !deferring && input.observation && !input.deferInvariant {
 		if err := clearDeferredEvent(ctx, tx, runID, input.deferSubject()); err != nil {
 			return EventResult{}, err
 		}
@@ -491,7 +508,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	// the reconciler no longer sees the change as drift, so an observation the
 	// workflow listens on is also queued, latest per subject, and replayed
 	// through the transition engine when the run is active again.
-	if stored.Status == RunSuspended && input.observation && !input.deferInvariant {
+	if deferring && input.observation && !input.deferInvariant {
 		deferred := workflowListensOn(workflow.Workflow, input.Kind)
 		reason := "evidence updated while suspended"
 		if deferred {
@@ -629,7 +646,7 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 		return EventResult{}, err
 	}
 	verified := valid
-	if !valid && !destination.Terminal && !input.deferInvariant && stored.Status == RunSuspended {
+	if !valid && !destination.Terminal && !input.deferInvariant && stored.SuspendedBeyondActivation() {
 		// Evidence recorded while suspended may break the invariant that a
 		// queued transition resolves; replay judges it once the queue drains.
 		if valid, err = hasDeferredEvents(ctx, tx, runID); err != nil {
@@ -689,12 +706,19 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 
 	transitionID := uuid.NewString()
 	toVersion := stored.StateVersion + 1
+	activationPending := stored.Status == RunSuspended && stored.WaitingReason == activationPendingReason
 	status := RunActive
 	waitingReason := ""
 	finishedAt := int64(0)
 	if destination.Terminal {
 		status = terminalRunStatus(transitionDef.To)
 		finishedAt = now.UnixMilli()
+	} else if activationPending {
+		// Only CompleteActivation releases the run: a transition taken during
+		// activation (such as context.bundle.ready) must not make its effects
+		// claimable before PR adoption has run.
+		status = RunSuspended
+		waitingReason = activationPendingReason
 	} else if held {
 		status, waitingReason = RunSuspended, replayPendingEntryReason
 	} else if awaitQueue {
@@ -713,6 +737,24 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	}
 	if changed != 1 {
 		return EventResult{}, fmt.Errorf("state compare-and-swap failed for run %s version %d", runID, stored.StateVersion)
+	}
+	// A delivery transition during activation (adopting an existing PR,
+	// promoting a registered branch PR, or the policy evaluation they publish)
+	// leaves a state whose effects could not be claimed yet: the initial
+	// state, or a state entered by an earlier activation-time transition such
+	// as context.bundle.ready. Those effects must not run in the destination
+	// state. Effects scheduled by an earlier delivery transition in the same
+	// activation (such as the CI trigger of delivery.adopted, followed by the
+	// workflow.delivery.evaluated it publishes) belong to the adopted path and
+	// are kept. Other activation-time transitions keep their effects.
+	if activationDeliveryEventKinds[input.Kind] && activationPending {
+		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',last_error=?,updated_at=?
+			WHERE run_id=? AND status='planned' AND (origin_type='initial' OR (origin_type='transition' AND origin_id NOT IN (
+				SELECT t.id FROM workflow_v2_transitions t JOIN workflow_v2_events e ON e.id=t.event_id
+				WHERE t.run_id=? AND e.kind IN (`+activationDeliveryEventKindList+`))))`,
+			"state left during activation", now.UnixMilli(), runID, runID); err != nil {
+			return EventResult{}, err
+		}
 	}
 
 	deltaJSON, err := marshalObject(writes)
@@ -763,7 +805,7 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	if err := tx.Commit(); err != nil {
 		return EventResult{}, err
 	}
-	if stored.Status == RunSuspended && !destination.Terminal && !input.deferInvariant {
+	if stored.SuspendedBeyondActivation() && !destination.Terminal && !input.deferInvariant {
 		// Recovery: fire what the run deferred while suspended. The result
 		// still describes this transition; a failure keeps the queue (and a
 		// held run) for the provider reconciler's ReplayDeferredEvents sweep.
@@ -883,6 +925,29 @@ func insertCommandEvent(ctx context.Context, tx *sql.Tx, runID string, input Com
 		nil, nil, now)
 }
 
+// ErrRunNotOpen reports that an event targeted a run that is no longer active
+// or suspended, or that is still pending activation.
+var ErrRunNotOpen = errors.New("workflow v2 run is not open for events")
+
+// ApplyOpenRunEvent applies an event only while the run is still open, checked
+// inside the event transaction. Unbound events (no attempt ID) are otherwise
+// not revalidated against run status, so a caller that selected the run
+// earlier could revive a run cancelled or finished in between. On
+// ErrRunNotOpen nothing is recorded.
+func (s *Store) ApplyOpenRunEvent(ctx context.Context, runID string, input EventInput) (EventResult, error) {
+	return s.applyEventWithMutation(ctx, runID, input, func(ctx context.Context, tx *sql.Tx, _ *EventInput) error {
+		var status, waitingReason string
+		if err := tx.QueryRowContext(ctx, `SELECT status,COALESCE(waiting_reason,'') FROM workflow_v2_runs WHERE id=?`,
+			runID).Scan(&status, &waitingReason); err != nil {
+			return err
+		}
+		if (status != string(RunActive) && status != string(RunSuspended)) || IsActivationPending(status, waitingReason) {
+			return ErrRunNotOpen
+		}
+		return nil
+	})
+}
+
 func (s *Store) applyEventWithMutation(ctx context.Context, runID string, input EventInput,
 	mutation eventMutation) (EventResult, error) {
 	input.mutation = mutation
@@ -916,7 +981,7 @@ func authorizeEvent(input EventInput) (typesv2.ControlDisposition, string) {
 		return typesv2.DispositionUnauthorized, fmt.Sprintf("producer %q cannot emit event %q", input.Producer, input.Kind)
 	}
 	for key := range input.Payload {
-		if !producerMaySupplyPayload(input.Producer, key) {
+		if !producerMaySupplyPayload(input.Producer, input.Kind, key) {
 			return typesv2.DispositionUnauthorized, fmt.Sprintf("producer %q cannot supply payload namespace %q", input.Producer, key)
 		}
 	}
@@ -928,8 +993,11 @@ func authorizeEvent(input EventInput) (typesv2.ControlDisposition, string) {
 	return "", ""
 }
 
-func producerMaySupplyPayload(producer Producer, namespace string) bool {
+func producerMaySupplyPayload(producer Producer, kind, namespace string) bool {
 	namespace = strings.SplitN(strings.TrimSpace(namespace), ".", 2)[0]
+	if producer == ProducerHub && kind == "cron.tick" && (namespace == "scheduled_at" || namespace == "slot_id") {
+		return true
+	}
 	switch producer {
 	case ProducerAgent:
 		return namespace == "agent" || namespace == "task" || namespace == "plan" || namespace == "delivery" ||
@@ -974,7 +1042,12 @@ func producerMayEmit(producer Producer, kind string) bool {
 		return prefix == "context"
 	case ProducerCustom:
 		return prefix == "custom"
-	case ProducerHub, ProducerEngine:
+	case ProducerHub:
+		if kind == "cron.tick" {
+			return true
+		}
+		fallthrough
+	case ProducerEngine:
 		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task" || prefix == "exec" || prefix == "dependency"
 	default:
 		return false
@@ -1344,6 +1417,25 @@ func finishRunScan(run *Run, phase, status string, created, updated, finished in
 		run.FinishedAt = &value
 	}
 }
+
+// activationDeliveryEventKinds are the events adoption and branch promotion
+// publish while a run is still activation-pending.
+var activationDeliveryEventKinds = map[string]bool{
+	"delivery.adopted":            true,
+	"delivery.verified":           true,
+	"workflow.delivery.evaluated": true,
+	"review.policy.evaluated":     true,
+}
+
+// activationDeliveryEventKindList is activationDeliveryEventKinds as a SQL list.
+var activationDeliveryEventKindList = func() string {
+	kinds := make([]string, 0, len(activationDeliveryEventKinds))
+	for kind := range activationDeliveryEventKinds {
+		kinds = append(kinds, "'"+kind+"'")
+	}
+	sort.Strings(kinds)
+	return strings.Join(kinds, ",")
+}()
 
 func terminalRunStatus(state string) RunStatus {
 	lower := strings.ToLower(state)
