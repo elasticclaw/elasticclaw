@@ -2,6 +2,7 @@ package v2
 
 import (
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -19,8 +20,37 @@ type Workflow struct {
 	Review        *WorkflowReview            `yaml:"review,omitempty" json:"review,omitempty"`
 	Delivery      *WorkflowDelivery          `yaml:"delivery,omitempty" json:"delivery,omitempty"`
 	Events        map[string]EventDefinition `yaml:"events,omitempty" json:"events,omitempty"`
+	Analytics     *WorkflowAnalytics         `yaml:"analytics,omitempty" json:"analytics,omitempty"`
 	Trigger       *WorkflowTrigger           `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 	Raw           map[string]interface{}     `yaml:"-" json:"-"`
+}
+
+// WorkflowAnalytics overrides the default code-task analytics contract.
+type WorkflowAnalytics struct {
+	RunKind    string `yaml:"run_kind,omitempty" json:"run_kind,omitempty"`
+	RequiresPR *bool  `yaml:"requires_pr,omitempty" json:"requires_pr,omitempty"`
+	Enabled    *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// TerminalOutcome is an explicit result independent of the authored state name.
+type TerminalOutcome string
+
+const (
+	OutcomeDelivered TerminalOutcome = "delivered"
+	OutcomeNoChanges TerminalOutcome = "no_changes"
+	OutcomeClosed    TerminalOutcome = "closed"
+	OutcomeFailed    TerminalOutcome = "failed"
+	OutcomeCancelled TerminalOutcome = "cancelled"
+)
+
+// IsTerminalOutcome reports whether outcome is one of the known terminal outcomes.
+func IsTerminalOutcome(outcome TerminalOutcome) bool {
+	switch outcome {
+	case OutcomeDelivered, OutcomeNoChanges, OutcomeClosed, OutcomeFailed, OutcomeCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 // WorkflowTrigger declares how the hub may create new runs outside the state
@@ -41,6 +71,7 @@ type CronTrigger struct {
 type State struct {
 	Description string                 `yaml:"description,omitempty" json:"description,omitempty"`
 	Phase       DisplayPhase           `yaml:"phase,omitempty" json:"phase,omitempty"`
+	Outcome     TerminalOutcome        `yaml:"outcome,omitempty" json:"outcome,omitempty"`
 	Terminal    bool                   `yaml:"terminal,omitempty" json:"terminal,omitempty"`
 	Invariant   map[string]interface{} `yaml:"invariant,omitempty" json:"invariant,omitempty"`
 	OnEnter     *StateActions          `yaml:"on_enter,omitempty" json:"on_enter,omitempty"`
@@ -107,8 +138,7 @@ type WorkflowReview struct {
 }
 
 // WorkflowDelivery declares aggregate constraints over the run-owned,
-// dynamically submitted delivery collection. It intentionally contains no
-// repository list; repository authority comes exclusively from the workspace.
+// delivery collection. Repository authority comes exclusively from the workspace.
 type WorkflowDelivery struct {
 	PullRequests *PullRequestDelivery `yaml:"pull_requests,omitempty" json:"pull_requests,omitempty"`
 }
@@ -116,11 +146,33 @@ type WorkflowDelivery struct {
 // PullRequestDelivery applies named CI/review policies to every active,
 // hub-verified PR and defines when that aggregate can complete.
 type PullRequestDelivery struct {
-	Required     bool   `yaml:"required,omitempty" json:"required,omitempty"`
-	Minimum      int    `yaml:"minimum,omitempty" json:"minimum,omitempty"`
-	CIPolicy     string `yaml:"ci_policy,omitempty" json:"ci_policy,omitempty"`
-	ReviewPolicy string `yaml:"review_policy,omitempty" json:"review_policy,omitempty"`
-	Completion   string `yaml:"completion,omitempty" json:"completion,omitempty"`
+	Branches     []PullRequestBranch `yaml:"branches,omitempty" json:"branches,omitempty"`
+	Required     bool                `yaml:"required,omitempty" json:"required,omitempty"`
+	Minimum      int                 `yaml:"minimum,omitempty" json:"minimum,omitempty"`
+	CIPolicy     string              `yaml:"ci_policy,omitempty" json:"ci_policy,omitempty"`
+	ReviewPolicy string              `yaml:"review_policy,omitempty" json:"review_policy,omitempty"`
+	Completion   string              `yaml:"completion,omitempty" json:"completion,omitempty"`
+}
+
+// PullRequestBranch selects head branches within a workspace repository.
+type PullRequestBranch struct {
+	Repository string `yaml:"repository" json:"repository"`
+	Pattern    string `yaml:"pattern" json:"pattern"`
+}
+
+// MatchesBranch uses slash-separated Go path globs; * does not cross a slash.
+func (d *PullRequestDelivery) MatchesBranch(repository, branch string) bool {
+	if d == nil {
+		return false
+	}
+	for _, rule := range d.Branches {
+		if rule.Repository == repository {
+			if matched, _ := path.Match(rule.Pattern, branch); matched {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 const DeliveryCompletionAllMerged = "all_merged"

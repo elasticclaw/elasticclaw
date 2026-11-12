@@ -43,13 +43,20 @@ func bridgeWorkspaceCommand(command string) string {
 // on the bridge. It records the incoming assignment as running, executes the
 // command or generated dependency-update script, and emits a typed completion
 // event back to the hub. These tasks never fall back to the agent gateway.
+// The completion carries the assignment's state version, not the shared
+// snapshot version, so a late completion cannot satisfy a newer assignment.
 func (s *controlSupervisor) startCommandTask(ctx context.Context, binding workflowControlBinding,
-	assignmentMessageID string, kind typesv2.ControlMessageKind, taskID string, payload json.RawMessage) {
-	go s.executeCommandTask(ctx, binding, assignmentMessageID, kind, taskID, payload)
+	assignment typesv2.ControlEnvelope) {
+	go s.executeCommandTask(ctx, binding, assignment)
 }
 
 func (s *controlSupervisor) executeCommandTask(ctx context.Context, binding workflowControlBinding,
-	assignmentMessageID string, kind typesv2.ControlMessageKind, taskID string, payload json.RawMessage) {
+	assignment typesv2.ControlEnvelope) {
+	assignmentMessageID, kind, taskID, payload := assignment.MessageID, assignment.Kind, assignment.TaskID, assignment.Payload
+	version := s.stateVersion(binding)
+	if assignment.ExpectedStateVersion != nil {
+		version = *assignment.ExpectedStateVersion
+	}
 	claimed, err := s.store.setIncomingStatus(assignmentMessageID, "accepted", "running")
 	if err != nil || !claimed {
 		if err != nil {
@@ -57,6 +64,15 @@ func (s *controlSupervisor) executeCommandTask(ctx context.Context, binding work
 		}
 		return
 	}
+
+	defer func() {
+		s.mu.RLock()
+		gateway := s.gateway
+		s.mu.RUnlock()
+		if gateway != nil {
+			gateway.branches.trigger()
+		}
+	}()
 
 	taskCtx, cancel := context.WithCancel(ctx)
 	activeCancellation := s.registerTaskCancellation(taskID, cancel)
@@ -71,7 +87,7 @@ func (s *controlSupervisor) executeCommandTask(ctx context.Context, binding work
 	case typesv2.MessageExecRunAssign:
 		var cfg typesv2.ExecRunConfig
 		if err := json.Unmarshal(payload, &cfg); err != nil {
-			s.finishCommandTask(binding, taskID, assignmentMessageID, typesv2.MessageExecRunFailed,
+			s.finishCommandTask(binding, taskID, version, assignmentMessageID, typesv2.MessageExecRunFailed,
 				fmt.Errorf("decode exec.run config: %w", err))
 			return
 		}
@@ -79,18 +95,18 @@ func (s *controlSupervisor) executeCommandTask(ctx context.Context, binding work
 	case typesv2.MessageDependencyUpdateAssign:
 		var cfg typesv2.DependencyUpdateConfig
 		if err := json.Unmarshal(payload, &cfg); err != nil {
-			s.finishCommandTask(binding, taskID, assignmentMessageID, typesv2.MessageDependencyUpdateFailed,
+			s.finishCommandTask(binding, taskID, version, assignmentMessageID, typesv2.MessageDependencyUpdateFailed,
 				fmt.Errorf("decode dependency.update config: %w", err))
 			return
 		}
 		receipt, completedKind = s.runDependencyUpdateCommand(taskCtx, binding, taskID, cfg)
 	default:
-		s.finishCommandTask(binding, taskID, assignmentMessageID, typesv2.MessageExecRunFailed,
+		s.finishCommandTask(binding, taskID, version, assignmentMessageID, typesv2.MessageExecRunFailed,
 			fmt.Errorf("unsupported command task kind %q", kind))
 		return
 	}
 
-	if err := s.enqueueCommandEvent(binding, taskID, completedKind, receipt); err != nil {
+	if err := s.enqueueCommandEvent(binding, taskID, version, completedKind, receipt); err != nil {
 		log.Printf("[control-v2] queue command task completion %s: %v", taskID, err)
 		return
 	}
@@ -213,22 +229,21 @@ func (s *controlSupervisor) runDependencyUpdateCommand(ctx context.Context, bind
 	return result, typesv2.MessageDependencyUpdateFailed
 }
 
-func (s *controlSupervisor) finishCommandTask(binding workflowControlBinding, taskID, assignmentMessageID string,
-	kind typesv2.ControlMessageKind, reason error) {
-	if err := s.enqueueCommandEvent(binding, taskID, kind, map[string]interface{}{"succeeded": false, "error": reason.Error()}); err != nil {
+func (s *controlSupervisor) finishCommandTask(binding workflowControlBinding, taskID string, version uint64,
+	assignmentMessageID string, kind typesv2.ControlMessageKind, reason error) {
+	if err := s.enqueueCommandEvent(binding, taskID, version, kind, map[string]interface{}{"succeeded": false, "error": reason.Error()}); err != nil {
 		log.Printf("[control-v2] queue command task failure %s: %v", taskID, err)
 		return
 	}
 	_, _ = s.store.setIncomingStatus(assignmentMessageID, "running", "failed")
 }
 
-func (s *controlSupervisor) enqueueCommandEvent(binding workflowControlBinding, taskID string,
+func (s *controlSupervisor) enqueueCommandEvent(binding workflowControlBinding, taskID string, version uint64,
 	kind typesv2.ControlMessageKind, payload map[string]interface{}) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	version := s.stateVersion(binding)
 	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
 		MessageID: uuid.NewString(), Kind: kind, RunID: binding.RunID, AttemptID: binding.AttemptID,
 		TaskID: taskID, ExpectedStateVersion: &version, SentAt: time.Now().UTC(), Payload: raw}

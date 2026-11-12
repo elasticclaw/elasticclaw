@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
@@ -384,5 +385,86 @@ func TestMigrateClawPRSource(t *testing.T) {
 		if source != "" {
 			t.Fatalf("legacy source %q", source)
 		}
+	}
+}
+
+func TestClawPRRegistrationV2PromotesDeclaredBranch(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	ctx := context.Background()
+	const clawID = "claw-pr-branch"
+	const url = "https://github.com/owner/repo/pull/1"
+	s, db := newTaskRunAnalyticsTestServer(t, clawID)
+	s.hubCfg.ClawToken = "claw-token"
+	if _, err := db.Exec(`UPDATE claws SET github_repos='[{"repo":"owner/repo"}]' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	taskRunID, _ := startTaskRunForTest(t, s, clawID, "pr-branch-registration")
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: "pr-branch", TenantID: "test-tenant-id", InitialClawID: clawID, TaskRunID: taskRunID,
+		WorkspaceYAML: []byte("schema_version: 2\nname: test\nrepositories:\n  repo:\n    provider: github\n    repository: owner/repo\n"),
+		WorkflowYAML: []byte(`
+schema_version: 2
+name: delivery
+enabled: true
+initial_state: working
+states:
+  working:
+    phase: build
+  done:
+    phase: done
+    terminal: true
+transitions:
+  delivered:
+    from: working
+    on: delivery.verified
+    to: done
+delivery:
+  pull_requests:
+    branches:
+      - repository: repo
+        pattern: deps/*
+`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldClient := defaultGitHubClient
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() { defaultGitHubClient = oldClient })
+	defaultGitHubClient.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return githubAppTokenResponse(http.StatusOK, `{"html_url":"`+url+`","state":"open","head":{"sha":"head-v2","ref":"deps/go-minor"},"base":{"ref":"main"}}`), nil
+	})}
+	req := httptest.NewRequest(http.MethodPost, "/api/claws/"+clawID+"/prs?claw_token=claw-token", strings.NewReader(`{"url":"`+url+`","source":"gh_create"}`))
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
+	}
+	var registered int
+	if err := db.QueryRow(`SELECT registered_only FROM workflow_v2_delivery_prs WHERE run_id=?`, run.ID).Scan(&registered); err != nil || registered != 0 {
+		t.Fatalf("registered_only=%d err=%v", registered, err)
+	}
+	inspection, err := store.InspectRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Run.Status != workflowv2.RunCompleted || inspection.Facts["delivery"].(map[string]interface{})["count"] != float64(1) {
+		t.Fatalf("run=%+v facts=%v", inspection.Run, inspection.Facts["delivery"])
+	}
+	assertTaskRunPR(t, db, taskRunID, "owner/repo", 1, taskRunPRStateOpen, false)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status == "deleted" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("parent claw not finished: %s", status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

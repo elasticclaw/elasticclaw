@@ -985,6 +985,11 @@ func (s *Server) promotePendingClaws() {
 		if err := rows.Scan(&clawID, &tenantID, &groupName); err != nil {
 			continue
 		}
+		if _, activating := s.activatingClaws.Load(clawID); activating {
+			// Workflow v2 activation may still finish the run without
+			// provisioning; its creator promotes again once it decides.
+			continue
+		}
 		if groupName == "" {
 			groupName = "global"
 		}

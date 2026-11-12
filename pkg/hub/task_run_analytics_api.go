@@ -119,6 +119,7 @@ type taskRunAnalyticsRunView struct {
 	FactoryName           string   `json:"factoryName"`
 	OwnerID               string   `json:"ownerId"`
 	OwnerDisplayName      string   `json:"ownerDisplayName"`
+	Outcome               string   `json:"outcome,omitempty"`
 	RunKind               string   `json:"runKind"`
 	Integration           string   `json:"integration"`
 	IntegrationWorkspace  string   `json:"integrationWorkspace"`
@@ -251,6 +252,7 @@ type taskRunAnalyticsFilters struct {
 	ToStartedAt      int64
 	Status           []string
 	Owner            []string
+	RunKind          []string
 	OwnerType        []string
 	Workspace        []string
 	Workflow         []string
@@ -307,7 +309,7 @@ func (s *Server) handleTaskRunAnalyticsGeneralStats(w http.ResponseWriter, r *ht
 
 func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilters, bh BusinessHours) (taskRunGeneralStatsResponse, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
-	rows, err := s.db.Query(`SELECT issue_created_at, started_at, agent_started_at, pr_opened_at, ready_at, merged_at FROM task_run_summaries `+where, args...)
+	rows, err := s.db.Query(`SELECT issue_created_at, started_at, agent_started_at, pr_opened_at, ready_at, merged_at, run_kind FROM task_run_summaries `+where, args...)
 	if err != nil {
 		return taskRunGeneralStatsResponse{}, err
 	}
@@ -316,12 +318,13 @@ func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilter
 	var ticketN, ticketAuthN, prN, aiN int
 	for rows.Next() {
 		var issue, started, agent, opened, ready, merged int64
-		if err := rows.Scan(&issue, &started, &agent, &opened, &ready, &merged); err != nil {
+		var runKind string
+		if err := rows.Scan(&issue, &started, &agent, &opened, &ready, &merged, &runKind); err != nil {
 			return taskRunGeneralStatsResponse{}, err
 		}
 		// Negative deltas are skipped: for GitHub-triggered claws the PR
 		// pre-dates the run, so opened-started/opened-agent are meaningless.
-		if started > 0 {
+		if started > 0 && runKind != taskRunKindMaintenance {
 			base := issue
 			fallback := base == 0
 			if fallback {
@@ -628,7 +631,12 @@ func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, err
 	if err != nil {
 		return taskRunAnalyticsFilters{}, err
 	}
+	runKind, err := read("run_kind", "runKind")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
 	filters := taskRunAnalyticsFilters{
+		RunKind:     runKind,
 		TenantID:    tenantFromCtx(r),
 		Status:      status,
 		Owner:       owner,
@@ -1262,7 +1270,7 @@ func (s *Server) readDistinctTaskRunAnalyticsValues(tenantID, column string) ([]
 	rows, err := s.db.Query(fmt.Sprintf(`
 		SELECT DISTINCT %s
 		  FROM task_run_summaries
-		 WHERE tenant_id=? AND analytics_enabled=1 AND requires_pr=1 AND %s != ''
+		 WHERE tenant_id=? AND analytics_enabled=1 AND (requires_pr=1 OR run_kind='maintenance') AND %s != ''
 		 ORDER BY %s`, column, column, column), tenantID)
 	if err != nil {
 		return nil, err
@@ -1286,7 +1294,7 @@ func (s *Server) readDistinctTaskRunAnalyticsJSONValues(tenantID, column string)
 	rows, err := s.db.Query(fmt.Sprintf(`
 		SELECT DISTINCT je.value
 		  FROM task_run_summaries s, json_each(s.%s) je
-		 WHERE s.tenant_id=? AND s.analytics_enabled=1 AND s.requires_pr=1 AND je.value != ''
+		 WHERE s.tenant_id=? AND s.analytics_enabled=1 AND (s.requires_pr=1 OR s.run_kind='maintenance') AND je.value != ''
 		 ORDER BY je.value`, column), tenantID)
 	if err != nil {
 		return nil, err
@@ -1312,6 +1320,7 @@ func (s *Server) taskRunAnalyticsRunExists(tenantID, runID string) bool {
 func taskRunAnalyticsSummaryWhere(filters taskRunAnalyticsFilters) (string, []any) {
 	where := []string{`tenant_id=?`}
 	args := []any{filters.TenantID}
+	addTaskRunAnalyticsInFilter(&where, &args, "run_kind", filters.RunKind)
 	addTaskRunAnalyticsInFilter(&where, &args, "status", filters.Status)
 	addTaskRunAnalyticsOwnerFilter(&where, &args, filters.Owner)
 	addTaskRunAnalyticsInFilter(&where, &args, "owner_type", filters.OwnerType)
@@ -1348,12 +1357,17 @@ func taskRunAnalyticsSummaryWhere(filters taskRunAnalyticsFilters) (string, []an
 		where = append(where, `started_at <= ?`)
 		args = append(args, filters.ToStartedAt)
 	}
+	// Default scope is PR-producing runs plus maintenance runs; other
+	// requires_pr=0 runs stay excluded (excluded_reason=non_pr_producing).
+	// The dashboard sends analytics_enabled=true on its own, so that filter
+	// keeps the default PR scope; only analytics_enabled=false (inspecting
+	// excluded runs) or an explicit requires_pr lifts it.
 	eligibilityFilterProvided := filters.RequiresPR != nil || filters.AnalyticsEnabled != nil
 	if filters.RequiresPR != nil {
 		where = append(where, `requires_pr=?`)
 		args = append(args, boolInt(*filters.RequiresPR))
-	} else if !eligibilityFilterProvided {
-		where = append(where, `requires_pr=1`)
+	} else if filters.AnalyticsEnabled == nil || *filters.AnalyticsEnabled {
+		where = append(where, `(requires_pr=1 OR run_kind='maintenance')`)
 	}
 	if filters.AnalyticsEnabled != nil {
 		where = append(where, `analytics_enabled=?`)
@@ -1401,7 +1415,7 @@ func taskRunAnalyticsRunColumns() string {
 		failure_type, human_interaction_count, started_at, queued_at, provision_started_at,
 		agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at,
 		materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason,
-		input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, issue_title, cost_approximate`
+		input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, issue_title, cost_approximate, outcome`
 }
 
 func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error) {
@@ -1420,7 +1434,7 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 			&warningsJSON, &run.FailureType, &run.HumanInteractionCount, &run.StartedAt, &run.QueuedAt,
 			&run.ProvisionStartedAt, &run.AgentStartedAt, &run.PROpenedAt, &run.ReadyAt, &run.MergedAt, &run.FinishedAt,
 			&run.TimeoutAt, &run.LastEventAt, &run.MaterializedAt, &run.UpdatedAt, &analyticsEnabled, &requiresPR,
-			&run.ExcludedReason, &inputTokens, &outputTokens, &totalTokens, &estimatedCostUSD, &usageUpdatedAt, &run.IssueTitle, &run.CostApproximate,
+			&run.ExcludedReason, &inputTokens, &outputTokens, &totalTokens, &estimatedCostUSD, &usageUpdatedAt, &run.IssueTitle, &run.CostApproximate, &run.Outcome,
 		); err != nil {
 			return nil, err
 		}
