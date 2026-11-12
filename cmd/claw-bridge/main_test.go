@@ -1661,6 +1661,86 @@ func TestGatewaySessionSurfacesLifecycleRawErrorFromSessionsGet(t *testing.T) {
 	}
 }
 
+// startLifecycleEndGateway serves one accepted sessions.send whose turn ends
+// with a lifecycle end carrying data, then keeps the socket open.
+func startLifecycleEndGateway(t *testing.T, data map[string]interface{}) *gatewaySession {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+			"stream": "assistant", "sessionKey": "session-1", "data": map[string]string{"delta": "partial"},
+		})})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": data,
+		})})
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.CloseNow() })
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	return gs
+}
+
+// OpenClaw 2026.9.4 ends a turn whose reasoning-only retries are exhausted
+// with lifecycle end livenessState=abandoned (its terminalError
+// non_deliverable_terminal_turn stays in the trajectory file).
+func TestGatewaySessionUndeliverableTurnFailsOnlyWhenRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		data     map[string]interface{}
+		required bool
+		wantErr  string
+	}{
+		{"abandoned required", map[string]interface{}{"phase": "end", "livenessState": "abandoned", "replayInvalid": true},
+			true, "agent turn ended without a deliverable answer: livenessState=abandoned"},
+		{"blocked required", map[string]interface{}{"phase": "end", "livenessState": "blocked", "stopReason": "length"},
+			true, "agent turn ended without a deliverable answer: livenessState=blocked stopReason=length"},
+		{"abandoned not required", map[string]interface{}{"phase": "end", "livenessState": "abandoned"}, false, ""},
+		{"working required", map[string]interface{}{"phase": "end", "livenessState": "working", "stopReason": "stop"}, true, ""},
+		{"aborted required", map[string]interface{}{"phase": "end", "livenessState": "blocked", "aborted": true}, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gs := startLifecycleEndGateway(t, tc.data)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if tc.required {
+				ctx = requireDeliverableTurn(ctx)
+			}
+			reply, err := gs.SendMessage(ctx, "repair", "turn-1", nil, nil)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("SendMessage = %q, %v; want error %q", reply, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || reply != "partial" {
+				t.Fatalf("SendMessage = %q, %v; want completed reply", reply, err)
+			}
+		})
+	}
+}
+
 func TestGatewaySessionLifecycleErrorWinsOverDisconnectDuringCauseLookup(t *testing.T) {
 	const generic = "⚠️ Agent run failed (model: anthropic/claude-sonnet-5)"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

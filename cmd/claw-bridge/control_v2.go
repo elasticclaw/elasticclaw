@@ -625,7 +625,9 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 		}
 	}()
 	prompt := workflowV2TaskPrompt(task)
-	response, sendErr := gateway.SendMessage(taskCtx, prompt, assignmentMessageID, func(string) {}, func(agentActivity) {})
+	// A turn OpenClaw ends without a deliverable answer fails the task, so the
+	// workflow does not advance as if the agent had done the work.
+	response, sendErr := gateway.SendMessage(requireDeliverableTurn(taskCtx), prompt, assignmentMessageID, func(string) {}, func(agentActivity) {})
 	close(heartbeatDone)
 	<-heartbeatStopped
 	if sendErr != nil {

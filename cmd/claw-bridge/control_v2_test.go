@@ -303,3 +303,58 @@ func TestBridgeControlOutboxRetryUsesStableMessageIdentity(t *testing.T) {
 		t.Fatalf("ready = %#v, err=%v", ready, err)
 	}
 }
+
+// Incident 2026-11-12: a repair turn whose reasoning ate the whole output
+// budget ended with livenessState=abandoned and was still reported as
+// agent.task.completed, so the workflow moved on to validate.
+func TestAgentTaskWithUndeliverableTurnReportsFailed(t *testing.T) {
+	store := openTestBridgeControlStore(t)
+	binding := workflowControlBinding{RunID: "run-undeliverable", AttemptID: "attempt-undeliverable"}
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor.binding = &binding
+	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 4}
+	gs := startLifecycleEndGateway(t, map[string]interface{}{"phase": "end", "livenessState": "abandoned", "replayInvalid": true})
+	gs.ready = true
+	supervisor.setGatewaySession(gs)
+
+	task := typesv2.AgentTask{ID: "task-repair", RunID: binding.RunID, AttemptID: binding.AttemptID,
+		State: "repair", StateVersion: 4, Status: typesv2.AgentTaskAssigned, Instructions: "Fix the build.",
+		Deadline: time.Now().Add(time.Minute)}
+	payload, _ := json.Marshal(task)
+	version := task.StateVersion
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: "assign-repair", Kind: typesv2.MessageAgentTaskAssign, RunID: binding.RunID,
+		AttemptID: binding.AttemptID, TaskID: task.ID, ExpectedStateVersion: &version, Payload: payload}
+	if _, accepted, err := supervisor.acceptHubEnvelope(context.Background(), binding, envelope); err != nil || accepted == nil {
+		t.Fatalf("accept assignment: task=%#v err=%v", accepted, err)
+	}
+	supervisor.startTask(context.Background(), binding, envelope.MessageID, task)
+
+	var terminal *typesv2.ControlEnvelope
+	for deadline := time.Now().Add(5 * time.Second); terminal == nil && time.Now().Before(deadline); {
+		ready, err := store.ready(binding, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range ready {
+			if ready[i].Kind == typesv2.MessageAgentTaskCompleted || ready[i].Kind == typesv2.MessageAgentTaskFailed {
+				terminal = &ready[i]
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if terminal == nil || terminal.Kind != typesv2.MessageAgentTaskFailed {
+		t.Fatalf("terminal task event = %#v, want agent.task.failed", terminal)
+	}
+	var result struct {
+		Task struct {
+			Error string `json:"error"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(terminal.Payload, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Task.Error, "without a deliverable answer: livenessState=abandoned") {
+		t.Fatalf("failure reason = %q", result.Task.Error)
+	}
+}
