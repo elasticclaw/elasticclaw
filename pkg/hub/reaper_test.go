@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -971,4 +972,49 @@ func deleteClawForTest(t *testing.T, s *Server, db *sql.DB, clawID string) int {
 		}
 	}
 	return rec.Code
+}
+
+// A kill retried after a failed v2 cancel must comment the linked story once:
+// the comment is only posted after the delete commits.
+func TestDeleteClawCommentsTrackerOnceAcrossRetriedKill(t *testing.T) {
+	var comments atomic.Int32
+	shortcut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments") {
+			comments.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer shortcut.Close()
+	factory := taskRunLifecycleFactoryConfig("kill-factory", "shortcut")
+	s, db := newReaperTestServer(t, &types.HubConfig{
+		Factories:    []*types.FactoryConfig{factory},
+		Integrations: &types.IntegrationsConfig{Shortcut: []*types.ShortcutIntegrationConfig{{Workspace: factory.Workspace, Token: "token"}}},
+	})
+	s.shortcutBaseURL = shortcut.URL
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at,shortcut_story_id,tags) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"claw-killed", "tenant", "killed", "ws", "replicated", "connected", now, "42", `["factory:kill-factory"]`); err != nil {
+		t.Fatal(err)
+	}
+	insertWorkflowV2Run(t, db, "run-killed", "att-killed", time.Time{}, now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-killed", "att-killed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_run_cancel BEFORE UPDATE OF status ON workflow_v2_runs
+		WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT, 'db busy'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusInternalServerError {
+		t.Fatalf("delete status = %d, want 500", code)
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_run_cancel`); err != nil {
+		t.Fatal(err)
+	}
+	if code := deleteClawForTest(t, s, db, "claw-killed"); code != http.StatusNoContent {
+		t.Fatalf("retried delete status = %d", code)
+	}
+	if got := comments.Load(); got != 1 {
+		t.Fatalf("tracker comments = %d, want 1", got)
+	}
 }

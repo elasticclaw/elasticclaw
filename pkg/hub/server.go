@@ -2084,8 +2084,40 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		var provider, providerID, clawStatus string
 		_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,''), COALESCE(status,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&provider, &providerID, &clawStatus)
 
-		// Post a comment on the linked issue/story when a factory-created claw is killed manually
+		// Resolve the linked issue/story before the delete; it is commented only
+		// once the kill is committed, so a retried kill does not comment twice.
 		factory, issueID := s.findFactoryForClaw(clawID)
+
+		// Cancel the bound workflow v2 run before the soft delete, which
+		// bypasses finishClawTerminalTx. A tick landing after the delete would
+		// otherwise be absorbed by the dying run of a signal-overlap workflow,
+		// and a cancel failure would leave that run active forever. On failure
+		// the claw stays alive so the kill can be retried. clawStatus is only
+		// set when the tenant owns the claw.
+		if clawStatus != "" && clawStatus != "deleted" {
+			runID, err := s.cancelBoundWorkflowV2Run(context.Background(), clawID, "manually killed")
+			if err != nil {
+				log.Printf("kill: claw %s: %v", clawID, err)
+				http.Error(w, "failed to cancel workflow run", http.StatusInternalServerError)
+				return
+			}
+			if runID != "" {
+				// Close the cron history and parent once the claw is deleted.
+				defer s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+			}
+		}
+		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
+		if err != nil {
+			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
+			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		rowsAffected, err := res.RowsAffected()
+		if err != nil || rowsAffected == 0 {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Post a comment on the linked issue/story when a factory-created claw is killed manually
 		if factory != nil && issueID != "" {
 			switch factory.Integration {
 			case "linear":
@@ -2123,36 +2155,6 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-		}
-
-		// Cancel the bound workflow v2 run before the soft delete, which
-		// bypasses finishClawTerminalTx. A tick landing after the delete would
-		// otherwise be absorbed by the dying run of a signal-overlap workflow,
-		// and a cancel failure would leave that run active forever. On failure
-		// the claw stays alive so the kill can be retried. clawStatus is only
-		// set when the tenant owns the claw.
-		if clawStatus != "" && clawStatus != "deleted" {
-			runID, err := s.cancelBoundWorkflowV2Run(context.Background(), clawID, "manually killed")
-			if err != nil {
-				log.Printf("kill: claw %s: %v", clawID, err)
-				http.Error(w, "failed to cancel workflow run", http.StatusInternalServerError)
-				return
-			}
-			if runID != "" {
-				// Close the cron history and parent once the claw is deleted.
-				defer s.maybeFinishWorkflowV2Parent(context.Background(), runID)
-			}
-		}
-		res, err := s.db.Exec(`UPDATE claws SET status='deleted', bootstrap_status='' WHERE id = ? AND tenant_id = ? AND status != 'deleted'`, clawID, tenantID)
-		if err != nil {
-			log.Printf("kill: db soft-delete error for claw %s: %v", clawID, err)
-			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
-			return
-		}
-		rowsAffected, err := res.RowsAffected()
-		if err != nil || rowsAffected == 0 {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
 		}
 		if clawStatus != "error" {
 			s.recordTaskRunManualStopBeforeDelivery(clawID, ghLogin)
