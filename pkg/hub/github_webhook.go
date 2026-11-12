@@ -12,7 +12,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -140,6 +139,22 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
 			s.safeGo("github issue comment webhook", func() { s.processGitHubIssueComment(payload) })
 		}
+	case "status":
+		// Requires the GitHub App to subscribe to the status event (commit
+		// statuses: read). Pending statuses are skipped: policy already treats
+		// missing evidence as pending and the reconciler covers re-runs.
+		var payload githubStatusPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse status payload: %v", err)
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		log.Printf("[github-webhook] status repo=%q sha=%q state=%q", payload.Repository.FullName, payload.SHA, payload.State)
+		check, ok := payload.checkPayload()
+		if !ok {
+			break
+		}
+		s.safeGo("github status webhook", func() { s.processWorkflowV2GitHubCheckEvent("check_run", check) })
 	case "check_run", "check_suite":
 		var payload githubCheckPayload
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -281,7 +296,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 						payload.PullRequest.HTMLURL, payload.PullRequest.Head.SHA, s.resolveGitHubIssuesTokenForFactory(factory))
 				}
 			}
-			if payload.Action == "closed" {
+			if payload.Action == "closed" && !s.isScannedPRMention(existingClawID, payload.PullRequest.HTMLURL) {
 				if _, runID, _, ok, err := s.taskRunContextForClaw(existingClawID); err == nil && ok {
 					at := parseRFC3339Timestamp(payload.PullRequest.MergedAt)
 					if !payload.PullRequest.Merged {
@@ -370,7 +385,7 @@ func (s *Server) recordGitHubPRReadyForReview(payload githubPRPayload) {
 	}
 	repoFullName := payload.Repository.FullName
 	runID := ""
-	if clawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL); clawID != "" {
+	if clawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL); clawID != "" && !s.isScannedPRMention(clawID, payload.PullRequest.HTMLURL) {
 		if _, id, _, ok, err := s.taskRunContextForClaw(clawID); err == nil && ok {
 			runID = id
 		}
@@ -453,6 +468,29 @@ type githubPRReviewPayload struct {
 // githubCheckPayload holds the fields we need from check_run and check_suite
 // webhook events. One struct serves both: the handler reads the sub-object that
 // matches the event name.
+// githubStatusPayload is the subset of a commit status delivery the v2
+// evidence refresh needs.
+type githubStatusPayload struct {
+	SHA        string `json:"sha"`
+	State      string `json:"state"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// checkPayload converts a settled commit status into the completed check_run
+// shape processWorkflowV2GitHubCheckEvent consumes. Pending statuses report
+// false.
+func (p githubStatusPayload) checkPayload() (githubCheckPayload, bool) {
+	if p.State == "pending" || p.SHA == "" {
+		return githubCheckPayload{}, false
+	}
+	check := githubCheckPayload{Action: "completed"}
+	check.Repository.FullName = p.Repository.FullName
+	check.CheckRun.HeadSHA = p.SHA
+	return check, true
+}
+
 type githubCheckPayload struct {
 	Action   string `json:"action"` // "completed", "created", "rerequested", "requested"
 	CheckRun struct {
@@ -959,16 +997,29 @@ func (s *Server) resetReopenedClawPR(clawID, prURL string) {
 }
 
 // findClawForGitHubPR returns the claw ID that is already tracking this PR URL, or "".
+// Claws that delivered or created the PR win over claws that merely mentioned it.
 func (s *Server) findClawForGitHubPR(prURL string) string {
 	var clawID string
 	_ = s.db.QueryRow(
 		`SELECT cp.claw_id FROM claw_prs cp
 		 JOIN claws cl ON cl.id = cp.claw_id
 		 WHERE cp.pr_url = ? AND cl.status NOT IN ('deleted','error','offline')
+		 ORDER BY (cp.mention_only=1 AND cp.source IN ('mention','')) ASC
 		 LIMIT 1`,
 		prURL,
 	).Scan(&clawID)
 	return clawID
+}
+
+// isScannedPRMention reports whether the claw only knows this PR from a URL
+// scanned out of its messages (source=” covers mention rows stored before the
+// source column existed). Such PRs must not be attached to its task run;
+// registered (gh_create, branch_sweep) and delivered rows still are.
+func (s *Server) isScannedPRMention(clawID, prURL string) bool {
+	var scanned bool
+	_ = s.db.QueryRow(`SELECT mention_only=1 AND source IN ('mention','') FROM claw_prs WHERE claw_id=? AND pr_url=?`,
+		clawID, prURL).Scan(&scanned)
+	return scanned
 }
 
 func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPRPayload, reason string) error {
@@ -1187,7 +1238,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
-	if groupLimit > 0 && activeCount >= groupLimit {
+	if groupLimit > 0 && (activeCount >= groupLimit || s.hasPendingInGroup(groupName)) {
 		isPending = true
 		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for GitHub PR %s#%d as pending", groupName, activeCount, groupLimit, repoFullName, prNumber)
 	}
@@ -1233,7 +1284,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// can retry.
 	// mentionOnly=false: this PR is the claw's reason to exist, so it must
 	// gate finalization like a delivered PR.
-	if _, err := s.storePRMention(clawID, repoFullName, prNumber, prURL, false); err != nil {
+	if _, err := s.storePRMention(clawID, repoFullName, prNumber, prURL, false, "trigger"); err != nil {
 		_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id=?`, clawID)
 		if s.cronScheduler != nil {
 			s.cronScheduler.finishRunByClawID(clawID, "failed", err.Error())
@@ -1276,6 +1327,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	})
 
 	if isPending {
+		go s.promotePendingClaws()
 		return nil
 	}
 
@@ -1303,26 +1355,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 			fileBytes[k] = []byte(v)
 		}
 
-		var provErr error
-		switch provider {
-		case "replicated":
-			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-		case "daytona":
-			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-		case "exedev":
-			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-		case "noop":
-			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
-				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
-			} else {
-				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
-			}
-		default:
-			provErr = fmt.Errorf("unsupported provider: %s", provider)
-		}
+		provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 		if provErr != nil {
 			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)

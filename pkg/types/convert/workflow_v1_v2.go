@@ -100,13 +100,21 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 			if mapped == nil {
 				continue
 			}
-			if len(fromStates) == 0 {
+			triggerFrom := fromStates
+			if raw, present := trig["from"]; present {
+				var err error
+				triggerFrom, err = types.ParseTriggerFrom(raw)
+				if err != nil {
+					return Result{}, fmt.Errorf("%s: %w", path, err)
+				}
+			}
+			if len(triggerFrom) == 0 {
 				appendWarning(&warnings, "%s: no source states available for transition to %q; skipped", path, id)
 				continue
 			}
 			tname := uniqueName(fmt.Sprintf("to_%s_via_%s", id, mapped.slug), usedTransitionNames)
 			tr := v2.Transition{
-				From: stringOrList(fromStates),
+				From: stringOrList(triggerFrom),
 				On:   mapped.on,
 				To:   id,
 			}

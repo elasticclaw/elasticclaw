@@ -4,13 +4,133 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
+
+// workflowV2TaskRunTerminal is what analytics needs from the finished v2 run
+// of a task run. finishedAt is set for any completed/cancelled run and is the
+// durable marker recorded on the summary once it has seen that run.
+type workflowV2TaskRunTerminal struct {
+	outcome    typesv2.TerminalOutcome
+	outcomeAt  int64
+	finishedAt int64
+	// failedWithoutOutcome mirrors the eager terminal update: a run cancelled
+	// (e.g. by a timeout) or ending in prepare_failed without an outcome failed.
+	failedWithoutOutcome bool
+}
+
+func workflowV2FailedWithoutOutcome(status workflowv2.RunStatus, state string, outcome typesv2.TerminalOutcome) bool {
+	return outcome == "" && (status == workflowv2.RunCancelled || state == "prepare_failed")
+}
+
+// readWorkflowV2TaskRunTerminal uses the pinned document, so edits to the workflow
+// cannot change the classification when analytics is rebuilt later.
+func readWorkflowV2TaskRunTerminal(db interface{ QueryRow(string, ...any) *sql.Row }, taskRunID string) (workflowV2TaskRunTerminal, error) {
+	var state, status, workflowYAML string
+	var terminal workflowV2TaskRunTerminal
+	err := db.QueryRow(`SELECT state, status, workflow_yaml, finished_at FROM workflow_v2_runs
+  WHERE task_run_id=? AND status IN ('completed','cancelled') ORDER BY created_at DESC, id DESC LIMIT 1`, taskRunID).Scan(&state, &status, &workflowYAML, &terminal.finishedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return workflowV2TaskRunTerminal{}, nil
+	}
+	if err != nil {
+		return workflowV2TaskRunTerminal{}, err
+	}
+	workflow, err := typesv2.ParseWorkflow([]byte(workflowYAML))
+	if err != nil {
+		// A pinned document the current parser rejects must not block event
+		// recording or claw teardown; classify the run as having no outcome.
+		log.Printf("[workflow-v2] cannot parse pinned workflow for task run %s; ignoring outcome: %v", taskRunID, err)
+	} else if definition := workflow.States[state]; definition.Terminal {
+		terminal.outcome, terminal.outcomeAt = definition.Outcome, terminal.finishedAt
+	}
+	terminal.failedWithoutOutcome = workflowV2FailedWithoutOutcome(workflowv2.RunStatus(status), state, terminal.outcome)
+	return terminal, nil
+}
+
+// materializeTerminalWorkflowV2TaskRuns is one-shot per run: a summary whose
+// workflow_v2_finished_at matches the run's finished_at was written by a
+// transaction that already saw the finished run, so it is not selected again.
+// Wall-clock comparisons are not used: the v2 finish time is taken before its
+// transaction, so a concurrent materialization can be newer yet stale.
+func (s *Server) materializeTerminalWorkflowV2TaskRuns() (int, error) {
+	// Any status qualifies: a summary closed before its outcome was
+	// materialized must still pick the outcome up.
+	rows, err := s.db.Query(`SELECT s.run_id, s.status, MAX(r.finished_at) FROM task_run_summaries s
+  JOIN workflow_v2_runs r ON r.task_run_id=s.run_id
+  WHERE s.outcome='' AND s.workflow_v2_finished_at < r.finished_at
+    AND r.status IN ('completed','cancelled')
+  GROUP BY s.run_id`)
+	if err != nil {
+		return 0, err
+	}
+	type terminalRun struct {
+		runID      string
+		status     string
+		finishedAt int64
+	}
+	var runs []terminalRun
+	for rows.Next() {
+		var run terminalRun
+		if err := rows.Scan(&run.runID, &run.status, &run.finishedAt); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		runs = append(runs, run)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	for _, run := range runs {
+		if run.status != taskRunStatusRunning {
+			// A closed summary without an outcome was finished by the terminal
+			// path itself; re-materializing it could reopen it as running.
+			terminal, err := readWorkflowV2TaskRunTerminal(s.db, run.runID)
+			if err != nil {
+				log.Printf("[task-run-analytics] read terminal workflow outcome %s: %v", run.runID, err)
+				continue
+			}
+			if terminal.outcome == "" {
+				s.markTerminalWorkflowV2TaskRunRecovered(run.runID, run.finishedAt)
+				continue
+			}
+		}
+		if err := s.materializeTaskRun(run.runID); err != nil {
+			log.Printf("[task-run-analytics] recover terminal workflow summary %s: %v", run.runID, err)
+			continue
+		}
+		s.markTerminalWorkflowV2TaskRunRecovered(run.runID, run.finishedAt)
+	}
+	return len(runs), nil
+}
+
+func (s *Server) markTerminalWorkflowV2TaskRunRecovered(runID string, finishedAt int64) {
+	if _, err := s.db.Exec(`UPDATE task_run_summaries SET workflow_v2_finished_at=? WHERE run_id=? AND workflow_v2_finished_at<?`,
+		finishedAt, runID, finishedAt); err != nil {
+		log.Printf("[task-run-analytics] mark terminal workflow summary %s recovered: %v", runID, err)
+	}
+}
+
+// workflowV2ClawResult maps a terminal v2 run status and outcome to the claw's
+// terminal result. Runs end only as completed or cancelled (see terminalRunStatus).
+func workflowV2ClawResult(status workflowv2.RunStatus, outcome typesv2.TerminalOutcome) string {
+	if status == workflowv2.RunCancelled {
+		return "cancelled"
+	}
+	if outcome == typesv2.OutcomeFailed {
+		return "failed"
+	}
+	return "success"
+}
 
 // maybeFinishWorkflowV2Parent checks whether a v2 workflow run has reached a
 // terminal state and, if so, finishes the parent v1 task run and disconnects
@@ -29,13 +149,23 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if run.Status != workflowv2.RunCompleted && run.Status != workflowv2.RunCancelled {
 		return
 	}
-	if s.cronSchedulerV2 != nil && run.TriggerType == "cron" {
-		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
-	}
-	s.releaseWorkflowV2CronSlot(ctx, run.ID)
+	s.finishWorkflowV2CronRun(ctx, run)
 	if strings.TrimSpace(run.TaskRunID) == "" {
 		// No parent task run; nothing to finish.
 		return
+	}
+	terminal, err := readWorkflowV2TaskRunTerminal(s.db, run.TaskRunID)
+	if err != nil {
+		// Still tear the claw down; analytics recovers the outcome on a later sweep.
+		log.Printf("[workflow-v2] cannot read outcome for run %s: %v", runID, err)
+	}
+	outcome := terminal.outcome
+	if outcome != "" {
+		if err := s.materializeTaskRun(run.TaskRunID); err != nil {
+			// Still tear the claw down: materializeTerminalWorkflowV2TaskRuns
+			// recovers the summary, and the orphan sweep leaves it alone until then.
+			log.Printf("[workflow-v2] cannot materialize outcome for run %s: %v", runID, err)
+		}
 	}
 	var clawID string
 	if err := s.db.QueryRowContext(ctx, `SELECT claw_id FROM task_runs WHERE id=?`, run.TaskRunID).Scan(&clawID); err != nil {
@@ -48,11 +178,7 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		return
 	}
 	// Idempotent: finishClawTerminalTx is a no-op if the claw is already deleted.
-	result := "success"
-	if run.Status == workflowv2.RunCancelled {
-		result = "cancelled"
-	}
-	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", result, "workflow v2 terminal state "+string(run.Status), terminalTxOpts{})
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", workflowV2ClawResult(run.Status, outcome), "workflow v2 terminal state "+string(run.Status), terminalTxOpts{})
 	if err != nil {
 		log.Printf("[workflow-v2] failed to finish claw %s for terminal run %s: %v", clawID, runID, err)
 		return
@@ -61,32 +187,45 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		// Already finished; avoid duplicate events.
 		return
 	}
+	// A run cancelled before reaching a terminal outcome (e.g. reaper timeout)
+	// did not complete its task.
+	cancelledWithoutOutcome := outcome == "" && run.Status == workflowv2.RunCancelled
 	// Eagerly update the task-run summary so the dashboard reflects the
 	// terminal state without waiting for the analytics materializer.
-	status, failureType := taskRunStatusClean, ""
-	if run.Status == workflowv2.RunCancelled || run.State == "prepare_failed" {
-		status, failureType = taskRunStatusFailed, run.State
-	}
-	finishedAt := time.Now().UTC().UnixMilli()
-	if _, err := s.db.ExecContext(ctx, `
+	if outcome == "" {
+		status, failureType := taskRunStatusClean, ""
+		if workflowV2FailedWithoutOutcome(run.Status, run.State, outcome) {
+			// failure_type is CHECK-constrained; a state name such as
+			// "cancelled" would make this UPDATE fail.
+			status, failureType = taskRunStatusFailed, taskRunFailureUnknown
+		}
+		finishedAt := time.Now().UTC().UnixMilli()
+		if _, err := s.db.ExecContext(ctx, `
 		UPDATE task_run_summaries
 		SET status=?, phase=?, failure_type=?, finished_at=?, updated_at=?
 		WHERE run_id=?`, status, taskRunPhaseTerminal, failureType, finishedAt, finishedAt, run.TaskRunID); err != nil {
-		log.Printf("[workflow-v2] failed to update task run summary %s for terminal run %s: %v", run.TaskRunID, runID, err)
+			log.Printf("[workflow-v2] failed to update task run summary %s for terminal run %s: %v", run.TaskRunID, runID, err)
+		}
 	}
 	s.syncWorkflowVolumes(clawID)
+	// The writable lease kept this claw's slot until the sync released it.
+	go s.promotePendingClaws()
 	if s.cronScheduler != nil {
 		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}
-	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
-		EventKey:        "workflow_v2:" + runID + ":" + string(run.Status),
-		Source:          taskRunSourceHub,
-		EventType:       taskRunEventTaskCompleted,
-		ActorType:       taskRunActorAgent,
-		InteractionRole: taskRunInteractionTerminal,
-		Detail:          map[string]any{"workflow_v2_run_id": runID, "terminal_state": run.State, "requires_pr": false},
-	}); err != nil {
-		log.Printf("[workflow-v2] failed to record task completion for claw %s: %v", clawID, err)
+	// task_completed marks a requires_pr=false run successful, so a cancelled
+	// run must not record it; the orphan sweep closes its summary as failed.
+	if !cancelledWithoutOutcome {
+		if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+			EventKey:        "workflow_v2:" + runID + ":" + string(run.Status),
+			Source:          taskRunSourceHub,
+			EventType:       taskRunEventTaskCompleted,
+			ActorType:       taskRunActorAgent,
+			InteractionRole: taskRunInteractionTerminal,
+			Detail:          map[string]any{"workflow_v2_run_id": runID, "terminal_state": run.State, "requires_pr": false, "outcome": outcome},
+		}); err != nil {
+			log.Printf("[workflow-v2] failed to record task completion for claw %s: %v", clawID, err)
+		}
 	}
 	s.broadcastToUsers(run.TenantID, types.WSMessage{
 		Type:    "claw_status",
@@ -98,6 +237,37 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
+}
+
+// finishWorkflowV2ClawAfterActivation finishes the parent of a run that
+// reached a terminal state during activation. It runs in the background, like
+// every other terminal hook: it must outlive the caller's ctx (an HTTP request
+// for manual triggers), has no deadline because a timeout mid-way would leave
+// the parent partially finished, and cannot block activation if it stalls.
+// The claw was never provisioned, so if the parent finish exits early (for
+// example on a failed run lookup) the claw is deleted here instead of holding
+// its concurrency slot until the reaper's provisioning timeout.
+func (s *Server) finishWorkflowV2ClawAfterActivation(runID, clawID, result string) {
+	s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", result,
+		"workflow v2 run finished during activation", terminalTxOpts{})
+	if err != nil {
+		log.Printf("[workflow-v2] failed to finish claw %s of run %s finished at activation: %v", shortID(clawID), runID, err)
+		return
+	}
+	if applied {
+		log.Printf("[workflow-v2] parent finish left claw %s of run %s alive; deleted it", shortID(clawID), runID)
+		s.promotePendingClaws()
+	}
+}
+
+// finishWorkflowV2CronRun finishes the cron history row of a terminal run and
+// releases its overlap slot. Both steps are idempotent.
+func (s *Server) finishWorkflowV2CronRun(ctx context.Context, run workflowv2.Run) {
+	if s.cronSchedulerV2 != nil && run.TriggerType == "cron" {
+		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
+	}
+	s.releaseWorkflowV2CronSlot(ctx, run.ID)
 }
 
 // releaseWorkflowV2CronSlot releases the in-memory overlap slot for a terminal
@@ -138,8 +308,23 @@ func (s *Server) releaseWorkflowV2CronSlot(ctx context.Context, runID string) {
 // assigned to the dead claw. It is used when a claw fails before the v2 run
 // can reach a terminal state on its own (e.g. provisioning failed).
 func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason string) {
-	if s == nil || s.db == nil {
+	runID, err := s.cancelBoundWorkflowV2Run(ctx, clawID, reason)
+	if err != nil {
+		log.Printf("[workflow-v2] %v", err)
 		return
+	}
+	if runID != "" {
+		s.maybeFinishWorkflowV2Parent(ctx, runID)
+	}
+}
+
+// cancelBoundWorkflowV2Run cancels the active/suspended workflow v2 run bound
+// to the claw without finishing its parent, and returns the cancelled run's ID
+// ("" when no run is bound). Callers must call maybeFinishWorkflowV2Parent
+// afterwards to close the cron history and tear down the parent.
+func (s *Server) cancelBoundWorkflowV2Run(ctx context.Context, clawID, reason string) (string, error) {
+	if s == nil || s.db == nil {
+		return "", nil
 	}
 	var runID string
 	err := s.db.QueryRowContext(ctx, `
@@ -147,16 +332,15 @@ func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason 
 		JOIN workflow_v2_runs r ON r.id=a.run_id
 		WHERE a.claw_id=? AND a.status='active' AND r.status IN ('active','suspended')
 		LIMIT 1`, clawID).Scan(&runID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			log.Printf("[workflow-v2] failed to find active run for claw %s: %v", shortID(clawID), err)
-		}
-		return
+		return "", fmt.Errorf("failed to find active run for claw %s: %w", shortID(clawID), err)
 	}
 	if err := workflowv2.NewStore(s.db).CancelActivation(ctx, runID, reason); err != nil {
-		log.Printf("[workflow-v2] failed to cancel run %s for claw %s: %v", shortID(runID), shortID(clawID), err)
-		return
+		return "", fmt.Errorf("failed to cancel run %s for claw %s: %w", shortID(runID), shortID(clawID), err)
 	}
 	log.Printf("[workflow-v2] cancelled run %s because claw %s %s", shortID(runID), shortID(clawID), reason)
-	s.maybeFinishWorkflowV2Parent(ctx, runID)
+	return runID, nil
 }

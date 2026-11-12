@@ -4632,3 +4632,74 @@ func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
 		t.Fatal("no sessions.abort observed")
 	}
 }
+
+func TestParseSessionCacheTokens(t *testing.T) {
+	read, write, err := parseSessionCacheTokens([]byte(`{"sessions":[{"key":"k","usage":{"input":10,"output":5,"cacheRead":1200,"cacheWrite":300,"totalCost":0}}]}`))
+	if err != nil || read == nil || write == nil || *read != 1200 || *write != 300 {
+		t.Fatalf("got %v %v %v, want 1200 300", read, write, err)
+	}
+	if _, _, err := parseSessionCacheTokens([]byte(`{"sessions":[{"key":"k","usage":null}]}`)); err == nil {
+		t.Fatal("missing usage must be an error, not zero cache tokens")
+	}
+}
+
+func TestGatewayCostUnknown(t *testing.T) {
+	n, zero, cost := 10, 0.0, 0.5
+	for _, tc := range []struct {
+		usage gatewayUsage
+		want  bool
+	}{
+		{gatewayUsage{inputTokens: &n, estimatedCostUSD: &zero}, true},
+		{gatewayUsage{outputTokens: &n}, true},
+		{gatewayUsage{inputTokens: &n, estimatedCostUSD: &cost}, false},
+		{gatewayUsage{estimatedCostUSD: &zero}, false},
+	} {
+		if got := tc.usage.gatewayCostUnknown(); got != tc.want {
+			t.Errorf("%+v: got %v, want %v", tc.usage, got, tc.want)
+		}
+	}
+}
+
+func TestNeedsCacheTokensAfterGatewayPricing(t *testing.T) {
+	n, cost, read := 10, 0.5, 100
+	priced := gatewayUsage{sessionKey: "a", inputTokens: &n, estimatedCostUSD: &cost}
+	if priced.needsCacheTokens(gatewayUsage{sessionKey: "a"}) {
+		t.Fatal("gateway-priced session without counters must not poll")
+	}
+	if !priced.needsCacheTokens(gatewayUsage{sessionKey: "a", cacheReadTokens: &read}) {
+		t.Fatal("gateway-priced turn after counters must keep the cache baseline current")
+	}
+	if priced.needsCacheTokens(gatewayUsage{sessionKey: "b", cacheReadTokens: &read}) {
+		t.Fatal("another session's counters must not trigger polling")
+	}
+}
+
+func TestNewTurnSince(t *testing.T) {
+	a, b := 10, 20
+	prev := gatewayUsage{sessionKey: "s", inputTokens: &a, outputTokens: &a}
+	if (gatewayUsage{sessionKey: "s", inputTokens: &a, outputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("same totals are the same turn")
+	}
+	if !(gatewayUsage{sessionKey: "s", inputTokens: &b, outputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("changed input totals are a new turn")
+	}
+	if !(gatewayUsage{sessionKey: "s", inputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("a dropped output total is a new turn")
+	}
+}
+
+func TestMaxIntPtr(t *testing.T) {
+	one, two := 1, 2
+	if got := maxIntPtr(&two, &one); *got != 2 {
+		t.Fatalf("max(2,1) = %d", *got)
+	}
+	if got := maxIntPtr(nil, &one); *got != 1 {
+		t.Fatalf("max(nil,1) = %d", *got)
+	}
+	if got := maxIntPtr(&one, nil); *got != 1 {
+		t.Fatalf("max(1,nil) = %d", *got)
+	}
+	if maxIntPtr(nil, nil) != nil {
+		t.Fatal("max(nil,nil) must stay nil")
+	}
+}

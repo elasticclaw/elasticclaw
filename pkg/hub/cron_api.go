@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -35,12 +36,18 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 	}
 
 	var key string
+	var targets []string
+	status := "triggered"
 	if isV2 {
 		if s.cronSchedulerV2 == nil {
 			http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
 			return
 		}
-		key, err = s.cronSchedulerV2.manualTrigger(workspace, workflow, tenantFromCtx(r))
+		var runStatus workflowRunStartStatus
+		key, runStatus, targets, err = s.cronSchedulerV2.manualTrigger(workspace, workflow, tenantFromCtx(r))
+		if runStatus == workflowRunSignaled {
+			status = string(workflowRunSignaled)
+		}
 	} else {
 		if s.cronScheduler == nil {
 			http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
@@ -55,17 +62,24 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusForbidden)
 		} else if _, ok := err.(*cronTriggerSkippedError); ok {
 			http.Error(w, err.Error(), http.StatusConflict)
+		} else if errors.Is(err, errCronSchedulerStopping) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":   "triggered",
+	resp := map[string]interface{}{
+		"status":   status,
 		"workflow": key,
-	})
+	}
+	if status == string(workflowRunSignaled) {
+		// Same shape as the UI /trigger endpoint for a signaled run.
+		resp["target_run_ids"] = targets
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleCronWorkflowRuns handles GET /api/workspaces/{workspace}/workflows/{workflow}/cron/runs

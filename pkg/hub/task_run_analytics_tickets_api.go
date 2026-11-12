@@ -41,6 +41,8 @@ type taskRunAnalyticsTicketsResponse struct {
 }
 
 type taskRunAnalyticsTicketRunSummary struct {
+	Outcome      string  `json:"outcome,omitempty"`
+	Approximate  bool    `json:"approximate,omitempty"`
 	RunID        string  `json:"runId"`
 	Status       string  `json:"status"`
 	Phase        string  `json:"phase"`
@@ -70,35 +72,40 @@ type taskRunAnalyticsTicketStoryEntry struct {
 }
 
 type taskRunAnalyticsTicketView struct {
-	TicketKey      string                             `json:"ticketKey"`
-	IssueID        string                             `json:"issueId"`
-	IssueTitle     string                             `json:"issueTitle"`
-	Status         string                             `json:"status"`
-	Requester      string                             `json:"requester"`
-	RequesterRole  string                             `json:"requesterRole,omitempty"`
-	Team           string                             `json:"team,omitempty"`
-	Priority       string                             `json:"priority"`
-	Ask            string                             `json:"ask"`
-	Source         string                             `json:"source"`
-	Repo           string                             `json:"repo,omitempty"`
-	WorkflowName   string                             `json:"workflowName,omitempty"`
-	WorkspaceName  string                             `json:"workspaceName,omitempty"`
-	ReportedAt     int64                              `json:"reportedAt"`
-	RunIDs         []string                           `json:"runIds"`
-	Runs           []taskRunAnalyticsTicketRunSummary `json:"runs"`
-	RunCount       int                                `json:"runCount"`
-	AttemptCount   int                                `json:"attemptCount"`
-	FailedRunCount int                                `json:"failedRunCount"`
-	Cost           float64                            `json:"cost"`
-	TotalTokens    int64                              `json:"totalTokens"`
-	HumanTouches   int                                `json:"humanTouches"`
-	PRs            []taskRunAnalyticsTicketPRView     `json:"prs"`
-	MergedPRCount  int                                `json:"mergedPrCount"`
-	OpenPRCount    int                                `json:"openPrCount"`
-	TimeToFirstRun int64                              `json:"timeToFirstRun"`
-	LeadTime       int64                              `json:"leadTime"`
-	LastActivity   int64                              `json:"lastActivity"`
-	Story          []taskRunAnalyticsTicketStoryEntry `json:"story"`
+	Approximate       bool                               `json:"approximate,omitempty"`
+	TicketKey         string                             `json:"ticketKey"`
+	IssueID           string                             `json:"issueId"`
+	IssueTitle        string                             `json:"issueTitle"`
+	Status            string                             `json:"status"`
+	Requester         string                             `json:"requester"`
+	RequesterRole     string                             `json:"requesterRole,omitempty"`
+	Team              string                             `json:"team,omitempty"`
+	Priority          string                             `json:"priority"`
+	Ask               string                             `json:"ask"`
+	Source            string                             `json:"source"`
+	Repo              string                             `json:"repo,omitempty"`
+	WorkflowName      string                             `json:"workflowName,omitempty"`
+	WorkspaceName     string                             `json:"workspaceName,omitempty"`
+	ReportedAt        int64                              `json:"reportedAt"`
+	RunIDs            []string                           `json:"runIds"`
+	Runs              []taskRunAnalyticsTicketRunSummary `json:"runs"`
+	RunCount          int                                `json:"runCount"`
+	AttemptCount      int                                `json:"attemptCount"`
+	FailedRunCount    int                                `json:"failedRunCount"`
+	Cost              float64                            `json:"cost"`
+	TotalTokens       int64                              `json:"totalTokens"`
+	HumanTouches      int                                `json:"humanTouches"`
+	PRs               []taskRunAnalyticsTicketPRView     `json:"prs"`
+	MergedPRCount     int                                `json:"mergedPrCount"`
+	OpenPRCount       int                                `json:"openPrCount"`
+	TimeToFirstRun    int64                              `json:"timeToFirstRun"`
+	FactoryTime       int64                              `json:"factoryTime"`
+	AwaitingMergeTime int64                              `json:"awaitingMergeTime"`
+	PROpenedAt        int64                              `json:"prOpenedAt"`
+	ClockRunning      bool                               `json:"clockRunning"`
+	LeadTime          int64                              `json:"leadTime"`
+	LastActivity      int64                              `json:"lastActivity"`
+	Story             []taskRunAnalyticsTicketStoryEntry `json:"story"`
 }
 
 // agent_idle is intentionally unmapped because the kit has no user-facing idle story entry.
@@ -203,9 +210,10 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	requestNow := now().UnixMilli()
 	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
 	for _, group := range groups {
-		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, actorsByClaw, metadataByIssue[group.key], false)
+		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, actorsByClaw, metadataByIssue[group.key], false, requestNow)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
@@ -225,8 +233,10 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 // callers who may read analytics but are not allowed to see costs.
 func redactTaskRunAnalyticsTicketCost(ticket *taskRunAnalyticsTicketView) {
 	ticket.Cost = 0
+	ticket.Approximate = false
 	for i := range ticket.Runs {
 		ticket.Runs[i].Cost = 0
+		ticket.Runs[i].Approximate = false
 	}
 }
 
@@ -259,7 +269,7 @@ func (s *Server) readTaskRunAnalyticsTicketTimingForRuns(tenantID string, runIDs
 	for _, runID := range runIDs {
 		args = append(args, runID)
 	}
-	rows, err := s.db.Query(`SELECT run_id, MAX(event_time), MIN(CASE WHEN event_type='pr_merged' THEN event_time END) FROM task_run_events WHERE tenant_id=? AND run_id IN (`+placeholders+`) GROUP BY run_id`, args...)
+	rows, err := s.db.Query(`SELECT run_id, MAX(event_time), MIN(CASE WHEN event_type='pr_merged' THEN event_time END), MIN(CASE WHEN event_type='pr_opened' THEN event_time END) FROM task_run_events WHERE tenant_id=? AND run_id IN (`+placeholders+`) GROUP BY run_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -267,11 +277,14 @@ func (s *Server) readTaskRunAnalyticsTicketTimingForRuns(tenantID string, runIDs
 	for rows.Next() {
 		var runID string
 		var lastActivity int64
-		var firstMergedAt *int64
-		if err := rows.Scan(&runID, &lastActivity, &firstMergedAt); err != nil {
+		var firstMergedAt, firstOpenedAt *int64
+		if err := rows.Scan(&runID, &lastActivity, &firstMergedAt, &firstOpenedAt); err != nil {
 			return nil, err
 		}
 		eventsByRun[runID] = append(eventsByRun[runID], taskRunAnalyticsEventView{EventTime: lastActivity})
+		if firstOpenedAt != nil {
+			eventsByRun[runID] = append(eventsByRun[runID], taskRunAnalyticsEventView{EventType: "pr_opened", EventTime: *firstOpenedAt})
+		}
 		if firstMergedAt != nil {
 			eventsByRun[runID] = append(eventsByRun[runID], taskRunAnalyticsEventView{EventType: "pr_merged", EventTime: *firstMergedAt})
 		}
@@ -288,6 +301,7 @@ func (s *Server) readTaskRunAnalyticsTicketTimingForRuns(tenantID string, runIDs
 // until a materialized per-issue ordering column can provide the real fix.
 func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, bool, taskRunAnalyticsTicketGroup, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
+	where += ` AND run_kind <> 'maintenance'`
 	total, err := s.readTaskRunAnalyticsTicketTotal(where, args)
 	if err != nil {
 		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
@@ -385,6 +399,7 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 		return nil, errInvalidTaskRunAnalyticsTicketKey
 	}
 	where, args := taskRunAnalyticsSummaryWhere(filters)
+	where += ` AND run_kind <> 'maintenance'`
 	runWhere := where + ` AND integration = ? AND integration_workspace = ? AND issue_id = ?`
 	rows, err := s.db.QueryContext(ctx, `SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+runWhere, append(args, parts[0], parts[1], parts[2])...)
 	if err != nil {
@@ -423,7 +438,8 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 	if err != nil {
 		return nil, err
 	}
-	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, actorsByClaw, metadata[key], true)
+	requestNow := now().UnixMilli()
+	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, actorsByClaw, metadata[key], true, requestNow)
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +638,7 @@ func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
 	return 1
 }
 
-func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, actorsByClaw map[string]triggerActor, metadata taskRunAnalyticsTicketMetadata, includeStory bool) (taskRunAnalyticsTicketView, error) {
+func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, actorsByClaw map[string]triggerActor, metadata taskRunAnalyticsTicketMetadata, includeStory bool, requestNow int64) (taskRunAnalyticsTicketView, error) {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
 	ticket := taskRunAnalyticsTicketView{TicketKey: taskRunAnalyticsTicketKey(runs[0].Integration, runs[0].IntegrationWorkspace, issueID), IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
 	events := []taskRunAnalyticsTicketStoryEntry{}
@@ -632,9 +648,10 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		runEvents := eventsByRun[run.RunID]
 		ticket.RunIDs = append(ticket.RunIDs, run.RunID)
 		cost, tokens := taskRunTicketCostAndTokens(run)
-		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{RunID: run.RunID, Status: run.Status, Phase: run.Phase, Model: run.Model, AttemptCount: len(attempts), Cost: cost, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
+		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{Outcome: run.Outcome, RunID: run.RunID, Status: run.Status, Phase: run.Phase, Model: run.Model, AttemptCount: len(attempts), Cost: cost, Approximate: run.CostApproximate, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
 		ticket.AttemptCount += len(attempts)
 		ticket.Cost += cost
+		ticket.Approximate = ticket.Approximate || run.CostApproximate
 		ticket.TotalTokens += tokens
 		ticket.HumanTouches += run.HumanInteractionCount
 		if run.Status == "failed" {
@@ -682,23 +699,74 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		ticket.Story = collapseTaskRunAnalyticsTicketStory(events)
 	}
 	firstStart := runs[0].StartedAt
+	var openedAt, mergedAt int64
 	for _, event := range events {
 		if event.Time > ticket.LastActivity {
 			ticket.LastActivity = event.Time
 		}
-		// Lead time is measured from the first run, not from when the ticket was
-		// reported: the queue wait before an agent picks the ticket up is already
-		// reported on its own as time to first run.
-		if event.EventType == "pr_merged" && ticket.LeadTime == 0 && firstStart > 0 {
-			ticket.LeadTime = event.Time - firstStart
+		if event.EventType == "pr_opened" && openedAt == 0 {
+			openedAt = event.Time
+		}
+		if event.EventType == "pr_merged" && mergedAt == 0 {
+			mergedAt = event.Time
 		}
 	}
 	if ticket.LastActivity == 0 {
 		ticket.LastActivity = runs[len(runs)-1].StartedAt
 	}
-	if firstStart > 0 && ticket.LeadTime == 0 && len(events) > 0 {
-		ticket.LeadTime = ticket.LastActivity - firstStart
+	// The pr_opened event is stamped at detection; GitHub's created_at on the
+	// PR row is authoritative when it is earlier. Merges recorded only on the
+	// PR row (dead-claw webhook, reconciler) emit no pr_merged event.
+	for _, pr := range ticket.PRs {
+		if pr.OpenedAt > 0 && (openedAt == 0 || pr.OpenedAt < openedAt) {
+			openedAt = pr.OpenedAt
+		}
+		if pr.Merged && pr.MergedAt > 0 && (mergedAt == 0 || pr.MergedAt < mergedAt) {
+			mergedAt = pr.MergedAt
+		}
 	}
+	// A replacement PR still open keeps the clock running even when an earlier
+	// closed PR already labels the ticket delivered.
+	// PRs left open by an abandoned run (taskRunOutcomeAbandoned) do not count.
+	waitingOnOpenPR := false
+	if mergedAt == 0 && ticket.MergedPRCount == 0 {
+		abandonedRuns := map[string]bool{}
+		for _, run := range ticket.Runs {
+			if taskRunOutcomeAbandoned(run.Outcome) {
+				abandonedRuns[run.RunID] = true
+			}
+		}
+		for _, pr := range ticket.PRs {
+			waitingOnOpenPR = waitingOnOpenPR || (pr.State == "open" && !abandonedRuns[pr.RunID])
+		}
+	}
+	// A run still in flight keeps the clock running through silent stalls,
+	// also when a retry follows a closed PR; failed tickets stop at their
+	// last activity. The reaper closes runs whose claws were deleted.
+	runInFlight := false
+	for _, run := range runs {
+		runInFlight = runInFlight || run.Status == taskRunStatusRunning
+	}
+	clockRunning := mergedAt == 0 && (waitingOnOpenPR || runInFlight)
+	ticket.ClockRunning, ticket.PROpenedAt = clockRunning, openedAt
+	// Queue time is separate: the lead window starts at the first run.
+	leadEnd := ticket.LastActivity
+	if mergedAt > 0 {
+		leadEnd = mergedAt
+	} else if clockRunning {
+		leadEnd = max(ticket.LastActivity, requestNow)
+	}
+	if firstStart > 0 && (len(events) > 0 || clockRunning) {
+		ticket.LeadTime = max(int64(0), leadEnd-firstStart)
+	}
+	// The factory owns the ticket from the first run until its first PR opens,
+	// stalls and retries included; from then on the ticket awaits merge.
+	ticket.FactoryTime = ticket.LeadTime
+	if openedAt > 0 {
+		ticket.FactoryTime = min(max(int64(0), openedAt-firstStart), ticket.LeadTime)
+	}
+	ticket.AwaitingMergeTime = ticket.LeadTime - ticket.FactoryTime
+
 	if ticket.ReportedAt > 0 {
 		ticket.TimeToFirstRun = firstStart - ticket.ReportedAt
 	}
@@ -778,16 +846,37 @@ func taskRunTicketCostAndTokens(run taskRunAnalyticsRunView) (float64, int64) {
 	return cost, tokens
 }
 
+// taskRunOutcomeAbandoned reports whether a run's explicit v2 outcome gave up
+// on delivery, so PRs it left open or closed do not count for the ticket.
+func taskRunOutcomeAbandoned(outcome string) bool {
+	return outcome == "failed" || outcome == "cancelled"
+}
+
 func deriveTaskRunAnalyticsTicketStatus(runs []taskRunAnalyticsTicketRunSummary, prs []taskRunAnalyticsTicketPRView) string {
+	failedRuns := map[string]bool{}
+	for _, run := range runs {
+		if taskRunOutcomeAbandoned(run.Outcome) {
+			failedRuns[run.RunID] = true
+		}
+		if run.Outcome == "no_changes" || run.Outcome == "delivered" || run.Outcome == "closed" {
+			return "delivered"
+		}
+	}
 	// Delivered means the PR reached a terminal state on purpose: merged, or
 	// closed after its content landed some other way (squash elsewhere, direct
 	// push). Closed-unmerged PRs are therefore delivery, not abandonment.
 	for _, pr := range prs {
+		if failedRuns[pr.RunID] {
+			continue
+		}
 		if pr.Merged || pr.State == "closed" {
 			return "delivered"
 		}
 	}
 	for _, pr := range prs {
+		if failedRuns[pr.RunID] {
+			continue
+		}
 		if pr.State == "open" {
 			return "pr_open"
 		}
@@ -797,7 +886,7 @@ func deriveTaskRunAnalyticsTicketStatus(runs []taskRunAnalyticsTicketRunSummary,
 		if run.Status == "running" {
 			return "in_progress"
 		}
-		if run.Status != "failed" {
+		if run.Status != "failed" && run.Status != "cancelled" {
 			allFailed = false
 		}
 	}

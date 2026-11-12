@@ -68,6 +68,8 @@ func (s *Store) MaterializeAgentTask(ctx context.Context, effectID, effectAttemp
 		AllowedActions    []string `json:"allowed_actions"`
 		RequiredArtifacts []string `json:"required_artifacts"`
 		IncludeFacts      []string `json:"include_facts"`
+		// See snapshotReplayedTaskFacts.
+		ReplayedFactSnapshot map[string]json.RawMessage `json:"replayed_fact_snapshot"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		return typesv2.AgentTask{}, fmt.Errorf("decode agent task effect: %w", err)
@@ -91,13 +93,16 @@ func (s *Store) MaterializeAgentTask(ctx context.Context, effectID, effectAttemp
 				return typesv2.AgentTask{}, fmt.Errorf("agent task effect include_facts must contain unique non-empty keys")
 			}
 			seenFacts[key] = true
-			var raw []byte
-			if err := tx.QueryRowContext(ctx, `SELECT value_json FROM workflow_v2_facts WHERE run_id=? AND fact_key=?`,
-				runID, key).Scan(&raw); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return typesv2.AgentTask{}, fmt.Errorf("agent task required fact %q is unavailable", key)
+			// A replayed event binds the facts to its own values; see snapshotReplayedTaskFacts.
+			raw := []byte(payload.ReplayedFactSnapshot[key])
+			if raw == nil {
+				if err := tx.QueryRowContext(ctx, `SELECT value_json FROM workflow_v2_facts WHERE run_id=? AND fact_key=?`,
+					runID, key).Scan(&raw); err != nil {
+					if errors.Is(err, sql.ErrNoRows) {
+						return typesv2.AgentTask{}, fmt.Errorf("agent task required fact %q is unavailable", key)
+					}
+					return typesv2.AgentTask{}, err
 				}
-				return typesv2.AgentTask{}, err
 			}
 			var value interface{}
 			if err := json.Unmarshal(raw, &value); err != nil {
@@ -161,8 +166,8 @@ func (s *Store) MaterializeAgentTask(ctx context.Context, effectID, effectAttemp
 		return typesv2.AgentTask{}, err
 	}
 	receiptJSON, _ := json.Marshal(map[string]interface{}{"task_id": task.ID, "message_id": envelope.MessageID})
-	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effect_attempts SET status='succeeded',receipt_json=?,finished_at=?
-		WHERE id=? AND effect_id=? AND status='running'`, string(receiptJSON), now.UnixMilli(), effectAttemptID, effectID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effect_attempts SET status='succeeded',attempt_id=?,receipt_json=?,finished_at=?
+		WHERE id=? AND effect_id=? AND status='running'`, runAttemptID, string(receiptJSON), now.UnixMilli(), effectAttemptID, effectID); err != nil {
 		return typesv2.AgentTask{}, err
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='succeeded',lease_owner='',lease_expires_at=0,

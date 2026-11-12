@@ -9,6 +9,9 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 	if workflow == nil {
 		return nil
 	}
+	if err := validateWorkflowTriggerSources(workflow.Stages, workflow.PipelineYAML); err != nil {
+		return err
+	}
 	if workflow.SchemaVersion == "" {
 		workflow.SchemaVersion = "v1"
 	}
@@ -70,8 +73,9 @@ func NormalizeWorkflowConfig(workflow *WorkflowConfig) error {
 	}
 	if len(workflow.Stages) > 0 {
 		data, err := yaml.Marshal(struct {
-			Stages []WorkflowStage `yaml:"stages"`
-		}{Stages: workflow.Stages})
+			InitialPlan *bool           `yaml:"initial_plan,omitempty"`
+			Stages      []WorkflowStage `yaml:"stages"`
+		}{InitialPlan: workflow.InitialPlan, Stages: workflow.Stages})
 		if err != nil {
 			return err
 		}

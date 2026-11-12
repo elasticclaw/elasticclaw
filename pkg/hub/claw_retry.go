@@ -49,7 +49,7 @@ func retryableAgentFailure(kind agentFailureKind) bool {
 
 func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
 	switch kind {
-	case agentFailureProvisioning:
+	case agentFailureProvisioning, agentFailureProviderQuota:
 		return taskRunFailureProvisionFailed
 	case agentFailureSandboxTerminated, agentFailureProviderLost:
 		return taskRunFailureProviderLost
@@ -59,7 +59,7 @@ func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
 		// is starting. Folding them into bootstrap_failed made the two
 		// indistinguishable in analytics.
 		return taskRunFailureWorkspaceUnresponsive
-	case agentFailureBootstrap, agentFailureRestore, agentFailureWorkspaceFiles:
+	case agentFailureBootstrap, agentFailureBridgeArtifact, agentFailureRestore, agentFailureWorkspaceFiles:
 		return taskRunFailureBootstrapFailed
 	case agentFailureGitHubCredentials:
 		return taskRunFailurePermissionOrAuth
@@ -535,16 +535,18 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// which is an upper bound rather than a permanent veto (see
 	// TestAgentIdleResumeFiresAfterTheBlindWindowElapses).
 	//
-	// bridge_error_auto_resumes is re-armed for the new sandbox, but
-	// bridge_error_pause_kind is cleared WITHOUT lifting no_progress_paused: a
-	// transport-error pause that survives into a replacement stays human-only,
-	// as before NEXT-1293. Both auto-lift messages assume continuity that a
-	// checkpoint restore cannot guarantee.
+	// bridge_error_auto_resumes is re-armed for the new sandbox. A pause tagged
+	// with a bridge_error_pause_kind blamed the sandbox being replaced, so it is
+	// lifted here; otherwise the re-brief waits behind it until a human types
+	// (NEXT-1407: 63h). No auto-lift message is sent: the re-brief already says
+	// the session is new, which was the NEXT-1293 concern. Untagged pauses
+	// (genuine no-progress, human) stay latched. The CASE reads the old row, so
+	// it sees the kind before the same SET clears it.
 	res, err := s.db.Exec(`
 		UPDATE claws
-		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
+		   SET status='provisioning', no_progress_paused=CASE WHEN bridge_error_pause_kind!='' THEN 0 ELSE no_progress_paused END, bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
 		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
-		       rebrief_pending=1, idle_resume_count=0, bridge_error_auto_resumes=0, bridge_error_pause_kind='', idle_resume_at=0, session_loss_streak=0, session_loss_progress_mark=''
+		       rebrief_pending=1, idle_resume_count=0, lost_turn_recovery_count=0, bridge_error_auto_resumes=0, bridge_error_pause_kind='', idle_resume_at=0, session_loss_streak=0, session_loss_progress_mark=''
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
 		bootstrapStatus, bootstrapDiagnostic, checkpointID, clawID, tenantID)
 	if err != nil {
@@ -552,6 +554,12 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	}
 	rows, _ := res.RowsAffected()
 	if rows > 0 {
+		// The reaper ages provisioning/starting claws by first-seen time keyed on
+		// claw ID and status. The successor reuses both, so without this reset it
+		// would inherit the predecessor's age and be reaped again within a tick
+		// instead of getting its own provisioningMaxAge window.
+		s.firstSeen(reaperClawKey(clawID, "provisioning"), false, time.Time{})
+		s.firstSeen(reaperClawKey(clawID, "starting"), false, time.Time{})
 		// The gateway health counters are keyed by claw ID, and a retry reuses
 		// the ID while replacing the sandbox behind it. They must be cleared for
 		// the same reason idle_resume_count is cleared above: the successor is a

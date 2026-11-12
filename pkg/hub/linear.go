@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -896,19 +895,41 @@ func (s *Server) countActiveClaws() int {
 // Legacy rows (created before the migration) have concurrency_group = ” and
 // are treated as belonging to the "global" group.
 func (s *Server) countActiveClawsInGroup(groupName string) int {
-	var count int
+	// A finished claw keeps its slot while it still holds a writable workflow
+	// volume lease (checkpoint and volume sync run after the terminal
+	// transition), so the next claw does not fail its attach on the held lease.
+	// The heartbeat bound stops a lease left behind by a failed sync from
+	// holding the slot until the lease expires.
+	now := time.Now().UTC()
+	query := `
+		SELECT COUNT(*) FROM claws c
+		WHERE (c.status IN ('provisioning','starting','connected','running','idle')
+		    OR EXISTS (SELECT 1 FROM volume_leases l
+		               WHERE l.claw_id = c.id AND l.mode = 'rw' AND l.released_at IS NULL
+		                 AND l.expires_at > ? AND l.heartbeat_at > ?))
+		  AND `
+	args := []any{now, now.Add(-volumeLeaseSlotGrace)}
 	if groupName == "global" {
-		_ = s.db.QueryRow(`
-			SELECT COUNT(*) FROM claws
-			WHERE status IN ('provisioning','starting','connected','running','idle')
-			  AND (concurrency_group = 'global' OR concurrency_group = '')`).Scan(&count)
+		query += `(c.concurrency_group = 'global' OR c.concurrency_group = '')`
 	} else {
-		_ = s.db.QueryRow(`
-			SELECT COUNT(*) FROM claws
-			WHERE status IN ('provisioning','starting','connected','running','idle')
-			  AND concurrency_group = ?`, groupName).Scan(&count)
+		query += `c.concurrency_group = ?`
+		args = append(args, groupName)
 	}
+	var count int
+	_ = s.db.QueryRow(query, args...).Scan(&count)
 	return count
+}
+
+// hasPendingInGroup reports whether a new claw must queue behind older work.
+// Legacy rows with an empty concurrency group belong to the global group.
+func (s *Server) hasPendingInGroup(groupName string) bool {
+	var pending bool
+	if groupName == "" || groupName == "global" {
+		_ = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claws WHERE status='pending' AND concurrency_group IN ('global',''))`).Scan(&pending)
+	} else {
+		_ = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claws WHERE status='pending' AND concurrency_group=?)`, groupName).Scan(&pending)
+	}
+	return pending
 }
 
 // resolveGroupLimit returns the concurrency group name and limit for a factory.
@@ -962,6 +983,11 @@ func (s *Server) promotePendingClaws() {
 	for rows.Next() {
 		var clawID, tenantID, groupName string
 		if err := rows.Scan(&clawID, &tenantID, &groupName); err != nil {
+			continue
+		}
+		if _, activating := s.activatingClaws.Load(clawID); activating {
+			// Workflow v2 activation may still finish the run without
+			// provisioning; its creator promotes again once it decides.
 			continue
 		}
 		if groupName == "" {
@@ -1182,26 +1208,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		fileBytes[k] = []byte(v)
 	}
 
-	var provErr error
-	switch provider {
-	case "replicated":
-		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-	case "daytona":
-		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-	case "exedev":
-		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-	case "lambda-microvms":
-		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-	case "noop":
-		if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
-			provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1")
-		} else {
-			providerID := "noop-vm-" + clawID[:8]
-			_, _ = s.execStatusLogged("connect claw "+clawID, `UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
-		}
-	default:
-		provErr = fmt.Errorf("unsupported provider: %s", provider)
-	}
+	provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 	if provErr != nil {
 		log.Printf("[factory] provision failed for pending claw %s: %v", clawID, provErr)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
@@ -1320,6 +1327,10 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	if !pipeline.MessageSignals(rawMessage, doneSignalToken) {
 		return
 	}
+	s.nudgeRejectedPipelineSignals(clawID, rawMessage)
+	if s.pipelineRejectsMessageSignal(clawID, doneSignalToken) {
+		return
+	}
 	// Get the issue ID and tenant for this claw. Workflow claws may not have an
 	// issue, but [DONE] must still give those runs a terminal path.
 	var issueID, tenantID string
@@ -1329,7 +1340,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 
 	// Extract PR URLs from the [DONE] line.
 	// Expected format: [DONE] https://github.com/org/repo/pull/1 https://...
-	prURLs := extractDonePRURLs(rawMessage)
+	prURLs, fallback := s.donePRURLs(clawID, rawMessage)
 
 	if pipelineCtx, stage, ok := s.pipelineStageForMessageContains(clawID, rawMessage); ok {
 		// Match the legacy [DONE] path: a failed required gate must block both
@@ -1339,6 +1350,9 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 			msg := "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry."
 			log.Printf("[factory] claw %s pipeline [DONE] blocked by failed required gate", shortID(clawID))
 			s.injectUserMessage(clawID, msg)
+			return
+		}
+		if fallback && s.rejectInvalidDoneFallback(clawID, prURLs) {
 			return
 		}
 		// Pipeline stages that match [DONE] return before the legacy store path
@@ -1420,7 +1434,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	if pipelineCtx, ok := s.findPipelineContextForIssue(issueID); ok {
 		s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
 		if pl := parsePipelineForContext(pipelineCtx); pl != nil {
-			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+			if stage := pl.StageForMessageContains(rawMessage, s.getPipelineStage(clawID)); stage != nil {
 				s.transitionPipelineStageWithContext(clawID, *stage, pipelineCtx)
 				pipelineHandledDone = true
 			}
@@ -1440,7 +1454,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	}
 	if !pipelineHandledDone {
 		if pl := parsePipelineForFactory(factory); pl != nil {
-			if stage := pl.StageForMessageContains(rawMessage); stage != nil {
+			if stage := pl.StageForMessageContains(rawMessage, s.getPipelineStage(clawID)); stage != nil {
 				s.transitionPipelineStage(clawID, *stage, factory, issueID)
 				pipelineHandledDone = true
 			}
@@ -1657,6 +1671,10 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	if !pipeline.MessageSignals(rawMessage, terminateSignalToken) {
 		return
 	}
+	if s.pipelineRejectsMessageSignal(clawID, terminateSignalToken) {
+		s.nudgeRejectedPipelineSignals(clawID, rawMessage)
+		return
+	}
 	// Get the tenant ID and issue ID for this claw
 	var issueID, tenantID, factoryName string
 	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,'')), tenant_id, factory_name FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID, &factoryName); err != nil {
@@ -1759,6 +1777,46 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	log.Printf("[terminate] claw %s terminated successfully", clawID[:8])
 }
 
+// donePRURLs uses the claw's delivered or registered (created) open PRs only
+// when the signal omits URLs. The PR that triggered a PR-driven claw is not
+// the claw's delivery, so a bare [DONE] there keeps its previous meaning; rows
+// stored before claw_prs.source existed cannot be told apart and are skipped.
+func (s *Server) donePRURLs(clawID, message string) ([]string, bool) {
+	urls := extractDonePRURLs(message)
+	if len(urls) > 0 {
+		return urls, false
+	}
+	rows, err := s.db.Query(`SELECT pr_url FROM claw_prs WHERE claw_id=? AND source IN ('done','gate','gh_create','branch_sweep')
+		AND (mention_only=0 OR source IN ('gh_create','branch_sweep'))
+		AND state NOT IN ('merged','closed') ORDER BY pr_url`, clawID)
+	if err != nil {
+		log.Printf("[factory] failed to load delivered PRs for claw %s: %v", shortID(clawID), err)
+		return nil, false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var prURL string
+		if err := rows.Scan(&prURL); err != nil {
+			return nil, false
+		}
+		urls = append(urls, prURL)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false
+	}
+	return urls, len(urls) > 0
+}
+
+func (s *Server) rejectInvalidDoneFallback(clawID string, urls []string) bool {
+	if token := s.resolveGitHubToken(); token != "" {
+		if rejected, reason := s.validateDonePRs(clawID, urls, token); rejected {
+			s.injectUserMessage(clawID, reason)
+			return true
+		}
+	}
+	return false
+}
+
 // extractDonePRURLs parses PR URLs from a [DONE] message.
 // It finds the [DONE] token and returns github.com PR URLs that follow it on the
 // same line, plus any PR URLs on subsequent lines of the same message. Agents
@@ -1830,7 +1888,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 
 	// Single URL: reuse the normal path (no multi-row partial-write risk).
 	if len(prs) == 1 {
-		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url, false); err != nil {
+		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url, false, "done"); err != nil {
 			log.Printf("[factory] failed to register PR %s for claw %s: %v", prs[0].url, shortID(clawID), err)
 			return prs[0].url
 		}
@@ -1839,7 +1897,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 
 	var toInsert []prMentionCandidate
 	for _, pr := range prs {
-		already, row, err := s.preparePRMention(clawID, pr.repo, pr.number, pr.url, false)
+		already, row, err := s.preparePRMention(clawID, pr.repo, pr.number, pr.url, false, "done")
 		if err != nil {
 			log.Printf("[factory] failed to prepare PR %s for claw %s: %v", pr.url, shortID(clawID), err)
 			return pr.url
@@ -1849,7 +1907,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 		}
 		toInsert = append(toInsert, row)
 	}
-	if failURL := s.insertClawPRsAtomic(clawID, toInsert, false); failURL != "" {
+	if failURL := s.insertClawPRsAtomic(clawID, toInsert, false, "done"); failURL != "" {
 		log.Printf("[factory] failed to register PR set for claw %s (first failure %s)", shortID(clawID), failURL)
 		return failURL
 	}

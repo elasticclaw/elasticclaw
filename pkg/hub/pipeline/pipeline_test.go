@@ -1267,3 +1267,25 @@ stages:
 		}
 	}
 }
+
+func TestInitialPlanEnabled(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		setting string
+		want    bool
+	}{
+		{name: "default", want: true},
+		{name: "enabled", setting: "initial_plan: true\n", want: true},
+		{name: "disabled", setting: "initial_plan: false\n", want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := pipeline.Parse([]byte(tt.setting + sampleYAML))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := p.InitialPlanEnabled(); got != tt.want {
+				t.Fatalf("InitialPlanEnabled = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

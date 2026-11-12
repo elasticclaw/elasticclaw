@@ -13,7 +13,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,7 +36,7 @@ const (
 	checkpointMinInterval        = 5 * time.Minute
 	checkpointRequestTimeout     = 2 * time.Minute
 	checkpointTerminationTimeout = 90 * time.Second
-	maxCheckpointBlobBytes       = 256 << 20
+	maxCheckpointBlobBytes       = types.MaxCheckpointBlobBytes
 
 	defaultCheckpointRestoreParallelism = 8
 	checkpointRestoreFileTimeout        = 2 * time.Minute
@@ -532,19 +534,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 		req.TTL = stored.tmplCfg.TTL
 	}
 	ctx := context.Background()
-	var provErr error
-	switch stored.provider {
-	case "daytona":
-		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, stored.env)
-	case "replicated":
-		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, stored.env)
-	case "exedev":
-		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, stored.env)
-	case "lambda-microvms":
-		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-	default:
-		provErr = fmt.Errorf("unsupported provider: %s", stored.provider)
-	}
+	provErr := s.provisionWithProvider(ctx, stored.provider, clawID, req, provCfg, fileBytes, stored.env)
 	if provErr != nil {
 		log.Printf("[restore] provision failed for claw %s: %v", clawID, provErr)
 		s.recordPipelineFailureRecord(clawID, "provision", "provision", "FATAL", provErr.Error(), map[string]interface{}{"error.type": "provision_failed"})
@@ -1267,6 +1257,62 @@ func (s *Server) restoreCheckpointFilesTo(ctx context.Context, clawID, checkpoin
 		return err
 	}
 	log.Printf("[checkpoint] claw %s: restore complete (%d files)", clawID, total)
+	return nil
+}
+
+// dockerCheckpointManifest is the .complete marker the bridge reads to
+// overlay staged checkpoint files; Files[i] is staged as files/<i>.
+type dockerCheckpointManifest struct {
+	Files []dockerCheckpointManifestFile `json:"files"`
+}
+
+type dockerCheckpointManifestFile struct {
+	Path string `json:"path"`
+	Mode int64  `json:"mode"`
+}
+
+func (s *Server) restoreCheckpointToDocker(ctx context.Context, clawID, containerID, homeDir string, p interface {
+	CopyIn(context.Context, string, string, []byte) error
+}) error {
+	checkpointID := s.pendingRestoreCheckpoint(clawID)
+	if checkpointID == "" {
+		return nil
+	}
+	s.setBootstrapStatus(clawID, "Restoring checkpoint files")
+	files, err := s.restoreCheckpointFiles(checkpointID)
+	if err != nil {
+		return err
+	}
+	// Stage files flat under files/<index> and describe them in the marker:
+	// CopyIn chowns only a file's directory and its parent, so a nested
+	// layout would leave root-owned ancestors the bridge cannot clean up,
+	// and CopyIn writes every file 0644, so modes travel in the manifest.
+	stagingDir := path.Join(homeDir, ".elasticclaw", "checkpoint-restore")
+	manifest := dockerCheckpointManifest{Files: make([]dockerCheckpointManifestFile, len(files))}
+	index := make(map[string]int, len(files))
+	for i, f := range files {
+		clean := path.Clean(f.Path)
+		if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+			return fmt.Errorf("checkpoint path escapes restore root: %q", f.Path)
+		}
+		manifest.Files[i] = dockerCheckpointManifestFile{Path: f.Path, Mode: f.Mode}
+		index[f.Path] = i
+	}
+	marker, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	if err := s.restoreCheckpointFilesTo(ctx, clawID, checkpointID, files, func(rel string) string {
+		return path.Join(stagingDir, "files", strconv.Itoa(index[rel]))
+	}, defaultCheckpointRestoreParallelism, func(ctx context.Context, remote string, data []byte) error {
+		return p.CopyIn(ctx, containerID, remote, data)
+	}); err != nil {
+		return err
+	}
+	if err := p.CopyIn(ctx, containerID, path.Join(stagingDir, ".complete"), marker); err != nil {
+		return err
+	}
+	s.markRestoreApplied(clawID, checkpointID)
 	return nil
 }
 

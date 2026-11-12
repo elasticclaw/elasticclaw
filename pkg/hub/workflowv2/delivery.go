@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
@@ -26,8 +27,8 @@ func (f PullRequestVerifierFunc) VerifyPullRequest(ctx context.Context, run Run,
 }
 
 // SubmitDelivery verifies every untrusted PR claim before atomically amending
-// the run-owned delivery collection. Workflows never declare repository lists;
-// authority comes solely from the pinned workspace repository map.
+// the run-owned delivery collection. Repository authority comes solely from
+// the pinned workspace repository map.
 func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, manifest typesv2.DeliveryManifest,
 	verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, error) {
 	verified, eventResult, err := s.submitDelivery(ctx, runID, attemptID, uuid.NewString(), "", nil, manifest, verifier)
@@ -60,6 +61,10 @@ func (s *Store) ApplyDeliveryControl(ctx context.Context, envelope typesv2.Contr
 	} else if handled {
 		return receipt, nil
 	}
+	if envelope.Kind == typesv2.MessagePullRequestClaimed {
+		_, _, receipt, err := s.registerPullRequests(ctx, envelope.RunID, envelope.AttemptID, manifest, verifier, &envelope)
+		return receipt, err
+	}
 	_, eventResult, err := s.submitDelivery(ctx, envelope.RunID, envelope.AttemptID, envelope.MessageID,
 		envelope.MessageID, envelope.ExpectedStateVersion, manifest, verifier)
 	if err != nil {
@@ -71,17 +76,30 @@ func (s *Store) ApplyDeliveryControl(ctx context.Context, envelope typesv2.Contr
 
 func (s *Store) preflightDeliveryControl(ctx context.Context,
 	envelope typesv2.ControlEnvelope) (typesv2.ControlReceipt, bool, error) {
-	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return typesv2.ControlReceipt{}, false, err
 	}
 	defer tx.Rollback()
+	receipt, handled, err := s.preflightDeliveryControlTx(ctx, tx, envelope)
+	if err == nil && handled {
+		err = tx.Commit()
+	}
+	return receipt, handled, err
+}
+
+func (s *Store) preflightDeliveryControlTx(ctx context.Context, tx *sql.Tx,
+	envelope typesv2.ControlEnvelope) (typesv2.ControlReceipt, bool, error) {
+	now := s.now().UTC()
 	run, _, err := getRunForUpdate(ctx, tx, envelope.RunID)
 	if err != nil {
 		return typesv2.ControlReceipt{}, false, err
 	}
-	input := EventInput{ID: envelope.MessageID, MessageID: envelope.MessageID, Kind: "delivery.verified",
+	kind := "delivery.verified"
+	if envelope.Kind == typesv2.MessagePullRequestClaimed {
+		kind = string(envelope.Kind)
+	}
+	input := EventInput{ID: envelope.MessageID, MessageID: envelope.MessageID, Kind: kind,
 		AttemptID: envelope.AttemptID, ExpectedStateVersion: envelope.ExpectedStateVersion,
 		Producer: ProducerSourceControl, Provenance: typesv2.EvidenceProvenance{
 			Producer: string(ProducerSourceControl), ObservedAt: now,
@@ -97,9 +115,6 @@ func (s *Store) preflightDeliveryControl(ctx context.Context,
 			run.StateVersion, reason, now); err != nil {
 			return typesv2.ControlReceipt{}, false, err
 		}
-		if err := tx.Commit(); err != nil {
-			return typesv2.ControlReceipt{}, false, err
-		}
 		return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: typesv2.DispositionDuplicate,
 			StateVersion: run.StateVersion, Reason: reason}, true, nil
 	}
@@ -107,7 +122,7 @@ func (s *Store) preflightDeliveryControl(ctx context.Context,
 		return typesv2.ControlReceipt{}, false, nil
 	}
 	reason := fmt.Sprintf("expected state version %d, current version is %d", *envelope.ExpectedStateVersion, run.StateVersion)
-	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.AttemptID, input.ExpectedStateVersion,
 		run.StateVersion, typesv2.DispositionStaleState, reason, ProducerSourceControl, input.Provenance, nil, nil, now); err != nil {
 		return typesv2.ControlReceipt{}, false, err
 	}
@@ -115,72 +130,41 @@ func (s *Store) preflightDeliveryControl(ctx context.Context,
 		run.StateVersion, reason, now); err != nil {
 		return typesv2.ControlReceipt{}, false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return typesv2.ControlReceipt{}, false, err
-	}
 	return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: typesv2.DispositionStaleState,
 		StateVersion: run.StateVersion, Reason: reason}, true, nil
+}
+
+// policyStatusFacts returns the CI and review policy statuses of policy under
+// the producers that own them, for the policies the pinned workflow uses.
+// Writers that change the policy inputs (the delivered PRs or their heads) set
+// them with their event: a resumed run replays its deferred queue before the
+// policy events are published, and must not see the statuses of the previous
+// inputs.
+func policyStatusFacts(workflowYAML string, policy DeliveryPolicyResult) (map[Producer]map[string]interface{}, error) {
+	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
+	if err != nil {
+		return nil, fmt.Errorf("load pinned workflow: %w", err)
+	}
+	delivery := workflow.Workflow.Delivery
+	if delivery == nil || delivery.PullRequests == nil {
+		return nil, nil
+	}
+	facts := map[Producer]map[string]interface{}{}
+	if delivery.PullRequests.CIPolicy != "" {
+		facts[ProducerCI] = map[string]interface{}{"ci.status": policy.CIStatus}
+	}
+	if delivery.PullRequests.ReviewPolicy != "" {
+		facts[ProducerReview] = map[string]interface{}{"review.status": policy.ReviewStatus}
+	}
+	return facts, nil
 }
 
 func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, messageID string,
 	expectedStateVersion *uint64, manifest typesv2.DeliveryManifest,
 	verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, EventResult, error) {
-	if s == nil || s.db == nil {
-		return nil, EventResult{}, fmt.Errorf("workflow v2 store is not configured")
-	}
-	if verifier == nil && len(manifest.PullRequests) > 0 {
-		return nil, EventResult{}, fmt.Errorf("pull request verifier is required")
-	}
-	if len(manifest.PullRequests) > 100 {
-		return nil, EventResult{}, fmt.Errorf("delivery manifest exceeds 100 pull requests")
-	}
-	run, err := s.GetRun(ctx, runID)
+	verified, err := s.verifyDeliveryClaims(ctx, runID, attemptID, manifest, verifier)
 	if err != nil {
 		return nil, EventResult{}, err
-	}
-	var activeAttempt int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_v2_attempts WHERE id=? AND run_id=? AND status='active'`,
-		attemptID, runID).Scan(&activeAttempt); err != nil || run.CurrentAttemptID != attemptID {
-		return nil, EventResult{}, fmt.Errorf("delivery attempt is not active")
-	}
-	var workspaceYAML string
-	if err := s.db.QueryRowContext(ctx, `SELECT workspace_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workspaceYAML); err != nil {
-		return nil, EventResult{}, err
-	}
-	resolvedWorkspace, err := typesv2.ParseAndValidateWorkspace([]byte(workspaceYAML))
-	if err != nil {
-		return nil, EventResult{}, fmt.Errorf("load pinned workspace: %w", err)
-	}
-
-	verified := make([]typesv2.VerifiedPullRequest, 0, len(manifest.PullRequests))
-	claimsByURL := map[string]bool{}
-	identities := map[string]bool{}
-	for i, claim := range manifest.PullRequests {
-		claim.URL = strings.TrimSpace(claim.URL)
-		if strings.TrimSpace(claim.Supersedes) != "" {
-			return nil, EventResult{}, fmt.Errorf("pull_requests[%d].supersedes requires hub-owned source-control reconciliation", i)
-		}
-		parsed, err := url.Parse(claim.URL)
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			return nil, EventResult{}, fmt.Errorf("pull_requests[%d].url is not an absolute HTTP(S) URL", i)
-		}
-		if claimsByURL[claim.URL] {
-			return nil, EventResult{}, fmt.Errorf("pull_requests[%d].url is duplicated", i)
-		}
-		claimsByURL[claim.URL] = true
-		pr, err := verifier.VerifyPullRequest(ctx, run, resolvedWorkspace.Workspace, claim)
-		if err != nil {
-			return nil, EventResult{}, fmt.Errorf("verify pull_requests[%d] %s: %w", i, claim.URL, err)
-		}
-		if err := validateVerifiedPullRequest(resolvedWorkspace.Workspace, claim, pr); err != nil {
-			return nil, EventResult{}, fmt.Errorf("verify pull_requests[%d] %s: %w", i, claim.URL, err)
-		}
-		identity := pr.Repository + "#" + fmt.Sprint(pr.Number)
-		if identities[identity] {
-			return nil, EventResult{}, fmt.Errorf("pull_requests[%d] duplicates verified PR %s", i, identity)
-		}
-		identities[identity] = true
-		verified = append(verified, pr)
 	}
 
 	now := s.now().UTC()
@@ -190,62 +174,14 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 		Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerSourceControl), ObservedAt: now},
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		for i := range verified {
-			pr := &verified[i]
-			var existingID, existingHead string
-			err := tx.QueryRowContext(ctx, `SELECT id,current_head_sha FROM workflow_v2_delivery_prs
-				WHERE run_id=? AND repository=? AND pr_number=?`, runID, pr.Repository, pr.Number).Scan(&existingID, &existingHead)
-			if err != nil && err != sql.ErrNoRows {
+			if _, err := upsertDeliveryPR(ctx, tx, runID, &verified[i], false, now); err != nil {
 				return err
-			}
-			if existingID == "" {
-				pr.ID = uuid.NewString()
-			} else {
-				pr.ID = existingID
-			}
-			provenanceJSON, err := marshalObject(pr.Provenance)
-			if err != nil {
-				return err
-			}
-			_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_delivery_prs(
-				id,run_id,url,repository_name,repository,pr_number,source_branch,base_branch,current_head_sha,state,
-				active,supersedes_id,provenance_json,verified_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)
-				ON CONFLICT(run_id,repository,pr_number) DO UPDATE SET url=excluded.url,repository_name=excluded.repository_name,
-				source_branch=excluded.source_branch,base_branch=excluded.base_branch,current_head_sha=excluded.current_head_sha,
-				state=excluded.state,active=1,supersedes_id=excluded.supersedes_id,provenance_json=excluded.provenance_json,
-				verified_at=excluded.verified_at,updated_at=excluded.updated_at`,
-				pr.ID, runID, pr.URL, pr.RepositoryName, pr.Repository, pr.Number, pr.SourceBranch, pr.BaseBranch,
-				pr.HeadSHA, pr.State, pr.Supersedes, provenanceJSON, pr.VerifiedAt.UnixMilli(), now.UnixMilli())
-			if err != nil {
-				return err
-			}
-			if existingHead != pr.HeadSHA {
-				var generation int
-				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation),0)+1 FROM workflow_v2_delivery_heads WHERE pr_id=?`,
-					pr.ID).Scan(&generation); err != nil {
-					return err
-				}
-				if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_delivery_heads(id,pr_id,head_sha,generation,observed_at)
-					VALUES(?,?,?,?,?)`, uuid.NewString(), pr.ID, pr.HeadSHA, generation, now.UnixMilli()); err != nil {
-					return err
-				}
-				if existingHead != "" {
-					if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
-						WHERE run_id=? AND pr_id=? AND superseded_at=0`, now.UnixMilli(), runID, pr.ID); err != nil {
-						return err
-					}
-				}
 			}
 		}
-		summary, err := deliveryFactsFrom(ctx, tx, runID)
-		if err != nil {
+		if err := deliveryEventFacts(ctx, tx, runID, input); err != nil {
 			return err
 		}
-		input.Payload = map[string]interface{}{"delivery": summary}
-		input.Facts = map[string]interface{}{
-			"delivery.count": summary["count"], "delivery.open": summary["open"],
-			"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
-		}
-		return nil
+		return deliveryPolicyOwnedFacts(ctx, tx, runID, input)
 	})
 	if err != nil {
 		return nil, EventResult{}, err
@@ -262,6 +198,144 @@ func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, m
 		return verified[i].Repository < verified[j].Repository
 	})
 	return verified, eventResult, nil
+}
+
+func (s *Store) verifyDeliveryClaims(ctx context.Context, runID, attemptID string,
+	manifest typesv2.DeliveryManifest, verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("workflow v2 store is not configured")
+	}
+	if verifier == nil && len(manifest.PullRequests) > 0 {
+		return nil, fmt.Errorf("pull request verifier is required")
+	}
+	if len(manifest.PullRequests) > 100 {
+		return nil, fmt.Errorf("delivery manifest exceeds 100 pull requests")
+	}
+	run, err := s.GetRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	var activeAttempt int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_v2_attempts WHERE id=? AND run_id=? AND status='active'`,
+		attemptID, runID).Scan(&activeAttempt); err != nil || run.CurrentAttemptID != attemptID {
+		return nil, fmt.Errorf("delivery attempt is not active")
+	}
+	var workspaceYAML string
+	if err := s.db.QueryRowContext(ctx, `SELECT workspace_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workspaceYAML); err != nil {
+		return nil, err
+	}
+	resolvedWorkspace, err := typesv2.ParseAndValidateWorkspace([]byte(workspaceYAML))
+	if err != nil {
+		return nil, fmt.Errorf("load pinned workspace: %w", err)
+	}
+
+	verified := make([]typesv2.VerifiedPullRequest, 0, len(manifest.PullRequests))
+	claimsByURL := map[string]bool{}
+	identities := map[string]bool{}
+	for i, claim := range manifest.PullRequests {
+		claim.URL = strings.TrimSpace(claim.URL)
+		if strings.TrimSpace(claim.Supersedes) != "" {
+			return nil, fmt.Errorf("pull_requests[%d].supersedes requires hub-owned source-control reconciliation", i)
+		}
+		parsed, err := url.Parse(claim.URL)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return nil, fmt.Errorf("pull_requests[%d].url is not an absolute HTTP(S) URL", i)
+		}
+		if claimsByURL[claim.URL] {
+			return nil, fmt.Errorf("pull_requests[%d].url is duplicated", i)
+		}
+		claimsByURL[claim.URL] = true
+		pr, err := verifier.VerifyPullRequest(ctx, run, resolvedWorkspace.Workspace, claim)
+		if err != nil {
+			return nil, fmt.Errorf("verify pull_requests[%d] %s: %w", i, claim.URL, err)
+		}
+		if err := validateVerifiedPullRequest(resolvedWorkspace.Workspace, claim, pr); err != nil {
+			return nil, fmt.Errorf("verify pull_requests[%d] %s: %w", i, claim.URL, err)
+		}
+		identity := pr.Repository + "#" + fmt.Sprint(pr.Number)
+		if identities[identity] {
+			return nil, fmt.Errorf("pull_requests[%d] duplicates verified PR %s", i, identity)
+		}
+		identities[identity] = true
+		verified = append(verified, pr)
+	}
+
+	return verified, nil
+}
+
+func upsertDeliveryPR(ctx context.Context, tx *sql.Tx, runID string, pr *typesv2.VerifiedPullRequest,
+	registeredOnly bool, now time.Time) (bool, error) {
+	var existingID, existingHead, existingState string
+	var existingRegisteredOnly bool
+	err := tx.QueryRowContext(ctx, `SELECT id,current_head_sha,state,registered_only FROM workflow_v2_delivery_prs
+		WHERE run_id=? AND repository=? AND pr_number=?`, runID, pr.Repository, pr.Number).Scan(&existingID, &existingHead,
+		&existingState, &existingRegisteredOnly)
+	if err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	if existingID == "" {
+		pr.ID = uuid.NewString()
+	} else {
+		pr.ID = existingID
+	}
+	// A creation report must never amend an already submitted delivery.
+	if registeredOnly && existingID != "" && !existingRegisteredOnly {
+		return false, nil
+	}
+	provenanceJSON, err := marshalObject(pr.Provenance)
+	if err != nil {
+		return false, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_delivery_prs(
+		id,run_id,url,repository_name,repository,pr_number,source_branch,base_branch,current_head_sha,state,
+		active,supersedes_id,provenance_json,verified_at,updated_at,registered_only) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)
+		ON CONFLICT(run_id,repository,pr_number) DO UPDATE SET url=excluded.url,repository_name=excluded.repository_name,
+		source_branch=excluded.source_branch,base_branch=excluded.base_branch,current_head_sha=excluded.current_head_sha,
+		state=excluded.state,active=1,supersedes_id=COALESCE(NULLIF(excluded.supersedes_id,''),workflow_v2_delivery_prs.supersedes_id),provenance_json=excluded.provenance_json,
+		verified_at=excluded.verified_at,updated_at=excluded.updated_at,registered_only=excluded.registered_only`,
+		pr.ID, runID, pr.URL, pr.RepositoryName, pr.Repository, pr.Number, pr.SourceBranch, pr.BaseBranch,
+		pr.HeadSHA, pr.State, pr.Supersedes, provenanceJSON, pr.VerifiedAt.UnixMilli(), now.UnixMilli(), registeredOnly)
+	if err != nil {
+		return false, err
+	}
+	// A resubmission that moves the head or state invalidates what a suspended
+	// run queued for the previous one, exactly as a reconciled move does. A PR
+	// that joins the delivery (new, or registered-only until now) has no queued
+	// observations, but the policy results queued without it no longer
+	// aggregate every subject. Registration leaves the delivery and its policy
+	// untouched, so it keeps them.
+	if !registeredOnly {
+		if existingID != "" && !existingRegisteredOnly {
+			if err := clearStaleDeferredEvents(ctx, tx, runID, pr.ID, existingHead != pr.HeadSHA,
+				existingState != pr.State, pr.State == "open", now); err != nil {
+				return false, err
+			}
+		} else {
+			for _, key := range []string{"ci.policy.evaluated", "review.policy.evaluated", "workflow.delivery.evaluated"} {
+				if err := invalidateDeferredSubject(ctx, tx, runID, key, now); err != nil {
+					return false, err
+				}
+			}
+		}
+	}
+	if existingHead != pr.HeadSHA {
+		var generation int
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation),0)+1 FROM workflow_v2_delivery_heads WHERE pr_id=?`,
+			pr.ID).Scan(&generation); err != nil {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_delivery_heads(id,pr_id,head_sha,generation,observed_at)
+			VALUES(?,?,?,?,?)`, uuid.NewString(), pr.ID, pr.HeadSHA, generation, now.UnixMilli()); err != nil {
+			return false, err
+		}
+		if existingHead != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
+				WHERE run_id=? AND pr_id=? AND superseded_at=0`, now.UnixMilli(), runID, pr.ID); err != nil {
+				return false, err
+			}
+		}
+	}
+	return existingID == "", nil
 }
 
 func validateVerifiedPullRequest(workspace *typesv2.Workspace, claim typesv2.PullRequestClaim,
@@ -294,13 +368,15 @@ type rowQueryer interface {
 }
 
 func deliveryFactsFrom(ctx context.Context, queryer rowQueryer, runID string) (map[string]interface{}, error) {
-	var count, open, merged int
+	var count, open, merged, conflicted, behind int
 	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN state='open' THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN state='merged' THEN 1 ELSE 0 END),0)
-		FROM workflow_v2_delivery_prs WHERE run_id=? AND active=1`, runID).Scan(&count, &open, &merged); err != nil {
+		COALESCE(SUM(CASE WHEN state='merged' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN state='open' AND mergeable_head_sha=current_head_sha AND mergeable_state='dirty' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN state='open' AND mergeable_head_sha=current_head_sha AND mergeable_state='behind' THEN 1 ELSE 0 END),0)
+		FROM workflow_v2_delivery_prs WHERE run_id=? AND active=1 AND registered_only=0`, runID).Scan(&count, &open, &merged, &conflicted, &behind); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{"count": count, "open": open, "merged": merged,
-		"all_merged": merged == count}, nil
+		"all_merged": merged == count, "any_conflicted": conflicted > 0, "any_behind": behind > 0}, nil
 }

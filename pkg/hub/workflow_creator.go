@@ -3,9 +3,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -213,10 +213,18 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 	s.promoteMu.Lock()
 	activeCount := s.countActiveClawsInGroup(groupName)
-	isPending := groupLimit > 0 && activeCount >= groupLimit
+	isPending := groupLimit > 0 && (activeCount >= groupLimit || s.hasPendingInGroup(groupName))
 	initialStatus := "provisioning"
 	if isPending {
 		initialStatus = "pending"
+	}
+
+	if opts.beforeProvision != nil {
+		// Hold the claw out of promotePendingClaws until activation decides
+		// whether it provisions at all. Marked under promoteMu, before the
+		// row exists, so no promotion can see it unmarked.
+		s.activatingClaws.Store(clawID, struct{}{})
+		defer s.activatingClaws.Delete(clawID)
 	}
 
 	filesJSON, _ := json.Marshal(templateFiles)
@@ -277,6 +285,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
 			log.Printf("[workflow] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
 		}
+		s.activatingClaws.Delete(clawID)
 		go s.promotePendingClaws()
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
@@ -285,13 +294,38 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if callbackCtx == nil {
 			callbackCtx = context.Background()
 		}
-		if err := opts.beforeProvision(callbackCtx, clawID, tenantID); err != nil {
+		err := opts.beforeProvision(callbackCtx, clawID, tenantID)
+		if errors.Is(err, errWorkflowV2FinishedAtActivation) {
+			log.Printf("[workflow] run for claw %s finished during activation; skipping provisioning", clawID[:8])
+			var finished workflowV2FinishedAtActivationError
+			errors.As(err, &finished)
+			result := workflowV2ClawResult(finished.status, "")
+			// Leave the pending queue without provisioning, like a claw that
+			// was never queued; the parent finish below deletes it and then
+			// promotes pending claws.
+			if _, dequeueErr := s.db.Exec(`UPDATE claws SET status='provisioning' WHERE id=? AND status='pending'`, clawID); dequeueErr != nil {
+				// A claw left pending would be provisioned by the next
+				// promotion once the hold is released; finish it here instead.
+				log.Printf("[workflow] failed to dequeue finished claw %s: %v", clawID[:8], dequeueErr)
+				if _, finishErr := s.finishClawTerminalTx(clawID, "deleted", "", result,
+					"workflow v2 run finished during activation", terminalTxOpts{}); finishErr != nil {
+					log.Printf("[workflow] failed to finish dequeue-failed claw %s: %v", clawID[:8], finishErr)
+				}
+				s.activatingClaws.Delete(clawID)
+				go s.promotePendingClaws()
+			}
+			go s.finishWorkflowV2ClawAfterActivation(finished.runID, clawID, result)
+			return clawID, false, nil
+		}
+		if err != nil {
 			_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed",
 				"workflow v2 activation failed: "+err.Error(), terminalTxOpts{})
+			s.activatingClaws.Delete(clawID)
 			s.cancelWorkflowV2RunForClaw(callbackCtx, clawID, "workflow v2 activation failed")
 			go s.promotePendingClaws()
 			return "", false, fmt.Errorf("activate workflow v2 run: %w", err)
 		}
+		s.activatingClaws.Delete(clawID)
 	}
 
 	log.Printf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)
@@ -301,6 +335,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	})
 
 	if isPending {
+		go s.promotePendingClaws()
 		return clawID, true, nil
 	}
 
@@ -328,28 +363,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			return
 		}
 		ctx := context.Background()
-		var provErr error
-		switch provider {
-		case "replicated":
-			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-		case "daytona":
-			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-		case "exedev":
-			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-		case "docker":
-			provErr = s.provisionDocker(ctx, clawID, req, provCfg, fileBytes)
-		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-		case "noop":
-			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
-				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
-			} else {
-				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
-			}
-		default:
-			provErr = fmt.Errorf("unsupported provider: %s", provider)
-		}
+		provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 		if provErr != nil {
 			log.Printf("[workflow] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow provision failed: %v", provErr), false)

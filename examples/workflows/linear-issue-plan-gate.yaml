@@ -5,6 +5,9 @@
 #
 # When plan_gate: true is present on a stage that also has gate:, freeform
 # hub plan approval is skipped for this workflow so plans are not double-approved.
+# Workflows without a plan_gate can set top-level initial_plan: false to skip
+# the freeform handshake. It defaults to true; disabling it does not skip stages
+# or deterministic gates. Legacy factory pipeline_yaml accepts the same key.
 schema_version: v1
 name: linear-issue-plan-gate
 

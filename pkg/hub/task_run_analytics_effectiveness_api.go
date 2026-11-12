@@ -8,6 +8,7 @@ import (
 )
 
 type taskRunAnalyticsEffectivenessResponse struct {
+	TicketCostUSD     float64                             `json:"ticketCostUsd"`
 	OutcomesByDay     []taskRunAnalyticsOutcomesDay       `json:"outcomesByDay"`
 	Funnel            taskRunAnalyticsFunnel              `json:"funnel"`
 	CostPerMergedPr   taskRunAnalyticsCostPerMerged       `json:"costPerMergedPr"`
@@ -21,6 +22,7 @@ type taskRunAnalyticsEffectivenessResponse struct {
 	Prior             *taskRunAnalyticsEffectivenessPrior `json:"prior,omitempty"`
 }
 type taskRunAnalyticsEffectivenessPrior struct {
+	TicketCostUSD     float64 `json:"ticketCostUsd"`
 	SuccessRate       float64 `json:"successRate"`
 	TicketSuccessRate float64 `json:"ticketSuccessRate"`
 	UniqueTickets     int     `json:"uniqueTickets"`
@@ -32,6 +34,7 @@ type taskRunAnalyticsOutcomesDay struct {
 	HumanInTheLoop int    `json:"humanInTheLoop"`
 	Warning        int    `json:"warning"`
 	Failed         int    `json:"failed"`
+	Cancelled      int    `json:"cancelled"`
 }
 type taskRunAnalyticsFunnel struct {
 	AgentStarted int `json:"agentStarted"`
@@ -59,12 +62,13 @@ type taskRunAnalyticsRunsPerTicket struct {
 	Tickets int    `json:"tickets"`
 }
 type taskRunAnalyticsTopTicket struct {
-	TicketKey  string  `json:"ticketKey"`
-	IssueID    string  `json:"issueId"`
-	IssueTitle string  `json:"issueTitle"`
-	CostUsd    float64 `json:"costUsd"`
-	Runs       int     `json:"runs"`
-	Outcome    string  `json:"outcome"`
+	Approximate bool    `json:"approximate,omitempty"`
+	TicketKey   string  `json:"ticketKey"`
+	IssueID     string  `json:"issueId"`
+	IssueTitle  string  `json:"issueTitle"`
+	CostUsd     float64 `json:"costUsd"`
+	Runs        int     `json:"runs"`
+	Outcome     string  `json:"outcome"`
 }
 
 func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *http.Request) {
@@ -89,12 +93,15 @@ func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *h
 	}
 	out.Prior = &taskRunAnalyticsEffectivenessPrior{
 		SuccessRate:       prior.SuccessRate,
+		TicketCostUSD:     prior.TicketCostUSD,
 		TicketSuccessRate: prior.TicketSuccessRate,
 		UniqueTickets:     prior.UniqueTickets,
 		MergeRate:         prior.MergeRate,
 	}
 	if !analyticsCostsVisible(r) {
 		// Non-admins read effectiveness without the money slices.
+		out.TicketCostUSD = 0
+		out.Prior.TicketCostUSD = 0
 		out.CostPerMergedPr = taskRunAnalyticsCostPerMerged{Weekly: make([]taskRunAnalyticsWeeklyCost, 0)}
 		out.TopTicketsByCost = make([]taskRunAnalyticsTopTicket, 0)
 	}
@@ -140,6 +147,8 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			x.HumanInTheLoop = n
 		case taskRunStatusWarning:
 			x.Warning = n
+		case taskRunStatusCancelled:
+			x.Cancelled = n
 		case taskRunStatusFailed:
 			x.Failed = n
 		}
@@ -170,7 +179,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 	}
 	var finishedTickets, successfulTickets int
 	if !includeTicketAggregates {
-		ticketRows, err := s.db.Query(`SELECT `+taskRunAnalyticsTicketKeySQL+`, COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY `+taskRunAnalyticsTicketKeySQL, a...)
+		ticketRows, err := s.db.Query(`SELECT `+taskRunAnalyticsTicketKeySQL+`, COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0), COALESCE(SUM(estimated_cost_usd),0) FROM task_run_summaries `+w+` AND issue_id != '' AND run_kind <> 'maintenance' GROUP BY `+taskRunAnalyticsTicketKeySQL, a...)
 		if err != nil {
 			return out, err
 		}
@@ -178,7 +187,8 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 		for ticketRows.Next() {
 			var ticketKey string
 			var ticketFinished, ticketSuccess int
-			if err = ticketRows.Scan(&ticketKey, &ticketFinished, &ticketSuccess); err != nil {
+			var ticketCost float64
+			if err = ticketRows.Scan(&ticketKey, &ticketFinished, &ticketSuccess, &ticketCost); err != nil {
 				return out, err
 			}
 			if ticketFinished > 0 {
@@ -187,6 +197,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 					successfulTickets++
 				}
 			}
+			out.TicketCostUSD += ticketCost
 			out.UniqueTickets++
 		}
 		if err = ticketRows.Err(); err != nil {
@@ -199,8 +210,8 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),0),
-			COALESCE(SUM(estimated_cost_usd),0), MIN(started_at), MAX(started_at)
-			FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY `+taskRunAnalyticsTicketKeySQL, a...)
+			COALESCE(SUM(estimated_cost_usd),0), MIN(started_at), MAX(started_at), MAX(cost_approximate)
+			FROM task_run_summaries `+w+` AND issue_id != '' AND run_kind <> 'maintenance' GROUP BY `+taskRunAnalyticsTicketKeySQL, a...)
 		if err != nil {
 			return out, err
 		}
@@ -209,15 +220,17 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			key, issueID, issueTitle           string
 			runs, finished, delivered, running int
 			cost                               float64
+			approximate                        bool
 			earliest, latest                   int64
 		}
 		tickets := map[string]*ticketAggregate{}
 		for ticketRows.Next() {
 			var ticketKey string
 			var t ticketAggregate
-			if err = ticketRows.Scan(&ticketKey, &t.issueID, &t.issueTitle, &t.runs, &t.finished, &t.delivered, &t.running, &t.cost, &t.earliest, &t.latest); err != nil {
+			if err = ticketRows.Scan(&ticketKey, &t.issueID, &t.issueTitle, &t.runs, &t.finished, &t.delivered, &t.running, &t.cost, &t.earliest, &t.latest, &t.approximate); err != nil {
 				return out, err
 			}
+			out.TicketCostUSD += t.cost
 			t.key = ticketKey
 			tickets[ticketKey] = &t
 		}
@@ -260,7 +273,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			}
 			runBuckets[bucket]++
 			if t.cost > 0 {
-				out.TopTicketsByCost = append(out.TopTicketsByCost, taskRunAnalyticsTopTicket{TicketKey: t.key, IssueID: t.issueID, IssueTitle: t.issueTitle, CostUsd: t.cost, Runs: t.runs, Outcome: outcome})
+				out.TopTicketsByCost = append(out.TopTicketsByCost, taskRunAnalyticsTopTicket{TicketKey: t.key, IssueID: t.issueID, IssueTitle: t.issueTitle, CostUsd: t.cost, Approximate: t.approximate, Runs: t.runs, Outcome: outcome})
 			}
 		}
 		for _, d := range ticketsByDay {
@@ -308,6 +321,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 }
 
 type taskRunAnalyticsCostDriver struct {
+	Approximate     bool                        `json:"approximate,omitempty"`
 	Name            string                      `json:"name"`
 	Runs            int                         `json:"runs"`
 	SuccessRate     float64                     `json:"successRate"`
@@ -366,7 +380,7 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 		col = "workflow_name"
 	}
 	w, a := taskRunAnalyticsSummaryWhere(f)
-	q := fmt.Sprintf(`SELECT %s, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status!='running' THEN 1 ELSE 0 END),0) FROM task_run_summaries %s GROUP BY %s ORDER BY 3 DESC`, col, w, col)
+	q := fmt.Sprintf(`SELECT %s, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status!='running' THEN 1 ELSE 0 END),0), MAX(cost_approximate) FROM task_run_summaries %s GROUP BY %s ORDER BY 3 DESC`, col, w, col)
 	rows, err := s.db.Query(q, a...)
 	if err != nil {
 		return nil, err
@@ -376,7 +390,7 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 	for rows.Next() {
 		var x taskRunAnalyticsCostDriver
 		var suc, fin int
-		if err = rows.Scan(&x.Name, &x.Runs, &x.CostUsd, &x.MergedPrs, &suc, &fin); err != nil {
+		if err = rows.Scan(&x.Name, &x.Runs, &x.CostUsd, &x.MergedPrs, &suc, &fin, &x.Approximate); err != nil {
 			return nil, err
 		}
 		if fin > 0 {

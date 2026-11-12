@@ -7,7 +7,7 @@ The E2E paths run against real services:
 
 ```text
 Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> Daytona -> OpenClaw -> Fireworks Kimi
-Depot CI -> ngrok -> ElasticClaw Server -> Linear -> Daytona -> OpenClaw -> Fireworks Kimi
+Depot CI -> ngrok -> ElasticClaw Server -> fake Linear API -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Jira Cloud -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> exe.dev -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Docker -> OpenClaw
@@ -16,8 +16,8 @@ Depot CI -> ngrok -> ElasticClaw Server -> Docker -> OpenClaw
 Each test creates a workspace and workflow with the ElasticClaw CLI, configures
 a workspace GitHub App with the CLI so repositories can clone in Daytona, then
 configures the issue tracker through the server API. The GitHub Issues test
-creates a real GitHub issue and labels it. The Linear test creates a real Linear
-webhook, creates a real Linear issue in a non-trigger state, moves it into the
+creates a real GitHub issue and labels it. The Linear test serves the issue from an
+in-process fake Linear API, posts a signed webhook for its move into the
 trigger state, then waits for one Daytona-backed agent to connect and reply. The
 Jira test creates a real Jira Cloud issue, labels it, transitions it into the
 trigger state, delivers a Jira-shaped webhook payload to the E2E hub, and lets
@@ -86,8 +86,6 @@ Required secrets:
 ELASTICCLAW_E2E_GITHUB_TOKEN
 ELASTICCLAW_E2E_GITHUB_APP_ID
 ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY
-ELASTICCLAW_E2E_LINEAR_API_KEY
-ELASTICCLAW_E2E_LINEAR_TEAM_KEY
 ELASTICCLAW_E2E_JIRA_BASE_URL
 ELASTICCLAW_E2E_JIRA_USERNAME
 ELASTICCLAW_E2E_JIRA_TOKEN
@@ -116,8 +114,6 @@ Optional secrets:
 ELASTICCLAW_E2E_GITHUB_REPO=elasticclaw/e2e-fixtures
 ELASTICCLAW_E2E_GITHUB_APP_URL=https://github.com/settings/apps/...
 ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION=elasticclaw
-ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE=Todo
-ELASTICCLAW_E2E_LINEAR_INITIAL_STATE=Backlog
 ELASTICCLAW_E2E_JIRA_MANUAL_WEBHOOK=true
 ELASTICCLAW_E2E_REPLICATED_API_URL=https://api.replicated.com/vendor/v3
 ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE=r1.small
@@ -136,11 +132,11 @@ Webhooks: read/write
 The GitHub App must be installed on the fixture repo and have repository
 contents permissions sufficient for ElasticClaw to mint a checkout token.
 
-The Linear API key must be able to create webhooks and issues for the team in
-`ELASTICCLAW_E2E_LINEAR_TEAM_KEY`. The trigger state defaults to `Todo`; set
-`ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE` to the exact state name you want the
-workflow to watch. Set `ELASTICCLAW_E2E_LINEAR_INITIAL_STATE` only if the test
-cannot infer a non-trigger state for the initial issue creation.
+The Linear suites need no Linear credentials: they serve issues from an
+in-process fake (`factorytest.MockLinear`, wired into the hub through
+`ELASTICCLAW_E2E_LINEAR_API_URL`) and deliver a signed `status_changed`
+webhook through the public URL themselves. Sandbox, bridge, agent, and model
+stay real.
 
 The Jira Cloud user is configured with `ELASTICCLAW_E2E_JIRA_USERNAME` and
 `ELASTICCLAW_E2E_JIRA_TOKEN`. It must be able to browse the project, create
