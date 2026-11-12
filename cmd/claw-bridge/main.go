@@ -689,6 +689,42 @@ func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn,
 type agentResult struct {
 	text string
 	err  error
+	// undeliverable is set when OpenClaw ended the turn without a deliverable
+	// answer; see undeliverableTurnReason.
+	undeliverable string
+}
+
+// undeliverableTurnReason reports why a lifecycle end closed a turn without a
+// deliverable answer. OpenClaw 2026.9.4 keeps its terminalError
+// (non_deliverable_terminal_turn) in the trajectory file only; on the gateway
+// wire the run's lifecycle end carries livenessState, which its own terminal
+// classification (resolveAgentRunTerminalFacts) treats as a failure when
+// "abandoned" (incomplete turn, e.g. reasoning-only retries exhausted) or
+// "blocked". Aborts keep their existing handling.
+func undeliverableTurnReason(livenessState, stopReason string, aborted bool) string {
+	state := strings.ToLower(strings.TrimSpace(livenessState))
+	if aborted || (state != "abandoned" && state != "blocked") {
+		return ""
+	}
+	reason := "agent turn ended without a deliverable answer: livenessState=" + state
+	if stopReason = strings.TrimSpace(stopReason); stopReason != "" {
+		reason += " stopReason=" + stopReason
+	}
+	return reason
+}
+
+type deliverableTurnKey struct{}
+
+// requireDeliverableTurn makes SendMessage fail a turn OpenClaw ended without
+// a deliverable answer instead of returning it as a completed reply. Workflow
+// v2 agent tasks opt in so the hub applies their failure transitions.
+func requireDeliverableTurn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deliverableTurnKey{}, true)
+}
+
+func deliverableTurnRequired(ctx context.Context) bool {
+	required, _ := ctx.Value(deliverableTurnKey{}).(bool)
+	return required
 }
 
 type agentActivity struct {
@@ -1958,9 +1994,17 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			if agentPayload.Stream == "lifecycle" {
 				switch agentPayload.Data.Phase {
 				case "end":
-					log.Printf("[gateway] agent turn complete")
+					livenessState, _ := rawAgentPayload.Data["livenessState"].(string)
+					stopReason, _ := rawAgentPayload.Data["stopReason"].(string)
+					aborted, _ := rawAgentPayload.Data["aborted"].(bool)
+					undeliverable := undeliverableTurnReason(livenessState, stopReason, aborted)
+					if undeliverable != "" {
+						log.Printf("[gateway] %s", undeliverable)
+					} else {
+						log.Printf("[gateway] agent turn complete")
+					}
 					inf.transcriptOnce.Do(func() { gs.transcript.noteAssistant(inf.assistantText()) })
-					deliverInFlight(inf, agentResult{text: strings.TrimSpace(inf.assistantText())})
+					deliverInFlight(inf, agentResult{text: strings.TrimSpace(inf.assistantText()), undeliverable: undeliverable})
 				case "error":
 					msg := agentPayload.Data.Error
 					if msg == "" {
@@ -3302,6 +3346,9 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, turnKey, message 
 		case result := <-inf.done:
 			if result.err != nil {
 				return "", result.err
+			}
+			if result.undeliverable != "" && deliverableTurnRequired(ctx) {
+				return "", errors.New(result.undeliverable)
 			}
 			// Refresh context usage after each turn (best-effort)
 			go gs.refreshContextUsage(context.Background())
