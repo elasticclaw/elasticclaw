@@ -3425,7 +3425,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if err := s.flushStreamingSegment(clawID, tenantID, cc); err != nil {
 					log.Printf("[agent_activity] flush streaming segment for %s: %v", clawID[:8], err)
 				}
-				if isBusyAgentActivity(activity) {
+				// Workflow v2 tasks report through the control channel, so their
+				// activity is display-only and must not open a legacy chat turn.
+				if isBusyAgentActivity(activity) && !s.workflowV2OwnsExecution(cc) {
 					cc.mu.Lock()
 					if cc.streamingStartedAt.IsZero() {
 						cc.streamingStartedAt = time.Now()
