@@ -646,3 +646,166 @@ func TestEvaluationAfterAdoptionDuringActivationKeepsAdoptionEffects(t *testing.
 		t.Fatalf("effects=%v want %v", got, want)
 	}
 }
+
+const adoptionThenObservationWorkflowYAML = `
+schema_version: 2
+name: adoption-then-observation
+enabled: true
+initial_state: working
+states:
+  working:
+    phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Update dependencies.
+  awaiting:
+    phase: review
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Watch CI.
+  reviewing:
+    phase: review
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Review PR.
+  fixing:
+    phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Fix PR.
+transitions:
+  adopted:
+    from: working
+    on: delivery.adopted
+    to: awaiting
+    effects:
+      - agent.task:
+          prompt: Trigger CI.
+  evaluated:
+    from: awaiting
+    on: workflow.delivery.evaluated
+    to: reviewing
+  head_changed:
+    from: reviewing
+    on: pull_request.head_changed
+    to: fixing
+` + branchDeliveryYAML
+
+// Since PR observations reach activation-pending runs, a webhook or the
+// reconciler may move an adopted run on before CompleteActivation. The run
+// stays held for activation and nothing is deferred. A transition that leaves
+// the state cancels every effect planned so far, adoption's included, so only
+// the destination's effects run once activation completes; an observation
+// that does not transition keeps them.
+func TestObservationAfterAdoptionDuringActivation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state string
+		want  map[string]string
+	}{
+		{name: "head change leaves the state", state: "fixing", want: map[string]string{
+			"Update dependencies.": "cancelled", "Trigger CI.": "cancelled", "Watch CI.": "cancelled",
+			"Review PR.": "cancelled", "Fix PR.": "planned"}},
+		{name: "mergeability stays", state: "reviewing", want: map[string]string{
+			"Update dependencies.": "cancelled", "Trigger CI.": "planned", "Watch CI.": "planned", "Review PR.": "planned"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := openRuntimeDB(t)
+			store := workflowv2.NewStore(db)
+			previous := createDeliveryRun(t, store, "previous")
+			url := "https://github.example/org/api/pull/10"
+			delivered, err := store.SubmitDelivery(ctx, previous.RunID, previous.ID, typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: url}}}, deliveryVerifier(map[string]string{url: "head"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='completed' WHERE id=?`, previous.RunID); err != nil {
+				t.Fatal(err)
+			}
+			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{ID: "new", TenantID: "tenant-1", InitialClawID: "new-claw", ActivationPending: true,
+				WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(adoptionThenObservationWorkflowYAML)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.AssembleOrganizationContext(ctx, run.ID, workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, _ string, _ typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+				return typesv2.ContextBundleSource{}, fmt.Errorf("unexpected knowledge resolution")
+			})); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.AdoptPullRequests(ctx, run.ID, delivered, ""); err != nil {
+				t.Fatal(err)
+			}
+			targets, err := store.ActiveDeliveryTargets(ctx, "org/api", 10)
+			if err != nil || len(targets) != 1 || targets[0].RunID != run.ID {
+				t.Fatalf("targets=%+v err=%v", targets, err)
+			}
+			observed := delivered[0]
+			observed.ID = targets[0].PRID
+			if tc.state == "fixing" {
+				observed.HeadSHA = "head-2"
+				_, err = store.ReconcilePullRequest(ctx, targets[0], "synchronize", "pull_request.head_changed", observed)
+			} else {
+				observed.MergeableState, observed.BaseSHA = "dirty", "base"
+				_, err = store.ReconcileMergeability(ctx, targets[0], observed)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var observations int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND kind LIKE 'pull_request.%'`, run.ID).Scan(&observations); err != nil || observations != 1 {
+				t.Fatalf("observation events=%d err=%v", observations, err)
+			}
+			current, err := store.GetRun(ctx, run.ID)
+			if err != nil || current.State != tc.state || current.Status != workflowv2.RunSuspended || current.SuspendedBeyondActivation() {
+				t.Fatalf("run before activation=%+v err=%v", current, err)
+			}
+			var deferred int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_deferred_events WHERE run_id=?`, run.ID).Scan(&deferred); err != nil || deferred != 0 {
+				t.Fatalf("deferred=%d err=%v", deferred, err)
+			}
+			if claim, err := store.ClaimEffect(ctx, "worker", time.Minute); err != nil || claim != nil {
+				t.Fatalf("claim during activation=%+v err=%v", claim, err)
+			}
+			rows, err := db.Query(`SELECT json_extract(payload_json,'$.prompt'),status FROM workflow_v2_effects WHERE run_id=?`, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for rows.Next() {
+				var prompt, status string
+				if err := rows.Scan(&prompt, &status); err != nil {
+					t.Fatal(err)
+				}
+				got[prompt] = status
+			}
+			rows.Close()
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("effects=%v want %v", got, tc.want)
+			}
+
+			if err := store.CompleteActivation(ctx, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			planned := 0
+			for _, status := range tc.want {
+				if status == "planned" {
+					planned++
+				}
+			}
+			for i := 0; i < planned; i++ {
+				claim, err := store.ClaimEffect(ctx, "worker", time.Minute)
+				if err != nil || claim == nil || claim.Effect.RunID != run.ID {
+					t.Fatalf("claim %d after activation=%+v err=%v", i, claim, err)
+				}
+			}
+			if extra, err := store.ClaimEffect(ctx, "worker", time.Minute); err != nil || extra != nil {
+				t.Fatalf("extra claim=%+v err=%v", extra, err)
+			}
+		})
+	}
+}
