@@ -535,6 +535,64 @@ func TestRunWorkflowCronTriggerUsesCronEndpoint(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowCronTriggerReportsSignaledRuns(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspaces/prod/workflows/nightly/cron/trigger" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "signaled", "workflow": "prod/nightly"})
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowTrigger("prod", "nightly", nil, true)
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowTrigger returned error: %v", err)
+	}
+	for _, want := range []string{"Signaled open run(s) of cron workflow", "nightly", "no new run started"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Triggered") {
+		t.Fatalf("signaled output should not claim a triggered run:\n%s", out)
+	}
+}
+
+func TestRunWorkflowTriggerReportsSignaledRuns(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspaces/prod/workflows/nightly/trigger" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "signaled", "target_run_ids": []string{"run-a", "run-b"}})
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowTrigger("prod", "nightly", nil, false)
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowTrigger returned error: %v", err)
+	}
+	for _, want := range []string{"Signaled open run(s)", "run-a, run-b", "no new run started"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "-> agent") {
+		t.Fatalf("signaled output should not report an agent:\n%s", out)
+	}
+}
+
 func TestRunWorkflowV2CronRunsUsesCronEndpoint(t *testing.T) {
 	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

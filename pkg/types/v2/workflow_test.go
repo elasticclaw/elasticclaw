@@ -794,6 +794,14 @@ states:
     overlap_policy: parallel`,
 		},
 		{
+			name: "valid signal without timeout",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    overlap_policy: signal
+    timeout: "0"`,
+		},
+		{
 			name: "missing schedule",
 			trigger: `trigger:
   cron:

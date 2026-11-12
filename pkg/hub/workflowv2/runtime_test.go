@@ -3,6 +3,7 @@ package workflowv2_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -613,5 +614,77 @@ func TestRuntimeRecoveryDoesNotReadConversationRows(t *testing.T) {
 	}
 	if run.State != "building" || run.StateVersion != 1 {
 		t.Fatalf("conversation deletion changed recovery: %#v", run)
+	}
+}
+
+func TestCronTickRequiresHubProducer(t *testing.T) {
+	store := workflowv2.NewStore(openRuntimeDB(t))
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "cron-auth", TenantID: "tenant-1", InitialClawID: "claw-cron-auth",
+		WorkspaceYAML: []byte(runtimeWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, producer := range []workflowv2.Producer{workflowv2.ProducerHub, workflowv2.ProducerEngine, workflowv2.ProducerAgent, workflowv2.ProducerCustom, workflowv2.ProducerOperator} {
+		t.Run(string(producer), func(t *testing.T) {
+			result, err := store.ApplyEvent(context.Background(), run.ID, workflowv2.EventInput{
+				ID: "cron-auth-" + string(producer), Kind: "cron.tick", Producer: producer,
+				Payload: map[string]interface{}{"scheduled_at": "2026-08-08T12:00:00Z", "slot_id": "slot-1"},
+			})
+			want := typesv2.DispositionUnauthorized
+			if producer == workflowv2.ProducerHub {
+				want = typesv2.DispositionAccepted
+			}
+			if err != nil || result.Disposition != want {
+				t.Fatalf("disposition = %s, want %s, err = %v", result.Disposition, want, err)
+			}
+		})
+	}
+}
+
+func TestApplyOpenRunEventRefusesClosedRuns(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	ctx := context.Background()
+	closed, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: "open-closed", TenantID: "tenant-1", InitialClawID: "claw-open-closed",
+		WorkspaceYAML: []byte(runtimeWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CancelActivation(ctx, closed.ID, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
+		ID: "open-pending", TenantID: "tenant-1", InitialClawID: "claw-open-pending",
+		WorkspaceYAML: []byte(runtimeWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML), ActivationPending: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []string{"open-closed", "open-pending"} {
+		before, err := store.GetRun(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.ApplyOpenRunEvent(ctx, runID, workflowv2.EventInput{
+			ID: "tick-" + runID, Kind: "cron.tick", Producer: workflowv2.ProducerHub,
+			Payload: map[string]interface{}{"slot_id": "slot-1"},
+		})
+		if !errors.Is(err, workflowv2.ErrRunNotOpen) {
+			t.Fatalf("%s: err = %v, want ErrRunNotOpen", runID, err)
+		}
+		after, err := store.GetRun(ctx, runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Status != before.Status || after.WaitingReason != before.WaitingReason || after.StateVersion != before.StateVersion {
+			t.Fatalf("%s changed: before %#v after %#v", runID, before, after)
+		}
+		var events int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND kind='cron.tick'`, runID).Scan(&events); err != nil || events != 0 {
+			t.Fatalf("%s events = %d, %v", runID, events, err)
+		}
 	}
 }

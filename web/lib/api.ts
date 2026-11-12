@@ -378,8 +378,17 @@ export async function updateWorkflowControls(
   )
 }
 
-export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
-  return apiFetch<{ claw_id: string; status: string }>(
+// A started run returns run_id and claw_id; a signal-policy trigger that
+// ticked an open run returns status "signaled" and target_run_ids instead.
+export type TriggerWorkflowResponse = {
+  status: string
+  run_id?: string
+  claw_id?: string
+  target_run_ids?: string[]
+}
+
+export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<TriggerWorkflowResponse> {
+  return apiFetch<TriggerWorkflowResponse>(
     `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}/trigger`,
     {
       method: "POST",

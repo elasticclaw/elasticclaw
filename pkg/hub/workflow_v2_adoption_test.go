@@ -185,7 +185,7 @@ func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
     terminal: true`, 1) + "trigger:\n  cron:\n    schedule: \"0 9 * * *\"\n"}})
 	s.cronSchedulerV2 = newCronSchedulerV2(s)
 
-	if _, err := s.cronSchedulerV2.manualTrigger("adoption", "adoption", "test-tenant-id"); err != nil {
+	if _, _, err := s.cronSchedulerV2.manualTrigger("adoption", "adoption", "test-tenant-id"); err != nil {
 		t.Fatal(err)
 	}
 	var runStatus, clawID string
