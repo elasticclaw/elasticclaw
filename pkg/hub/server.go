@@ -3618,6 +3618,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					} else if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
 						s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
 					} else {
+						s.dropSweptPRNudges(clawID)
 						s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
 						s.safeGo("pipeline done transition", func() {
 							s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)

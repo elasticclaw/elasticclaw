@@ -196,7 +196,6 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 	if err := json.Unmarshal(resp.Body, &prs); err != nil {
 		return err
 	}
-	newPR := false
 	for _, pr := range prs {
 		if pr.State != "open" || !s.isClawAppAuthor(pr.User.Login, pr.User.Type) || !strings.EqualFold(pr.Head.Repo.FullName, branch.Repo) || pr.Head.Ref != branch.Branch || pr.Number <= 0 ||
 			// Branch names get reused; only a PR whose head is the commit this
@@ -208,7 +207,7 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 		if !strings.EqualFold(pr.HTMLURL, expectedURL) {
 			continue
 		}
-		accepted, isNew, err := s.registerSweptPR(ctx, clawID, tenantID, branch.Repo, pr.Number, expectedURL)
+		accepted, _, err := s.registerSweptPR(ctx, clawID, tenantID, branch.Repo, pr.Number, expectedURL)
 		if err != nil {
 			return err
 		}
@@ -216,14 +215,15 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 			continue
 		}
 		prURL = expectedURL
-		newPR = isNew
 		break
+	}
+	// A nudge deferred by a running turn leaves the branch pending, so the
+	// retry sweep re-evaluates it once the turn is over.
+	if prURL != "" && !s.nudgeSweptPRStageSignal(clawID, prURL) {
+		prURL = ""
 	}
 	_, err = s.db.Exec(`UPDATE claw_branches SET checked_at=?,pr_url=? WHERE claw_id=? AND repo=? AND branch=? AND head_sha=?`,
 		now(), prURL, clawID, branch.Repo, branch.Branch, branch.HeadSHA)
-	if newPR {
-		s.nudgeSweptPRStageSignal(clawID, prURL)
-	}
 	return err
 }
 
@@ -276,39 +276,74 @@ func (s *Server) registerSweptPR(ctx context.Context, clawID, tenantID, repo str
 	return err == nil, isNew, err
 }
 
-// nudgeSweptPRStageSignal tells an agent whose PR the sweep just found that
-// its stage still waits for [DONE]. The PR stage advances only on that signal,
-// and the sweep exists because it was lost (a transport error after the agent
+// sweptPRNudgePrefix starts every swept-PR nudge, so an accepted [DONE] can
+// drop one still queued.
+const sweptPRNudgePrefix = "[hub] The hub found these PRs on your branch:"
+
+// nudgeSweptPRStageSignal tells an agent whose PR the sweep found that its
+// stage still waits for [DONE]. The PR stage advances only on that signal, and
+// the sweep exists because it was lost (a transport error after the agent
 // opened the PR), so without a nudge the claw idles in the stage. The agent may
 // believe it already sent the signal; the message says it did not arrive.
 // Workflow V2 registration is itself the delivery, so V2 claws are skipped.
-func (s *Server) nudgeSweptPRStageSignal(clawID, prURL string) {
+//
+// It returns false only when a running turn defers the decision: that turn
+// may still end with [DONE], and a nudge queued behind it would then reach the
+// next stage asking for the signal again.
+func (s *Server) nudgeSweptPRStageSignal(clawID, prURL string) bool {
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
-	if cc == nil {
+	if cc != nil {
+		cc.mu.RLock()
+		busy := cc.isBusyLocked()
+		cc.mu.RUnlock()
+		if busy {
+			return false
+		}
+	} else {
 		cc = &clawConn{id: clawID}
 		_ = s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&cc.tenantID)
 	}
 	if s.workflowV2OwnsExecution(cc) || !s.pipelineAwaitsDoneSignal(clawID) {
-		return
+		return true
+	}
+	// A [DONE] that listed the PR (or fell back to it) already delivered it.
+	var undelivered int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM claw_prs WHERE claw_id=? AND pr_url=? AND source='branch_sweep' AND mention_only=1`,
+		clawID, prURL).Scan(&undelivered); err != nil || undelivered == 0 {
+		return true
+	}
+	// One nudge per PR, across sweeps and hub restarts. Check before lifting
+	// pauses so a repeat call changes nothing.
+	messageID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("swept-pr-signal\x00"+clawID+"\x00"+prURL)).String()
+	if err := s.db.QueryRow(`SELECT 1 FROM messages WHERE id=?`, messageID).Scan(new(int)); !errors.Is(err, sql.ErrNoRows) {
+		return true
 	}
 	urls, _ := s.donePRURLs(clawID, "")
 	if len(urls) == 0 {
 		urls = []string{prURL}
 	}
-	text := fmt.Sprintf("[hub] The hub found these PRs on your branch:\n%s\n\n"+
+	text := fmt.Sprintf(sweptPRNudgePrefix+"\n%s\n\n"+
 		"The hub has NOT received your %s signal for this stage. Do not open another PR. "+
 		"If these are your final PRs for this stage, reply with %s on its own line followed by the PR URLs, one per line, "+
 		"even if you believe you already sent it.",
 		strings.Join(urls, "\n"), doneSignalToken, doneSignalToken)
-	// One nudge per PR, across sweeps and hub restarts.
-	messageID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("swept-pr-signal\x00"+clawID+"\x00"+prURL)).String()
 	log.Printf("[branch-sweep] claw %s: nudging for %s after registering %s", shortID(clawID), doneSignalToken, prURL)
 	// External event: lift a no-progress or bridge-error pause, as
 	// injectExternalHubMessageByID does, so the nudge is delivered.
 	s.resumeNoProgressAfterUserInput(clawID)
 	s.injectMessageWithID(clawID, text, "hub", messageID)
+	return true
+}
+
+// dropSweptPRNudges removes swept-PR nudges still queued when the agent's
+// [DONE] is accepted; delivered later they would ask for it again.
+func (s *Server) dropSweptPRNudges(clawID string) {
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE claw_id=? AND role='hub' AND delivered_at IS NULL AND substr(content,1,?)=?`,
+		clawID, len(sweptPRNudgePrefix), sweptPRNudgePrefix); err != nil {
+		log.Printf("[branch-sweep] drop queued nudges for %s: %v", shortID(clawID), err)
+	}
 }
 
 // pipelineAwaitsDoneSignal reports whether [DONE] would move the claw out of

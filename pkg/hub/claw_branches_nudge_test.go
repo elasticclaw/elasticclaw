@@ -143,3 +143,129 @@ func TestBranchSweepDoesNotNudgeTerminalStage(t *testing.T) {
 		t.Fatalf("nudged in a terminal stage: %q", got)
 	}
 }
+
+func sweptBranchPRURL(t *testing.T, s *Server, clawID string) string {
+	t.Helper()
+	var prURL string
+	if err := s.db.QueryRow(`SELECT pr_url FROM claw_branches WHERE claw_id=?`, clawID).Scan(&prURL); err != nil {
+		t.Fatal(err)
+	}
+	return prURL
+}
+
+func resweepTestBranch(t *testing.T, s *Server, clawID string) {
+	t.Helper()
+	if err := s.sweepClawBranch(clawID, clawBranch{Repo: "owner/repo", Branch: "feature", HeadSHA: strings.Repeat("a", 40)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A running turn may still end with [DONE]; a nudge queued behind it would
+// reach the next stage, so the sweep defers until the claw is idle.
+func TestBranchSweepDefersNudgeWhileTurnRuns(t *testing.T) {
+	const clawID = "swept-pr-busy-claw"
+	s := sweptPRServer(t, clawID, "open_pr")
+	s.mu.Lock()
+	s.claws[clawID] = &clawConn{id: clawID, tenantID: "test-tenant-id", awaitingResponse: true}
+	s.mu.Unlock()
+
+	sweepTestBranch(t, s, clawID)
+	if got := sweptPRNudges(t, s, clawID); len(got) != 0 {
+		t.Fatalf("nudged mid-turn: %q", got)
+	}
+	if got := sweptBranchPRURL(t, s, clawID); got != "" {
+		t.Fatalf("deferred branch settled with pr_url %q", got)
+	}
+
+	// The turn ends without the signal: the next sweep nudges.
+	s.mu.Lock()
+	delete(s.claws, clawID)
+	s.mu.Unlock()
+	resweepTestBranch(t, s, clawID)
+	if got := sweptPRNudges(t, s, clawID); len(got) != 1 {
+		t.Fatalf("nudges after the turn = %q, want one", got)
+	}
+	if got := sweptBranchPRURL(t, s, clawID); got != sweptPRURL {
+		t.Fatalf("branch pr_url = %q, want %q", got, sweptPRURL)
+	}
+}
+
+func TestBranchSweepSkipsNudgeAfterTurnDeliversPR(t *testing.T) {
+	const clawID = "swept-pr-busy-done-claw"
+	s := sweptPRServer(t, clawID, "open_pr")
+	s.mu.Lock()
+	s.claws[clawID] = &clawConn{id: clawID, tenantID: "test-tenant-id", awaitingResponse: true}
+	s.mu.Unlock()
+	sweepTestBranch(t, s, clawID)
+
+	// The turn ends with [DONE] + URL before the async stage transition.
+	if errURL := s.registerDonePRURLs(clawID, []string{sweptPRURL}); errURL != "" {
+		t.Fatalf("register [DONE] PR %s", errURL)
+	}
+	s.mu.Lock()
+	delete(s.claws, clawID)
+	s.mu.Unlock()
+	if !s.pipelineAwaitsDoneSignal(clawID) {
+		t.Fatal("setup: stage no longer awaits [DONE]")
+	}
+	resweepTestBranch(t, s, clawID)
+	if got := sweptPRNudges(t, s, clawID); len(got) != 0 {
+		t.Fatalf("nudged for a PR [DONE] delivered: %q", got)
+	}
+	if got := sweptBranchPRURL(t, s, clawID); got != sweptPRURL {
+		t.Fatalf("branch pr_url = %q, want %q", got, sweptPRURL)
+	}
+}
+
+func TestDropSweptPRNudgesRemovesQueuedNudge(t *testing.T) {
+	const clawID = "swept-pr-drop-claw"
+	s := sweptPRServer(t, clawID, "open_pr")
+	sweepTestBranch(t, s, clawID)
+	var pending int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE claw_id=? AND delivered_at IS NULL AND content LIKE '%has NOT received your%'`, clawID).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("setup: pending nudges = %d, %v", pending, err)
+	}
+	s.injectMessage(clawID, "[hub] unrelated", "hub")
+
+	s.dropSweptPRNudges(clawID)
+	if got := sweptPRNudges(t, s, clawID); len(got) != 0 {
+		t.Fatalf("queued nudge survived an accepted [DONE]: %q", got)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE claw_id=? AND content='[hub] unrelated'`, clawID).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("unrelated message dropped: %d, %v", pending, err)
+	}
+}
+
+func TestBranchSweepDoesNotNudgeWorkflowV2Claw(t *testing.T) {
+	const clawID = "swept-pr-v2-claw"
+	s := sweptPRServer(t, clawID, "open_pr")
+	// Register as a legacy claw mid-turn (no nudge yet); V2 then takes over.
+	s.mu.Lock()
+	s.claws[clawID] = &clawConn{id: clawID, tenantID: "test-tenant-id", awaitingResponse: true}
+	s.mu.Unlock()
+	sweepTestBranch(t, s, clawID)
+	s.mu.Lock()
+	s.claws[clawID] = &clawConn{id: clawID, tenantID: "test-tenant-id", workflowV2Controlled: true}
+	s.mu.Unlock()
+	if !s.nudgeSweptPRStageSignal(clawID, sweptPRURL) {
+		t.Fatal("idle V2 claw deferred the nudge")
+	}
+	if got := sweptPRNudges(t, s, clawID); len(got) != 0 {
+		t.Fatalf("nudged a workflow V2 claw: %q", got)
+	}
+}
+
+func TestBranchSweepDoesNotNudgeWithoutPipeline(t *testing.T) {
+	const clawID = "swept-pr-no-pipeline-claw"
+	s := sweptPRServer(t, clawID, "open_pr")
+	if _, err := s.db.Exec(`UPDATE claws SET tags='[]' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.findPipelineContextForClaw(clawID); ok {
+		t.Fatal("setup: claw still has a pipeline context")
+	}
+	sweepTestBranch(t, s, clawID)
+	if got := sweptPRNudges(t, s, clawID); len(got) != 0 {
+		t.Fatalf("nudged a claw without a pipeline: %q", got)
+	}
+}
