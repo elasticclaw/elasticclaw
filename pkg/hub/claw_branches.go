@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type clawBranch struct {
@@ -194,6 +196,7 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 	if err := json.Unmarshal(resp.Body, &prs); err != nil {
 		return err
 	}
+	newPR := false
 	for _, pr := range prs {
 		if pr.State != "open" || !s.isClawAppAuthor(pr.User.Login, pr.User.Type) || !strings.EqualFold(pr.Head.Repo.FullName, branch.Repo) || pr.Head.Ref != branch.Branch || pr.Number <= 0 ||
 			// Branch names get reused; only a PR whose head is the commit this
@@ -205,18 +208,22 @@ func (s *Server) sweepClawBranch(clawID string, branch clawBranch) error {
 		if !strings.EqualFold(pr.HTMLURL, expectedURL) {
 			continue
 		}
-		registered, err := s.registerSweptPR(ctx, clawID, tenantID, branch.Repo, pr.Number, expectedURL)
+		accepted, isNew, err := s.registerSweptPR(ctx, clawID, tenantID, branch.Repo, pr.Number, expectedURL)
 		if err != nil {
 			return err
 		}
-		if !registered {
+		if !accepted {
 			continue
 		}
 		prURL = expectedURL
+		newPR = isNew
 		break
 	}
 	_, err = s.db.Exec(`UPDATE claw_branches SET checked_at=?,pr_url=? WHERE claw_id=? AND repo=? AND branch=? AND head_sha=?`,
 		now(), prURL, clawID, branch.Repo, branch.Branch, branch.HeadSHA)
+	if newPR {
+		s.nudgeSweptPRStageSignal(clawID, prURL)
+	}
 	return err
 }
 
@@ -233,21 +240,22 @@ func (s *Server) hasOwnAppIdentity() bool {
 }
 
 // Serialize ownership checks and registration, leaving branch lookups independent.
-func (s *Server) registerSweptPR(ctx context.Context, clawID, tenantID, repo string, number int, prURL string) (bool, error) {
+// accepted means the PR is the claw's; isNew that this call registered it.
+func (s *Server) registerSweptPR(ctx context.Context, clawID, tenantID, repo string, number int, prURL string) (accepted, isNew bool, err error) {
 	s.branchSweepMu.Lock()
 	defer s.branchSweepMu.Unlock()
 	var status string
 	if err := s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
-		return false, err
+		return false, false, err
 	}
 	if status == "deleted" || status == "error" {
-		return false, nil
+		return false, false, nil
 	}
 	// Ownership spans both stores: legacy delivered or created rows, and V2
 	// delivered or registered PRs of runs whose current attempt is another claw.
 	// An offline claw may reconnect, so only deleted/error claws release.
 	var otherClaw string
-	err := s.db.QueryRow(`SELECT cp.claw_id FROM claw_prs cp JOIN claws c ON c.id=cp.claw_id
+	err = s.db.QueryRow(`SELECT cp.claw_id FROM claw_prs cp JOIN claws c ON c.id=cp.claw_id
 		WHERE cp.repo=? COLLATE NOCASE AND cp.pr_number=? AND cp.claw_id<>?
 		AND (cp.mention_only=0 OR cp.source IN ('gh_create','branch_sweep'))
 		AND c.status NOT IN ('deleted','error')
@@ -258,14 +266,68 @@ func (s *Server) registerSweptPR(ctx context.Context, clawID, tenantID, repo str
 		AND r.status IN ('active','suspended') AND a.status='active'
 		LIMIT 1`, repo, number, clawID, repo, number, clawID).Scan(&otherClaw)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
+		return false, false, err
 	}
 	if otherClaw != "" {
 		log.Printf("[branch-sweep] skipping %s for claw %s: owned by active claw %s", prURL, shortID(clawID), shortID(otherClaw))
-		return false, nil
+		return false, false, nil
 	}
-	_, err = s.registerClawPR(ctx, clawID, tenantID, repo, number, prURL, "branch_sweep")
-	return err == nil, err
+	isNew, err = s.registerClawPR(ctx, clawID, tenantID, repo, number, prURL, "branch_sweep")
+	return err == nil, isNew, err
+}
+
+// nudgeSweptPRStageSignal tells an agent whose PR the sweep just found that
+// its stage still waits for [DONE]. The PR stage advances only on that signal,
+// and the sweep exists because it was lost (a transport error after the agent
+// opened the PR), so without a nudge the claw idles in the stage. The agent may
+// believe it already sent the signal; the message says it did not arrive.
+// Workflow V2 registration is itself the delivery, so V2 claws are skipped.
+func (s *Server) nudgeSweptPRStageSignal(clawID, prURL string) {
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		cc = &clawConn{id: clawID}
+		_ = s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&cc.tenantID)
+	}
+	if s.workflowV2OwnsExecution(cc) || !s.pipelineAwaitsDoneSignal(clawID) {
+		return
+	}
+	urls, _ := s.donePRURLs(clawID, "")
+	if len(urls) == 0 {
+		urls = []string{prURL}
+	}
+	text := fmt.Sprintf("[hub] The hub found these PRs on your branch:\n%s\n\n"+
+		"The hub has NOT received your %s signal for this stage. Do not open another PR. "+
+		"If these are your final PRs for this stage, reply with %s on its own line followed by the PR URLs, one per line, "+
+		"even if you believe you already sent it.",
+		strings.Join(urls, "\n"), doneSignalToken, doneSignalToken)
+	// One nudge per PR, across sweeps and hub restarts.
+	messageID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("swept-pr-signal\x00"+clawID+"\x00"+prURL)).String()
+	log.Printf("[branch-sweep] claw %s: nudging for %s after registering %s", shortID(clawID), doneSignalToken, prURL)
+	// External event: lift a no-progress or bridge-error pause, as
+	// injectExternalHubMessageByID does, so the nudge is delivered.
+	s.resumeNoProgressAfterUserInput(clawID)
+	s.injectMessageWithID(clawID, text, "hub", messageID)
+}
+
+// pipelineAwaitsDoneSignal reports whether [DONE] would move the claw out of
+// its current, non-terminal pipeline stage.
+func (s *Server) pipelineAwaitsDoneSignal(clawID string) bool {
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return false
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return false
+	}
+	current := s.getPipelineStage(clawID)
+	if stage := pl.StageByID(current); stage == nil || stage.Terminal {
+		return false
+	}
+	next := pl.StageForMessageContains(doneSignalToken, current)
+	return next != nil && next.ID != current
 }
 
 // Retry only sandbox-reported branches. This also catches PR creation after a
