@@ -5560,6 +5560,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}()
 	if control != nil {
 		control.setActivitySink(writeActivity)
+		// Reconnects run sequentially, so clearing on exit never drops the
+		// next connection's sink; task activity is skipped while disconnected.
+		defer control.setActivitySink(nil)
 	}
 
 	// Replay any queued entries that accumulated while we were disconnected.
