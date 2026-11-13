@@ -189,33 +189,19 @@ type CheckpointCreatePayload struct {
 // MaxCheckpointBlobBytes is the largest single file the hub accepts in a checkpoint.
 const MaxCheckpointBlobBytes = 256 << 20
 
-// openClawAgentDBFiles is OpenClaw's runtime agent database and the companion
-// lock databases it keeps beside it.
-var openClawAgentDBFiles = []string{
-	"openclaw-agent.sqlite",
-	"openclaw-agent.sqlite.generation-lock.sqlite",
-	"openclaw-agent.sqlite.generation-writer.sqlite",
-	"openclaw-agent.sqlite.reindex-lock.sqlite",
-}
-
-// IsOpenClawAgentDBFile reports whether the file at path is one of OpenClaw's
-// runtime agent databases or its -wal, -shm or -journal sidecar. These must
-// never be checkpointed or restored. The gateway already has a fresh database
-// open when a restore runs, and writing another sandbox's WAL and shared-memory
-// index under it corrupts its view of the schema ("no such table:
-// session_nodes"), so the bridge can never open a session. Only the exact
-// names match, so a user's own copy such as openclaw-agent.sqlite-backup is
-// still captured.
+// IsOpenClawAgentDBFile reports whether the file at path belongs to OpenClaw's
+// runtime agent database: any openclaw-agent.sqlite* file (the database, its
+// -wal and -shm sidecars, companion lock databases, temp copies) inside the
+// OpenClaw agents directory. These must never be checkpointed or restored. The
+// gateway already has a fresh database open when a restore runs, and writing
+// another sandbox's WAL and shared-memory index under it corrupts its view of
+// the schema ("no such table: session_nodes"), so the bridge can never open a
+// session. Files outside .openclaw/agents/, such as a user's backup copy in
+// the workspace, are still captured.
 func IsOpenClawAgentDBFile(filePath string) bool {
-	name := path.Base(filepath.ToSlash(filePath))
-	for _, db := range openClawAgentDBFiles {
-		for _, sidecar := range []string{"", "-wal", "-shm", "-journal"} {
-			if name == db+sidecar {
-				return true
-			}
-		}
-	}
-	return false
+	slashed := "/" + filepath.ToSlash(filePath)
+	return strings.Contains(slashed, "/.openclaw/agents/") &&
+		strings.HasPrefix(path.Base(slashed), "openclaw-agent.sqlite")
 }
 
 // CheckpointFile describes one content-addressed file in a bridge checkpoint.

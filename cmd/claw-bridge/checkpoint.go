@@ -253,7 +253,7 @@ func checkpointExclude(path string, d os.DirEntry) bool {
 	case "node_modules", ".cache", ".turbo", ".pnpm-store", "tmp", "dist", "build", ".next", "auth-profiles.json":
 		return true
 	}
-	if types.IsOpenClawAgentDBFile(name) {
+	if types.IsOpenClawAgentDBFile(path) {
 		return true
 	}
 	// Only exclude the agent sessions directory, not arbitrary "sessions" folders in the workspace.
