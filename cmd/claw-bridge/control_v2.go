@@ -291,6 +291,7 @@ type controlSupervisor struct {
 	connected   bool
 	snapshot    *typesv2.WorkflowSnapshot
 	gateway     *gatewaySession
+	activity    func(agentActivity)
 	activeTasks map[string]*activeTaskCancellation
 	recovered   map[workflowControlBinding]bool
 }
@@ -306,6 +307,23 @@ func (s *controlSupervisor) setGatewaySession(session *gatewaySession) {
 	s.mu.Lock()
 	s.gateway = session
 	s.mu.Unlock()
+}
+
+// setActivitySink routes task activity to the current hub connection so the
+// UI shows what the agent is doing while a workflow task runs.
+func (s *controlSupervisor) setActivitySink(sink func(agentActivity)) {
+	s.mu.Lock()
+	s.activity = sink
+	s.mu.Unlock()
+}
+
+func (s *controlSupervisor) reportActivity(activity agentActivity) {
+	s.mu.RLock()
+	sink := s.activity
+	s.mu.RUnlock()
+	if sink != nil {
+		sink(activity)
+	}
 }
 
 func (s *controlSupervisor) updateBinding(binding *workflowControlBinding) {
@@ -627,7 +645,7 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 	prompt := workflowV2TaskPrompt(task)
 	// A turn OpenClaw ends without a deliverable answer fails the task, so the
 	// workflow does not advance as if the agent had done the work.
-	response, sendErr := gateway.SendMessage(requireDeliverableTurn(taskCtx), prompt, assignmentMessageID, func(string) {}, func(agentActivity) {})
+	response, sendErr := gateway.SendMessage(requireDeliverableTurn(taskCtx), prompt, assignmentMessageID, func(string) {}, s.reportActivity)
 	close(heartbeatDone)
 	<-heartbeatStopped
 	if sendErr != nil {

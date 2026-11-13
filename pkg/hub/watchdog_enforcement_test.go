@@ -1153,3 +1153,31 @@ func TestLongTurnInterleavedSegmentsNagsExactlyOnce(t *testing.T) {
 		t.Fatal("streamingTimeoutSent was re-armed by an interleaved segment; it must stay true for the whole turn")
 	}
 }
+
+// Workflow v2 tasks forward their activity for display only; it must reach
+// the UI without opening a legacy chat turn that the busy-turn watchdog would
+// later force-finish.
+func TestWorkflowV2ActivityIsStoredWithoutOpeningTurn(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-v2-activity"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	cc.mu.Lock()
+	cc.workflowV2Controlled = true
+	cc.mu.Unlock()
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "agent_activity",
+		Payload: map[string]any{"kind": "tool", "phase": "started", "tool": "exec", "command": "go test ./..."}}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyWatchdog(t, func() bool {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='activity'`, clawID).Scan(&n)
+		return n == 1
+	}, "stored activity")
+	cc.mu.RLock()
+	started := cc.streamingStartedAt
+	cc.mu.RUnlock()
+	if !started.IsZero() {
+		t.Fatalf("streamingStartedAt = %v, want zero for a workflow v2 claw", started)
+	}
+}
