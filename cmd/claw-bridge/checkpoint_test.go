@@ -48,12 +48,15 @@ func TestCollectCheckpointFilesExcludesSessionsAndAuthProfiles(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 
 	files := map[string]string{
-		".openclaw/workspace/src/main.go":                   "package main",
-		".openclaw/workspace/sessions/data.json":            "[]",
-		".openclaw/openclaw.json":                           "{}",
-		".openclaw/agents/main/agent/openclaw-agent.sqlite": "sqlite",
-		".openclaw/agents/main/agent/auth-profiles.json":    "auth",
-		".openclaw/agents/main/sessions/session.jsonl":      "{}",
+		".openclaw/workspace/src/main.go":                       "package main",
+		".openclaw/workspace/sessions/data.json":                "[]",
+		".openclaw/openclaw.json":                               "{}",
+		".openclaw/agents/main/agent/openclaw-agent.sqlite":     "sqlite",
+		".openclaw/agents/main/agent/openclaw-agent.sqlite-wal": "wal",
+		".openclaw/agents/main/agent/openclaw-agent.sqlite-shm": "shm",
+		".openclaw/workspace/openclaw-agent.sqlite-backup":      "backup",
+		".openclaw/agents/main/agent/auth-profiles.json":        "auth",
+		".openclaw/agents/main/sessions/session.jsonl":          "{}",
 	}
 	for rel, content := range files {
 		abs := filepath.Join(tmpDir, rel)
@@ -84,8 +87,17 @@ func TestCollectCheckpointFilesExcludesSessionsAndAuthProfiles(t *testing.T) {
 	if !byPath[".openclaw/openclaw.json"] {
 		t.Errorf("expected openclaw.json to be checkpointed, got paths: %v", byPath)
 	}
-	if byPath[".openclaw/agents/main/agent/openclaw-agent.sqlite"] {
-		t.Errorf("openclaw-agent.sqlite should be excluded from checkpoints")
+	if !byPath["workspace/openclaw-agent.sqlite-backup"] {
+		t.Errorf("a user's database backup should still be checkpointed, got paths: %v", byPath)
+	}
+	for _, p := range []string{
+		".openclaw/agents/main/agent/openclaw-agent.sqlite",
+		".openclaw/agents/main/agent/openclaw-agent.sqlite-wal",
+		".openclaw/agents/main/agent/openclaw-agent.sqlite-shm",
+	} {
+		if byPath[p] {
+			t.Errorf("%s should be excluded from checkpoints", p)
+		}
 	}
 	if byPath[".openclaw/agents/main/agent/auth-profiles.json"] {
 		t.Errorf("auth-profiles.json should be excluded from checkpoints")

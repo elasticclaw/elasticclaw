@@ -1187,7 +1187,19 @@ func (s *Server) restoreCheckpointFiles(checkpointID string) ([]types.Checkpoint
 	if err := s.db.QueryRow(`SELECT root_tree_sha256 FROM claw_checkpoints WHERE id=? AND status='ready'`, checkpointID).Scan(&rootSHA); err != nil {
 		return nil, err
 	}
-	return s.filesForTree(rootSHA)
+	files, err := s.filesForTree(rootSHA)
+	if err != nil {
+		return nil, err
+	}
+	// Checkpoints taken by older bridges still carry the OpenClaw agent
+	// database's -wal and -shm files; restoring them corrupts the live one.
+	kept := files[:0]
+	for _, f := range files {
+		if !types.IsOpenClawAgentDBFile(f.Path) {
+			kept = append(kept, f)
+		}
+	}
+	return kept, nil
 }
 
 func restoreRemotePath(path, home, workspace string) string {
