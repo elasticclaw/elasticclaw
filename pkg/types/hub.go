@@ -187,6 +187,17 @@ type CheckpointCreatePayload struct {
 // MaxCheckpointBlobBytes is the largest single file the hub accepts in a checkpoint.
 const MaxCheckpointBlobBytes = 256 << 20
 
+// IsOpenClawAgentDBFile reports whether a file name belongs to OpenClaw's
+// runtime agent database: openclaw-agent.sqlite plus its -wal, -shm and
+// companion lock databases. These must never be checkpointed or restored. The
+// gateway already has a fresh database open when a restore runs, and writing
+// another sandbox's WAL and shared-memory index under it corrupts its view of
+// the schema ("no such table: session_nodes"), so the bridge can never open a
+// session.
+func IsOpenClawAgentDBFile(name string) bool {
+	return strings.HasPrefix(name, "openclaw-agent.sqlite")
+}
+
 // CheckpointFile describes one content-addressed file in a bridge checkpoint.
 type CheckpointFile struct {
 	Path   string `json:"path"`

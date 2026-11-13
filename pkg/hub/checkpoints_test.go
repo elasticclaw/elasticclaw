@@ -462,3 +462,44 @@ func TestRestoreCheckpointToDocker(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreCheckpointFilesSkipsOpenClawAgentDB(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := newCheckpointCompletionTestServer(t)
+	if err := s.insertCheckpoint("restore", "tenant", "claw", "manual", "hub", "daytona", "sandbox"); err != nil {
+		t.Fatal(err)
+	}
+	files := []types.CheckpointFile{
+		{Path: "workspace/main.go"},
+		{Path: ".openclaw/openclaw.json"},
+		{Path: ".openclaw/agents/main/agent/openclaw-agent.sqlite-wal"},
+		{Path: ".openclaw/agents/main/agent/openclaw-agent.sqlite-shm"},
+		{Path: ".openclaw/agents/main/agent/openclaw-agent.sqlite.generation-writer.sqlite"},
+	}
+	rootSHA := strings.Repeat("f", 64)
+	data, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(checkpointBlobPath(rootSHA)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checkpointBlobPath(rootSHA), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', root_tree_sha256=? WHERE id='restore'`, rootSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.restoreCheckpointFiles("restore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, f := range got {
+		paths = append(paths, f.Path)
+	}
+	if want := []string{"workspace/main.go", ".openclaw/openclaw.json"}; strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("restored paths = %v, want %v", paths, want)
+	}
+}
