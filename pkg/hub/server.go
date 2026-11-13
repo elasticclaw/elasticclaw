@@ -55,6 +55,8 @@ import (
 type Server struct {
 	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
 	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
+	appSlugMu     sync.Mutex // guards appSlugs
+	appSlugs      map[int64]appSlugEntry
 
 	db        *sql.DB
 	addr      string

@@ -127,7 +127,7 @@ func (s *Server) sweepClawBranches(clawID string, branches []clawBranch) {
 	// Every claw PR is opened by the hub's own App; without its identity any
 	// Bot (Dependabot, Renovate) would qualify, so fail closed.
 	if len(branches) > 0 && !s.hasOwnAppIdentity() {
-		log.Printf("[branch-sweep] claw %s: no GitHub App URL configured to identify the hub's bot; skipping %d branch(es)",
+		log.Printf("[branch-sweep] claw %s: no GitHub App slug known to identify the hub's bot; skipping %d branch(es)",
 			shortID(clawID), len(branches))
 		return
 	}
@@ -227,15 +227,9 @@ func (s *Server) isClawAppAuthor(login, userType string) bool {
 	return userType == "Bot" && s.isOwnAppBot(login)
 }
 
-// hasOwnAppIdentity reports whether any configured App has a URL to derive
-// its bot login from.
+// hasOwnAppIdentity reports whether any configured App's bot login is known.
 func (s *Server) hasOwnAppIdentity() bool {
-	for _, app := range s.githubAppConfigsForTokens() {
-		if app.URL != "" {
-			return true
-		}
-	}
-	return false
+	return len(s.ownAppSlugs()) > 0
 }
 
 // Serialize ownership checks and registration, leaving branch lookups independent.
@@ -310,7 +304,7 @@ func (s *Server) retryClawBranches() {
 		return
 	}
 	if !s.hasOwnAppIdentity() {
-		log.Printf("[branch-sweep] no GitHub App URL configured to identify the hub's bot; skipping %d pending branch(es)", len(pending))
+		log.Printf("[branch-sweep] no GitHub App slug known to identify the hub's bot; skipping %d pending branch(es)", len(pending))
 		return
 	}
 	for _, p := range pending {

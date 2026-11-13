@@ -955,20 +955,12 @@ func githubRepoMatchesWithExclusions(fullName string, includeRepos, excludeRepos
 // createClawForGitHubPR provisions a new claw for a GitHub PR event.
 // isOwnAppBot returns true if the given GitHub login is the bot account for one of
 // the configured GitHub Apps (hub-global or workspace-scoped). App bots have the
-// login "<app-slug>[bot]". The app slug is derived from the App URL field
-// (e.g. "https://github.com/apps/my-app" → "my-app").
+// login "<app-slug>[bot]"; see ownAppSlugs for where the slug comes from.
 func (s *Server) isOwnAppBot(login string) bool {
 	if !strings.HasSuffix(login, "[bot]") {
 		return false
 	}
-	for _, app := range s.githubAppConfigsForTokens() {
-		if app.URL == "" {
-			continue
-		}
-		// Extract slug from URL: https://github.com/apps/<slug> or https://github.com/settings/apps/<slug>
-		// Also accept org settings URLs: .../organizations/.../settings/apps/<slug>
-		u := strings.TrimSuffix(app.URL, "/")
-		slug := u[strings.LastIndex(u, "/")+1:]
+	for _, slug := range s.ownAppSlugs() {
 		if strings.EqualFold(login, slug+"[bot]") {
 			return true
 		}
