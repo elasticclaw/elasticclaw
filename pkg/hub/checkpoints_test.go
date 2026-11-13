@@ -475,6 +475,7 @@ func TestRestoreCheckpointFilesSkipsOpenClawAgentDB(t *testing.T) {
 		{Path: ".openclaw/agents/main/agent/openclaw-agent.sqlite-wal"},
 		{Path: ".openclaw/agents/main/agent/openclaw-agent.sqlite-shm"},
 		{Path: ".openclaw/agents/main/agent/openclaw-agent.sqlite.generation-writer.sqlite"},
+		{Path: "workspace/openclaw-agent.sqlite-backup"},
 	}
 	rootSHA := strings.Repeat("f", 64)
 	data, err := json.Marshal(files)
@@ -499,7 +500,7 @@ func TestRestoreCheckpointFilesSkipsOpenClawAgentDB(t *testing.T) {
 	for _, f := range got {
 		paths = append(paths, f.Path)
 	}
-	if want := []string{"workspace/main.go", ".openclaw/openclaw.json"}; strings.Join(paths, ",") != strings.Join(want, ",") {
+	if want := []string{"workspace/main.go", ".openclaw/openclaw.json", "workspace/openclaw-agent.sqlite-backup"}; strings.Join(paths, ",") != strings.Join(want, ",") {
 		t.Fatalf("restored paths = %v, want %v", paths, want)
 	}
 }

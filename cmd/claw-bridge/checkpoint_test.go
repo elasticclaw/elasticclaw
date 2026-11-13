@@ -54,6 +54,7 @@ func TestCollectCheckpointFilesExcludesSessionsAndAuthProfiles(t *testing.T) {
 		".openclaw/agents/main/agent/openclaw-agent.sqlite":     "sqlite",
 		".openclaw/agents/main/agent/openclaw-agent.sqlite-wal": "wal",
 		".openclaw/agents/main/agent/openclaw-agent.sqlite-shm": "shm",
+		".openclaw/workspace/openclaw-agent.sqlite-backup":      "backup",
 		".openclaw/agents/main/agent/auth-profiles.json":        "auth",
 		".openclaw/agents/main/sessions/session.jsonl":          "{}",
 	}
@@ -85,6 +86,9 @@ func TestCollectCheckpointFilesExcludesSessionsAndAuthProfiles(t *testing.T) {
 	}
 	if !byPath[".openclaw/openclaw.json"] {
 		t.Errorf("expected openclaw.json to be checkpointed, got paths: %v", byPath)
+	}
+	if !byPath["workspace/openclaw-agent.sqlite-backup"] {
+		t.Errorf("a user's database backup should still be checkpointed, got paths: %v", byPath)
 	}
 	for _, p := range []string{
 		".openclaw/agents/main/agent/openclaw-agent.sqlite",

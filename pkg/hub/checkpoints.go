@@ -1195,7 +1195,7 @@ func (s *Server) restoreCheckpointFiles(checkpointID string) ([]types.Checkpoint
 	// database's -wal and -shm files; restoring them corrupts the live one.
 	kept := files[:0]
 	for _, f := range files {
-		if !types.IsOpenClawAgentDBFile(path.Base(f.Path)) {
+		if !types.IsOpenClawAgentDBFile(f.Path) {
 			kept = append(kept, f)
 		}
 	}

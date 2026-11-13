@@ -2,6 +2,8 @@ package types
 
 import (
 	"encoding/json"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -187,15 +189,33 @@ type CheckpointCreatePayload struct {
 // MaxCheckpointBlobBytes is the largest single file the hub accepts in a checkpoint.
 const MaxCheckpointBlobBytes = 256 << 20
 
-// IsOpenClawAgentDBFile reports whether a file name belongs to OpenClaw's
-// runtime agent database: openclaw-agent.sqlite plus its -wal, -shm and
-// companion lock databases. These must never be checkpointed or restored. The
-// gateway already has a fresh database open when a restore runs, and writing
-// another sandbox's WAL and shared-memory index under it corrupts its view of
-// the schema ("no such table: session_nodes"), so the bridge can never open a
-// session.
-func IsOpenClawAgentDBFile(name string) bool {
-	return strings.HasPrefix(name, "openclaw-agent.sqlite")
+// openClawAgentDBFiles is OpenClaw's runtime agent database and the companion
+// lock databases it keeps beside it.
+var openClawAgentDBFiles = []string{
+	"openclaw-agent.sqlite",
+	"openclaw-agent.sqlite.generation-lock.sqlite",
+	"openclaw-agent.sqlite.generation-writer.sqlite",
+	"openclaw-agent.sqlite.reindex-lock.sqlite",
+}
+
+// IsOpenClawAgentDBFile reports whether the file at path is one of OpenClaw's
+// runtime agent databases or its -wal, -shm or -journal sidecar. These must
+// never be checkpointed or restored. The gateway already has a fresh database
+// open when a restore runs, and writing another sandbox's WAL and shared-memory
+// index under it corrupts its view of the schema ("no such table:
+// session_nodes"), so the bridge can never open a session. Only the exact
+// names match, so a user's own copy such as openclaw-agent.sqlite-backup is
+// still captured.
+func IsOpenClawAgentDBFile(filePath string) bool {
+	name := path.Base(filepath.ToSlash(filePath))
+	for _, db := range openClawAgentDBFiles {
+		for _, sidecar := range []string{"", "-wal", "-shm", "-journal"} {
+			if name == db+sidecar {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CheckpointFile describes one content-addressed file in a bridge checkpoint.
