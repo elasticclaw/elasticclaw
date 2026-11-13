@@ -392,4 +392,21 @@ func TestAgentTaskForwardsActivityToHub(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("task activity never reached the hub sink")
 	}
+
+	// Let the task goroutine finish writing to the store before TempDir cleanup.
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		ready, err := store.ready(binding, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range ready {
+			if event.Kind == typesv2.MessageAgentTaskCompleted || event.Kind == typesv2.MessageAgentTaskFailed {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("task never reached a terminal event")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
