@@ -39,7 +39,9 @@ func (s *Server) claimPipelineStageTransition(clawID, stageID string, blockedFro
 			args = append(args, id)
 		}
 	}
-	res, err := s.db.Exec(query, args...)
+	// A lost transition strands the claw in the previous stage; ride out a
+	// busy write lock rather than drop it.
+	res, err := execRetryBusy(s.db, query, args...)
 	if err != nil {
 		log.Printf("[pipeline] failed to set stage %q for claw %s: %v", stageID, clawID[:8], err)
 		return false
