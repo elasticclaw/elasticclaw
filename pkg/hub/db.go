@@ -415,6 +415,12 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE usage_daily ADD COLUMN approx_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN cost_approximate INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN last_agent_head_sha TEXT NOT NULL DEFAULT ''`)
+	if err := addColumn(db, "task_run_prs", "inferred", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "task_runs", "pr_discovery_scanned", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 
@@ -771,6 +777,7 @@ func migrate(db *sql.DB) error {
 		llm_key               TEXT NOT NULL DEFAULT '',
 		tags                  TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(tags) AND json_type(tags) = 'array'),
 		analytics_enabled     INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)),
+		pr_discovery_scanned  INTEGER NOT NULL DEFAULT 0,
 		requires_pr           INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)),
 		excluded_reason       TEXT NOT NULL DEFAULT '',
 		timeout_at            INTEGER NOT NULL DEFAULT 0,
@@ -913,6 +920,7 @@ func migrate(db *sql.DB) error {
 		pr_url          TEXT NOT NULL DEFAULT '',
 		head_sha        TEXT NOT NULL DEFAULT '',
 		head_branch     TEXT NOT NULL DEFAULT '',
+		inferred        INTEGER NOT NULL DEFAULT 0,
 		last_agent_head_sha TEXT NOT NULL DEFAULT '',
 		base_branch     TEXT NOT NULL DEFAULT '',
 		state           TEXT NOT NULL DEFAULT 'unknown' CHECK(state IN ('open','closed','unknown')),

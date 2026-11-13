@@ -1903,7 +1903,8 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 			return pr.url
 		}
 		if already {
-			continue
+			// insertClawPRsAtomic confirms already-tracked rows as delivered.
+			row = s.trackedPRCandidate(clawID, pr.repo, pr.number, pr.url)
 		}
 		toInsert = append(toInsert, row)
 	}
@@ -1912,6 +1913,13 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 		return failURL
 	}
 	return ""
+}
+
+// trackedPRCandidate rebuilds a candidate for an already-tracked claw_prs row
+// so an explicit [DONE] can confirm a PR that discovery registered first.
+func (s *Server) trackedPRCandidate(clawID, repo string, number int, url string) prMentionCandidate {
+	// Confirmation must not use last_ci_sha as the agent baseline.
+	return prMentionCandidate{repo: repo, number: number, url: url}
 }
 
 // validateDonePRs checks that every PR URL in the [DONE] signal refers to an open PR.
