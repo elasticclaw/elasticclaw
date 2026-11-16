@@ -2831,6 +2831,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	// A panic in the turn-completion region must not leave the claw's signal
+	// lock held for the hub's lifetime: the next turn after reconnect and the
+	// branch-retry sweep would block on it forever.
+	var heldSignalLock *sync.Mutex
+	defer func() {
+		if heldSignalLock != nil {
+			heldSignalLock.Unlock()
+		}
+	}()
 
 	// First message must be registration
 	var reg types.WSMessage
@@ -3509,6 +3518,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
 			signalLock := s.clawSignalLock(clawID)
 			signalLock.Lock()
+			heldSignalLock = signalLock
 			cc.mu.Lock()
 			persistContent := hm.Content
 			skipPersist := false
@@ -3549,6 +3559,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			s.deleteStaleWatchdogNags(clawID)
 			// Drop empty messages — never store or broadcast
 			if strings.TrimSpace(turnContent) == "" {
+				heldSignalLock = nil
 				signalLock.Unlock()
 				// Clear typing indicator first — always clear even if no queued messages
 				s.broadcastToUsers(tenantID, types.WSMessage{
@@ -3635,6 +3646,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			} else if !workflowV2Controlled && !doneSignalled && !bridgeErrTurn {
 				s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 			}
+			heldSignalLock = nil
 			signalLock.Unlock()
 			// A known token written mid-sentence no longer transitions
 			// anything. Tell the agent so, or the run freezes with nobody
