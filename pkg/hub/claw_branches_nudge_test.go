@@ -124,6 +124,48 @@ func TestBranchSweepNudgesStageAwaitingDone(t *testing.T) {
 	}
 }
 
+func TestBranchSweepNudgesGHCreatePRAwaitingDone(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		mentionOnly int
+		wantNudges  int
+	}{
+		{"registered", 1, 1},
+		{"delivered", 0, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const clawID = "swept-pr-gh-create-claw"
+			s := sweptPRServer(t, clawID, "open_pr")
+			if _, err := s.storePRRegistration(clawID, "owner/repo", 1, sweptPRURL, "gh_create"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`UPDATE claw_prs SET mention_only=? WHERE claw_id=? AND pr_url=?`, tt.mentionOnly, clawID, sweptPRURL); err != nil {
+				t.Fatal(err)
+			}
+			branch := clawBranch{Repo: "owner/repo", Branch: "feature", HeadSHA: strings.Repeat("a", 40)}
+			if _, err := s.storeClawBranches(clawID, []clawBranch{branch}); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				if _, err := s.db.Exec(`UPDATE claw_branches SET pr_url='', checked_at=NULL WHERE claw_id=?`, clawID); err != nil {
+					t.Fatal(err)
+				}
+				resweepTestBranch(t, s, clawID)
+				if got := sweptPRNudges(t, s, clawID); len(got) != tt.wantNudges {
+					t.Fatalf("nudges after sweep %d = %q, want %d", i+1, got, tt.wantNudges)
+				}
+				if got := sweptBranchPRURL(t, s, clawID); got != sweptPRURL {
+					t.Fatalf("branch pr_url = %q, want %q", got, sweptPRURL)
+				}
+			}
+			var source string
+			if err := s.db.QueryRow(`SELECT source FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, sweptPRURL).Scan(&source); err != nil || source != "gh_create" {
+				t.Fatalf("registered PR source = %q, want gh_create: %v", source, err)
+			}
+		})
+	}
+}
+
 func TestBranchSweepDoesNotNudgeAfterDone(t *testing.T) {
 	const clawID = "swept-pr-done-claw"
 	s := sweptPRServer(t, clawID, "pr_opened")

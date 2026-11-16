@@ -291,6 +291,7 @@ func (s *Server) clawSignalLock(clawID string) *sync.Mutex {
 // the sweep exists because it was lost (a transport error after the agent
 // opened the PR), so without a nudge the claw idles in the stage. The agent may
 // believe it already sent the signal; the message says it did not arrive.
+// PRs registered by gh_create also need this nudge until [DONE] delivers them.
 // Workflow V2 registration is itself the delivery, so V2 claws are skipped.
 //
 // It returns false only when a running turn defers the decision: that turn
@@ -322,7 +323,7 @@ func (s *Server) nudgeSweptPRStageSignal(clawID, prURL string) bool {
 	}
 	// A [DONE] that listed the PR (or fell back to it) already delivered it.
 	var undelivered int
-	if err := s.db.QueryRow(`SELECT COUNT(1) FROM claw_prs WHERE claw_id=? AND pr_url=? AND source='branch_sweep' AND mention_only=1`,
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM claw_prs WHERE claw_id=? AND pr_url=? AND source IN ('gh_create','branch_sweep') AND mention_only=1`,
 		clawID, prURL).Scan(&undelivered); err != nil || undelivered == 0 {
 		return true
 	}
