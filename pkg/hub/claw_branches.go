@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -280,6 +281,11 @@ func (s *Server) registerSweptPR(ctx context.Context, clawID, tenantID, repo str
 // drop one still queued.
 const sweptPRNudgePrefix = "[hub] The hub found these PRs on your branch:"
 
+func (s *Server) clawSignalLock(clawID string) *sync.Mutex {
+	lock, _ := s.clawSignalLocks.LoadOrStore(clawID, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
 // nudgeSweptPRStageSignal tells an agent whose PR the sweep found that its
 // stage still waits for [DONE]. The PR stage advances only on that signal, and
 // the sweep exists because it was lost (a transport error after the agent
@@ -290,7 +296,13 @@ const sweptPRNudgePrefix = "[hub] The hub found these PRs on your branch:"
 // It returns false only when a running turn defers the decision: that turn
 // may still end with [DONE], and a nudge queued behind it would then reach the
 // next stage asking for the signal again.
+// The lock spans injectMessageWithID's bounded SQLITE_BUSY retry, which only
+// delays this claw's turn completion.
 func (s *Server) nudgeSweptPRStageSignal(clawID, prURL string) bool {
+	signalLock := s.clawSignalLock(clawID)
+	signalLock.Lock()
+	defer signalLock.Unlock()
+
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()

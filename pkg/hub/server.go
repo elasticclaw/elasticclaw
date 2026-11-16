@@ -57,6 +57,9 @@ type Server struct {
 	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
 	appSlugMu     sync.Mutex // guards appSlugs
 	appSlugs      map[int64]appSlugEntry
+	// clawSignalLocks prevents nudges between turn finish and [DONE] registration,
+	// or inserts after [DONE] drops queued nudges; keyed by claw ID across reconnects.
+	clawSignalLocks sync.Map // claw_id -> *sync.Mutex; acquire before s.mu or cc.mu
 
 	db        *sql.DB
 	addr      string
@@ -3503,6 +3506,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// Always clean up streaming state first, even for empty messages.
 			// Use the outer cc (this goroutine's connection), not a fresh lookup.
 			// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
+			signalLock := s.clawSignalLock(clawID)
+			signalLock.Lock()
 			cc.mu.Lock()
 			persistContent := hm.Content
 			skipPersist := false
@@ -3543,6 +3548,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			s.deleteStaleWatchdogNags(clawID)
 			// Drop empty messages — never store or broadcast
 			if strings.TrimSpace(turnContent) == "" {
+				signalLock.Unlock()
 				// Clear typing indicator first — always clear even if no queued messages
 				s.broadcastToUsers(tenantID, types.WSMessage{
 					Type: "agent_typing",
@@ -3628,6 +3634,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			} else if !workflowV2Controlled && !doneSignalled && !bridgeErrTurn {
 				s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 			}
+			signalLock.Unlock()
 			// A known token written mid-sentence no longer transitions
 			// anything. Tell the agent so, or the run freezes with nobody
 			// aware the signal was dropped. Skipped while continuation is

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -214,6 +215,57 @@ func TestBranchSweepSkipsNudgeAfterTurnDeliversPR(t *testing.T) {
 	}
 	if got := sweptBranchPRURL(t, s, clawID); got != sweptPRURL {
 		t.Fatalf("branch pr_url = %q, want %q", got, sweptPRURL)
+	}
+}
+
+func TestBranchSweepWaitsForTurnToDeliverPR(t *testing.T) {
+	const clawID = "swept-pr-completing-claw"
+	s := sweptPRServer(t, clawID, "open_pr")
+	s.mu.Lock()
+	s.claws[clawID] = &clawConn{id: clawID, tenantID: "test-tenant-id", awaitingResponse: true}
+	s.mu.Unlock()
+	sweepTestBranch(t, s, clawID)
+
+	finished := make(chan struct{})
+	settled := false
+	func() {
+		signalLock := s.clawSignalLock(clawID)
+		signalLock.Lock()
+		defer signalLock.Unlock()
+		// Completion has cleared busy, but has not registered the [DONE] PR yet.
+		s.mu.Lock()
+		delete(s.claws, clawID)
+		s.mu.Unlock()
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			settled = s.nudgeSweptPRStageSignal(clawID, sweptPRURL)
+			close(finished)
+		}()
+		<-started
+		select {
+		case <-finished:
+			t.Error("nudge returned while turn completion held the signal lock")
+		case <-time.After(100 * time.Millisecond):
+		}
+		if errURL := s.registerDonePRURLs(clawID, []string{sweptPRURL}); errURL != "" {
+			t.Errorf("register [DONE] PR %s", errURL)
+		}
+		s.dropSweptPRNudges(clawID)
+	}()
+	select {
+	case <-finished:
+		if !settled {
+			t.Fatal("nudge deferred after turn completion")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("nudge blocked after turn completion released the signal lock")
+	}
+	if !s.pipelineAwaitsDoneSignal(clawID) {
+		t.Fatal("setup: stage no longer awaits [DONE]")
+	}
+	if got := sweptPRNudges(t, s, clawID); len(got) != 0 {
+		t.Fatalf("nudged for a PR [DONE] delivered: %q", got)
 	}
 }
 
