@@ -51,6 +51,41 @@ func TestOwnAppBotResolvesSlugWithoutAppURL(t *testing.T) {
 	}
 }
 
+func TestResolveAppSlugDeduplicatesConcurrentLookups(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			http.NotFound(w, r)
+			return
+		}
+		hits.Add(1)
+		time.Sleep(100 * time.Millisecond) // Keep the lookup in flight while callers overlap.
+		_, _ = w.Write([]byte(`{"slug":"fw-agent-factory"}`))
+	}))
+	t.Cleanup(srv.Close)
+	s := &Server{githubBaseURL: srv.URL}
+	apps := []*types.GitHubAppConfig{{AppID: 7, PrivateKeyPEM: testGitHubAppPEM(t)}}
+
+	const callers = 8
+	start := make(chan struct{})
+	results := make(chan string, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			<-start
+			results <- s.resolveAppSlug(7, apps)
+		}()
+	}
+	close(start)
+	for i := 0; i < callers; i++ {
+		if slug := <-results; slug != "fw-agent-factory" {
+			t.Errorf("slug=%q, want fw-agent-factory", slug)
+		}
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("GET /app hits=%d, want 1 for concurrent callers", got)
+	}
+}
+
 func TestOwnAppBotPrefersConfiguredAppURL(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	var status atomic.Int32

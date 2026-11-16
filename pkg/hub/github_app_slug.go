@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,34 +69,44 @@ func (s *Server) resolveAppSlug(appID int64, apps []*types.GitHubAppConfig) stri
 	if ok && (entry.slug != "" || time.Since(entry.failedAt) < appSlugRetryAfter) {
 		return entry.slug
 	}
-	var slug string
-	var lastErr error
-	for _, app := range apps {
-		provider, err := NewGitHubTokenProvider(app)
-		if err != nil {
-			lastErr = err
-			continue
+	result, _, _ := s.appSlugGroup.Do(strconv.FormatInt(appID, 10), func() (any, error) {
+		// A completed lookup may have filled the cache before this call joined.
+		s.appSlugMu.Lock()
+		entry, ok := s.appSlugs[appID]
+		s.appSlugMu.Unlock()
+		if ok && (entry.slug != "" || time.Since(entry.failedAt) < appSlugRetryAfter) {
+			return entry.slug, nil
 		}
-		if s.githubBaseURL != "" {
-			provider.apiBaseURL = s.githubBaseURL
+		var slug string
+		var lastErr error
+		for _, app := range apps {
+			provider, err := NewGitHubTokenProvider(app)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if s.githubBaseURL != "" {
+				provider.apiBaseURL = s.githubBaseURL
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			slug, lastErr = provider.AppSlug(ctx)
+			cancel()
+			if lastErr == nil {
+				break
+			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		slug, lastErr = provider.AppSlug(ctx)
-		cancel()
-		if lastErr == nil {
-			break
+		entry = appSlugEntry{slug: slug}
+		if slug == "" {
+			log.Printf("[github] resolve slug for app %d: %v (retrying in %s)", appID, lastErr, appSlugRetryAfter)
+			entry.failedAt = time.Now()
 		}
-	}
-	entry = appSlugEntry{slug: slug}
-	if slug == "" {
-		log.Printf("[github] resolve slug for app %d: %v (retrying in %s)", appID, lastErr, appSlugRetryAfter)
-		entry.failedAt = time.Now()
-	}
-	s.appSlugMu.Lock()
-	if s.appSlugs == nil {
-		s.appSlugs = map[int64]appSlugEntry{}
-	}
-	s.appSlugs[appID] = entry
-	s.appSlugMu.Unlock()
-	return slug
+		s.appSlugMu.Lock()
+		if s.appSlugs == nil {
+			s.appSlugs = map[int64]appSlugEntry{}
+		}
+		s.appSlugs[appID] = entry
+		s.appSlugMu.Unlock()
+		return slug, nil
+	})
+	return result.(string)
 }

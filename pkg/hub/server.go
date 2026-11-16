@@ -56,6 +56,7 @@ type Server struct {
 	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
 	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
 	appSlugMu     sync.Mutex // guards appSlugs
+	appSlugGroup  singleflight.Group
 	appSlugs      map[int64]appSlugEntry
 	// clawSignalLocks prevents nudges between turn finish and [DONE] registration,
 	// or inserts after [DONE] drops queued nudges; keyed by claw ID across reconnects.
