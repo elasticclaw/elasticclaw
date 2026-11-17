@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Artifact styling and templates follow the ai_chat/ convention; see docs/ai-chat-artifact-templates.md.
 // Config describes <workspace managed directory>/ai_chat.yaml. About and each
 // modes.{explore_idea,validate_hypothesis,ask_the_data,write_brief}.prompt are
 // optional text, and each mode's example is the optional sample shown on its

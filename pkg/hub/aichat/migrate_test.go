@@ -27,7 +27,7 @@ func TestMigrate(t *testing.T) {
 		"ai_chat_messages":          "id,thread_id,seq,role,content,blocks_json,interview_json,panel_json,model,input_tokens,output_tokens,status,created_at",
 		"ai_chat_tool_runs":         "id,message_id,seq,tool,provider,args_json,summary,result_json,row_count,duration_ms,error,created_at",
 		"ai_chat_artifacts":         "id,slug,tenant_id,workspace,owner_login,thread_id,title,current_version,created_at,updated_at,deleted_at",
-		"ai_chat_artifact_versions": "artifact_id,version,message_id,path,bytes,sha256,created_at",
+		"ai_chat_artifact_versions": "artifact_id,version,message_id,path,bytes,sha256,created_at,template_id,design_system_sha256",
 		"ai_chat_handoffs":          "id,thread_id,message_id,kind,provider,external_ref,url,payload_json,created_at",
 	}
 	for table, want := range tables {
@@ -119,5 +119,30 @@ func TestMigrateConcurrentOpeners(t *testing.T) {
 		if err := <-results; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestMigrateLegacyArtifactVersions(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err = db.Exec(`CREATE TABLE ai_chat_artifact_versions (artifact_id TEXT NOT NULL,version INTEGER NOT NULL,message_id TEXT NOT NULL,path TEXT NOT NULL,bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(artifact_id,version))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO ai_chat_artifact_versions VALUES('old',1,'message','path',42,'hash',1)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err = Migrate(ctx, db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var template, ds sql.NullString
+	var bytes int
+	if err = db.QueryRow(`SELECT template_id,design_system_sha256,bytes FROM ai_chat_artifact_versions WHERE artifact_id='old'`).Scan(&template, &ds, &bytes); err != nil || template.Valid || ds.Valid || bytes != 42 {
+		t.Fatal(template, ds, bytes, err)
 	}
 }

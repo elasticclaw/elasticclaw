@@ -20,6 +20,14 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("ai chat schema: %w", err)
 		}
 	}
+	for _, col := range []struct{ table, name, decl string }{
+		{"ai_chat_artifact_versions", "template_id", "TEXT"},
+		{"ai_chat_artifact_versions", "design_system_sha256", "TEXT"},
+	} {
+		if err := addColumn(ctx, tx, col.table, col.name, col.decl); err != nil {
+			return fmt.Errorf("ai chat schema: %w", err)
+		}
+	}
 	return tx.Commit()
 }
 
@@ -66,4 +74,16 @@ var schema = []string{
  provider TEXT NOT NULL, external_ref TEXT, url TEXT, payload_json TEXT,
  created_at INTEGER NOT NULL
  )`,
+}
+
+func addColumn(ctx context.Context, tx *sql.Tx, table, name, decl string) error {
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, table, name).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+name+` `+decl)
+	return err
 }

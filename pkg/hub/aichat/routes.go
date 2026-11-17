@@ -55,7 +55,8 @@ func Routes(deps Deps) http.Handler {
 	deps.health = newSourceHealth()
 	mux := http.NewServeMux()
 	api := &api{deps: deps, store: &Store{DB: deps.DB}}
-	api.runner = &Runner{Store: api.store, PrepareReads: deps.prepareReads, ArtifactsDir: deps.ArtifactsDir, PublicURL: deps.PublicURL, AvailableActions: deps.availableActions, TicketCreator: deps.ticketCreator, TicketSecrets: deps.ticketSecrets}
+	api.runner = &Runner{Store: api.store, ArtifactKit: deps.artifactKit, PrepareReads: deps.prepareReads, ArtifactsDir: deps.ArtifactsDir, PublicURL: deps.PublicURL, AvailableActions: deps.availableActions, TicketCreator: deps.ticketCreator, TicketSecrets: deps.ticketSecrets}
+	mux.HandleFunc("GET /api/ai-chat/artifact-kit", api.artifactKit)
 	mux.HandleFunc("GET /api/ai-chat/artifacts", api.listArtifacts)
 	mux.HandleFunc("DELETE /api/ai-chat/artifacts/{slug}", api.deleteArtifact)
 	mux.HandleFunc("GET /api/ai-chat/artifacts/{slug}", api.getArtifact)
@@ -72,12 +73,13 @@ func Routes(deps Deps) http.Handler {
 }
 
 type SourcesResponse struct {
-	Actions    []string        `json:"actions"`
-	Ticket     *tracker.Target `json:"ticket,omitempty"`
-	Configured bool            `json:"configured"`
-	Workspaces []string        `json:"workspaces"`
-	Workspace  string          `json:"workspace"`
-	Sources    []config.Source `json:"sources"`
+	ArtifactKit *ArtifactKitInfo `json:"artifactKit,omitempty"`
+	Actions     []string         `json:"actions"`
+	Ticket      *tracker.Target  `json:"ticket,omitempty"`
+	Configured  bool             `json:"configured"`
+	Workspaces  []string         `json:"workspaces"`
+	Workspace   string           `json:"workspace"`
+	Sources     []config.Source  `json:"sources"`
 	// Examples maps a mode to the sample shown on its card; Suggestions are
 	// starter prompts. Both come from ai_chat.yaml and are empty when unset.
 	Examples    map[string]string `json:"examples"`
@@ -112,6 +114,8 @@ func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
 	if known {
 		if cfg, err := config.Load(deps.ManagedDir(response.Workspace)); err == nil {
 			response.Configured = true
+			kit := deps.artifactKit(response.Workspace).Info()
+			response.ArtifactKit = &kit
 			response.Suggestions = cfg.Suggestions
 			for name, mode := range cfg.Modes {
 				if mode.Example != "" {
@@ -142,4 +146,13 @@ func sources(w http.ResponseWriter, r *http.Request, deps Deps) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (d Deps) artifactKit(workspace string) ArtifactKit {
+	if d.Workspaces != nil && d.ManagedDir != nil {
+		if names, err := d.Workspaces(); err == nil && slices.Contains(names, workspace) {
+			return LoadArtifactKit(d.ManagedDir(workspace))
+		}
+	}
+	return ArtifactKit{DesignSystemStatus: "absent"}
 }

@@ -18,6 +18,7 @@ import (
 const maxArtifactBytes = 2 * 1024 * 1024
 
 var errArtifactSize = errors.New("The page is over the 2 MB limit. Nothing was published.")
+var errIncompleteArtifact = errors.New("The model did not return a complete HTML document.")
 
 type artifactHostsError []string
 
@@ -47,7 +48,7 @@ func validateArtifact(s string) error {
 	}
 	lower := strings.ToLower(strings.TrimSpace(s))
 	if !(strings.HasPrefix(lower, "<!doctype html>") || strings.HasPrefix(lower, "<html")) || !strings.Contains(lower, "</html>") {
-		return errors.New("The model did not return a complete HTML document.")
+		return errIncompleteArtifact
 	}
 	bad := map[string]bool{}
 	check := func(value string) {

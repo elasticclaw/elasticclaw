@@ -76,8 +76,10 @@ func objectSchema(properties map[string]any, required ...string) map[string]any 
 	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
 }
 
+type TemplateOption struct{ ID, Name, When string }
+
 // ReservedDefinitions includes the future panel seam; the runner selects what is available.
-func ReservedDefinitions() []llm.Tool {
+func ReservedDefinitions(templates ...TemplateOption) []llm.Tool {
 	tile := objectSchema(map[string]any{"label": stringSchema(60), "value": stringSchema(24), "caption": stringSchema(80)}, "label", "value")
 	cell := stringSchema(120)
 	cell["minLength"] = 0
@@ -99,7 +101,7 @@ func ReservedDefinitions() []llm.Tool {
 	step := objectSchema(map[string]any{"questions": arraySchema(question, 1, 3)}, "questions")
 	actions := arraySchema(enumSchema("artifact", "ticket"), 1, 2)
 	actions["uniqueItems"] = true
-	return []llm.Tool{
+	definitions := []llm.Tool{
 		Define(StartTicket, "Create a plain ticket only when the user asks for a ticket or issue. Ends the turn. Include a summary, evidence with numbers and decisions in body. Optionally link an artifact from THIS thread by the artifactId shown when it was created; never make one up.", map[string]any{"title": stringSchema(70), "body": stringSchema(8000), "artifactId": stringSchema(80)}, "title", "body"),
 		Define(StartArtifact, "Build an HTML artifact only when the user asks for a page, prototype, document or a revision. Ends the turn. Include the decisions and numbers from the conversation in brief. Omit artifactId for a new artifact; set it only to revise an artifact already created in this thread, using the artifactId shown when it was created. Never make one up.", map[string]any{"title": stringSchema(80), "brief": stringSchema(4000), "artifactId": stringSchema(80)}, "title", "brief"),
 		{Name: EmitBlock, Description: "Show plain-text inline stat tiles, a callout or a table. Use 1–4 key numbers only when backed by a read tool result, never invent them. Stat data is {tiles:[{label,value,caption?}]}. Table rows must match the columns. No HTML or Markdown.", InputSchema: blockSchema},
@@ -107,6 +109,31 @@ func ReservedDefinitions() []llm.Tool {
 		Define(OfferActions, "Offer available wrap-up actions after giving your answer. This only shows buttons; it never creates an artifact or ticket.", map[string]any{"actions": actions}, "actions"),
 		Define(SetPanel, "Reserved for v1. Not available in Lite.", map[string]any{"mode": enumSchema("explore_idea", "validate_hypothesis", "ask_the_data", "write_brief"), "text": stringSchema(600)}, "mode", "text"),
 	}
+	if len(templates) > 0 {
+		ids := make([]string, 0, len(templates)+1)
+		labels := make([]string, 0, len(templates))
+		for _, t := range templates {
+			ids = append(ids, t.ID)
+			label := t.ID + " (" + t.Name + ")"
+			if t.When != "" {
+				label += ": " + t.When
+			}
+			labels = append(labels, label)
+		}
+		ids = append(ids, "free")
+		description := `Workspace template for the page. Set it when the user names a template or a template's "when" guidance clearly fits the request; use "free" when the user wants no template. Omit it when revising to keep the artifact's current template. Templates: ` + strings.Join(labels, "; ") + "."
+		for i := range definitions {
+			if definitions[i].Name != StartArtifact {
+				continue
+			}
+			var schema map[string]any
+			_ = json.Unmarshal(definitions[i].InputSchema, &schema)
+			schema["properties"].(map[string]any)["template"] = map[string]any{"type": "string", "enum": ids, "description": description}
+			definitions[i].InputSchema, _ = json.Marshal(schema)
+			definitions[i].Description += " Select a workspace template when its guidance fits the request."
+		}
+	}
+	return definitions
 }
 
 func validText(s string, max int) bool {
@@ -114,6 +141,7 @@ func validText(s string, max int) bool {
 }
 
 type ArtifactRequest struct {
+	Template   string `json:"template,omitempty"`
 	ArtifactID string `json:"artifactId,omitempty"`
 	Title      string `json:"title,omitempty"`
 	Brief      string `json:"brief,omitempty"`
@@ -124,8 +152,8 @@ func ParseArtifact(raw json.RawMessage) (ArtifactRequest, error) {
 	if err := decodeReserved(raw, &args); err != nil {
 		return args, err
 	}
-	if !validText(args.Title, 80) || !validText(args.Brief, 4000) || !optionalText(args.ArtifactID, 80) {
-		return args, ArgError("artifact requires title (1–80 chars), brief (1–4000 chars), and optional artifactId")
+	if !validText(args.Title, 80) || !validText(args.Brief, 4000) || !optionalText(args.ArtifactID, 80) || !optionalText(args.Template, 40) {
+		return args, ArgError("artifact requires title (1–80 chars), brief (1–4000 chars), and optional artifactId and template")
 	}
 	return args, nil
 }

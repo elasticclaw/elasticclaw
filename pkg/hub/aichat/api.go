@@ -168,12 +168,17 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Answers *InterviewAnswers `json:"answers"`
-		Text    string            `json:"text"`
-		Retry   bool              `json:"retry"`
-		RetryOf string            `json:"retryOf"`
+		ArtifactTemplate string            `json:"artifactTemplate"`
+		Answers          *InterviewAnswers `json:"answers"`
+		Text             string            `json:"text"`
+		Retry            bool              `json:"retry"`
+		RetryOf          string            `json:"retryOf"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	if len(body.ArtifactTemplate) > 64 {
+		http.Error(w, "invalid request", 400)
 		return
 	}
 	body.Text = strings.TrimSpace(body.Text)
@@ -237,7 +242,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	emit, stopHeartbeat := streamWithHeartbeat(ctx, w, 15*time.Second, func() { a.runner.Interrupt(t) })
 	defer stopHeartbeat()
-	_ = a.runner.Run(ctx, t, m, cfg, provider, emit)
+	_ = a.runner.RunTurn(ctx, t, m, cfg, provider, TurnOptions{ArtifactTemplate: body.ArtifactTemplate}, emit)
 	stopHeartbeat()
 	release()
 	a.publish(t)

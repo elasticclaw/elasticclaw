@@ -20,18 +20,22 @@ import (
 )
 
 type Artifact struct {
-	ID             string `json:"artifactId"`
-	Slug           string `json:"slug"`
-	Tenant         string `json:"-"`
-	OwnerLogin     string `json:"ownerLogin"`
-	ThreadID       string `json:"-"`
-	Title          string `json:"title"`
-	Version        int    `json:"version"`
-	CurrentVersion int    `json:"currentVersion"`
-	Bytes          int64  `json:"bytes"`
-	CreatedAt      int64  `json:"createdAt"`
-	Path           string `json:"-"`
-	SHA256         string `json:"-"`
+	Workspace          string `json:"-"`
+	TemplateID         string `json:"template,omitempty"`
+	TemplateName       string `json:"templateName,omitempty"`
+	DesignSystemSHA256 string `json:"-"`
+	ID                 string `json:"artifactId"`
+	Slug               string `json:"slug"`
+	Tenant             string `json:"-"`
+	OwnerLogin         string `json:"ownerLogin"`
+	ThreadID           string `json:"-"`
+	Title              string `json:"title"`
+	Version            int    `json:"version"`
+	CurrentVersion     int    `json:"currentVersion"`
+	Bytes              int64  `json:"bytes"`
+	CreatedAt          int64  `json:"createdAt"`
+	Path               string `json:"-"`
+	SHA256             string `json:"-"`
 }
 
 // One serving process owns a database. Serialize publication across Store values,
@@ -60,13 +64,13 @@ func (s *Store) Artifact(ctx context.Context, tenant, slug string, version int) 
 // Empty owner allows shared reads within the tenant; mutations require an owner.
 func (s *Store) artifact(ctx context.Context, tenant, owner, slug string, version int) (Artifact, error) {
 	var a Artifact
-	query := `SELECT a.id,a.slug,a.tenant_id,a.owner_login,a.thread_id,a.title,a.current_version,v.version,v.bytes,v.created_at,v.path,v.sha256 FROM ai_chat_artifacts a JOIN ai_chat_artifact_versions v ON v.artifact_id=a.id AND v.version=CASE WHEN ?=0 THEN a.current_version ELSE ? END WHERE a.tenant_id=? AND a.slug=? AND a.deleted_at IS NULL`
+	query := `SELECT a.id,a.slug,a.tenant_id,a.owner_login,a.thread_id,a.title,a.current_version,v.version,v.bytes,v.created_at,v.path,v.sha256,a.workspace,COALESCE(v.template_id,''),COALESCE(v.design_system_sha256,'') FROM ai_chat_artifacts a JOIN ai_chat_artifact_versions v ON v.artifact_id=a.id AND v.version=CASE WHEN ?=0 THEN a.current_version ELSE ? END WHERE a.tenant_id=? AND a.slug=? AND a.deleted_at IS NULL`
 	args := []any{version, version, tenant, slug}
 	if owner != "" {
 		query += ` AND a.owner_login=?`
 		args = append(args, OwnerLogin(owner))
 	}
-	err := s.DB.QueryRowContext(ctx, query, args...).Scan(&a.ID, &a.Slug, &a.Tenant, &a.OwnerLogin, &a.ThreadID, &a.Title, &a.CurrentVersion, &a.Version, &a.Bytes, &a.CreatedAt, &a.Path, &a.SHA256)
+	err := s.DB.QueryRowContext(ctx, query, args...).Scan(&a.ID, &a.Slug, &a.Tenant, &a.OwnerLogin, &a.ThreadID, &a.Title, &a.CurrentVersion, &a.Version, &a.Bytes, &a.CreatedAt, &a.Path, &a.SHA256, &a.Workspace, &a.TemplateID, &a.DesignSystemSHA256)
 	return a, err
 }
 func (s *Store) ownedArtifact(ctx context.Context, t Thread, id string) (Artifact, error) {
@@ -91,7 +95,16 @@ func readArtifact(dir string, a Artifact) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+type artifactVersionMeta struct {
+	TemplateID, TemplateName, DesignSystemSHA256 string
+	Notices                                      []string
+}
+
 func (s *Store) publishArtifact(ctx context.Context, dir string, t Thread, m *Message, input tools.ArtifactRequest, html string) (Artifact, error) {
+	return s.publishArtifactVersion(ctx, dir, t, m, input, html, artifactVersionMeta{})
+}
+
+func (s *Store) publishArtifactVersion(ctx context.Context, dir string, t Thread, m *Message, input tools.ArtifactRequest, html string, meta artifactVersionMeta) (Artifact, error) {
 	if len(html) > maxArtifactBytes {
 		return Artifact{}, errArtifactSize
 	}
@@ -107,7 +120,7 @@ func (s *Store) publishArtifact(ctx context.Context, dir string, t Thread, m *Me
 	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at=? WHERE id=?`, now, t.ID); err != nil {
 		return Artifact{}, err
 	}
-	a := Artifact{ID: input.ArtifactID, Tenant: t.TenantID, OwnerLogin: t.OwnerLogin, ThreadID: t.ID, Title: input.Title, Version: 1, CreatedAt: now, Bytes: int64(len(html))}
+	a := Artifact{Workspace: t.Workspace, TemplateID: meta.TemplateID, TemplateName: meta.TemplateName, DesignSystemSHA256: meta.DesignSystemSHA256, ID: input.ArtifactID, Tenant: t.TenantID, OwnerLogin: t.OwnerLogin, ThreadID: t.ID, Title: input.Title, Version: 1, CreatedAt: now, Bytes: int64(len(html))}
 	if a.ID != "" {
 		err = tx.QueryRowContext(ctx, `SELECT slug,current_version FROM ai_chat_artifacts WHERE id=? AND tenant_id=? AND owner_login=? AND thread_id=? AND deleted_at IS NULL`, a.ID, t.TenantID, t.OwnerLogin, t.ID).Scan(&a.Slug, &a.Version)
 		if err != nil {
@@ -198,7 +211,7 @@ func (s *Store) publishArtifact(ctx context.Context, dir string, t Thread, m *Me
 	}
 	sum := sha256.Sum256([]byte(html))
 	a.SHA256 = hex.EncodeToString(sum[:])
-	if _, err = tx.ExecContext(ctx, `INSERT INTO ai_chat_artifact_versions(artifact_id,version,message_id,path,bytes,sha256,created_at) VALUES(?,?,?,?,?,?,?)`, a.ID, a.Version, m.ID, a.Path, a.Bytes, a.SHA256, now); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO ai_chat_artifact_versions(artifact_id,version,message_id,path,bytes,sha256,created_at,template_id,design_system_sha256) VALUES(?,?,?,?,?,?,?,NULLIF(?,''),NULLIF(?,''))`, a.ID, a.Version, m.ID, a.Path, a.Bytes, a.SHA256, now, meta.TemplateID, meta.DesignSystemSHA256); err != nil {
 		return Artifact{}, err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_artifacts SET current_version=?,title=?,updated_at=? WHERE id=?`, a.Version, a.Title, now, a.ID); err != nil {
@@ -208,7 +221,7 @@ func (s *Store) publishArtifact(ctx context.Context, dir string, t Thread, m *Me
 		return Artifact{}, err
 	}
 	saved := *m
-	setArtifactBlock(&saved, "created", ArtifactCard{ArtifactRequest: tools.ArtifactRequest{ArtifactID: a.ID, Title: a.Title, Brief: input.Brief}, Slug: a.Slug, Version: a.Version, Bytes: a.Bytes})
+	setArtifactBlock(&saved, "created", ArtifactCard{ArtifactRequest: tools.ArtifactRequest{ArtifactID: a.ID, Title: a.Title, Brief: input.Brief, Template: meta.TemplateID}, Slug: a.Slug, Version: a.Version, Bytes: a.Bytes, TemplateName: meta.TemplateName, Notices: meta.Notices})
 	if _, err = tx.ExecContext(ctx, `UPDATE ai_chat_messages SET blocks_json=? WHERE id=?`, string(saved.Blocks), m.ID); err != nil {
 		return Artifact{}, err
 	}

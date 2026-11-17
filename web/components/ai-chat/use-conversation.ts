@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { ApiError, dismissAIChatTicketAttempt, cancelAIChatTurn, createAIChatThread, fetchAIChatThread, streamAIChatTurn, streamAIChatAction, type AIChatArtifactRequest, type AIChatActionRequest, type AIChatTicketRequest, type AIChatAnswers, type AIChatAnswersSummary, type AIChatStepAnswers, type AIChatConversation, type AIChatThread, type AIChatMessage } from "@/lib/api"
 import type { ChatMode } from "./mode-cards"
 import { summarizeInterview, applyStreamEvent, type StreamTurn } from "./stream-turn"
+import { effectivePin } from "./artifact-kit"
 import { useChatSources } from "./use-chat-sources"
 
 // `rejected` marks a message the hub refused before starting a turn (an HTTP
@@ -42,6 +43,9 @@ function recentlyStopped(threadId: string) {
   try { at = Math.max(at, Number(localStorage.getItem(stopStorageKey(threadId))) || 0) } catch { /* memory only */ }
   return Date.now() - at < AUTO_RETRY_WINDOW_MS
 }
+
+// The composer's template pin, per thread, for the life of the page.
+const threadPins = new Map<string, string>()
 
 // randomUUID needs a secure context; a hub served over plain http still needs a key.
 export function newActionKey() {
@@ -85,6 +89,7 @@ export function useConversation() {
   const sending = useRef(false)
   const [thread, setThread] = useState<AIChatThread | null>(null)
   const [messages, setMessages] = useState<AIChatMessage[]>([])
+  const [templatePin, setTemplatePin] = useState("")
   const [draft, setDraft] = useState("")
   const [streaming, setStreaming] = useState(false)
   const [reading, setReading] = useState("")
@@ -92,7 +97,8 @@ export function useConversation() {
   const [loadError, setLoadError] = useState("")
   const [turnError, setTurnError] = useState<TurnError | null>(null)
   const [mode, setMode] = useState<ChatMode | null>(null)
-  const { current, data, setWorkspace, refresh } = useChatSources(threadRef, () => setMode(null))
+  const { current, data, setWorkspace, refresh } = useChatSources(threadRef, () => { setMode(null); setTemplatePin("") })
+  const pin = effectivePin(templatePin, data?.artifactKit)
 
   const isSameConversation = (version: number) => version === generation.current
   const isLatestSync = (revision: number) => revision === syncRevision.current
@@ -110,6 +116,7 @@ export function useConversation() {
     setThread(null)
     setMessages([])
     setDraft("")
+    setTemplatePin("")
     setMode(null)
     setStreaming(false)
     setReading("")
@@ -137,6 +144,7 @@ export function useConversation() {
       loadedThread.current = thread.id
       setWorkspace(thread.workspace)
       setMode(thread.mode as ChatMode)
+      setTemplatePin(threadPins.get(thread.id) ?? "")
       setLoadError("")
       setLoadingThread(false)
     }
@@ -195,10 +203,17 @@ export function useConversation() {
 
   const selectWorkspace = (workspace: string) => {
     setWorkspace(workspace)
+    setTemplatePin("")
     setMode(null)
   }
 
+  const pinTemplate = (value: string) => {
+    setTemplatePin(value)
+    if (threadRef.current) threadPins.set(threadRef.current, value)
+  }
+
   const openCreatedThread = (created: AIChatThread) => {
+    if (templatePin) threadPins.set(created.id, templatePin)
     threadRef.current = created.id
     loadedThread.current = created.id
     setThread(created)
@@ -232,7 +247,7 @@ export function useConversation() {
       if (isCurrent()) applyStreamEvent(turn, event, payload, { setMessages, setDraft, setReading })
     }
     if (turn.action) await streamAIChatAction(turn.threadId, turn.action, signal, onEvent, turn.turnKey)
-    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers, turn.turnKey, turn.retryOf)
+    else await streamAIChatTurn(turn.threadId, turn.text, turn.retry, signal, onEvent, turn.answers, turn.turnKey, turn.retryOf, turn.artifactTemplate)
   }
 
   const finishTurn = async (turn: StreamTurn, isCurrent: () => boolean) => {
@@ -259,12 +274,13 @@ export function useConversation() {
     const controller = startTurn()
     const version = generation.current
     const isCurrent = () => isSameConversation(version)
-    const turn: StreamTurn = { action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "", retryOf: autoRetryOf }
+    const turn: StreamTurn = { artifactTemplate: pin || undefined, action, answers, answersSummary, threadId: threadRef.current, text, retry, started: false, assistantId: "", error: "", retryOf: autoRetryOf }
     const afterMessageId = messages[messages.length - 1]?.id
     // Without a random source, Stop falls back to aborting the stream.
     try { turn.turnKey = newActionKey() } catch { /* keyless turn */ }
     activeTurn.current = turn
     try {
+      if (action?.kind === "artifact" && action.template === undefined && pin) action = { ...action, template: pin }
       if (action?.kind === "ticket" && !action.actionKey) action = { ...action, actionKey: newActionKey() }
       turn.action = action
       await streamTurn(turn, data.workspace, controller.signal, isCurrent)
@@ -318,6 +334,7 @@ export function useConversation() {
     if (!threadRef.current || thread?.archivedAt) return
     return send("", false, undefined, undefined, action)
   }
+  const changeTemplate = (artifactId: string, title: string, template: string) => startArtifact({ kind: "artifact", artifactId, title, template })
   const startTicket = (action: AIChatTicketRequest = { kind: "ticket" }) => {
     if (!threadRef.current || thread?.archivedAt || !data?.actions?.includes("ticket")) return
     return send("", false, undefined, undefined, action)
@@ -363,6 +380,7 @@ export function useConversation() {
   useEffect(() => autoRetry(), [streaming, data?.configured, last?.id, last?.status])
 
   return {
+    templatePin: pin, setTemplatePin: pinTemplate, changeTemplate,
     requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry, retryNotice,
     mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, startTicket, dismissTicket, retryTurn, cancel,
   }
