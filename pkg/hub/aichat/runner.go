@@ -59,6 +59,7 @@ type flight struct {
 // Runner assumes one serving hub process per database. CLI migrations do not
 // serve turns; limits, cancellation and interrupted-turn recovery are local.
 type Runner struct {
+	ArtifactKit      func(workspace string) ArtifactKit
 	ArtifactsDir     string
 	PublicURL        func() string
 	AvailableActions func(context.Context, string, *config.Config) []string
@@ -237,9 +238,22 @@ func prompt(cfg *config.Config, mode string) string {
 
 // Run persists partial output and usage even on cancellation or a broken SSE
 // connection. The caller must hold Acquire's slot until Run returns.
+type TurnOptions struct{ ArtifactTemplate string }
+
+func (r *Runner) kit(workspace string) ArtifactKit {
+	if r.ArtifactKit != nil {
+		return r.ArtifactKit(workspace)
+	}
+	return ArtifactKit{DesignSystemStatus: "absent"}
+}
+
 func (r *Runner) Run(ctx context.Context, t Thread, m Message, cfg *config.Config, provider llm.Provider, emit Emit) error {
+	return r.RunTurn(ctx, t, m, cfg, provider, TurnOptions{}, emit)
+}
+
+func (r *Runner) RunTurn(ctx context.Context, t Thread, m Message, cfg *config.Config, provider llm.Provider, opts TurnOptions, emit Emit) error {
 	ctx = withTicketToken(ctx)
-	runErr := r.loop(ctx, t, &m, cfg, provider, emit)
+	runErr := r.loop(ctx, t, &m, cfg, provider, opts, emit)
 	return r.finishRun(ctx, m, runErr, emit)
 }
 
@@ -276,7 +290,7 @@ func (r *Runner) finishRun(ctx context.Context, m Message, runErr error, emit Em
 	return runErr
 }
 
-func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Config, provider llm.Provider, emit Emit) error {
+func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Config, provider llm.Provider, opts TurnOptions, emit Emit) error {
 	// A generation started by start_artifact runs on the action deadline.
 	actionCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
@@ -309,7 +323,8 @@ func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Con
 		}
 	}
 	req := llm.Request{System: readhttp.Redact(prompt(cfg, t.Mode), secrets), Tools: reads.Definitions()}
-	for _, definition := range tools.ReservedDefinitions() {
+	kit := r.kit(t.Workspace)
+	for _, definition := range tools.ReservedDefinitions(kit.TemplateOptions()...) {
 		if definition.Name == tools.EmitBlock || definition.Name == tools.AskInterview || (definition.Name == tools.OfferActions && len(available) > 0) || (definition.Name == tools.StartArtifact && slices.Contains(available, "artifact")) || (definition.Name == tools.StartTicket && slices.Contains(available, "ticket")) {
 			req.Tools = append(req.Tools, definition)
 		}
@@ -380,7 +395,7 @@ func (r *Runner) loop(ctx context.Context, t Thread, m *Message, cfg *config.Con
 				input, parseErr := tools.ParseArtifact(json.RawMessage(call.Arguments))
 				if parseErr == nil {
 					input.ArtifactID = r.knownArtifactID(actionCtx, t, input.ArtifactID)
-					return r.generateArtifact(actionCtx, t, m, provider, input, secrets, count, emit)
+					return r.generateArtifact(actionCtx, t, m, provider, input, opts.ArtifactTemplate, secrets, count, emit)
 				}
 				result = llm.Message{Role: "tool", ToolCallID: readhttp.Redact(call.ID, secrets), Content: readhttp.Redact(parseErr.Error(), secrets), IsError: true}
 			} else if call.Name == tools.StartTicket && slices.Contains(available, "ticket") {
