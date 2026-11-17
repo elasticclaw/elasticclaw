@@ -2136,6 +2136,13 @@ test("artifact cards show template metadata and notices and revise only a change
   assert.deepEqual(changes, [])
   picker.props.onSelect("free")
   assert.deepEqual(changes, [["a", "Proposal", "free"]])
+  // An older card compares against the latest version, which the change revises.
+  changes.length = 0
+  render({ currentTemplate: "status-report" })
+  tree = render({ currentTemplate: "status-report" })
+  assert.equal(findElement(tree, "TemplatePicker").props.value, "status-report")
+  findElement(tree, "TemplatePicker").props.onSelect("one-pager")
+  assert.deepEqual(changes, [["a", "Proposal", "one-pager"]])
   for (const extra of [{ onChangeTemplate: undefined }, { kit: undefined }, { kit: { ...artifactKit, templates: [] } }, { block: { ...props.block, card: { ...card, artifactId: undefined } } }]) assert.doesNotMatch(elementText(render(extra)), /Change template/)
   assert.match(elementText(render({ block: { ...props.block, state: "working" } })), /One-pager template/)
   let retry
@@ -2160,6 +2167,8 @@ test("every created artifact can change template unless streaming or archived", 
     assert.equal(card.props.workspace, "A")
   }
   for (const extra of [{ streaming: true }, { interviewDisabled: true }]) for (const card of findElements(render(extra), "ArtifactActionCard")) assert.equal(card.props.onChangeTemplate, undefined)
+  const versions = [["v1", "one-pager"], ["v2", "status-report"], ["v3", undefined]].map(([id, template], index) => ({ id, role: "assistant", content: "", createdAt: 0, status: "completed", blocks: [{ id, at: 0, type: "action", kind: "artifact", state: index === 2 ? "failed" : "created", card: { title: "Same", artifactId: "a", template } }] }))
+  for (const card of findElements(hooks.render(() => MessageList({ messages: versions, reading: "", workspace: "A", artifactKit, onChangeTemplate })), "ArtifactActionCard")) assert.equal(card.props.currentTemplate, "status-report")
 })
 
 test("sources popover lists artifact status and warnings without changing the source count", () => {

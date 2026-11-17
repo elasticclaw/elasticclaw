@@ -25,7 +25,9 @@ export function CopyArtifactLink({ url, className }: { url: string; className?: 
   return <Button variant="outline" size="sm" className={className} onClick={() => void copy()}>{copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{failed ? "Could not copy" : copied ? "Copied" : "Copy link"}</Button>
 }
 
-export function ArtifactActionCard({ kit, workspace = "", onChangeTemplate, block, onStop, onRetry, ticket, onTicket }: { kit?: AIChatArtifactKit; workspace?: string; onChangeTemplate?: (artifactId: string, title: string, template: string) => void; block: ActionBlock; ticket?: AIChatTicketTarget; onTicket?: (action: AIChatTicketRequest) => void; onStop?: () => void; onRetry?: (action: AIChatArtifactRequest) => void }) {
+// `currentTemplate` is the template of the artifact's latest version, which a
+// template change revises; older cards may show a different one.
+export function ArtifactActionCard({ kit, workspace = "", currentTemplate, onChangeTemplate, block, onStop, onRetry, ticket, onTicket }: { kit?: AIChatArtifactKit; workspace?: string; currentTemplate?: string; onChangeTemplate?: (artifactId: string, title: string, template: string) => void; block: ActionBlock; ticket?: AIChatTicketTarget; onTicket?: (action: AIChatTicketRequest) => void; onStop?: () => void; onRetry?: (action: AIChatArtifactRequest) => void }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   if (block.kind !== "artifact") return null
   const { card, state } = block
@@ -43,6 +45,7 @@ export function ArtifactActionCard({ kit, workspace = "", onChangeTemplate, bloc
   const url = artifactShareURL(card.slug, card.shareUrl)
   const label = templateLabel(card, kit)
   const canChangeTemplate = onChangeTemplate && card.artifactId && kitTemplates(kit).length > 0
+  const latestTemplate = (currentTemplate ?? card.template) || "free"
   return <div className="my-3">
     <div className="flex items-center gap-4 rounded-xl border bg-card p-3.5">
       <div aria-hidden="true" className="flex h-24 w-36 shrink-0 items-center justify-center rounded-lg border bg-muted/40"><FileCode2 className="size-8 text-muted-foreground" /></div>
@@ -52,7 +55,7 @@ export function ArtifactActionCard({ kit, workspace = "", onChangeTemplate, bloc
       </div>
     </div>
     {renderNotices(card.notices)}
-    {canChangeTemplate && <TemplatePicker open={pickerOpen} onOpenChange={setPickerOpen} workspace={workspace} kit={kit} value={card.template || "free"} includeAuto={false} title="Change template" description="Publishes a new version with the same content in the chosen template." onSelect={(template) => { if (template !== (card.template || "free")) onChangeTemplate(card.artifactId!, card.title, template) }} />}
+    {canChangeTemplate && <TemplatePicker open={pickerOpen} onOpenChange={setPickerOpen} workspace={workspace} kit={kit} value={latestTemplate} includeAuto={false} title="Change template" description="Publishes a new version with the same content in the chosen template." onSelect={(template) => { if (template !== latestTemplate) onChangeTemplate(card.artifactId!, card.title, template) }} />}
     <div className="mt-2 text-sm text-muted-foreground">Ask for changes and I will publish a new version at the same link.</div>
     {ticket && onTicket && card.artifactId && <Button variant="outline" size="sm" className="mt-2" onClick={() => onTicket({ kind: "ticket", artifactId: card.artifactId })}><Ticket className="size-3.5" />{ticket.verb} with this artifact</Button>}
   </div>
