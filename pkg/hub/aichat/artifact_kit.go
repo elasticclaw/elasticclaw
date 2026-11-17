@@ -478,7 +478,9 @@ func stripInjectedDesignSystem(document string) string {
 
 type templateChoice struct {
 	Template *ArtifactTemplate
-	Notice   string
+	// Free marks an explicit "free" choice, which a retry must repeat.
+	Free   bool
+	Notice string
 }
 
 func resolveTemplate(kit ArtifactKit, pin, model, inherited string) templateChoice {
@@ -496,7 +498,7 @@ func resolveTemplate(kit ArtifactKit, pin, model, inherited string) templateChoi
 		requested = inherited
 	}
 	if requested == "" || requested == "free" {
-		return templateChoice{}
+		return templateChoice{Free: requested == "free"}
 	}
 	if t, ok := kit.Template(requested); ok {
 		return templateChoice{Template: &t}

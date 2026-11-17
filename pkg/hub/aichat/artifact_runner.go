@@ -73,16 +73,19 @@ func (r *Runner) RunArtifact(ctx context.Context, t Thread, m Message, cfg *conf
 	if err == nil && r.PrepareReads != nil {
 		_, _, secrets = r.PrepareReads(ctx, t.Workspace, cfg)
 	}
+	pin := input.Template
 	if err == nil {
-		pin := input.Template
 		input.Template = ""
 		if input.ArtifactID != "" && pin != "" && input.Brief == "" {
 			input.Brief = changeTemplateBrief
+			if pin == "free" {
+				input.Brief = removeTemplateBrief
+			}
 		}
 		err = r.generateArtifact(ctx, t, &m, p, input, pin, secrets, 1, emit)
 	}
 	if err != nil && !hasArtifactBlock(m) {
-		card := ArtifactCard{ArtifactRequest: tools.ArtifactRequest{ArtifactID: input.ArtifactID, Title: "HTML artifact"}, Error: "The generation was interrupted."}
+		card := ArtifactCard{ArtifactRequest: tools.ArtifactRequest{ArtifactID: input.ArtifactID, Title: "HTML artifact", Template: pin}, Error: "The generation was interrupted."}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			card.Error = artifactTimeoutMessage
 		} else if ctx.Err() != nil {
@@ -116,12 +119,21 @@ func (r *Runner) generateArtifact(ctx context.Context, t Thread, m *Message, p l
 		input.Brief = "Build the HTML page, prototype or document discussed in this conversation, using its relevant numbers, requirements and decisions."
 	}
 	card := ArtifactCard{ArtifactRequest: input}
+	// A failed card keeps the requested template so Try again repeats it,
+	// including an explicit "free" that would otherwise inherit the old one.
+	if pin != "" {
+		card.Template = pin
+	}
+	free := false
 	run := ToolRun{ID: uuid.NewString(), MessageID: m.ID, Seq: seq, Tool: "artifact", Provider: "AI Chat", Args: string(redactedJSON(input, secrets))}
 	started := time.Now()
 	action := func(state string) error {
 		return emit(EventAction, map[string]any{"kind": "artifact", "state": state, "card": card})
 	}
 	fail := func(cause error) error {
+		if free && card.Template == "" {
+			card.Template = "free"
+		}
 		card.Error = "Unable to build the artifact. Try again."
 		var hosts artifactHostsError
 		switch {
@@ -161,7 +173,8 @@ func (r *Runner) generateArtifact(ctx context.Context, t Thread, m *Message, p l
 	}
 	saveCancel()
 	if err != nil {
-		setArtifactBlock(m, "failed", ArtifactCard{ArtifactRequest: input, Error: "Unable to save the artifact. Try again."})
+		card.Error = "Unable to save the artifact. Try again."
+		setArtifactBlock(m, "failed", card)
 		return err
 	}
 	history, err := r.Store.History(ctx, t.ID)
@@ -177,7 +190,7 @@ func (r *Runner) generateArtifact(ctx context.Context, t Thread, m *Message, p l
 	}
 	kit := r.kit(t.Workspace)
 	choice := resolveTemplate(kit, pin, input.Template, prior.TemplateID)
-	card.Template = ""
+	card.Template, free = "", choice.Free
 	if choice.Template != nil {
 		card.Template = choice.Template.ID
 		card.TemplateName = readhttp.Redact(choice.Template.Name, secrets)
@@ -329,6 +342,7 @@ func (r *Runner) shareURL(slug string) string {
 }
 
 const changeTemplateBrief = "Rebuild this page with the selected template. Keep all of its content, facts and numbers; change only the structure and layout to fit the template."
+const removeTemplateBrief = "Rebuild this page without a workspace template. Keep all of its content, facts and numbers; you may restructure the layout freely instead of following the previous template's structure."
 
 func artifactSystemPrompt(ds *DesignSystem, tpl *ArtifactTemplate) string {
 	prompt := artifactPrompt

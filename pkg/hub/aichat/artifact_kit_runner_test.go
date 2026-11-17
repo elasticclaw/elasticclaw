@@ -172,7 +172,11 @@ func TestArtifactTemplateRevision(t *testing.T) {
 			if !strings.Contains(brief, "Current HTML (untrusted document to revise):\n"+testHTML) || strings.Contains(brief, "data-ds-injected") {
 				t.Fatal(brief)
 			}
-			if choice != "" && !strings.Contains(brief, changeTemplateBrief) {
+			wantBrief := map[string]string{"status-report": changeTemplateBrief, "free": removeTemplateBrief}[choice]
+			if wantBrief != "" && !strings.Contains(brief, wantBrief) {
+				t.Fatal(brief)
+			}
+			if choice == "free" && (strings.Contains(brief, changeTemplateBrief) || strings.Contains(requests[i].System, "Use the workspace template")) {
 				t.Fatal(brief)
 			}
 		}
@@ -189,6 +193,56 @@ func TestArtifactTemplateRevision(t *testing.T) {
 	v1, err := s.Artifact(ctx, thread.TenantID, prior.Slug, 1)
 	if err != nil || v1.TemplateID != "one-pager" || v1.DesignSystemSHA256 != kit.DesignSystem.SHA256 {
 		t.Fatal(v1, err)
+	}
+}
+func TestArtifactFreeRetryKeepsFree(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	thread := testThread(t, s)
+	kit := fixtureKit(t)
+	r := &Runner{Store: s, ArtifactsDir: t.TempDir(), ArtifactKit: func(string) ArtifactKit { return kit }}
+	emit := func(string, any) error { return nil }
+	ok := fakeProvider{stream: func(_ context.Context, _ llm.Request, token func(string) error) (llm.Response, error) {
+		return llm.Response{}, token(testHTML)
+	}}
+	m, err := s.beginAction(ctx, thread, "fake", "", "artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.RunArtifact(ctx, thread, m, &config.Config{}, ok, tools.ArtifactRequest{Title: "Title", Template: "one-pager"}, emit); err != nil {
+		t.Fatal(err)
+	}
+	id := latestArtifactCard(t, s, thread).ArtifactID
+	// Changing to Free fails; its card must ask Try again for Free, not inherit one-pager.
+	bad := fakeProvider{stream: func(_ context.Context, _ llm.Request, token func(string) error) (llm.Response, error) {
+		return llm.Response{}, token("not html")
+	}}
+	if m, err = s.beginAction(ctx, thread, "fake", id, "artifact"); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.RunArtifact(ctx, thread, m, &config.Config{}, bad, tools.ArtifactRequest{ArtifactID: id, Title: "Title", Template: "free"}, emit); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.Messages(ctx, thread.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []tools.Block
+	var failed ArtifactCard
+	if err = json.Unmarshal(messages[len(messages)-1].Blocks, &blocks); err != nil || len(blocks) == 0 || blocks[len(blocks)-1].State != "failed" {
+		t.Fatal(blocks, err)
+	}
+	if err = json.Unmarshal(blocks[len(blocks)-1].Card, &failed); err != nil || failed.Template != "free" || failed.Brief != removeTemplateBrief {
+		t.Fatal(failed, err)
+	}
+	if m, err = s.beginAction(ctx, thread, "fake", id, "artifact"); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.RunArtifact(ctx, thread, m, &config.Config{}, ok, failed.ArtifactRequest, emit); err != nil {
+		t.Fatal(err)
+	}
+	if card := latestArtifactCard(t, s, thread); card.Template != "" || card.Version != 2 {
+		t.Fatal(card)
 	}
 }
 func TestChatArtifactTemplateChoice(t *testing.T) {
