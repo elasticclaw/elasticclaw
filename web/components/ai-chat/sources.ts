@@ -9,12 +9,12 @@ export function sourceStatus(status: string) {
   }
 }
 
-export function sourceSummary(sources: AIChatSource[], loading = false) {
+export function sourceSummary(sources: AIChatSource[], loading = false, warning = false) {
   const connected = sources.filter((source) => source.status === "connected").length
   const allConnected = connected === sources.length
   return {
     label: allConnected ? `${sources.length} sources` : `${connected} of ${sources.length} sources`,
-    dotClass: loading || sources.length === 0 ? "bg-muted-foreground" : allConnected ? "bg-green-500" : "bg-amber-500",
+    dotClass: loading ? "bg-muted-foreground" : warning ? "bg-amber-500" : sources.length === 0 ? "bg-muted-foreground" : allConnected ? "bg-green-500" : "bg-amber-500",
   }
 }
 
