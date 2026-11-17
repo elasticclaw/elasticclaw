@@ -294,6 +294,24 @@ test("Back to new chat while an existing thread loads discards the stale load", 
   assert.equal(findElement(tree, "MessageList"), undefined)
 })
 
+test("composer template pin is kept per thread", async () => {
+  const fixture = chatFixture({ thread: "t1", api: { fetchAIChatThread: async (id) => ({ thread: thread(id), messages: [] }) } })
+  const chip = () => findElement(fixture.render(), "ChatComposer").props.toolbar
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"], { artifactKit }))
+  await flush()
+  chip().props.onChange("one-pager")
+  assert.equal(chip().props.value, "one-pager")
+  fixture.navigate("t2")
+  fixture.render()
+  await flush()
+  assert.equal(chip().props.value, "")
+  fixture.navigate("t1")
+  fixture.render()
+  await flush()
+  assert.equal(chip().props.value, "one-pager")
+})
+
 function captureWindowListeners() {
   const listeners = {}
   const previous = global.window

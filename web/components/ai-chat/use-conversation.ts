@@ -44,6 +44,9 @@ function recentlyStopped(threadId: string) {
   return Date.now() - at < AUTO_RETRY_WINDOW_MS
 }
 
+// The composer's template pin, per thread, for the life of the page.
+const threadPins = new Map<string, string>()
+
 // randomUUID needs a secure context; a hub served over plain http still needs a key.
 export function newActionKey() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID()
@@ -141,6 +144,7 @@ export function useConversation() {
       loadedThread.current = thread.id
       setWorkspace(thread.workspace)
       setMode(thread.mode as ChatMode)
+      setTemplatePin(threadPins.get(thread.id) ?? "")
       setLoadError("")
       setLoadingThread(false)
     }
@@ -203,7 +207,13 @@ export function useConversation() {
     setMode(null)
   }
 
+  const pinTemplate = (value: string) => {
+    setTemplatePin(value)
+    if (threadRef.current) threadPins.set(threadRef.current, value)
+  }
+
   const openCreatedThread = (created: AIChatThread) => {
+    if (templatePin) threadPins.set(created.id, templatePin)
     threadRef.current = created.id
     loadedThread.current = created.id
     setThread(created)
@@ -370,7 +380,7 @@ export function useConversation() {
   useEffect(() => autoRetry(), [streaming, data?.configured, last?.id, last?.status])
 
   return {
-    templatePin: pin, setTemplatePin, changeTemplate,
+    templatePin: pin, setTemplatePin: pinTemplate, changeTemplate,
     requestedThread, thread, messages, draft, setDraft, streaming, reading, loadingThread, loadError, turnError, canRetry, retryNotice,
     mode, setMode, current, data, selectWorkspace, refresh, newChat, send, answerInterview, startArtifact, startTicket, dismissTicket, retryTurn, cancel,
   }
