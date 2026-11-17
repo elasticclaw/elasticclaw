@@ -12,7 +12,7 @@ The hub reads them on each call. Only regular files are accepted, not symlinks. 
 
 ## Design system
 
-`design-system.html` is a complete HTML document and a standalone component catalog, up to 200 KB. Include at least one nonempty `<style data-ds>` block. Those blocks are concatenated and injected literally into generated pages, including free mode. Styles without `data-ds` can style the catalog itself and are not injected. HTTPS Google Fonts stylesheet links are also injected.
+`design-system.html` is a complete HTML document and a standalone component catalog, up to 200 KB. Include at least one nonempty `<style data-ds>` block. Each block is injected literally into generated pages as its own `<style>` element, in order, including free mode, so a block may start with `@import`. Styles without `data-ds` can style the catalog itself and are not injected. HTTPS Google Fonts stylesheet links are also injected.
 
 Use inline SVG or data URIs for brand assets. Add catalog elements such as:
 
@@ -26,7 +26,7 @@ The model receives a compact guide of CSS classes and up to 40 components (names
 
 ## Templates
 
-Each complete HTML file is limited to 50 KB. Its filename without `.html` is the ID and must match `^[a-z0-9][a-z0-9-]{0,39}$`. The hub offers at most 20 valid templates, sorted by ID.
+Each complete HTML file is limited to 50 KB. Its filename without `.html` is the ID and must match `^[a-z0-9][a-z0-9-]{0,39}$`. `auto` and `free` are reserved choices and cannot be template IDs. The hub offers at most 20 valid templates, sorted by ID.
 
 ```html
 <!doctype html>
@@ -51,7 +51,7 @@ At least one `data-slot` is required. Slot IDs are unique and match `^[a-z0-9][a
 
 Choice precedence is client pin (`artifactTemplate` on messages, `template` on artifact actions), model `start_artifact.template`, the latest version's template on revisions, then free. Omitted, empty or `auto` means no pin; `free` explicitly disables templates but still applies the design system. An unknown or invalid ID falls back to free and adds a card notice. Changing an existing artifact's template creates a new version and asks the model to preserve all content, facts and numbers.
 
-An invalid design system is ignored with a warning and a card notice. Invalid templates are skipped with warnings; extra valid templates beyond the cap are also skipped. The existing artifact host/URL allowlist and sandbox remain unchanged. External brand asset hosts are not allowed.
+An invalid design system is ignored and reported through `designSystem.error` and a card notice. Invalid templates are skipped with warnings; extra valid templates beyond the cap are also skipped. The existing artifact host/URL allowlist and sandbox remain unchanged. External brand asset hosts are not allowed.
 
 `GET /api/ai-chat/sources?workspace=W` includes `artifactKit` when configured. `GET /api/ai-chat/artifact-kit?workspace=W` returns the kit with signed preview URLs when signing is available. Preview capabilities last 15 minutes, are scoped to tenant, workspace and template, and are revoked when AI Chat is turned off. `/artifact-templates/{id}/preview` serves the current template with the current valid design system and the same CSP/sandbox as raw artifacts. Consumers should use a sandboxed iframe without `allow-same-origin`.
 

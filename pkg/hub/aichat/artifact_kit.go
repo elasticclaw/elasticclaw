@@ -1,6 +1,7 @@
 package aichat
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -24,12 +25,17 @@ const (
 	maxTemplates         = 20
 )
 
+const errIncompleteKitFile = "The file must be a complete HTML document, from <!doctype html> to </html>."
+
 var templateIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 var templateSlotPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
 var designSystemClasses = regexp.MustCompile(`\.(-?[_a-zA-Z][_a-zA-Z0-9-]*)`)
 
 type DesignSystem struct {
+	// CSS joins Styles; each <style data-ds> block is injected separately so a
+	// leading @import stays valid.
 	CSS       string
+	Styles    []string
 	FontLinks []string
 	Guide     string
 	SHA256    string
@@ -107,7 +113,8 @@ func readKitFile(path string, limit int) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	raw, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	return bytes.TrimPrefix(raw, []byte("\uFEFF")), err
 }
 
 func LoadArtifactKit(managedDir string) ArtifactKit {
@@ -118,7 +125,8 @@ func LoadArtifactKit(managedDir string) ArtifactKit {
 		return k
 	} else if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		k.DesignSystemStatus, k.DesignSystemError = "invalid", "Unable to read ai_chat/design-system.html."
-		warn(k.DesignSystemError)
+		log.Printf("ai chat artifact kit: %s", k.DesignSystemError)
+		warn("Unable to read ai_chat/templates.")
 		return k
 	}
 	raw, err := readKitFile(filepath.Join(root, "design-system.html"), maxDesignSystemBytes)
@@ -135,7 +143,8 @@ func LoadArtifactKit(managedDir string) ArtifactKit {
 		} else {
 			k.DesignSystemError = err.Error()
 		}
-		warn(k.DesignSystemError)
+		// Reported through DesignSystemError; Warnings are for templates.
+		log.Printf("ai chat artifact kit: %s", k.DesignSystemError)
 	}
 	dir := filepath.Join(root, "templates")
 	if info, err := os.Lstat(dir); os.IsNotExist(err) {
@@ -158,6 +167,10 @@ func LoadArtifactKit(managedDir string) ArtifactKit {
 		prefix := "ai_chat/templates/" + name + ": "
 		if !templateIDPattern.MatchString(id) {
 			warn(prefix + "skipped, the file name must match ^[a-z0-9][a-z0-9-]{0,39}$.")
+			continue
+		}
+		if id == "auto" || id == "free" {
+			warn(prefix + "skipped, auto and free are reserved template choices.")
 			continue
 		}
 		raw, err := readKitFile(filepath.Join(dir, name), maxTemplateBytes)
@@ -218,7 +231,9 @@ func parseDesignSystem(raw []byte) (*DesignSystem, error) {
 	if len(raw) > maxDesignSystemBytes {
 		return nil, errors.New("ai_chat/design-system.html is over the 200 KB limit.")
 	}
-	if err := validateArtifact(string(raw)); err != nil {
+	if err := validateArtifact(string(raw)); errors.Is(err, errIncompleteArtifact) {
+		return nil, errors.New("ai_chat/design-system.html: " + errIncompleteKitFile)
+	} else if err != nil {
 		return nil, fmt.Errorf("ai_chat/design-system.html: %w", err)
 	}
 	doc, err := html.Parse(strings.NewReader(string(raw)))
@@ -231,7 +246,9 @@ func parseDesignSystem(raw []byte) (*DesignSystem, error) {
 			return
 		}
 		if _, ok := nodeAttr(n, "data-ds"); n.Data == "style" && ok {
-			ds.CSS += nodeText(n) + "\n"
+			css := nodeText(n) + "\n"
+			ds.Styles = append(ds.Styles, css)
+			ds.CSS += css
 		}
 		if n.Data == "link" {
 			rel, _ := nodeAttr(n, "rel")
@@ -295,7 +312,9 @@ func parseTemplate(id string, raw []byte) (ArtifactTemplate, error) {
 	if len(raw) > maxTemplateBytes {
 		return t, errors.New("Template is over the 50 KB limit.")
 	}
-	if err := validateArtifact(t.HTML); err != nil {
+	if err := validateArtifact(t.HTML); errors.Is(err, errIncompleteArtifact) {
+		return t, errors.New(errIncompleteKitFile)
+	} else if err != nil {
 		return t, err
 	}
 	doc, err := html.Parse(strings.NewReader(t.HTML))
@@ -367,7 +386,14 @@ func injectDesignSystem(document string, ds *DesignSystem) string {
 	if ds == nil {
 		return document
 	}
-	block := "<style data-ds-injected>" + ds.CSS + "</style>"
+	styles := ds.Styles
+	if len(styles) == 0 {
+		styles = []string{ds.CSS}
+	}
+	block := ""
+	for _, css := range styles {
+		block += "<style data-ds-injected>" + css + "</style>"
+	}
 	for _, href := range ds.FontLinks {
 		block += `<link rel="stylesheet" href="` + html.EscapeString(href) + `" data-ds-injected>`
 	}

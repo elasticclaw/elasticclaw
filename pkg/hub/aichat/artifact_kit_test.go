@@ -85,7 +85,7 @@ func TestDesignSystemInvalid(t *testing.T) {
 		{"closing style", `<!doctype html><html><style data-ds>.a{content:"</stylex>"}</style></html>`, "closing style"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parseDesignSystem([]byte(tc.raw)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := parseDesignSystem([]byte(tc.raw)); err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "model") {
 				t.Fatal(err)
 			}
 		})
@@ -137,7 +137,7 @@ func TestTemplateInvalid(t *testing.T) {
 		{"hint", strings.Replace(valid, "State the title and concise proposal.", strings.Repeat("a", 301), 1), "data-slot-hint"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parseTemplate("one-pager", []byte(tc.raw)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := parseTemplate("one-pager", []byte(tc.raw)); err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "model") {
 				t.Fatal(err)
 			}
 		})
@@ -167,6 +167,11 @@ func TestArtifactKitLoading(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	for _, name := range []string{"auto.html", "free.html"} {
+		if err := os.WriteFile(filepath.Join(templates, name), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.Symlink(filepath.Join(templates, "one-pager.html"), filepath.Join(templates, "linked.html")); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +180,7 @@ func TestArtifactKitLoading(t *testing.T) {
 	}
 	k = LoadArtifactKit(dir)
 	warnings := strings.Join(k.Warnings, "\n")
-	for _, want := range []string{"Bad Name.html: skipped, the file name", "only 20 templates", "bad.html:", "linked.html:", "directory.html:"} {
+	for _, want := range []string{"Bad Name.html: skipped, the file name", "only 20 templates", "bad.html:", "linked.html:", "directory.html:", "auto.html: skipped, auto and free are reserved", "free.html: skipped"} {
 		if !strings.Contains(warnings, want) {
 			t.Fatal(warnings)
 		}
@@ -190,6 +195,17 @@ func TestArtifactKitLoading(t *testing.T) {
 	k = LoadArtifactKit(dir)
 	if k.DesignSystemStatus != "invalid" || k.DesignSystem != nil || k.DesignSystemError == "" {
 		t.Fatal(k)
+	}
+	// The error is reported once, through designSystem.error.
+	if strings.Contains(strings.Join(k.Info().Warnings, "\n"), "design-system.html") {
+		t.Fatal(k.Info().Warnings)
+	}
+	bom, _ := os.ReadFile("testdata/artifact-kit/ai_chat/design-system.html")
+	if err := os.WriteFile(dsPath, append([]byte("\uFEFF"), bom...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if k = LoadArtifactKit(dir); k.DesignSystemStatus != "ok" {
+		t.Fatal(k.DesignSystemError)
 	}
 	if err := os.Remove(dsPath); err != nil {
 		t.Fatal(err)
@@ -230,6 +246,11 @@ func TestDesignSystemInjection(t *testing.T) {
 		t.Fatal(got)
 	}
 	if got := injectDesignSystem(stripInjectedDesignSystem(injected), ds); got != injected {
+		t.Fatal(got)
+	}
+	split := &DesignSystem{CSS: ".a{}\n@import url(\"https://fonts.googleapis.com/css2?b\");\n", Styles: []string{".a{}\n", "@import url(\"https://fonts.googleapis.com/css2?b\");\n"}}
+	// Each block keeps its own <style> so a leading @import stays valid.
+	if got := injectDesignSystem(testHTML, split); !strings.Contains(got, "<style data-ds-injected>.a{}\n</style><style data-ds-injected>@import") || stripInjectedDesignSystem(got) != testHTML {
 		t.Fatal(got)
 	}
 	other := `<html><head><style>.other{}</style><link href="#local"></head><body> &#65; </body></html>`
@@ -278,7 +299,7 @@ func TestDesignSystemCollectsOnlySharedStylesAndFonts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ds.CSS != ".first{}\n.second{}\n" || !reflect.DeepEqual(ds.FontLinks, []string{"https://fonts.googleapis.com/css2?a=1&b=2"}) {
+	if ds.CSS != ".first{}\n.second{}\n" || !reflect.DeepEqual(ds.Styles, []string{".first{}\n", ".second{}\n"}) || !reflect.DeepEqual(ds.FontLinks, []string{"https://fonts.googleapis.com/css2?a=1&b=2"}) {
 		t.Fatal(ds)
 	}
 }
