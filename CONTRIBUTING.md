@@ -44,7 +44,7 @@ cd web
 cp .env.example .env.local
 # Edit .env.local:
 #   NEXT_PUBLIC_HUB_URL=http://localhost:8080
-npm install
+npm ci --ignore-scripts
 npm run dev
 ```
 

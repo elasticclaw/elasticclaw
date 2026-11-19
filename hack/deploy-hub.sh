@@ -67,7 +67,7 @@ SCP="scp -P $SSH_PORT -o ConnectTimeout=30"
 BUILD_TAGS=""
 if [ -z "${SKIP_WEB_UI:-}" ]; then
   echo "==> Building web UI static export..."
-  (cd web && npm install && npm run build)
+  (cd web && npm ci --ignore-scripts && npm run build)
   rm -rf internal/webui/out
   cp -r web/out internal/webui/out
   BUILD_TAGS="embedweb"
