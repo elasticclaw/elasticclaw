@@ -1,7 +1,11 @@
 // Package install generates install scripts and verifies downloaded assets.
 package install
 
-import "fmt"
+import (
+	"fmt"
+	"path"
+	"strings"
+)
 
 // Params holds all inputs needed to generate install scripts.
 type Params struct {
@@ -74,11 +78,35 @@ func ScriptInstallBinary(version string, useSudo bool) string {
 
 // ScriptInstallBinaryFromURL returns the shell script to download and install a hub binary.
 func ScriptInstallBinaryFromURL(url string, useSudo bool) string {
-	sudo := sudoPrefix(useSudo)
+	base := strings.TrimSuffix(url, "/"+path.Base(url))
 	return fmt.Sprintf(`set -ex
-curl -fsSL %q -o /tmp/elasticclaw-bin
-chmod +x /tmp/elasticclaw-bin
-%s mv /tmp/elasticclaw-bin /usr/local/bin/elasticclaw`, url, sudo)
+download_dir=$(mktemp -d)
+trap 'rm -rf "$download_dir"' EXIT
+curl -fsSL %s -o "$download_dir/elasticclaw-bin"
+curl -fsSL %s -o "$download_dir/checksums.txt"
+release_key=%s
+if [ -n "$release_key" ]; then
+  curl -fsSL %s -o "$download_dir/checksums.txt.minisig"
+  minisign -V -P "$release_key" -m "$download_dir/checksums.txt" -x "$download_dir/checksums.txt.minisig"
+else
+  echo "Warning: release signing key is not configured; skipping checksums.txt signature verification" >&2
+fi
+digest=$(awk -v name=%s '$2 == name || $2 == "*" name { print $1 }' "$download_dir/checksums.txt")
+if ! printf '%%s\n' "$digest" | grep -Eq '^[0-9a-fA-F]{64}$' || [ "${#digest}" -ne 64 ]; then
+  echo "Missing or invalid checksum for release asset" >&2
+  exit 1
+fi
+printf '%%s  %%s\n' "$digest" "$download_dir/elasticclaw-bin" > "$download_dir/verify.txt"
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c "$download_dir/verify.txt"
+else
+  shasum -a 256 -c "$download_dir/verify.txt"
+fi
+chmod +x "$download_dir/elasticclaw-bin"
+%smv "$download_dir/elasticclaw-bin" /usr/local/bin/elasticclaw`,
+		shellQuote(url), shellQuote(base+"/checksums.txt"), shellQuote(ReleaseMinisignPublicKey),
+		shellQuote(base+"/checksums.txt.minisig"),
+		shellQuote(path.Base(url)), sudoPrefix(useSudo))
 }
 
 // ScriptWriteConfig returns the shell script to write the hub config.
@@ -200,4 +228,8 @@ func ScriptWriteCaddyfile(domain string, useSudo bool) string {
 %sCADDYEOF
 %s mv /tmp/Caddyfile /etc/caddy/Caddyfile
 %s systemctl reload caddy || %s systemctl restart caddy`, Caddyfile(domain), sudo, sudo, sudo)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }

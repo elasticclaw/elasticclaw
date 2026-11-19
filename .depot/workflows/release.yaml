@@ -91,6 +91,24 @@ jobs:
           # Checksums
           cd dist && sha256sum * > checksums.txt
 
+      - name: Sign release checksums
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::notice::MINISIGN_SECRET_KEY is absent; skipping checksum signing"
+            exit 0
+          fi
+          umask 077
+          KEY_FILE=$(mktemp)
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$KEY_FILE"
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          minisign -S -s "$KEY_FILE" -m dist/checksums.txt -t "elasticclaw ${GITHUB_REF_NAME}"
+          rm -f "$KEY_FILE"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -104,6 +122,7 @@ jobs:
             dist/elasticclaw-windows-amd64.exe
             dist/claw-bridge-linux-amd64
             dist/checksums.txt
+            dist/checksums.txt.minisig
 
   update-homebrew:
     runs-on: depot-ubuntu-24.04

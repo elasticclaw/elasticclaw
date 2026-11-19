@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -53,7 +54,31 @@ func checksumURLAllowed(u *url.URL) bool {
 
 // FetchReleaseChecksums fetches checksums.txt over HTTPS (HTTP is allowed on loopback).
 func FetchReleaseChecksums(ctx context.Context, client *http.Client, baseURL string) (map[string]string, error) {
-	u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/checksums.txt")
+	return fetchReleaseChecksums(ctx, client, baseURL, ReleaseMinisignPublicKey)
+}
+
+func fetchReleaseChecksums(ctx context.Context, client *http.Client, baseURL, publicKey string) (map[string]string, error) {
+	baseURL = strings.TrimRight(baseURL, "/")
+	data, err := fetchReleaseFile(ctx, client, baseURL+"/checksums.txt")
+	if err != nil {
+		return nil, err
+	}
+	signature, sigErr := fetchReleaseFile(ctx, client, baseURL+"/checksums.txt.minisig")
+	if publicKey == "" {
+		log.Print("Warning: release signing key is not configured; skipping checksums.txt signature verification")
+	} else {
+		if sigErr != nil {
+			return nil, fmt.Errorf("fetch checksums signature: %w", sigErr)
+		}
+		if err := VerifyMinisign(data, signature, publicKey); err != nil {
+			return nil, fmt.Errorf("verify checksums signature: %w", err)
+		}
+	}
+	return ParseChecksums(data)
+}
+
+func fetchReleaseFile(ctx context.Context, client *http.Client, fileURL string) ([]byte, error) {
+	u, err := url.Parse(fileURL)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +121,7 @@ func FetchReleaseChecksums(ctx context.Context, client *http.Client, baseURL str
 	if len(data) > limit {
 		return nil, fmt.Errorf("checksums exceed %d bytes", limit)
 	}
-	return ParseChecksums(data)
+	return data, nil
 }
 
 // VerifySHA256 checks a stream against a hexadecimal SHA256 digest.

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/install"
 	"github.com/spf13/cobra"
 )
 
@@ -124,30 +125,16 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 		targetVer,
 	)
 
-	moveCmd := "mv /tmp/elasticclaw-new \"$SELF\""
-	versionCmd := "elasticclaw version 2>/dev/null"
-	restartCheckCmd := "systemctl is-active --quiet elasticclaw 2>/dev/null"
-	restartCmd := "systemctl restart elasticclaw"
-	if useSudo {
-		moveCmd = "sudo mv /tmp/elasticclaw-new \"$SELF\""
-		versionCmd = "sudo elasticclaw version 2>/dev/null"
-		restartCheckCmd = "sudo systemctl is-active --quiet elasticclaw 2>/dev/null"
-		restartCmd = "sudo systemctl restart elasticclaw"
+	checksums, err := install.FetchReleaseChecksums(cmd.Context(), nil, downloadURL[:strings.LastIndex(downloadURL, "/")])
+	if err != nil {
+		return fmt.Errorf("fetch release checksums: %w", err)
+	}
+	digest, ok := checksums["elasticclaw-linux-amd64"]
+	if !ok {
+		return fmt.Errorf("missing checksum for elasticclaw-linux-amd64")
 	}
 
-	script := fmt.Sprintf(`set -euo pipefail
-echo "Downloading %s..."
-curl -fsSL %q -o /tmp/elasticclaw-new
-chmod +x /tmp/elasticclaw-new
-SELF=$(which elasticclaw || echo /usr/local/bin/elasticclaw)
-%s
-echo "Upgraded to $(%s)"
-if %s; then
-  echo "Restarting hub service..."
-  %s
-  echo "Hub service restarted."
-fi
-`, targetVer, downloadURL, moveCmd, versionCmd, restartCheckCmd, restartCmd)
+	script := hubUpgradeScript(targetVer, downloadURL, digest, useSudo)
 
 	fmt.Printf("Upgrading remote hub to %s...\n", targetVer)
 	out, err := sshRunClient(client, script)
@@ -245,4 +232,38 @@ func parseVersionFromOutput(s string) string {
 		}
 	}
 	return "unknown"
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func hubUpgradeScript(targetVer, downloadURL, digest string, useSudo bool) string {
+	moveCmd := "mv \"$download_dir/elasticclaw-new\" \"$SELF\""
+	versionCmd := "elasticclaw version 2>/dev/null"
+	restartCheckCmd := "systemctl is-active --quiet elasticclaw 2>/dev/null"
+	restartCmd := "systemctl restart elasticclaw"
+	if useSudo {
+		moveCmd = "sudo mv \"$download_dir/elasticclaw-new\" \"$SELF\""
+		versionCmd = "sudo elasticclaw version 2>/dev/null"
+		restartCheckCmd = "sudo systemctl is-active --quiet elasticclaw 2>/dev/null"
+		restartCmd = "sudo systemctl restart elasticclaw"
+	}
+
+	return fmt.Sprintf(`set -euo pipefail
+printf 'Downloading %%s...\n' %s
+download_dir=$(mktemp -d)
+trap 'rm -rf "$download_dir"' EXIT
+curl -fsSL %s -o "$download_dir/elasticclaw-new"
+printf '%%s  %%s\n' %s "$download_dir/elasticclaw-new" | sha256sum -c -
+chmod +x "$download_dir/elasticclaw-new"
+SELF=$(which elasticclaw || echo /usr/local/bin/elasticclaw)
+%s
+echo "Upgraded to $(%s)"
+if %s; then
+  echo "Restarting hub service..."
+  %s
+  echo "Hub service restarted."
+fi
+`, shellQuote(targetVer), shellQuote(downloadURL), shellQuote(digest), moveCmd, versionCmd, restartCheckCmd, restartCmd)
 }
