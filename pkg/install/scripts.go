@@ -1,6 +1,4 @@
-// Package install contains pure functions for generating the shell scripts
-// and config files used by the elasticclaw install command.
-// All functions are side-effect free and easily testable.
+// Package install generates install scripts and verifies downloaded assets.
 package install
 
 import "fmt"

@@ -53,6 +53,9 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
+	bridgeChecksumMu sync.Mutex
+	bridgeChecksums  map[string]string // release claw-bridge URL -> sha256
+
 	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
 	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
 	appSlugMu     sync.Mutex // guards appSlugs
@@ -4220,6 +4223,10 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 	}
 	// Fail before creating a sandbox when the connector artifact is definitively missing.
 	if bridgeURL := s.bridgeDownloadURL(); bridgeURL != "" {
+		_, err := s.bridgeSHA256(ctx, bridgeURL)
+		if err != nil {
+			return err
+		}
 		if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
 			return err
 		}
@@ -4646,22 +4653,14 @@ exit 1`
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml (e.g. bridge_image: ttl.sh/your/claw-bridge:tag) or build a tagged release")
 	}
+	bridgeSHA256, err := s.bridgeSHA256(ctx, bridgeURL)
+	if err != nil {
+		return err
+	}
 	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
 		return err
 	}
-	var downloadCmd string
-	if strings.HasPrefix(bridgeURL, "http://") || strings.HasPrefix(bridgeURL, "https://") {
-		downloadCmd = fmt.Sprintf(`rm -f /tmp/claw-bridge.download && curl -fsSL %q -o /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv -f /tmp/claw-bridge.download /tmp/claw-bridge && echo downloaded`, bridgeURL)
-	} else {
-		// OCI ref (ttl.sh or ghcr) — use oras
-		downloadCmd = fmt.Sprintf(`
-if ! command -v oras &>/dev/null; then
-  curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp && sudo mv /tmp/oras /usr/local/bin/oras
-fi
-mkdir -p /tmp/bridge-dl && cd /tmp/bridge-dl && oras pull %q
-BIN=$(find /tmp/bridge-dl -name 'claw-bridge*' -type f | head -1)
-cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv -f /tmp/claw-bridge.download /tmp/claw-bridge && echo downloaded`, bridgeURL)
-	}
+	downloadCmd := daytonaBridgeDownloadScript(bridgeURL, bridgeSHA256)
 	if err := s.downloadDaytonaConnector(ctx, clawID, instanceID, p, downloadCmd); err != nil {
 		return err
 	}
@@ -5918,6 +5917,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
 	}
+	bridgeSHA256, err := s.bridgeSHA256(ctx, bridgeURL)
+	if err != nil {
+		return err
+	}
 	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
 		return err
 	}
@@ -5937,6 +5940,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		LLMProvider:     resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
+		BridgeSHA256:    bridgeSHA256,
 		Nix:             nixEnabled != 0,
 		Docker:          dockerEnabled != 0,
 		TemplateFiles:   templateFiles,
@@ -6225,10 +6229,14 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	if !strings.HasPrefix(bridgeURL, "http://") && !strings.HasPrefix(bridgeURL, "https://") {
 		return fmt.Errorf("docker provider requires an HTTP(S) claw-bridge URL, got %q", bridgeURL)
 	}
+	bridgeSHA256, err := s.bridgeSHA256(ctx, bridgeURL)
+	if err != nil {
+		return err
+	}
 	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
 		return err
 	}
-	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL)
+	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL, bridgeSHA256)
 	if err != nil {
 		return err
 	}
@@ -6250,7 +6258,7 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	return nil
 }
 
-func downloadDockerBridgeBinary(ctx context.Context, bridgeURL string) ([]byte, error) {
+func downloadDockerBridgeBinary(ctx context.Context, bridgeURL, digest string) ([]byte, error) {
 	if bridgePath := os.Getenv("ELASTICCLAW_E2E_BRIDGE_BINARY"); bridgePath != "" && strings.Contains(bridgeURL, "/__elasticclaw_e2e/claw-bridge-linux-amd64") {
 		data, err := os.ReadFile(bridgePath)
 		if err != nil {
@@ -6262,13 +6270,23 @@ func downloadDockerBridgeBinary(ctx context.Context, bridgeURL string) ([]byte, 
 		if len(data) > maxDockerBridgeBinaryBytes {
 			return nil, fmt.Errorf("docker claw-bridge local E2E binary exceeds %d bytes", maxDockerBridgeBinaryBytes)
 		}
-		return data, nil
+		return verifiedDockerBridgeBytes(data, digest)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bridgeURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("docker claw-bridge download request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := *http.DefaultClient
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" && !(req.URL.Scheme == "http" && bridgeLocalHost(req.URL.Hostname())) {
+			return fmt.Errorf("bridge redirect requires HTTPS: %s", req.URL)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("too many bridge redirects")
+		}
+		return nil
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("docker claw-bridge download: %w", err)
 	}
@@ -6286,7 +6304,7 @@ func downloadDockerBridgeBinary(ctx context.Context, bridgeURL string) ([]byte, 
 	if len(data) > maxDockerBridgeBinaryBytes {
 		return nil, fmt.Errorf("docker claw-bridge download exceeds %d bytes", maxDockerBridgeBinaryBytes)
 	}
-	return data, nil
+	return verifiedDockerBridgeBytes(data, digest)
 }
 
 func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte) error {
@@ -7454,6 +7472,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		s.stopAgentIfInstance(clawID, vmID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
+	bridgeSHA256, err := s.bridgeSHA256(context.Background(), bridgeURL)
+	if err != nil {
+		s.stopAgentWithReason(clawID, err.Error(), false)
+		return
+	}
 	if err := bootstrapBridgePreflight.check(context.Background(), bridgeURL); err != nil {
 		s.stopAgentWithReason(clawID, err.Error(), false)
 		return
@@ -7520,6 +7543,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		LLMProvider:     resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
+		BridgeSHA256:    bridgeSHA256,
 		Nix:             nixEnabled != 0,
 		Docker:          dockerEnabled != 0,
 		TemplateFiles:   files,

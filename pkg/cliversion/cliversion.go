@@ -6,7 +6,9 @@ import (
 )
 
 const (
-	OpenClawVersion = "2026.9.4"
+	OrasVersion          = "1.2.2"
+	OrasLinuxAMD64SHA256 = "bff970346470e5ef888e9f2c0bf7f8ee47283f5a45207d6e7a037da1fb0eae0d"
+	OpenClawVersion      = "2026.9.4"
 	// OpenClawImageVersion is only the docker provider's runtime base: the
 	// bridge installs OpenClawVersion over it whenever the two differ. 2026.10.6
 	// is the first image whose Node (24.22.1) satisfies NodeCompatibleRange.

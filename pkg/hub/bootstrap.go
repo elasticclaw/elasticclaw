@@ -29,7 +29,8 @@ type BootstrapParams struct {
 	LLMProvider     string
 
 	// claw-bridge binary source (HTTPS URL or OCI ref)
-	BridgeURL string
+	BridgeURL    string
+	BridgeSHA256 string
 
 	// Features
 	Nix    bool
@@ -521,32 +522,7 @@ export ELASTICCLAW_DOCKER=%s
 export ELASTICCLAW_ONBOARD_FLAGS=%s
 %s
 # ── Install claw-bridge ───────────────────────────────────────────────────────
-BRIDGE_SRC=%s
-download_connector_once() {
-  rm -f /tmp/claw-bridge
-  if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
-    curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
-  else
-    # OCI ref — use oras
-    if ! command -v oras &>/dev/null; then
-      echo "Installing oras..."
-      curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
-      sudo mv /tmp/oras /usr/local/bin/oras
-    fi
-    sudo apt-get install -y curl ca-certificates 2>/dev/null || true
-    rm -rf /tmp/claw-bridge-dl
-    mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
-    oras pull "$BRIDGE_SRC"
-    BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
-    if [ -z "$BINARY" ]; then
-      echo "ERROR: ElasticClaw connector binary not found after oras pull"
-      ls -la /tmp/claw-bridge-dl/
-      return 1
-    fi
-    cp "$BINARY" /tmp/claw-bridge
-    cd -
-  fi
-}
+%s
 
 CONNECTOR_DELAYS=(5 10 20 40 60)
 CONNECTOR_ATTEMPTS=6
@@ -649,7 +625,7 @@ exit 1
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ModelAuthToken), shellQuote(p.ClawName), shellQuote(p.TemplateName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(p.LLMProvider), shellQuote(nixFlag), shellQuote(dockerFlag),
 		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, oauthAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
-		shellQuote(p.BridgeURL),
+		bridgeDownloadShell(p.BridgeURL, p.BridgeSHA256, "/tmp/claw-bridge"),
 		customEnvPersist,
 	)
 }
