@@ -161,6 +161,7 @@ const (
 	SessionLossReasonLockConflict     = "lock_conflict"
 	SessionLossReasonGatewayReconnect = "gateway_reconnect"
 	SessionLossReasonProviderError    = "provider_error"
+	SessionLossReasonProviderRefusal  = "provider_refusal"
 	SessionLossReasonUnknown          = "unknown"
 )
 

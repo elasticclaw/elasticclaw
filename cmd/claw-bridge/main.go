@@ -2839,6 +2839,14 @@ func (gs *gatewaySession) probeSession(ctx context.Context, key string) error {
 // depends on this upstream compatibility string, so keep the coupling explicit.
 const providerRequestFormatErrorFragment = "provider rejected the request schema or tool payload"
 
+// providerRefusalErrorFragment is OpenClaw's user-facing text for an Anthropic
+// safety refusal of this category: "The provider refused this request
+// (category: reasoning_extraction). Revise the request and try again." The
+// refusal is deterministic for the session's transcript: every later turn in
+// that session is refused too, including a human "try again". In production
+// (Faster, Nov 2026) only a fresh session (/new plus a re-brief) recovered.
+const providerRefusalErrorFragment = "provider refused this request (category: reasoning_extraction)"
+
 const (
 	sessionRotatedErrorSuffix   = "OpenClaw session reset so the next message can continue"
 	sessionPreservedErrorSuffix = "OpenClaw session preserved; the turn was aborted but its history is intact"
@@ -2891,11 +2899,19 @@ func isProviderRequestFormatError(err error) bool {
 	return strings.Contains(msg, providerRequestFormatErrorFragment)
 }
 
+func isProviderRefusalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), providerRefusalErrorFragment)
+}
+
 // isRecoverableSessionLifecycleError identifies failures that can leave an
 // accepted OpenClaw turn stuck in the persistent session. Unlike a rejected
 // sessions.send request, these turns must not be replayed because they may
 // already have performed tool side effects. Timeouts and lock conflicts probe
-// and re-attach intact history; provider-rejected transcripts must be replaced.
+// and re-attach intact history; provider-rejected or provider-refused
+// transcripts must be replaced.
 func isRecoverableSessionLifecycleError(err error) bool {
 	if err == nil {
 		return false
@@ -2904,7 +2920,7 @@ func isRecoverableSessionLifecycleError(err error) bool {
 	if errors.As(err, &sendErr) {
 		return false
 	}
-	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err) || isSessionFileLockConflictError(err)
+	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err) || isProviderRefusalError(err) || isSessionFileLockConflictError(err)
 }
 
 // isSessionFileLockConflictError detects OpenClaw 2026.7.x's "session file
@@ -3267,6 +3283,8 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 				reason = types.SessionLossReasonTurnTimeout
 			} else if isProviderRequestFormatError(err) {
 				reason = types.SessionLossReasonProviderError
+			} else if isProviderRefusalError(err) {
+				reason = types.SessionLossReasonProviderRefusal
 			}
 			return reply, &sessionRotatedError{err: err, reason: reason, previousKey: turnKey}
 		}

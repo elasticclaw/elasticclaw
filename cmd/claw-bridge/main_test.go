@@ -2153,6 +2153,9 @@ func TestIsRecoverableSessionLifecycleError(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "provider format rejection", err: errString("LLM request failed: " + providerRequestFormatErrorFragment + "."), want: true},
+		{name: "provider reasoning_extraction refusal", err: errString(productionRefusalError), want: true},
+		{name: "send request provider refusal stays a send error", err: &sessionSendRequestError{err: errString(productionRefusalError)}, want: false},
+		{name: "other refusal category", err: errString("The provider refused this request (category: cyber). Revise the request and try again."), want: false},
 		{name: "accepted turn deadline", err: context.DeadlineExceeded, want: true},
 		{name: "send request deadline", err: &sessionSendRequestError{err: context.DeadlineExceeded}, want: false},
 		{name: "caller cancellation", err: context.Canceled, want: false},
@@ -2331,10 +2334,22 @@ func TestReplayQueuedDeliversRecoveryEdgeBeforeEmptyReply(t *testing.T) {
 	}
 }
 
+// productionRefusalError is the lifecycle error text claw-bridge logged on
+// Faster claws in Nov 2026 ("[gateway] agent turn error: ...").
+const productionRefusalError = "The provider refused this request (category: reasoning_extraction). Revise the request and try again."
+
 func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
+	testGatewaySessionResetsAfterLifecycleError(t, "LLM request failed: "+providerRequestFormatErrorFragment+".", types.SessionLossReasonProviderError)
+}
+
+func TestGatewaySessionResetsAfterProviderRefusalLifecycleError(t *testing.T) {
+	testGatewaySessionResetsAfterLifecycleError(t, productionRefusalError, types.SessionLossReasonProviderRefusal)
+}
+
+func testGatewaySessionResetsAfterLifecycleError(t *testing.T, providerErr, wantReason string) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
-	const providerErr = "LLM request failed: " + providerRequestFormatErrorFragment + "."
 	testDone := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -2455,6 +2470,9 @@ func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	}
 	if got := loadBridgeSession(); got != "session-2" {
 		t.Fatalf("persisted session key = %q, want session-2", got)
+	}
+	if got := sessionLossReason(err); got != wantReason {
+		t.Fatalf("session loss reason = %q, want %q", got, wantReason)
 	}
 }
 
