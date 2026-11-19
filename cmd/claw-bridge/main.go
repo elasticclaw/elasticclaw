@@ -2911,16 +2911,40 @@ func isProviderRefusalError(err error) bool {
 // sessions.send request, these turns must not be replayed because they may
 // already have performed tool side effects. Timeouts and lock conflicts probe
 // and re-attach intact history; provider-rejected or provider-refused
-// transcripts must be replaced.
+// transcripts must be replaced. A refusal is recovered the same way even when
+// sessions.send itself reports it: the poisoned transcript refuses every
+// retry, and rotating through the session_rotated edge re-briefs the fresh
+// session with task context instead of replaying a bare message into it.
 func isRecoverableSessionLifecycleError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if isProviderRefusalError(err) {
+		return true
 	}
 	var sendErr *sessionSendRequestError
 	if errors.As(err, &sendErr) {
 		return false
 	}
-	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err) || isProviderRefusalError(err) || isSessionFileLockConflictError(err)
+	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err) || isSessionFileLockConflictError(err)
+}
+
+// sessionRotationReason names why a recoverable lifecycle error replaced the
+// session. A refusal wins over every other cause: only the provider_refusal
+// re-brief omits the earlier agent output that would poison the new session.
+func sessionRotationReason(err error) string {
+	switch {
+	case isProviderRefusalError(err):
+		return types.SessionLossReasonProviderRefusal
+	case isSessionFileLockConflictError(err):
+		return types.SessionLossReasonLockConflict
+	case errors.Is(err, context.DeadlineExceeded):
+		return types.SessionLossReasonTurnTimeout
+	case isProviderRequestFormatError(err):
+		return types.SessionLossReasonProviderError
+	default:
+		return types.SessionLossReasonUnknown
+	}
 }
 
 // isSessionFileLockConflictError detects OpenClaw 2026.7.x's "session file
@@ -3232,7 +3256,9 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 			if abortErr != nil {
 				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
 			}
-			if isSessionFileLockConflictError(err) || (errors.Is(err, context.DeadlineExceeded) && abortErr == nil) {
+			// A refused transcript is never worth preserving, even when the
+			// error also carries a deadline or lock conflict.
+			if !isProviderRefusalError(err) && (isSessionFileLockConflictError(err) || (errors.Is(err, context.DeadlineExceeded) && abortErr == nil)) {
 				origKey := turnKey
 				reason := types.SessionLossReasonLockConflict
 				if errors.Is(err, context.DeadlineExceeded) {
@@ -3276,17 +3302,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 			if resetErr != nil {
 				return reply, fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
-			reason := types.SessionLossReasonUnknown
-			if isSessionFileLockConflictError(err) {
-				reason = types.SessionLossReasonLockConflict
-			} else if errors.Is(err, context.DeadlineExceeded) {
-				reason = types.SessionLossReasonTurnTimeout
-			} else if isProviderRequestFormatError(err) {
-				reason = types.SessionLossReasonProviderError
-			} else if isProviderRefusalError(err) {
-				reason = types.SessionLossReasonProviderRefusal
-			}
-			return reply, &sessionRotatedError{err: err, reason: reason, previousKey: turnKey}
+			return reply, &sessionRotatedError{err: err, reason: sessionRotationReason(err), previousKey: turnKey}
 		}
 		// Same-session retries exhausted: rotate as a last resort and surface
 		// the reset error instead of silently replaying, so the hub injects a
