@@ -1277,6 +1277,7 @@ chmod +x "$HOME/.local/bin/openclaw"
 }
 
 func TestInstallSelectedModelPluginInstallsPinnedCodexPluginOnce(t *testing.T) {
+	t.Setenv("ELASTICCLAW_CODEX_PLUGIN_VERSION", "untrusted-version")
 	if runtime.GOOS == "windows" {
 		t.Skip("fake openclaw executable uses POSIX shell")
 	}

@@ -56,16 +56,6 @@ func TestAgentDockerfilePinMatchesOpenClawVersion(t *testing.T) {
 	}
 }
 
-func TestFromEnvAllowsPinnedOverride(t *testing.T) {
-	t.Setenv("ELASTICCLAW_TEST_CLI_VERSION", "9.8.7")
-	if got := FromEnv("ELASTICCLAW_TEST_CLI_VERSION", "1.2.3"); got != "9.8.7" {
-		t.Fatalf("FromEnv override = %q", got)
-	}
-	if got := FromEnv("ELASTICCLAW_MISSING_VERSION", "1.2.3"); got != "1.2.3" {
-		t.Fatalf("FromEnv fallback = %q", got)
-	}
-}
-
 // TestNodeCompatibleExpr exercises the exact JS expression the bootstrap
 // scripts embed, with injected Node versions, against the accepted range
 // ">=24.22.1 <25 || >=26.12.1" (OpenClaw engines plus the CVE-2026-111497 fix).

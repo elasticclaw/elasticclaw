@@ -392,6 +392,8 @@ func (s *Server) resolveClawEnv(workspaceName string, workflow *types.WorkflowCo
 		val, ok := hubSecrets[secretRef]
 		return val, ok
 	}
+	envFilter := sandboxEnvFilter{}
+	defer envFilter.log(clawID)
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL": s.clawHubURL(), "ELASTICCLAW_CLAW_ID": clawID, "ELASTICCLAW_CLAW_TOKEN": clawToken,
 	}
@@ -418,14 +420,23 @@ func (s *Server) resolveClawEnv(workspaceName string, workflow *types.WorkflowCo
 		for envName, envVar := range tmplCfg.Env {
 			if envVar.Secret != "" {
 				if val, ok := resolveSecret(envVar.Secret); ok {
+					if !envFilter.allow(envName) {
+						continue
+					}
 					env[envName], resolvedSecrets[envName] = val, "workspace env secret"
 				}
+				continue
+			}
+			if !envFilter.allow(envName) {
 				continue
 			}
 			env[envName] = envVar.Value
 		}
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := resolveSecret(secretRef); ok {
+				if !envFilter.allow(envName) {
+					continue
+				}
 				env[envName], resolvedSecrets[envName] = val, "workspace secret_ref"
 			}
 		}
@@ -433,6 +444,9 @@ func (s *Server) resolveClawEnv(workspaceName string, workflow *types.WorkflowCo
 	if workflow != nil {
 		for envName, secretRef := range workflow.SecretRefs {
 			if val, ok := resolveSecret(secretRef); ok {
+				if !envFilter.allow(envName) {
+					continue
+				}
 				env[envName], resolvedSecrets[envName] = val, "workflow secret_ref"
 			}
 		}

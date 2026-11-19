@@ -1788,18 +1788,26 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	clawToken := s.hubCfg.ClawToken
 	hubSecrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
+	envFilter := sandboxEnvFilter{}
+	defer envFilter.log(clawID)
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
 		"ELASTICCLAW_CLAW_ID":    clawID,
 		"ELASTICCLAW_CLAW_TOKEN": clawToken,
 	}
 	for k, v := range req.Env {
+		if !envFilter.allow(k) {
+			continue
+		}
 		env[k] = v
 	}
 	env["ELASTICCLAW_MODEL_AUTH_TOKEN"] = s.modelAuthTokenForClaw(clawID)
 	// Sensitive identity is hub-managed and must not be overridden by request env.
 	env["ELASTICCLAW_TEMPLATE"] = req.TemplateName
 	for envName, secretRef := range req.SecretRefs {
+		if !envFilter.allow(envName) {
+			continue
+		}
 		if val, ok := hubSecrets[secretRef]; ok {
 			env[envName] = val
 			log.Printf("[create] injected secret_ref %s as %s into claw env", secretRef, envName)
@@ -4243,7 +4251,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		TemplateFiles: files,
 		Env:           env,
 	}
-	instance, err := createAndConfigureDaytonaSandbox(ctx, p, createReq, env, func(created *types.Instance) error {
+	instance, err := createDaytonaSandbox(ctx, p, createReq, env, func(created *types.Instance) error {
 		if _, err := s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, created.ID, clawID); err != nil {
 			return err
 		}
@@ -5124,10 +5132,10 @@ func daytonaInstallCodingModelCLICommand(model string) string {
 	var packageSpec, binary string
 	switch {
 	case strings.HasPrefix(model, "codex/"):
-		packageSpec = "@openai/codex@" + cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", cliversion.CodexCLIVersion)
+		packageSpec = "@openai/codex@" + cliversion.CodexCLIVersion
 		binary = "codex"
 	case strings.HasPrefix(model, "grok/"):
-		packageSpec = "@xai-official/grok@" + cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", cliversion.GrokCLIVersion)
+		packageSpec = "@xai-official/grok@" + cliversion.GrokCLIVersion
 		binary = "grok"
 	default:
 		return ""
@@ -5146,7 +5154,7 @@ func daytonaInstallModelPluginCommand(provider string) string {
 	if provider != "codex" {
 		return ""
 	}
-	version := cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", cliversion.CodexPluginVersion)
+	version := cliversion.CodexPluginVersion
 	spec := "npm:@openclaw/codex@" + version
 	return fmt.Sprintf(`export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm

@@ -1,10 +1,5 @@
 package cliversion
 
-import (
-	"os"
-	"strings"
-)
-
 const (
 	OrasVersion          = "1.2.2"
 	OrasLinuxAMD64SHA256 = "bff970346470e5ef888e9f2c0bf7f8ee47283f5a45207d6e7a037da1fb0eae0d"
@@ -32,10 +27,3 @@ const NodeCompatibleExpr = "(major === 24 && (minor > 22 || (minor === 22 && pat
 // NodeCompatibleCheck is a shell command that exits 0 when the node on PATH
 // satisfies NodeCompatibleExpr.
 const NodeCompatibleCheck = `node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); process.exit(` + NodeCompatibleExpr + ` ? 0 : 1)'`
-
-func FromEnv(envName, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
-		return v
-	}
-	return fallback
-}

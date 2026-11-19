@@ -54,31 +54,6 @@ type BootstrapParams struct {
 	Env            map[string]string // custom env vars from workflow/factory secret_refs and template env
 }
 
-// bootstrapManagedEnvKeys lists values that the bootstrap script derives from
-// dedicated parameters. Custom env must not override or duplicate them.
-var bootstrapManagedEnvKeys = map[string]bool{
-	"ELASTICCLAW_HUB_URL":            true,
-	"ELASTICCLAW_CLAW_ID":            true,
-	"ELASTICCLAW_CLAW_TOKEN":         true,
-	"ELASTICCLAW_MODEL_AUTH_TOKEN":   true,
-	"ELASTICCLAW_CLAW_NAME":          true,
-	"ELASTICCLAW_TEMPLATE":           true,
-	"ELASTICCLAW_GITHUB_REPOS":       true,
-	"ELASTICCLAW_BOOTSTRAP":          true,
-	"ELASTICCLAW_WAIT_FOR_WORKSPACE": true,
-	"ELASTICCLAW_GATEWAY_PASSWORD":   true,
-	"OPENCLAW_GATEWAY_PASSWORD":      true,
-	"OPENCLAW_DEFAULT_MODEL":         true,
-	"ELASTICCLAW_LLM_PROVIDER":       true,
-	"ELASTICCLAW_NIX":                true,
-	"ELASTICCLAW_DOCKER":             true,
-	"ELASTICCLAW_PROVIDER_CONFIG":    true,
-	"ELASTICCLAW_API_KEY_AUTH_SYNC":  true,
-	"ELASTICCLAW_OAUTH_AUTH_SYNC":    true,
-	"ELASTICCLAW_ONBOARD_FLAGS":      true,
-	"LINEAR_API_KEY":                 true,
-}
-
 // shellVarNameRegex matches valid POSIX shell variable names.
 var shellVarNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -480,7 +455,8 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 		sort.Strings(keys)
 		for _, k := range keys {
 			v := p.Env[k]
-			if bootstrapManagedEnvKeys[k] {
+			// LINEAR_API_KEY comes from the dedicated LinearEnv line above.
+			if isReservedSandboxEnvKey(k) || k == "LINEAR_API_KEY" {
 				continue
 			}
 			if !shellVarNameRegex.MatchString(k) {

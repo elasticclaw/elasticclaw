@@ -4013,9 +4013,9 @@ func installSelectedCodingModelCLI() error {
 	model := envOr("OPENCLAW_DEFAULT_MODEL", "")
 	switch cliCodingProviderForModel(model) {
 	case "codex":
-		return installNPMCLI("@openai/codex", cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", codexCLIVersion), "codex")
+		return installNPMCLI("@openai/codex", codexCLIVersion, "codex")
 	case "grok":
-		return installNPMCLI("@xai-official/grok", cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", grokCLIVersion), "grok")
+		return installNPMCLI("@xai-official/grok", grokCLIVersion, "grok")
 	default:
 		return nil
 	}
@@ -4029,7 +4029,7 @@ func installSelectedModelPlugin() error {
 		log.Printf("[bootstrap] Codex plugin already installed")
 		return nil
 	}
-	version := cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", codexPluginVersion)
+	version := codexPluginVersion
 	if strings.TrimSpace(version) == "" {
 		return fmt.Errorf("empty version for @openclaw/codex")
 	}
