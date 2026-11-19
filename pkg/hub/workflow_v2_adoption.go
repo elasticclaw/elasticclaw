@@ -131,7 +131,7 @@ func (s *Server) filterLegacyAdoptionOwners(ctx context.Context, candidates []ty
 
 func (s *Server) workflowV2AdoptionCandidates(ctx context.Context, workspace *typesv2.Workspace, delivery *typesv2.PullRequestDelivery) ([]typesv2.VerifiedPullRequest, error) {
 	if !s.hasOwnAppIdentity() {
-		return nil, fmt.Errorf("no GitHub App URL configured to identify the hub's bot")
+		return nil, fmt.Errorf("no GitHub App slug known to identify the hub's bot")
 	}
 	var candidates []typesv2.VerifiedPullRequest
 	seen := map[string]bool{}

@@ -294,13 +294,15 @@ func (s *Server) expireCheckpoints(cutoff time.Time, dry bool) (int, error) {
 }
 
 func (s *Server) compactCheckpointRows(where string, dry bool, args ...any) (int, error) {
-	tx, err := s.db.Begin()
+	store, tx, err := s.retentionBegin(dry)
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	if tx != nil {
+		defer tx.Rollback()
+	}
 	where += " AND " + retentionUnprotected
-	paths, err := retentionStrings(tx, `SELECT c.manifest_path FROM claw_checkpoints c WHERE `+where, args...)
+	paths, err := retentionStrings(store, `SELECT c.manifest_path FROM claw_checkpoints c WHERE `+where, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -397,6 +399,29 @@ func (s *Server) expireRetentionRows(cutoff time.Time, dry bool) (int, error) {
 
 type retentionQuerier interface {
 	Query(string, ...any) (*sql.Rows, error)
+}
+
+// retentionStore is what a retention pass reads through: its write
+// transaction, or the pool itself in dry mode.
+type retentionStore interface {
+	retentionQuerier
+	QueryRow(string, ...any) *sql.Row
+}
+
+// retentionBegin opens the transaction a retention pass writes through. openDB
+// uses BEGIN IMMEDIATE, so every transaction holds the database write lock;
+// dry mode writes nothing and reads straight from the pool instead, or the
+// hourly dry run starves every other writer past busy_timeout. tx is nil in
+// dry mode.
+func (s *Server) retentionBegin(dry bool) (store retentionStore, tx *sql.Tx, err error) {
+	if dry {
+		return s.db, nil, nil
+	}
+	tx, err = s.db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	return tx, tx, nil
 }
 
 func retentionStrings(db retentionQuerier, query string, args ...any) ([]string, error) {
@@ -524,13 +549,16 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, after string,
 	// concurrent plan from publishing a reference to a blob mid-removal. A
 	// rollback after an unlink is harmless: the tree is dead, the rows come
 	// back, and the next cycle retries the same batch (ENOENT is skipped).
-	tx, err := s.db.Begin()
+	// Dry mode unlinks nothing, so it needs no lock.
+	store, tx, err := s.retentionBegin(dry)
 	if err != nil {
 		return "", err
 	}
-	defer tx.Rollback()
+	if tx != nil {
+		defer tx.Rollback()
+	}
 	var live bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_checkpoints WHERE root_tree_sha256=? AND status IN `+retentionLive+`)`, tree).Scan(&live); err != nil {
+	if err := store.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_checkpoints WHERE root_tree_sha256=? AND status IN `+retentionLive+`)`, tree).Scan(&live); err != nil {
 		return "", err
 	}
 	if live {
@@ -538,7 +566,7 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, after string,
 	}
 	// Blobs are content-addressed across roles: a file digest may also be a
 	// live tree or message blob, so every role is checked before unlinking.
-	files, err := retentionStrings(tx, `SELECT file_sha256 FROM checkpoint_tree_files f WHERE tree_sha256=? AND file_sha256>? AND NOT EXISTS
+	files, err := retentionStrings(store, `SELECT file_sha256 FROM checkpoint_tree_files f WHERE tree_sha256=? AND file_sha256>? AND NOT EXISTS
   (SELECT 1 FROM checkpoint_tree_files other WHERE other.file_sha256=f.file_sha256 AND other.tree_sha256!=?)
   AND NOT EXISTS (SELECT 1 FROM claw_checkpoints c WHERE (c.root_tree_sha256=f.file_sha256 OR c.message_tree_sha256=f.file_sha256) AND c.status IN `+retentionLive+`)
   ORDER BY file_sha256 LIMIT 500`, tree, after, tree)
@@ -566,7 +594,7 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, after string,
 			return "", err
 		}
 	}
-	referenced, err := retentionReferenced(tx, tree)
+	referenced, err := retentionReferenced(store, tree)
 	if err != nil {
 		return "", err
 	}
@@ -591,20 +619,22 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, after string,
 
 // retentionReferenced reports whether any tree expansion or live checkpoint
 // still names the digest in any role.
-func retentionReferenced(tx *sql.Tx, sha string) (bool, error) {
+func retentionReferenced(store retentionStore, sha string) (bool, error) {
 	var referenced bool
-	err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM checkpoint_tree_files WHERE file_sha256=?)
+	err := store.QueryRow(`SELECT EXISTS(SELECT 1 FROM checkpoint_tree_files WHERE file_sha256=?)
   OR EXISTS(SELECT 1 FROM claw_checkpoints WHERE (root_tree_sha256=? OR message_tree_sha256=?) AND status IN `+retentionLive+`)`, sha, sha, sha).Scan(&referenced)
 	return referenced, err
 }
 
 func (s *Server) collectCheckpointMessage(sha string, dry bool, counts *retentionCollection) error {
-	tx, err := s.db.Begin()
+	store, tx, err := s.retentionBegin(dry)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	referenced, err := retentionReferenced(tx, sha)
+	if tx != nil {
+		defer tx.Rollback()
+	}
+	referenced, err := retentionReferenced(store, sha)
 	if err != nil {
 		return err
 	}

@@ -1358,7 +1358,16 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		// Pipeline stages that match [DONE] return before the legacy store path
 		// below. Register PRs here so merge/close monitoring and review injects
 		// still arm; without this, claws can live forever after a PR merges.
-		if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+		// Under the signal lock, as in the turn-completion path, so a branch
+		// sweep cannot nudge between registration and the drop.
+		signalLock := s.clawSignalLock(clawID)
+		signalLock.Lock()
+		errURL := s.registerDonePRURLs(clawID, prURLs)
+		if errURL == "" {
+			s.dropSweptPRNudges(clawID)
+		}
+		signalLock.Unlock()
+		if errURL != "" {
 			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
 			return
 		}

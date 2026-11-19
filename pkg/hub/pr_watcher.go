@@ -2019,12 +2019,15 @@ func (s *Server) injectMessageWithID(clawID, content, role, messageID string) {
 		Format:    format,
 		CreatedAt: now(),
 	}
-	result, err := s.db.Exec(
+	// A dropped insert is a lost prompt: nothing re-sends it, and the claw
+	// sits idle waiting for it. Callers never hold s.mu or cc.mu here (this
+	// function takes both), so riding out a busy write lock is safe.
+	result, err := execRetryBusy(s.db,
 		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO NOTHING`,
 		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt,
 	)
 	if err != nil {
-		log.Printf("[pr-watcher] failed to insert message: %v", err)
+		log.Printf("[pr-watcher] failed to insert %s message for claw %s: %v", role, shortID(clawID), err)
 		return
 	}
 

@@ -55,6 +55,12 @@ import (
 type Server struct {
 	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
 	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
+	appSlugMu     sync.Mutex // guards appSlugs
+	appSlugGroup  singleflight.Group
+	appSlugs      map[int64]appSlugEntry
+	// clawSignalLocks prevents nudges between turn finish and [DONE] registration,
+	// or inserts after [DONE] drops queued nudges; keyed by claw ID across reconnects.
+	clawSignalLocks sync.Map // claw_id -> *sync.Mutex; acquire before s.mu or cc.mu
 
 	db        *sql.DB
 	addr      string
@@ -2825,6 +2831,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	// A panic in the turn-completion region must not leave the claw's signal
+	// lock held for the hub's lifetime: the next turn after reconnect and the
+	// branch-retry sweep would block on it forever.
+	var heldSignalLock *sync.Mutex
+	defer func() {
+		if heldSignalLock != nil {
+			heldSignalLock.Unlock()
+		}
+	}()
 
 	// First message must be registration
 	var reg types.WSMessage
@@ -3501,6 +3516,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// Always clean up streaming state first, even for empty messages.
 			// Use the outer cc (this goroutine's connection), not a fresh lookup.
 			// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
+			signalLock := s.clawSignalLock(clawID)
+			signalLock.Lock()
+			heldSignalLock = signalLock
 			cc.mu.Lock()
 			persistContent := hm.Content
 			skipPersist := false
@@ -3541,6 +3559,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			s.deleteStaleWatchdogNags(clawID)
 			// Drop empty messages — never store or broadcast
 			if strings.TrimSpace(turnContent) == "" {
+				heldSignalLock = nil
+				signalLock.Unlock()
 				// Clear typing indicator first — always clear even if no queued messages
 				s.broadcastToUsers(tenantID, types.WSMessage{
 					Type: "agent_typing",
@@ -3616,6 +3636,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					} else if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
 						s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
 					} else {
+						s.dropSweptPRNudges(clawID)
 						s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
 						s.safeGo("pipeline done transition", func() {
 							s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
@@ -3625,6 +3646,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			} else if !workflowV2Controlled && !doneSignalled && !bridgeErrTurn {
 				s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 			}
+			heldSignalLock = nil
+			signalLock.Unlock()
 			// A known token written mid-sentence no longer transitions
 			// anything. Tell the agent so, or the run freezes with nobody
 			// aware the signal was dropped. Skipped while continuation is

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"time"
 
 	gossh "golang.org/x/crypto/ssh"
@@ -128,8 +127,4 @@ func (s *Server) verifySSHHostKeyOnce(host string, key gossh.PublicKey) error {
 		return fmt.Errorf("update ssh host key for %s: %w", host, err)
 	}
 	return nil
-}
-
-func isSQLiteBusy(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "database is locked")
 }
