@@ -3,7 +3,6 @@ package install
 
 import (
 	"fmt"
-	"path"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
@@ -73,29 +72,23 @@ func sudoPrefix(useSudo bool) string {
 	return ""
 }
 
-// ScriptInstallBinary returns the shell script to download and install the hub binary.
-func ScriptInstallBinary(version string, useSudo bool) string {
-	return ScriptInstallBinaryFromURL(HubBinaryURL(version), useSudo)
+// ScriptInstallBinary returns the shell script to download and install the
+// release hub binary. digest is its SHA256, already verified by the caller
+// (see FetchReleaseChecksums), so the target host needs no signature tooling.
+func ScriptInstallBinary(version, digest string, useSudo bool) string {
+	return ScriptInstallBinaryFromURL(HubBinaryURL(version), digest, useSudo)
 }
 
-// ScriptInstallBinaryFromURL returns the shell script to download and install a hub binary.
-func ScriptInstallBinaryFromURL(url string, useSudo bool) string {
-	base := strings.TrimSuffix(url, "/"+path.Base(url))
+// ScriptInstallBinaryFromURL returns the shell script to download a hub binary
+// and install it only if it matches digest.
+func ScriptInstallBinaryFromURL(url, digest string, useSudo bool) string {
 	return fmt.Sprintf(`set -ex
 download_dir=$(mktemp -d)
 trap 'rm -rf "$download_dir"' EXIT
 curl -fsSL %s -o "$download_dir/elasticclaw-bin"
-curl -fsSL %s -o "$download_dir/checksums.txt"
-release_key=%s
-if [ -n "$release_key" ]; then
-  curl -fsSL %s -o "$download_dir/checksums.txt.minisig"
-  minisign -V -P "$release_key" -m "$download_dir/checksums.txt" -x "$download_dir/checksums.txt.minisig"
-else
-  echo "Warning: release signing key is not configured; skipping checksums.txt signature verification" >&2
-fi
-digest=$(awk -v name=%s '$2 == name || $2 == "*" name { print $1 }' "$download_dir/checksums.txt")
+digest=%s
 if ! printf '%%s\n' "$digest" | grep -Eq '^[0-9a-fA-F]{64}$' || [ "${#digest}" -ne 64 ]; then
-  echo "Missing or invalid checksum for release asset" >&2
+  echo "Missing or invalid checksum for hub binary" >&2
   exit 1
 fi
 printf '%%s  %%s\n' "$digest" "$download_dir/elasticclaw-bin" > "$download_dir/verify.txt"
@@ -106,9 +99,7 @@ else
 fi
 chmod +x "$download_dir/elasticclaw-bin"
 %smv "$download_dir/elasticclaw-bin" /usr/local/bin/elasticclaw`,
-		shellQuote(url), shellQuote(base+"/checksums.txt"), shellQuote(ReleaseMinisignPublicKey),
-		shellQuote(base+"/checksums.txt.minisig"),
-		shellQuote(path.Base(url)), sudoPrefix(useSudo))
+		shellQuote(url), shellQuote(digest), sudoPrefix(useSudo))
 }
 
 // ScriptWriteConfig returns the shell script to write the hub config.

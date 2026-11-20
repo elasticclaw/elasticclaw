@@ -57,6 +57,16 @@ func FetchReleaseChecksums(ctx context.Context, client *http.Client, baseURL str
 	return fetchReleaseChecksums(ctx, client, baseURL, ReleaseMinisignPublicKey)
 }
 
+// FetchUnsignedChecksums fetches checksums.txt without signature verification,
+// for non-release sources such as preview builds that carry no release signature.
+func FetchUnsignedChecksums(ctx context.Context, client *http.Client, baseURL string) (map[string]string, error) {
+	data, err := fetchReleaseFile(ctx, client, strings.TrimRight(baseURL, "/")+"/checksums.txt")
+	if err != nil {
+		return nil, err
+	}
+	return ParseChecksums(data)
+}
+
 func fetchReleaseChecksums(ctx context.Context, client *http.Client, baseURL, publicKey string) (map[string]string, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
 	data, err := fetchReleaseFile(ctx, client, baseURL+"/checksums.txt")
