@@ -3588,7 +3588,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			automaticContinuationPaused := false
 			bridgeErrTurn := false
 			if !workflowV2Controlled {
-				automaticContinuationPaused, bridgeErrTurn = s.observeTurnOutcome(cc, clawID, hm.ID, turnContent)
+				automaticContinuationPaused, bridgeErrTurn = s.observeTurnOutcome(cc, clawID, hm.ID, turnContent, hm.ErrorClass)
 				if !automaticContinuationPaused {
 					s.handleInitialPlanResponse(clawID, tenantID, turnContent)
 				}
