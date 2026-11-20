@@ -5733,9 +5733,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			heartbeatPayload[k] = v
 		}
 		addHeartbeatSessionKeys(heartbeatPayload, usage.sessionKey, h.SessionKey())
-		if cumulative.SessionKey != "" && (cumulative.InputTokens != nil || cumulative.OutputTokens != nil) {
-			heartbeatPayload["usage"] = cumulative
-		}
+		addHeartbeatCumulativeUsage(heartbeatPayload, usage, cumulative)
 		if usage.inputTokens != nil {
 			heartbeatPayload["input_tokens"] = usage.inputTokens
 		}
@@ -5884,6 +5882,19 @@ func addHeartbeatSessionKeys(payload map[string]interface{}, snapshotKey, gatewa
 	if gatewayKey != "" {
 		payload["gateway_session_key"] = gatewayKey
 		payload["harness_session_key"] = gatewayKey
+	}
+}
+
+// addHeartbeatCumulativeUsage attaches the session totals only to a sample
+// that carries this run's flat tokens. The accumulator keeps the last seen
+// tokens, so a tokenless sample would otherwise reach the hub as a
+// cumulative-only sample that the flat fields alone never billed.
+func addHeartbeatCumulativeUsage(payload map[string]interface{}, usage gatewayUsage, cumulative harness.UsageSnapshot) {
+	if usage.inputTokens == nil && usage.outputTokens == nil {
+		return
+	}
+	if cumulative.SessionKey != "" && (cumulative.InputTokens != nil || cumulative.OutputTokens != nil) {
+		payload["usage"] = cumulative
 	}
 }
 

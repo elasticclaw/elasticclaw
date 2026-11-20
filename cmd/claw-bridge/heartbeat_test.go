@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
+)
 
 func TestHeartbeatPayloadHarnessAliases(t *testing.T) {
 	for _, ready := range []bool{false, true} {
@@ -32,6 +36,29 @@ func TestHeartbeatPayloadHarnessAliases(t *testing.T) {
 					t.Errorf("payload[%q] = %v (present=%v), want %q with empty values omitted", key, got, present, want)
 				}
 			}
+		}
+	}
+}
+
+func TestHeartbeatCumulativeUsageNeedsFlatTokens(t *testing.T) {
+	tokens := 100
+	cumulative := harness.UsageSnapshot{SessionKey: "a", InputTokens: &tokens, OutputTokens: &tokens}
+	cost := 1.0
+	for _, tc := range []struct {
+		name  string
+		usage gatewayUsage
+		want  bool
+	}{
+		{"input tokens", gatewayUsage{sessionKey: "a", inputTokens: &tokens}, true},
+		{"output tokens", gatewayUsage{sessionKey: "a", outputTokens: &tokens}, true},
+		{"total only", gatewayUsage{sessionKey: "a", totalTokens: &tokens}, false},
+		{"cost only", gatewayUsage{sessionKey: "a", estimatedCostUSD: &cost}, false},
+		{"nothing", gatewayUsage{sessionKey: "a"}, false},
+	} {
+		payload := map[string]interface{}{}
+		addHeartbeatCumulativeUsage(payload, tc.usage, cumulative)
+		if _, got := payload["usage"]; got != tc.want {
+			t.Errorf("%s: usage attached = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
