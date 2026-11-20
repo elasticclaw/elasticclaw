@@ -23,7 +23,7 @@ func (s *Server) handleClawPRRegistration(w http.ResponseWriter, r *http.Request
 	if clawToken == "" {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	if !s.validClawToken(clawToken) {
+	if !s.validClawToken(clawToken, r.PathValue("id")) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

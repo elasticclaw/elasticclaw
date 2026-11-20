@@ -1250,20 +1250,27 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 	return id, err
 }
 
-// validClawToken reports whether token authenticates a claw: either a tenant's
-// claw token (as on the WS register path) or the configured hub claw token.
-// An empty token or empty expected value never matches.
-func (s *Server) validClawToken(token string) bool {
+// validClawToken reports whether token authenticates a request for clawID:
+// either the configured hub claw token, or a tenant's claw token (as on the WS
+// register path) when clawID belongs to that tenant. An empty token or empty
+// expected value never matches.
+func (s *Server) validClawToken(token, clawID string) bool {
 	if token == "" {
 		return false
-	}
-	if _, err := s.tenantByClawToken(token); err == nil {
-		return true
 	}
 	s.mu.RLock()
 	want := s.hubCfg.ClawToken
 	s.mu.RUnlock()
-	return want != "" && subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1
+	if want != "" && subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1 {
+		return true
+	}
+	tenantID, err := s.tenantByClawToken(token)
+	if err != nil {
+		return false
+	}
+	var owned int
+	err = s.db.QueryRow(`SELECT 1 FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&owned)
+	return err == nil
 }
 
 // ─── REST handlers ────────────────────────────────────────────────────────────
@@ -9188,12 +9195,11 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	if clawToken == "" {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	if !s.validClawToken(clawToken) {
+	clawID := strings.TrimPrefix(r.URL.Path, "/api/github/token/")
+	if !s.validClawToken(clawToken, clawID) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-
-	clawID := strings.TrimPrefix(r.URL.Path, "/api/github/token/")
 	if clawID == "" {
 		http.Error(w, "missing claw id", http.StatusBadRequest)
 		return

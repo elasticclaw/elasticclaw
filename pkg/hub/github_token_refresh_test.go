@@ -852,6 +852,9 @@ func TestGitHubTokenEndpointFailsClosedOnClawToken(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant-b','B','tenant-b-token','tenant-claw-token',?)`, now()); err != nil {
 		t.Fatalf("insert tenant: %v", err)
 	}
+	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant-c','C','tenant-c-token','other-tenant-claw-token',?)`, now()); err != nil {
+		t.Fatalf("insert other tenant: %v", err)
+	}
 	reposJSON := `[{"repo":"example-org/example-repo","permissions":"read"}]`
 	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
 		"auth-claw", "tenant-b", "auth claw", "auth-ws", "noop", "", "{}", reposJSON, "", 0, 0, "", `[]`, "provisioning"); err != nil {
@@ -870,6 +873,8 @@ func TestGitHubTokenEndpointFailsClosedOnClawToken(t *testing.T) {
 		{name: "wrong bearer", bear: "wrong", want: http.StatusUnauthorized},
 		{name: "tenant token", query: "claw_token=tenant-claw-token", want: http.StatusOK},
 		{name: "tenant bearer", bear: "tenant-claw-token", want: http.StatusOK},
+		{name: "other tenant token", query: "claw_token=other-tenant-claw-token", want: http.StatusUnauthorized},
+		{name: "other tenant bearer", bear: "other-tenant-claw-token", want: http.StatusUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			url := "/api/github/token/auth-claw?repo=example-org/example-repo"
