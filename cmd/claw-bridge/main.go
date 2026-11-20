@@ -5156,7 +5156,7 @@ func runBootstrap() error {
 // ─── Local HTTP proxy ───────────────────────────────────────────────────────
 // The bridge listens on 127.0.0.1:18790 and forwards requests to the hub
 // via the existing WS connection. This allows tools inside the sandbox
-// (e.g. git credential helper) to reach hub APIs without a public hub URL.
+// to reach explicitly allowed hub APIs without a public hub URL.
 
 type httpProxyReq struct {
 	ReqID  string            `json:"req_id"`
@@ -5188,7 +5188,7 @@ func newHTTPProxy(send func(hubMsg) error) *httpProxy {
 }
 
 func (p *httpProxy) deliver(res httpProxyRes) {
-	log.Printf("[bridge-proxy] deliver req_id=%s status=%d body_len=%d", res.ReqID, res.Status, len(res.Body))
+	log.Printf("[bridge-proxy] deliver status=%d", res.Status)
 	p.mu.Lock()
 	ch, ok := p.pending[res.ReqID]
 	if ok {
@@ -5198,7 +5198,7 @@ func (p *httpProxy) deliver(res httpProxyRes) {
 	if ok {
 		ch <- res
 	} else {
-		log.Printf("[bridge-proxy] deliver dropped req_id=%s (no pending waiter)", res.ReqID)
+		log.Printf("[bridge-proxy] deliver dropped status=%d (no pending waiter)", res.Status)
 	}
 }
 
@@ -5209,7 +5209,7 @@ func (p *httpProxy) ready() bool {
 }
 
 func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[bridge-proxy] incoming %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+	log.Printf("[bridge-proxy] incoming method=%q path=%q", r.Method, r.URL.Path)
 	// Wait up to 30s for the bridge to connect to the hub
 	for i := 0; i < 30; i++ {
 		if p.ready() {
@@ -5218,7 +5218,7 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(1 * time.Second)
 	}
 	if !p.ready() {
-		log.Printf("[bridge-proxy] not ready for %s %s", r.Method, r.URL.Path)
+		log.Printf("[bridge-proxy] not ready method=%q path=%q status=%d", r.Method, r.URL.Path, http.StatusServiceUnavailable)
 		http.Error(w, "bridge not connected to hub", http.StatusServiceUnavailable)
 		return
 	}
@@ -5251,13 +5251,13 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sendFn := p.send
 	p.mu.Unlock()
 	if sendFn == nil {
-		log.Printf("[bridge-proxy] sendFn nil req_id=%s", reqID)
+		log.Printf("[bridge-proxy] sendFn nil method=%q path=%q status=%d", req.Method, req.Path, http.StatusServiceUnavailable)
 		http.Error(w, "bridge not connected", http.StatusServiceUnavailable)
 		return
 	}
-	log.Printf("[bridge-proxy] forwarding req_id=%s method=%s path=%s query=%s headers=%v body_len=%d", reqID, req.Method, req.Path, req.Query, req.Header, len(req.Body))
+	log.Printf("[bridge-proxy] forwarding method=%q path=%q", req.Method, req.Path)
 	if err := sendFn(hubMsg{Type: "http_proxy_req", Payload: mustJSON(req)}); err != nil {
-		log.Printf("[bridge-proxy] send error req_id=%s err=%v", reqID, err)
+		log.Printf("[bridge-proxy] send error method=%q path=%q status=%d", req.Method, req.Path, http.StatusBadGateway)
 		p.mu.Lock()
 		delete(p.pending, reqID)
 		p.mu.Unlock()
@@ -5267,11 +5267,11 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case res := <-ch:
-		log.Printf("[bridge-proxy] response req_id=%s status=%d body_len=%d", reqID, res.Status, len(res.Body))
+		log.Printf("[bridge-proxy] response method=%q path=%q status=%d", req.Method, req.Path, res.Status)
 		w.WriteHeader(res.Status)
 		_, _ = w.Write([]byte(res.Body))
 	case <-time.After(10 * time.Second):
-		log.Printf("[bridge-proxy] timeout req_id=%s path=%s", reqID, req.Path)
+		log.Printf("[bridge-proxy] timeout method=%q path=%q status=%d", req.Method, req.Path, http.StatusGatewayTimeout)
 		p.mu.Lock()
 		delete(p.pending, reqID)
 		p.mu.Unlock()

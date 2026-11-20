@@ -3820,8 +3820,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "model_auth_credential", Payload: credential})
 			}()
 		} else if msg.Type == "http_proxy_req" {
-			// Proxy an HTTP request from the bridge to the hub's internal API.
-			// This allows tools in the sandbox to reach hub APIs without a public URL.
+			// Only explicitly allowed bridge requests may reach the hub router.
 			go func(rawPayload json.RawMessage, conn *websocket.Conn) {
 				var req struct {
 					ReqID  string            `json:"req_id"`
@@ -3835,7 +3834,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					log.Printf("[hub-proxy] bad req payload: %v", err)
 					return
 				}
-				log.Printf("[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
+				logPath, _, _ := strings.Cut(req.Path, "?")
+				logPath, _, _ = strings.Cut(logPath, "#")
+				if !bridgeProxyRequestAllowed(req.Method, req.Path, clawID) {
+					log.Printf("[hub-proxy] denied method=%q path=%q", req.Method, logPath)
+					s.sendHTTPProxyRes(ctx, conn, req.ReqID, http.StatusForbidden, `{"error":"bridge proxy route forbidden"}`)
+					return
+				}
+				log.Printf("[hub-proxy] req method=%q path=%q", req.Method, logPath)
 				// Build an internal HTTP request
 				urls := req.Path
 				if req.Query != "" {
@@ -3843,18 +3849,19 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
 				if err != nil {
-					log.Printf("[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
+					log.Printf("[hub-proxy] build request failed method=%q path=%q", req.Method, logPath)
 					s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
 					return
 				}
-				for k, v := range req.Header {
-					httpReq.Header.Set(k, v)
+				if httpReq.URL.Path != req.Path || httpReq.URL.Host != "localhost" || httpReq.URL.Fragment != "" {
+					s.sendHTTPProxyRes(ctx, conn, req.ReqID, http.StatusForbidden, `{"error":"bridge proxy route forbidden"}`)
+					return
 				}
-				// Inject claw-token auth for internal endpoints used by the bridge.
-				s.mu.RLock()
-				clawToken := s.hubCfg.ClawToken
-				s.mu.RUnlock()
-				httpReq.Header.Set("X-Claw-Token", clawToken)
+				for k, v := range req.Header {
+					if !bridgeProxySensitiveHeader(k) {
+						httpReq.Header.Set(k, v)
+					}
+				}
 				// Execute against internal mux
 				w := &proxyResponseWriter{header: make(http.Header)}
 				s.mux.ServeHTTP(w, httpReq)
@@ -3866,6 +3873,47 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			}(mustJSONRaw(msg.Payload), conn)
 		}
 	}
+}
+
+type bridgeProxyRoute struct {
+	method string
+	path   string
+	prefix bool
+	clawID func(string) string
+}
+
+// Add only audited method/path pairs; prefix paths must end in "/".
+// Routes taking a claw ID must supply an extractor that returns that ID,
+// or an empty string for an invalid path. It is checked against the WS identity.
+var bridgeProxyAllowedRoutes = []bridgeProxyRoute{}
+
+func bridgeProxyRequestAllowed(method, path, clawID string) bool {
+	for _, route := range bridgeProxyAllowedRoutes {
+		if method != route.method || !strings.HasPrefix(path, "/") {
+			continue
+		}
+		if route.prefix {
+			if !strings.HasSuffix(route.path, "/") || !strings.HasPrefix(path, route.path) {
+				continue
+			}
+		} else if path != route.path {
+			continue
+		}
+		if route.clawID != nil {
+			id := route.clawID(path)
+			if id == "" || id != clawID {
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func bridgeProxySensitiveHeader(name string) bool {
+	name = strings.ToLower(name)
+	return name == "authorization" || name == "x-claw-token" || name == "cookie" ||
+		name == "x-volume-token" || strings.HasPrefix(name, "x-forwarded-")
 }
 
 func (s *Server) sendHTTPProxyRes(ctx context.Context, conn *websocket.Conn, reqID string, status int, body string) {
