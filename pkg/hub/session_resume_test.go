@@ -118,6 +118,25 @@ func TestEnqueueSessionLostResumeRendersDigestInsideFence(t *testing.T) {
 	}
 }
 
+func TestEnqueueSessionLostResumeOmitsPreviousOutputAfterProviderRefusal(t *testing.T) {
+	s, db, id := newSessionResumeTestServer(t)
+	seedSessionResumeMessage(t, db, id, "user", "Implement the ticket", now().Add(-time.Minute))
+	seedSessionResumeMessage(t, db, id, "claw", "Recent saved progress", now())
+	edge := types.SessionRecoveryEdge{Reason: types.SessionLossReasonProviderRefusal, TranscriptPath: "/tmp/previous.jsonl", Digest: &types.SessionDigest{AssistantMessages: []string{"refused output"}}}
+	s.enqueueSessionLostResume(id, restartResumePrefix, "refusal-marker", edge)
+	prompt := sessionResumePrompt(t, db, id, restartResumePrefix)
+	for _, banned := range []string{"PREVIOUS_AGENT_OUTPUT", "Recent saved progress", "refused output", "/tmp/previous.jsonl"} {
+		if strings.Contains(prompt, banned) {
+			t.Fatalf("refusal resume replays %q: %s", banned, prompt)
+		}
+	}
+	for _, want := range []string{"reasoning_extraction", "Implement the ticket", "Before anything else", "<!-- refusal-marker -->"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing %q: %s", want, prompt)
+		}
+	}
+}
+
 func TestEnqueueSessionLostResumeCapsDigest(t *testing.T) {
 	s, db, id := newSessionResumeTestServer(t)
 	digest := &types.SessionDigest{AssistantMessages: []string{"keep assistant context"}}
@@ -311,6 +330,7 @@ func TestSessionLossReasonSentence(t *testing.T) {
 		{types.SessionLossReasonLockConflict, "prompt lock"},
 		{types.SessionLossReasonGatewayReconnect, "could not be re-attached"},
 		{types.SessionLossReasonProviderError, "provider rejected"},
+		{types.SessionLossReasonProviderRefusal, "provider refused"},
 		{types.SessionLossReasonUnknown, ""}, {"", ""}, {"future_reason", ""},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {

@@ -2153,6 +2153,9 @@ func TestIsRecoverableSessionLifecycleError(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "provider format rejection", err: errString("LLM request failed: " + providerRequestFormatErrorFragment + "."), want: true},
+		{name: "provider reasoning_extraction refusal", err: errString(productionRefusalError), want: true},
+		{name: "send request provider refusal", err: &sessionSendRequestError{err: errString(productionRefusalError)}, want: true},
+		{name: "other refusal category", err: errString("The provider refused this request (category: cyber). Revise the request and try again."), want: false},
 		{name: "accepted turn deadline", err: context.DeadlineExceeded, want: true},
 		{name: "send request deadline", err: &sessionSendRequestError{err: context.DeadlineExceeded}, want: false},
 		{name: "caller cancellation", err: context.Canceled, want: false},
@@ -2331,10 +2334,55 @@ func TestReplayQueuedDeliversRecoveryEdgeBeforeEmptyReply(t *testing.T) {
 	}
 }
 
+func TestSessionRotationReasonPrefersProviderRefusal(t *testing.T) {
+	refusal := errString(productionRefusalError)
+	lockConflict := errString("error: session file changed while embedded prompt lock was released")
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "refusal", err: refusal, want: types.SessionLossReasonProviderRefusal},
+		{name: "refusal joined with deadline", err: errors.Join(context.DeadlineExceeded, refusal), want: types.SessionLossReasonProviderRefusal},
+		{name: "refusal wrapping deadline", err: fmt.Errorf("%s: %w", productionRefusalError, context.DeadlineExceeded), want: types.SessionLossReasonProviderRefusal},
+		{name: "refusal joined with lock conflict", err: errors.Join(lockConflict, refusal), want: types.SessionLossReasonProviderRefusal},
+		{name: "deadline", err: context.DeadlineExceeded, want: types.SessionLossReasonTurnTimeout},
+		{name: "lock conflict", err: lockConflict, want: types.SessionLossReasonLockConflict},
+		{name: "provider format", err: errString("LLM request failed: " + providerRequestFormatErrorFragment + "."), want: types.SessionLossReasonProviderError},
+		{name: "other", err: errString("boom"), want: types.SessionLossReasonUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionRotationReason(tt.err); got != tt.want {
+				t.Fatalf("sessionRotationReason(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// productionRefusalError is the lifecycle error text claw-bridge logged on
+// Faster claws in Nov 2026 ("[gateway] agent turn error: ...").
+const productionRefusalError = "The provider refused this request (category: reasoning_extraction). Revise the request and try again."
+
 func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
+	testGatewaySessionResetsAfterLifecycleError(t, "LLM request failed: "+providerRequestFormatErrorFragment+".", types.SessionLossReasonProviderError, false)
+}
+
+func TestGatewaySessionResetsAfterProviderRefusalLifecycleError(t *testing.T) {
+	testGatewaySessionResetsAfterLifecycleError(t, productionRefusalError, types.SessionLossReasonProviderRefusal, false)
+}
+
+// A refusal reported by sessions.send itself still rotates through the
+// session_rotated edge instead of replaying the bare message into a fresh
+// session; the fake gateway fails the test on any second sessions.send.
+func TestGatewaySessionResetsAfterProviderRefusalSendError(t *testing.T) {
+	testGatewaySessionResetsAfterLifecycleError(t, productionRefusalError, types.SessionLossReasonProviderRefusal, true)
+}
+
+func testGatewaySessionResetsAfterLifecycleError(t *testing.T, providerErr, wantReason string, rejectSend bool) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
-	const providerErr = "LLM request failed: " + providerRequestFormatErrorFragment + "."
 	testDone := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -2361,24 +2409,31 @@ func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
-			t.Errorf("accept sessions.send: %v", err)
-			return
-		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
-			Type:  "event",
-			Event: "agent",
-			Payload: mustJSON(map[string]interface{}{
-				"stream":     "lifecycle",
-				"sessionKey": "session-1",
-				"data": map[string]string{
-					"phase": "error",
-					"error": providerErr,
-				},
-			}),
-		}); err != nil {
-			t.Errorf("write lifecycle error: %v", err)
-			return
+		if rejectSend {
+			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: false, Error: &gwError{Code: "provider_error", Message: providerErr}}); err != nil {
+				t.Errorf("reject sessions.send: %v", err)
+				return
+			}
+		} else {
+			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+				t.Errorf("accept sessions.send: %v", err)
+				return
+			}
+			if err := wsjson.Write(r.Context(), conn, gwFrame{
+				Type:  "event",
+				Event: "agent",
+				Payload: mustJSON(map[string]interface{}{
+					"stream":     "lifecycle",
+					"sessionKey": "session-1",
+					"data": map[string]string{
+						"phase": "error",
+						"error": providerErr,
+					},
+				}),
+			}); err != nil {
+				t.Errorf("write lifecycle error: %v", err)
+				return
+			}
 		}
 
 		abortReq, ok := readRequest("sessions.abort")
@@ -2455,6 +2510,9 @@ func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	}
 	if got := loadBridgeSession(); got != "session-2" {
 		t.Fatalf("persisted session key = %q, want session-2", got)
+	}
+	if got := sessionLossReason(err); got != wantReason {
+		t.Fatalf("session loss reason = %q, want %q", got, wantReason)
 	}
 }
 
