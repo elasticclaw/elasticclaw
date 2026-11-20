@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN set -eu; key=$(mktemp) \
     && curl -fsSL --proto '=https' https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o "$key" \
     && key_info=$(gpg --batch --show-keys --with-colons "$key") \
+    && [ "$(printf '%s\n' "$key_info" | grep -c '^pub:')" = 1 ] \
     && printf '%s\n' "$key_info" | awk -F: '$1 == "pub" { primary=1; next } $1 == "sub" { primary=0 } $1 == "fpr" && primary { print; primary=0 }' | grep -Fx 'fpr:::::::::6F71F525282841EEDAF851B42F59B5F99B1BE0B4:' \
     && install -d /etc/apt/keyrings \
     && gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg "$key" \

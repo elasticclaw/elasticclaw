@@ -29,7 +29,8 @@ chmod +x "$NIX_INSTALLER"
 ) >> /tmp/nix-install.log 2>&1
 `
 
-// VerifiedAPTKeyScript checks the primary fingerprint before installing a keyring.
+// VerifiedAPTKeyScript checks that the bundle holds exactly one primary key with
+// the expected fingerprint before installing a keyring.
 // Arguments are trusted script constants; sudo is either empty or "sudo ".
 func VerifiedAPTKeyScript(url, keyring, fingerprint, sudo string) string {
 	return fmt.Sprintf(`(
@@ -38,6 +39,7 @@ APT_KEY=$(mktemp)
 trap 'rm -f "$APT_KEY"' EXIT
 curl -fsSL --proto '=https' "%s" -o "$APT_KEY"
 KEY_INFO=$(gpg --batch --show-keys --with-colons "$APT_KEY")
+[ "$(printf '%%s\n' "$KEY_INFO" | grep -c '^pub:')" = 1 ] || { echo "APT signing key bundle must hold exactly one primary key" >&2; exit 1; }
 printf '%%s\n' "$KEY_INFO" | awk -F: '$1 == "pub" { primary=1; next } $1 == "sub" { primary=0 } $1 == "fpr" && primary { print; primary=0 }' | grep -Fx 'fpr:::::::::%s:' >/dev/null || { echo "APT signing key fingerprint mismatch" >&2; exit 1; }
 %sgpg --batch --yes --dearmor -o %s "$APT_KEY"
 )

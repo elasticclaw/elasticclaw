@@ -29,6 +29,7 @@ func TestVerifiedAPTKeyScript(t *testing.T) {
 		{name: "primary matches", info: "pub:::::::::\nfpr:::::::::" + DockerKeyFingerprint + ":\n", want: true},
 		{name: "wrong primary", info: "pub:::::::::\nfpr:::::::::WRONG:\n"},
 		{name: "only subkey matches", info: "pub:::::::::\nfpr:::::::::WRONG:\nsub:::::::::\nfpr:::::::::" + DockerKeyFingerprint + ":\n"},
+		{name: "extra primary key", info: "pub:::::::::\nfpr:::::::::" + DockerKeyFingerprint + ":\npub:::::::::\nfpr:::::::::ATTACKER:\n"},
 		{name: "gpg failure", failGPG: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
