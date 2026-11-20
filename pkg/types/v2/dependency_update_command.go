@@ -28,6 +28,7 @@ func normalizeDependencyUpdateConfig(cfg DependencyUpdateConfig) DependencyUpdat
 		ExcludePaths:     cleanStringList(cfg.ExcludePaths),
 		Grouping:         strings.TrimSpace(cfg.Grouping),
 		IncludeMajor:     cfg.IncludeMajor,
+		IncludeIndirect:  cfg.IncludeIndirect,
 		SeparateMajor:    cfg.SeparateMajor,
 		SeparateSecurity: cfg.SeparateSecurity,
 		SeparateRuntime:  cfg.SeparateRuntime,
@@ -300,7 +301,7 @@ for manifest in manifests:
             apply_updates = []
             for module in parse_go_modules(listed.stdout):
                 name = module.get("Path", "")
-                if module.get("Main") or module.get("Replace") or module.get("Error") or module.get("Indirect"):
+                if module.get("Main") or module.get("Replace") or module.get("Error"):
                     continue
                 update = module.get("Update") or {}
                 if not update:
@@ -314,6 +315,17 @@ for manifest in manifests:
                 if not allowed(name):
                     update_record("go", name, from_version, to_version, kind, False, skipped_reason="filtered by allow/ignore")
                     continue
+                if module.get("Indirect"):
+                    # Indirect modules are skipped unless include_indirect is
+                    # set. When enabled, only patch updates are applied:
+                    # minor/major jumps for a module nothing directly requires
+                    # risk pulling unvetted versions into the build list.
+                    if not CONFIG.get("include_indirect"):
+                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="indirect updates disabled")
+                        continue
+                    if kind != "patch":
+                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="indirect updates are limited to patch releases")
+                        continue
                 if kind == "major" and not CONFIG.get("include_major"):
                     update_record("go", name, from_version, to_version, kind, False, skipped_reason="major updates disabled")
                     continue
