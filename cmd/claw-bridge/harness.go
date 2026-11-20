@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -43,7 +44,7 @@ type Harness interface {
 	RestartCount() int
 	RefreshUsage(ctx context.Context)
 	ContextUsage() int
-	Usage() gatewayUsage
+	Usage() (gatewayUsage, harness.UsageSnapshot)
 	Subagents(ctx context.Context) (int, error)
 }
 

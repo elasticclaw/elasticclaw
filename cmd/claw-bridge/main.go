@@ -1322,6 +1322,8 @@ type gatewaySession struct {
 	ctxMu        sync.RWMutex
 	contextUsage int
 	usage        gatewayUsage
+	// usageAcc turns usage into session totals; created on first Usage call.
+	usageAcc *openclaw.UsageAccumulator
 	// cacheUsagePolledAt throttles the sessions.usage transcript scan.
 	cacheUsagePolledAt time.Time
 	// cacheUsagePollFailed lifts the throttle until a poll succeeds again.
@@ -2641,10 +2643,14 @@ func (gs *gatewaySession) ContextUsage() int {
 	return gs.contextUsage
 }
 
-func (gs *gatewaySession) Usage() gatewayUsage {
-	gs.ctxMu.RLock()
-	defer gs.ctxMu.RUnlock()
-	return gs.usage
+func (gs *gatewaySession) Usage() (gatewayUsage, harness.UsageSnapshot) {
+	gs.ctxMu.Lock()
+	defer gs.ctxMu.Unlock()
+	if gs.usageAcc == nil {
+		gs.usageAcc = newOpenClawUsageAccumulator()
+	}
+	usage := gs.usage
+	return usage, gs.usageAcc.Observe(usage.sessionKey, usage.inputTokens, usage.outputTokens, usage.estimatedCostUSD, usage.model, usage.modelProvider, usage.cacheReadTokens, usage.cacheWriteTokens)
 }
 
 // IsReady returns true once the persistent gateway session is established.
@@ -5710,7 +5716,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		go h.RefreshUsage(connCtx)
 		health := h.Healthy()
 		cu := h.ContextUsage()
-		usage := h.Usage()
+		usage, cumulative := h.Usage()
 		restarts := h.RestartCount()
 		// Best-effort subagent activity: subagentHeartbeatFields returns both
 		// fields only for a successful poll, so on any failure (RPC error,
@@ -5727,6 +5733,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			heartbeatPayload[k] = v
 		}
 		addHeartbeatSessionKeys(heartbeatPayload, usage.sessionKey, h.SessionKey())
+		if cumulative.SessionKey != "" && (cumulative.InputTokens != nil || cumulative.OutputTokens != nil) {
+			heartbeatPayload["usage"] = cumulative
+		}
 		if usage.inputTokens != nil {
 			heartbeatPayload["input_tokens"] = usage.inputTokens
 		}

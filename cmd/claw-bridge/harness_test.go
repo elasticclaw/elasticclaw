@@ -40,3 +40,24 @@ func TestHarnessRunTurnForwardsEvents(t *testing.T) {
 		})
 	}
 }
+
+func TestHarnessUsageSharesSample(t *testing.T) {
+	in, out, cost := 100, 20, .5
+	gs := &gatewaySession{usage: gatewayUsage{sessionKey: "a", inputTokens: &in, outputTokens: &out, estimatedCostUSD: &cost, model: "model", modelProvider: "provider"}}
+	flat, cumulative := gs.Usage()
+	if !reflect.DeepEqual(flat, gs.usage) || cumulative.SessionKey != flat.sessionKey || *cumulative.InputTokens != *flat.inputTokens || *cumulative.OutputTokens != *flat.outputTokens || *cumulative.CostUSD != *flat.estimatedCostUSD || cumulative.Model != flat.model || cumulative.ModelProvider != flat.modelProvider {
+		t.Fatalf("flat/cumulative samples differ: %+v / %+v", flat, cumulative)
+	}
+	if len(cumulative.Epoch) != 32 {
+		t.Fatalf("epoch = %q, want 16 random bytes as hex", cumulative.Epoch)
+	}
+	_, repeated := gs.Usage()
+	if !reflect.DeepEqual(cumulative, repeated) {
+		t.Fatalf("repeat changed totals: %+v / %+v", cumulative, repeated)
+	}
+	other := &gatewaySession{}
+	_, otherUsage := other.Usage()
+	if otherUsage.Epoch == cumulative.Epoch {
+		t.Fatal("independent adapters reused epoch")
+	}
+}

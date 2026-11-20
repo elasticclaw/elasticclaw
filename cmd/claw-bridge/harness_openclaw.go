@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/harness/openclaw"
@@ -48,4 +50,12 @@ func (gs *gatewaySession) RefreshUsage(ctx context.Context) {
 
 func (gs *gatewaySession) Subagents(ctx context.Context) (int, error) {
 	return gs.pollSubagentActivity(ctx)
+}
+
+// newOpenClawUsageAccumulator starts a usage epoch for this bridge process:
+// a restart loses the running totals, so it must never reuse an epoch.
+func newOpenClawUsageAccumulator() *openclaw.UsageAccumulator {
+	epoch := make([]byte, 16)
+	rand.Read(epoch) // never fails since Go 1.24
+	return openclaw.NewUsageAccumulator(hex.EncodeToString(epoch))
 }
