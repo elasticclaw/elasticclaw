@@ -2,10 +2,12 @@ package hub
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -53,6 +55,10 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
+	bridgeChecksumMu     sync.Mutex
+	bridgeChecksums      map[string]bridgeChecksumEntry // release claw-bridge URL -> sha256 or recent failure
+	bridgeChecksumFlight singleflight.Group
+
 	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
 	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping
 	appSlugMu     sync.Mutex // guards appSlugs
@@ -1245,6 +1251,29 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 	return id, err
 }
 
+// validClawToken reports whether token authenticates a request for clawID:
+// either the configured hub claw token, or a tenant's claw token (as on the WS
+// register path) when clawID belongs to that tenant. An empty token or empty
+// expected value never matches.
+func (s *Server) validClawToken(token, clawID string) bool {
+	if token == "" {
+		return false
+	}
+	s.mu.RLock()
+	want := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	if want != "" && subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1 {
+		return true
+	}
+	tenantID, err := s.tenantByClawToken(token)
+	if err != nil {
+		return false
+	}
+	var owned int
+	err = s.db.QueryRow(`SELECT 1 FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&owned)
+	return err == nil
+}
+
 // ─── REST handlers ────────────────────────────────────────────────────────────
 
 // ─── Web UI auth (for embedded/static web UI) ───────────────────────────────────
@@ -1785,18 +1814,26 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	clawToken := s.hubCfg.ClawToken
 	hubSecrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
+	envFilter := sandboxEnvFilter{}
+	defer envFilter.log(clawID)
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
 		"ELASTICCLAW_CLAW_ID":    clawID,
 		"ELASTICCLAW_CLAW_TOKEN": clawToken,
 	}
 	for k, v := range req.Env {
+		if !envFilter.allow(k) {
+			continue
+		}
 		env[k] = v
 	}
 	env["ELASTICCLAW_MODEL_AUTH_TOKEN"] = s.modelAuthTokenForClaw(clawID)
 	// Sensitive identity is hub-managed and must not be overridden by request env.
 	env["ELASTICCLAW_TEMPLATE"] = req.TemplateName
 	for envName, secretRef := range req.SecretRefs {
+		if !envFilter.allow(envName) {
+			continue
+		}
 		if val, ok := hubSecrets[secretRef]; ok {
 			env[envName] = val
 			log.Printf("[create] injected secret_ref %s as %s into claw env", secretRef, envName)
@@ -1873,16 +1910,6 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	tagsJSON, _ := json.Marshal(tags)
 	color := resolveColor(req.Color, req.Name)
 
-	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
-	)
-	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
-		return
-	}
-
 	// Convert string files to bytes for the provider
 	templateFiles := make(map[string][]byte, len(req.Files))
 	for k, v := range req.Files {
@@ -1912,22 +1939,35 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 				log.Printf("[create] MCP server %q is disabled, skipping", mcpRef.Name)
 				continue
 			}
+			if hubMCP.Source == types.MCPSourceDocker {
+				if err := s.checkContainerImage("MCP docker", hubMCP.Image); err != nil {
+					jsonError(w, http.StatusUnprocessableEntity, err.Error())
+					return
+				}
+			}
 			// Build command
 			cmd := hubMCP.Command
 			if len(cmd) == 0 {
+				if err := s.checkMCPPackage(hubMCP.Source, hubMCP.Package); err != nil {
+					log.Printf("[create] MCP server %q skipped: %v", mcpRef.Name, err)
+					continue
+				}
 				switch hubMCP.Source {
 				case types.MCPSourceNpx:
-					cmd = []string{"npx", "-y", hubMCP.Package}
+					cmd = []string{"npx", "--ignore-scripts", "-y", hubMCP.Package}
 				case types.MCPSourceUvx:
 					cmd = []string{"uvx", hubMCP.Package}
 				case types.MCPSourceSmithery:
-					cmd = []string{"npx", "-y", "@smithery/cli@latest", "run", hubMCP.Package}
+					cmd = []string{"npx", "--ignore-scripts", "-y", "@smithery/cli@" + cliversion.SmitheryCLIVersion, "run", hubMCP.Package}
 				case types.MCPSourceDocker:
 					cmd = []string{"docker", "run", "-i", "--rm", hubMCP.Image}
 				case types.MCPSourceSSE:
 					// SSE is remote — no local command, skip for now
 					log.Printf("[create] SSE MCP server %q not yet supported for local stdio", mcpRef.Name)
 					continue
+				}
+				if hubMCP.Source == types.MCPSourceNpx || hubMCP.Source == types.MCPSourceSmithery {
+					log.Printf("[create] MCP server %q runs with npm install scripts disabled (--ignore-scripts); set an explicit command to allow them", mcpRef.Name)
 				}
 			}
 			if len(cmd) == 0 {
@@ -1956,6 +1996,16 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		}
 	}
 	req.MCPs = mcpConfigs
+
+	_, err := s.db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
+	)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 
 	// Provision asynchronously so the HTTP request returns quickly
 	// Use a stable short ID as the provider-side name so renaming the claw
@@ -3798,8 +3848,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "model_auth_credential", Payload: credential})
 			}()
 		} else if msg.Type == "http_proxy_req" {
-			// Proxy an HTTP request from the bridge to the hub's internal API.
-			// This allows tools in the sandbox to reach hub APIs without a public URL.
+			// Only explicitly allowed bridge requests may reach the hub router.
 			go func(rawPayload json.RawMessage, conn *websocket.Conn) {
 				var req struct {
 					ReqID  string            `json:"req_id"`
@@ -3813,7 +3862,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					log.Printf("[hub-proxy] bad req payload: %v", err)
 					return
 				}
-				log.Printf("[hub-proxy] req req_id=%s %s %s?%s", req.ReqID, req.Method, req.Path, req.Query)
+				logPath, _, _ := strings.Cut(req.Path, "?")
+				logPath, _, _ = strings.Cut(logPath, "#")
+				if !bridgeProxyRequestAllowed(req.Method, req.Path, clawID) {
+					log.Printf("[hub-proxy] denied method=%q path=%q", req.Method, logPath)
+					s.sendHTTPProxyRes(ctx, conn, req.ReqID, http.StatusForbidden, `{"error":"bridge proxy route forbidden"}`)
+					return
+				}
+				log.Printf("[hub-proxy] req method=%q path=%q", req.Method, logPath)
 				// Build an internal HTTP request
 				urls := req.Path
 				if req.Query != "" {
@@ -3821,18 +3877,19 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				httpReq, err := http.NewRequest(req.Method, "http://localhost"+urls, strings.NewReader(req.Body))
 				if err != nil {
-					log.Printf("[hub-proxy] build request failed req_id=%s err=%v", req.ReqID, err)
+					log.Printf("[hub-proxy] build request failed method=%q path=%q", req.Method, logPath)
 					s.sendHTTPProxyRes(ctx, conn, req.ReqID, 400, "bad request")
 					return
 				}
-				for k, v := range req.Header {
-					httpReq.Header.Set(k, v)
+				if httpReq.URL.Path != req.Path || httpReq.URL.Host != "localhost" || httpReq.URL.Fragment != "" {
+					s.sendHTTPProxyRes(ctx, conn, req.ReqID, http.StatusForbidden, `{"error":"bridge proxy route forbidden"}`)
+					return
 				}
-				// Inject claw-token auth for internal endpoints used by the bridge.
-				s.mu.RLock()
-				clawToken := s.hubCfg.ClawToken
-				s.mu.RUnlock()
-				httpReq.Header.Set("X-Claw-Token", clawToken)
+				for k, v := range req.Header {
+					if !bridgeProxySensitiveHeader(k) {
+						httpReq.Header.Set(k, v)
+					}
+				}
 				// Execute against internal mux
 				w := &proxyResponseWriter{header: make(http.Header)}
 				s.mux.ServeHTTP(w, httpReq)
@@ -3844,6 +3901,47 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			}(mustJSONRaw(msg.Payload), conn)
 		}
 	}
+}
+
+type bridgeProxyRoute struct {
+	method string
+	path   string
+	prefix bool
+	clawID func(string) string
+}
+
+// Add only audited method/path pairs; prefix paths must end in "/".
+// Routes taking a claw ID must supply an extractor that returns that ID,
+// or an empty string for an invalid path. It is checked against the WS identity.
+var bridgeProxyAllowedRoutes = []bridgeProxyRoute{}
+
+func bridgeProxyRequestAllowed(method, path, clawID string) bool {
+	for _, route := range bridgeProxyAllowedRoutes {
+		if method != route.method || !strings.HasPrefix(path, "/") {
+			continue
+		}
+		if route.prefix {
+			if !strings.HasSuffix(route.path, "/") || !strings.HasPrefix(path, route.path) {
+				continue
+			}
+		} else if path != route.path {
+			continue
+		}
+		if route.clawID != nil {
+			id := route.clawID(path)
+			if id == "" || id != clawID {
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func bridgeProxySensitiveHeader(name string) bool {
+	name = strings.ToLower(name)
+	return name == "authorization" || name == "x-claw-token" || name == "cookie" ||
+		name == "x-volume-token" || strings.HasPrefix(name, "x-forwarded-")
 }
 
 func (s *Server) sendHTTPProxyRes(ctx context.Context, conn *websocket.Conn, reqID string, status int, body string) {
@@ -4214,29 +4312,32 @@ configureLoop:
 }
 
 func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
+	snapshot, err := s.daytonaSnapshot(req, cfg)
+	if err != nil {
+		return err
+	}
 	p, err := newDaytonaProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("daytona init: %w", err)
 	}
 	// Fail before creating a sandbox when the connector artifact is definitively missing.
 	if bridgeURL := s.bridgeDownloadURL(); bridgeURL != "" {
+		_, err := s.bridgeSHA256(ctx, bridgeURL)
+		if err != nil {
+			return err
+		}
 		if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
 			return err
 		}
 	}
 	s.setBootstrapStatus(clawID, "Creating sandbox")
-	// Resolve snapshot: template snapshot > hub default_snapshot
-	snapshot := req.Snapshot
-	if snapshot == "" {
-		snapshot = cfg.DefaultSnapshot
-	}
 	createReq := types.CreateRequest{
 		Name:          req.ProviderName, // stable ec-<shortid>, decoupled from display name
 		FromImage:     snapshot,
 		TemplateFiles: files,
 		Env:           env,
 	}
-	instance, err := createAndConfigureDaytonaSandbox(ctx, p, createReq, env, func(created *types.Instance) error {
+	instance, err := createDaytonaSandbox(ctx, p, createReq, env, func(created *types.Instance) error {
 		if _, err := s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, created.ID, clawID); err != nil {
 			return err
 		}
@@ -4329,15 +4430,10 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	// Step 1: Install pinned OpenClaw version.
 	// Run install in background and poll — avoids the 60s HTTP client timeout
 	// that kills synchronous long-running commands.
-	// Uninstall old openclaw then reinstall pinned version (ensures nvm current symlink is updated)
-	if err := exec("uninstall old openclaw", 20*time.Second,
-		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-echo "npm=$NPM prefix=$PREFIX"; \
-sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true; \
-hash -r; \
-echo uninstalled`); err != nil {
-		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
+	// Remove the snapshot's unpinned global OpenClaw so shells without
+	// $HOME/.local/bin first on PATH cannot run it against the pinned state.
+	if err := exec("uninstall old openclaw", 20*time.Second, daytonaUninstallGlobalOpenClawCommand); err != nil {
+		log.Printf("[daytona] warning: uninstall old openclaw failed: %v", err)
 	}
 
 	const daytonaOpenClawVersion = cliversion.OpenClawVersion
@@ -4348,7 +4444,7 @@ echo uninstalled`); err != nil {
 	var lastInstallStatus string
 	installComplete := false
 	for !installComplete {
-		result, err := execResult("check openclaw install", 15*time.Second, daytonaOpenClawInstallStatusCommand(daytonaOpenClawVersion))
+		result, err := execResult("check openclaw install", 15*time.Second, daytonaOpenClawInstallStatusCommand())
 		if err != nil {
 			lastInstallStatus = err.Error()
 		} else {
@@ -4371,19 +4467,7 @@ echo uninstalled`); err != nil {
 		time.Sleep(10 * time.Second)
 	}
 
-	if err := exec("verify openclaw", 20*time.Second,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
-NPM="$NVM_DIR/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
-hash -r; \
-OPENCLAW_PATH="$(command -v openclaw || true)"; \
-OPENCLAW_VERSION="$(openclaw --version 2>&1 || true)"; \
-PACKAGE_VERSION="$(PREFIX="$PREFIX" node -e "try{console.log(require(process.env.PREFIX + '/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
-echo "openclaw path=$OPENCLAW_PATH"; \
-echo "openclaw version=$OPENCLAW_VERSION"; \
-echo "openclaw package_version=$PACKAGE_VERSION"; \
-case "$OPENCLAW_VERSION" in *%s*) ;; *) echo "expected openclaw %s"; exit 1 ;; esac`, daytonaOpenClawVersion, daytonaOpenClawVersion)); err != nil {
+	if err := exec("verify openclaw", 20*time.Second, daytonaVerifyOpenClawCommand(daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
@@ -4392,9 +4476,10 @@ case "$OPENCLAW_VERSION" in *%s*) ;; *) echo "expected openclaw %s"; exit 1 ;; e
 	_ = s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled)
 	if nixEnabled == 1 {
 		if err := exec("install nix", 3*time.Minute,
-			`export HOME=/home/daytona; \
-curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-  sh -s -- install linux --no-confirm --init none >> /tmp/nix-install.log 2>&1; \
+			`set -e
+export HOME=/home/daytona
+NIX_INIT_MODE=none
+`+cliversion.NixInstallerScript+`
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true; \
 nix --version`); err != nil {
 			log.Printf("[daytona] warning: nix install failed: %v", err)
@@ -4406,7 +4491,8 @@ nix --version`); err != nil {
 	_ = s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled)
 	if dockerEnabled == 1 {
 		if err := exec("install docker", 3*time.Minute,
-			`export HOME=/home/daytona; \
+			`set -e
+export HOME=/home/daytona; \
 . /etc/os-release; \
 if [ "$ID" = "debian" ] && [ -n "$VERSION_CODENAME" ]; then \
   DOCKER_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $VERSION_CODENAME stable"; \
@@ -4415,14 +4501,14 @@ else \
   DOCKER_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable"; \
   DOCKER_GPG="https://download.docker.com/linux/ubuntu/gpg"; \
 fi; \
-sudo apt-get update -qq && \
-sudo apt-get install -y --fix-broken ca-certificates curl gnupg && \
-sudo install -m 0755 -d /etc/apt/keyrings && \
-curl -fsSL "$DOCKER_GPG" | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg && \
-sudo chmod a+r /etc/apt/keyrings/docker.gpg && \
-echo "$DOCKER_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && \
-sudo apt-get update -qq && \
-sudo apt-get install -y --fix-broken docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
+sudo apt-get update -qq; \
+sudo apt-get install -y --fix-broken ca-certificates curl gnupg; \
+sudo install -m 0755 -d /etc/apt/keyrings; \
+`+cliversion.VerifiedAPTKeyScript("$DOCKER_GPG", "/etc/apt/keyrings/docker.gpg", cliversion.DockerKeyFingerprint, "sudo ")+`
+sudo chmod a+r /etc/apt/keyrings/docker.gpg; \
+echo "$DOCKER_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null; \
+sudo apt-get update -qq; \
+sudo apt-get install -y --fix-broken docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; \
 sudo usermod -aG docker daytona 2>/dev/null || true && \
 docker --version`); err != nil {
 			log.Printf("[daytona] warning: docker install failed: %v", err)
@@ -4532,7 +4618,7 @@ docker --version`); err != nil {
 		}
 	}
 	onboardCmd := fmt.Sprintf(
-		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
+		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
 		llmKeyEnvDaytona,
 		onboardFlags,
 	)
@@ -4559,13 +4645,13 @@ docker --version`); err != nil {
 		}
 	}
 	if oauthAuthSyncDaytona != "" {
-		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + oauthAuthSyncDaytona
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; ` + oauthAuthSyncDaytona
 		if err := exec("sync openclaw OAuth auth", 30*time.Second, syncCmd); err != nil {
 			return fmt.Errorf("sync openclaw OAuth auth: %w", err)
 		}
 	}
 	if apiKeyAuthSyncDaytona != "" {
-		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + apiKeyAuthSyncDaytona
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + apiKeyAuthSyncDaytona
 		if err := exec("sync openclaw api key auth", 30*time.Second, syncCmd); err != nil {
 			return fmt.Errorf("sync openclaw api key auth: %w", err)
 		}
@@ -4578,22 +4664,12 @@ docker --version`); err != nil {
 	// Step 2a: Preflight required commands and environment.
 	// Fail early if the sandbox is missing tools that OpenClaw or agents need.
 	if err := exec("preflight required commands", 30*time.Second,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; \
 for cmd in node npm git python3 curl; do command -v "$cmd" >/dev/null || { echo "missing: $cmd"; exit 1; }; done; \
 echo "preflight ok"`); err != nil {
 		return fmt.Errorf("daytona sandbox missing required commands: %w", err)
 	}
-	// Step 2b: Pre-stage plugin runtime dependencies before starting gateway.
-	// This prevents the gateway from doing expensive npm installs while
-	// clients are connected, which causes event-loop delays and connection drops.
-	if err := exec("stage openclaw plugin deps", 3*time.Minute,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
-export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
-openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"`); err != nil {
-		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
-	}
-
-	// Step 2c: Configure gateway bind/port and start it.
+	// Step 2b: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
 	gatewaySetup := `
 python3 - <<'PYEOF'
@@ -4607,7 +4683,7 @@ with open(path, 'w') as f: json.dump(cfg, f, indent=2)
 print('gateway config updated')
 PYEOF
 export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
-export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
+export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
 # Phase 1: wait for HTTP server to be listening (quick)
 for i in $(seq 1 30); do
   curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
@@ -4646,22 +4722,14 @@ exit 1`
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml (e.g. bridge_image: ttl.sh/your/claw-bridge:tag) or build a tagged release")
 	}
+	bridgeSHA256, err := s.bridgeSHA256(ctx, bridgeURL)
+	if err != nil {
+		return err
+	}
 	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
 		return err
 	}
-	var downloadCmd string
-	if strings.HasPrefix(bridgeURL, "http://") || strings.HasPrefix(bridgeURL, "https://") {
-		downloadCmd = fmt.Sprintf(`rm -f /tmp/claw-bridge.download && curl -fsSL %q -o /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv -f /tmp/claw-bridge.download /tmp/claw-bridge && echo downloaded`, bridgeURL)
-	} else {
-		// OCI ref (ttl.sh or ghcr) — use oras
-		downloadCmd = fmt.Sprintf(`
-if ! command -v oras &>/dev/null; then
-  curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp && sudo mv /tmp/oras /usr/local/bin/oras
-fi
-mkdir -p /tmp/bridge-dl && cd /tmp/bridge-dl && oras pull %q
-BIN=$(find /tmp/bridge-dl -name 'claw-bridge*' -type f | head -1)
-cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv -f /tmp/claw-bridge.download /tmp/claw-bridge && echo downloaded`, bridgeURL)
-	}
+	downloadCmd := daytonaBridgeDownloadScript(bridgeURL, bridgeSHA256)
 	if err := s.downloadDaytonaConnector(ctx, clawID, instanceID, p, downloadCmd); err != nil {
 		return err
 	}
@@ -5094,25 +5162,63 @@ echo "claw-bridge not running"
 exit 1`
 }
 
+const daytonaUninstallGlobalOpenClawCommand = `NPM="/usr/local/share/nvm/current/bin/npm"
+PREFIX="$("$NPM" config get prefix)"
+sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true
+hash -r
+echo uninstalled`
+
+func daytonaVerifyOpenClawCommand(version string) string {
+	return fmt.Sprintf(`export HOME=/home/daytona
+export PATH="$HOME/.local/bin:/usr/local/share/nvm/current/bin:$PATH"
+PACKAGE_VERSION="$(node -p "require('/home/daytona/.local/lib/openclaw-runtime/node_modules/openclaw/package.json').version" 2>/dev/null)"
+echo "openclaw package_version=$PACKAGE_VERSION"
+[ "$PACKAGE_VERSION" = %s ] || { echo "unexpected openclaw package version"; exit 1; }`, shellQuote(version))
+}
+
+// Compress the embedded lock to keep the remote shell command below Linux's
+// per-argument size limit, including the detached bash -c invocation.
+func daytonaOpenClawLockCommand(runtimeDir string) string {
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	_, _ = zw.Write(cliversion.OpenClawPackageLock)
+	_ = zw.Close()
+	return remoteWriteFileCommand(runtimeDir, "package-lock.json.gz", compressed.String()) +
+		"\ngzip -df -- " + shellQuote(path.Join(runtimeDir, "package-lock.json.gz"))
+}
+
 func daytonaStartOpenClawInstallCommand(version string) string {
-	installScript := fmt.Sprintf(`set -o pipefail
+	const runtimeDir = "/home/daytona/.local/lib/openclaw-runtime"
+	// The marker proves a previous npm ci from this exact lock completed.
+	lockSHA := shellQuote(cliversion.OpenClawLockSHA256())
+	installScript := fmt.Sprintf(`set -euo pipefail
 export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
 NPM="$NVM_DIR/current/bin/npm"
-PREFIX="$("$NPM" config get prefix)"
+PREFIX="$HOME/.local"
 export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status
-echo "npm=$NPM prefix=$PREFIX"
-if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" 2>&1; then
-  hash -r
-  echo ok > "$STATUS"
-  echo "install done"
-else
-  rc=$?
-  echo "failed:$rc" > "$STATUS"
-  exit "$rc"
-fi`, version)
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "failed:$rc" > "$STATUS"; fi' EXIT
+[ "$(id -un)" = daytona ] || { echo "OpenClaw must be installed as daytona"; exit 1; }
+mkdir -p "$PREFIX/bin"
+PACKAGE_VERSION="$(node -p "require('%s/node_modules/openclaw/package.json').version" 2>/dev/null || true)"
+MARKER=%s
+if [ "$PACKAGE_VERSION" != %s ] || [ "$(cat "$MARKER" 2>/dev/null)" != %s ]; then
+  rm -f "$MARKER"
+%s
+%s
+  cd %s
+  "$NPM" ci --no-audit --no-fund 2>&1
+  printf '%%s\n' %s > "$MARKER"
+fi
+ln -sfn "$PREFIX/lib/openclaw-runtime/node_modules/.bin/openclaw" "$PREFIX/bin/openclaw"
+%s
+echo ok > "$STATUS"
+echo "install done"`, runtimeDir, shellQuote(path.Join(runtimeDir, cliversion.OpenClawInstallMarker)),
+		shellQuote(version), lockSHA,
+		remoteWriteFileCommand(runtimeDir, "package.json", string(cliversion.OpenClawPackageJSON)),
+		daytonaOpenClawLockCommand(runtimeDir),
+		shellQuote(runtimeDir), lockSHA, daytonaVerifyOpenClawCommand(version))
 	return fmt.Sprintf(`export HOME=/home/daytona
 LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status
@@ -5125,10 +5231,10 @@ func daytonaInstallCodingModelCLICommand(model string) string {
 	var packageSpec, binary string
 	switch {
 	case strings.HasPrefix(model, "codex/"):
-		packageSpec = "@openai/codex@" + cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", cliversion.CodexCLIVersion)
+		packageSpec = "@openai/codex@" + cliversion.CodexCLIVersion
 		binary = "codex"
 	case strings.HasPrefix(model, "grok/"):
-		packageSpec = "@xai-official/grok@" + cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", cliversion.GrokCLIVersion)
+		packageSpec = "@xai-official/grok@" + cliversion.GrokCLIVersion
 		binary = "grok"
 	default:
 		return ""
@@ -5147,20 +5253,32 @@ func daytonaInstallModelPluginCommand(provider string) string {
 	if provider != "codex" {
 		return ""
 	}
-	version := cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", cliversion.CodexPluginVersion)
-	spec := "npm:@openclaw/codex@" + version
-	return fmt.Sprintf(`export HOME=/home/daytona
+	const runtimeDir = "/home/daytona/.local/lib/openclaw-codex-plugin"
+	return fmt.Sprintf(`set -euo pipefail
+export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
-export PATH="$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-if openclaw plugins info codex --json >/dev/null 2>&1; then
+export PATH="$HOME/.local/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+plugin_version() {
+  openclaw plugins info codex --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const p = JSON.parse(s); console.log(p.plugin?.version || p.version) })'
+}
+if INSTALLED_VERSION="$(plugin_version 2>/dev/null)" && [ "$INSTALLED_VERSION" = %s ]; then
   echo "Codex plugin already installed"
 else
-  openclaw plugins install %s
+%s
+%s
+  cd %s
+  npm ci --ignore-scripts --no-audit --no-fund
+  openclaw plugins install -l %s --force
 fi
-openclaw plugins info codex --json >/dev/null`, shellQuote(spec))
+INSTALLED_VERSION="$(plugin_version)"
+[ "$INSTALLED_VERSION" = %s ]`, shellQuote(cliversion.CodexPluginVersion),
+		remoteWriteFileCommand(runtimeDir, "package.json", string(cliversion.CodexPluginPackageJSON)),
+		remoteWriteFileCommand(runtimeDir, "package-lock.json", string(cliversion.CodexPluginPackageLock)),
+		shellQuote(runtimeDir), shellQuote(path.Join(runtimeDir, "node_modules/@openclaw/codex")),
+		shellQuote(cliversion.CodexPluginVersion))
 }
 
-func daytonaOpenClawInstallStatusCommand(version string) string {
+func daytonaOpenClawInstallStatusCommand() string {
 	return fmt.Sprintf(`export HOME=/home/daytona
 LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status
@@ -5184,13 +5302,14 @@ if [ -s "$STATUS" ]; then
       ;;
   esac
 fi
+# The bracketed pattern keeps this script's own shell from matching itself.
 if pgrep -af %s >/dev/null 2>&1; then
   echo "openclaw-install-status=pending"
   tail -n 20 "$LOG" 2>/dev/null || true
   exit 0
 fi
 echo "openclaw-install-status=missing"
-tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
+tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("[b]ash -c .*[o]penclaw-runtime"))
 }
 
 // daytonaLiveWorkspaceDir is the workspace the OpenClaw agent actually runs in.
@@ -5264,6 +5383,7 @@ rm -f "$PIDFILE"`
 
 func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName, llmKeyEnv string) string {
 	return withDaytonaLLMKeyEnv(llmKeyEnv, fmt.Sprintf(`export HOME=/home/daytona
+export PATH="$HOME/.local/bin:/usr/local/share/nvm/current/bin:$PATH"
 mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
 cd /home/daytona/.openclaw/workspace
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
@@ -5918,6 +6038,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if bridgeURL == "" {
 		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
 	}
+	bridgeSHA256, err := s.bridgeSHA256(ctx, bridgeURL)
+	if err != nil {
+		return err
+	}
 	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
 		return err
 	}
@@ -5937,6 +6061,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		LLMProvider:     resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
+		BridgeSHA256:    bridgeSHA256,
 		Nix:             nixEnabled != 0,
 		Docker:          dockerEnabled != 0,
 		TemplateFiles:   templateFiles,
@@ -6038,6 +6163,12 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 }
 
 func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
+	if cfg.Image == "" {
+		cfg.Image = cliversion.OpenClawImage
+	}
+	if err := s.checkContainerImage("docker provider", cfg.Image); err != nil {
+		return err
+	}
 	p, err := newDockerProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("docker init: %w", err)
@@ -6225,10 +6356,14 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	if !strings.HasPrefix(bridgeURL, "http://") && !strings.HasPrefix(bridgeURL, "https://") {
 		return fmt.Errorf("docker provider requires an HTTP(S) claw-bridge URL, got %q", bridgeURL)
 	}
+	bridgeSHA256, err := s.bridgeSHA256(ctx, bridgeURL)
+	if err != nil {
+		return err
+	}
 	if err := bootstrapBridgePreflight.check(ctx, bridgeURL); err != nil {
 		return err
 	}
-	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL)
+	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL, bridgeSHA256)
 	if err != nil {
 		return err
 	}
@@ -6250,7 +6385,7 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 	return nil
 }
 
-func downloadDockerBridgeBinary(ctx context.Context, bridgeURL string) ([]byte, error) {
+func downloadDockerBridgeBinary(ctx context.Context, bridgeURL, digest string) ([]byte, error) {
 	if bridgePath := os.Getenv("ELASTICCLAW_E2E_BRIDGE_BINARY"); bridgePath != "" && strings.Contains(bridgeURL, "/__elasticclaw_e2e/claw-bridge-linux-amd64") {
 		data, err := os.ReadFile(bridgePath)
 		if err != nil {
@@ -6262,13 +6397,23 @@ func downloadDockerBridgeBinary(ctx context.Context, bridgeURL string) ([]byte, 
 		if len(data) > maxDockerBridgeBinaryBytes {
 			return nil, fmt.Errorf("docker claw-bridge local E2E binary exceeds %d bytes", maxDockerBridgeBinaryBytes)
 		}
-		return data, nil
+		return verifiedDockerBridgeBytes(data, digest)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bridgeURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("docker claw-bridge download request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := *http.DefaultClient
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" && !(req.URL.Scheme == "http" && bridgeLocalHost(req.URL.Hostname())) {
+			return fmt.Errorf("bridge redirect requires HTTPS: %s", req.URL)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("too many bridge redirects")
+		}
+		return nil
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("docker claw-bridge download: %w", err)
 	}
@@ -6286,7 +6431,7 @@ func downloadDockerBridgeBinary(ctx context.Context, bridgeURL string) ([]byte, 
 	if len(data) > maxDockerBridgeBinaryBytes {
 		return nil, fmt.Errorf("docker claw-bridge download exceeds %d bytes", maxDockerBridgeBinaryBytes)
 	}
-	return data, nil
+	return verifiedDockerBridgeBytes(data, digest)
 }
 
 func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte) error {
@@ -7454,6 +7599,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		s.stopAgentIfInstance(clawID, vmID, "Bootstrap failed: bridge_image not configured", false)
 		return
 	}
+	bridgeSHA256, err := s.bridgeSHA256(context.Background(), bridgeURL)
+	if err != nil {
+		s.stopAgentWithReason(clawID, err.Error(), false)
+		return
+	}
 	if err := bootstrapBridgePreflight.check(context.Background(), bridgeURL); err != nil {
 		s.stopAgentWithReason(clawID, err.Error(), false)
 		return
@@ -7520,6 +7670,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		LLMProvider:     resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		GatewayPassword: gatewayPassword,
 		BridgeURL:       bridgeURL,
+		BridgeSHA256:    bridgeSHA256,
 		Nix:             nixEnabled != 0,
 		Docker:          dockerEnabled != 0,
 		TemplateFiles:   files,
@@ -8258,7 +8409,7 @@ If ` + "`REPO_INSTRUCTIONS.md`" + ` exists, read it before working inside any cl
 
 const repoEnvironmentAgentsSection = `## Repository Environments
 
-If ` + "`REPO_ENVIRONMENT.md`" + ` exists, read it before running commands inside cloned repositories. Repositories with ` + "`flake.nix`" + ` should run repo-local commands with that repository's own Nix development shell, for example ` + "`cd <repo> && nix develop --accept-flake-config -c <command>`" + `.`
+If ` + "`REPO_ENVIRONMENT.md`" + ` exists, read it before running commands inside cloned repositories. Repositories with ` + "`flake.nix`" + ` should run repo-local commands with that repository's own Nix development shell, for example ` + "`cd <repo> && nix develop -c <command>`" + `.`
 
 func buildRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
 	if len(repos) == 0 {
@@ -8310,8 +8461,8 @@ ENV_FOUND=0
 {
   printf '%%s\n\n' '# Repository Environments'
   printf '%%s\n\n' 'ElasticClaw detected repository-local Nix flakes. Run commands for each repository with that repository flake instead of assuming one global project environment.'
-  printf '%%s\n\n' 'For one command, use: cd <repo> && nix develop --accept-flake-config -c <command>'
-  printf '%%s\n\n' 'For a sequence of commands in one repository, use: cd <repo> && nix develop --accept-flake-config'
+  printf '%%s\n\n' 'For one command, use: cd <repo> && nix develop -c <command>'
+  printf '%%s\n\n' 'For a sequence of commands in one repository, use: cd <repo> && nix develop'
 `, repoInstructionsIndexName, repoInstructionsIndexName)
 	for _, repo := range repos {
 		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
@@ -8321,7 +8472,7 @@ ENV_FOUND=0
 		fmt.Fprintf(&b, `  REPO_DIR=%s
   if [ -f "$REPO_DIR/flake.nix" ]; then
     ENV_FOUND=1
-    printf -- '- %s: cd %s && nix develop --accept-flake-config -c <command>\n'
+    printf -- '- %s: cd %s && nix develop -c <command>\n'
   fi
 `, shellQuote(repoName), repoName, repoName)
 	}
@@ -9060,16 +9211,11 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	if clawToken == "" {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	// Single-tenant: validate against hub's claw_token directly
-	s.mu.RLock()
-	hubClawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
-	if clawToken != hubClawToken {
+	clawID := strings.TrimPrefix(r.URL.Path, "/api/github/token/")
+	if !s.validClawToken(clawToken, clawID) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-
-	clawID := strings.TrimPrefix(r.URL.Path, "/api/github/token/")
 	if clawID == "" {
 		http.Error(w, "missing claw id", http.StatusBadRequest)
 		return

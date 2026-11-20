@@ -110,7 +110,7 @@ func TestDependencyUpdatesCommandReturnsPythonScriptDirectly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build command: %v", err)
 	}
-	if strings.HasPrefix(command, "nix develop --accept-flake-config -c bash -lc ") {
+	if strings.HasPrefix(command, "nix develop -c bash -lc ") {
 		t.Fatalf("dependency update command should not add its own nix develop wrapper; the workspace run wrapper handles nix:\n%s", command)
 	}
 	if !strings.HasPrefix(command, "python3 - <<") {

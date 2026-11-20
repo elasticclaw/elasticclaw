@@ -1103,6 +1103,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	}
 
 	// Build env vars
+	envFilter := sandboxEnvFilter{}
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
 		"ELASTICCLAW_CLAW_TOKEN": s.hubCfg.ClawToken,
@@ -1114,6 +1115,9 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 		for _, ref := range tmplCfg.Secrets {
 			val, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
+				if !envFilter.allow(envName) {
+					continue
+				}
 				env[envName] = val
 				log.Printf("[factory:%s] injected template secret %s as %s into claw env", factory.Name, ref.Type, envName)
 			} else {
@@ -1126,6 +1130,9 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				if !envFilter.allow(envName) {
+					continue
+				}
 				env[envName] = val
 				log.Printf("[factory:%s] injected template secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
@@ -1138,6 +1145,9 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	if len(factory.SecretRefs) > 0 {
 		for envName, secretRef := range factory.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				if !envFilter.allow(envName) {
+					continue
+				}
 				env[envName] = val
 				log.Printf("[factory:%s] injected factory secret_ref %s as %s into claw env", factory.Name, secretRef, envName)
 			} else {
@@ -1216,6 +1226,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 
 	// Insert claw record (linear_issue_id = "" for GitHub-sourced claws)
 	clawID := uuid.New().String()
+	envFilter.log(clawID)
 	filesJSON, _ := json.Marshal(templateFiles)
 	createdAt := now()
 

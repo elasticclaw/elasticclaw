@@ -23,7 +23,7 @@ func TestRepoInstructionFileNamesIncludesAgents(t *testing.T) {
 
 func TestBuildRepoInstructionDiscoveryScriptReferencesKnownFiles(t *testing.T) {
 	script := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", []types.GitHubRepoAccess{{Repo: "elasticclaw/elasticclaw"}})
-	for _, want := range []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md", "REPO_INSTRUCTIONS.md", "REPO_ENVIRONMENT.md", "nix develop --accept-flake-config"} {
+	for _, want := range []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md", "REPO_INSTRUCTIONS.md", "REPO_ENVIRONMENT.md", "nix develop"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
@@ -125,7 +125,7 @@ func TestBuildRepoInstructionDiscoveryScriptWritesRepoEnvironmentForFlakes(t *te
 		t.Fatalf("read generated environment index: %v", err)
 	}
 	envText := string(envIndex)
-	if !strings.Contains(envText, "cd elasticclaw && nix develop --accept-flake-config -c <command>") {
+	if !strings.Contains(envText, "cd elasticclaw && nix develop -c <command>") {
 		t.Fatalf("generated environment index missing native nix guidance:\n%s", envText)
 	}
 

@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 
 	"nhooyr.io/websocket"
@@ -1214,116 +1215,215 @@ func TestInstallOpenClawWithoutSudoInstallsAndRunsPinnedVersion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake npm executable uses POSIX shell")
 	}
-
-	home := t.TempDir()
-	fakeBin := t.TempDir()
-	npmLog := filepath.Join(t.TempDir(), "npm-args")
-	t.Setenv("HOME", home)
-	t.Setenv("FAKE_NPM_LOG", npmLog)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	writeExecutable := func(path, content string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(content), 0755); err != nil {
-			t.Fatalf("write executable %s: %v", path, err)
-		}
-	}
-	writeExecutable(filepath.Join(fakeBin, "openclaw"), "#!/bin/sh\necho 'OpenClaw 0.0.0'\n")
-	writeExecutable(filepath.Join(fakeBin, "npm"), fmt.Sprintf(`#!/bin/sh
+	for _, tc := range []struct {
+		version string
+		locked  bool
+	}{{"", false}, {openClawVersion, true}, {openClawVersion, false}, {"2026.9.40", true}, {"0.0.0", false}} {
+		version := tc.version
+		t.Run(fmt.Sprintf("installed-%s-locked=%v", version, tc.locked), func(t *testing.T) {
+			home := t.TempDir()
+			fakeBin := t.TempDir()
+			npmLog := filepath.Join(t.TempDir(), "npm-args")
+			t.Setenv("HOME", home)
+			t.Setenv("FAKE_NPM_LOG", npmLog)
+			runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-runtime")
+			pkgDir := filepath.Join(runtimeDir, "node_modules", "openclaw")
+			binDir := filepath.Join(home, ".local", "bin")
+			// The user binary must take precedence even if its directory is already on PATH.
+			t.Setenv("PATH", strings.Join([]string{fakeBin, os.Getenv("PATH"), binDir}, string(os.PathListSeparator)))
+			for _, dir := range []string{pkgDir, binDir} {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write := func(path, content string, mode os.FileMode) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(filepath.Join(fakeBin, "openclaw"), "#!/bin/sh\nexit 1\n", 0755)
+			if version != "" {
+				write(filepath.Join(pkgDir, "package.json"), fmt.Sprintf(`{"name":"openclaw","version":%q}`, version), 0644)
+				// CLI output deliberately claims the pinned version even when the package differs.
+				write(filepath.Join(pkgDir, "openclaw.mjs"), "#!/bin/sh\necho 'OpenClaw "+openClawVersion+"'\n", 0755)
+				if err := os.Symlink(filepath.Join(pkgDir, "openclaw.mjs"), filepath.Join(binDir, "openclaw")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.locked {
+				// A Docker image or earlier bootstrap that completed npm ci from the embedded lock.
+				write(filepath.Join(runtimeDir, "package-lock.json"), string(cliversion.OpenClawPackageLock), 0644)
+				write(filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker), cliversion.OpenClawLockSHA256()+"\n", 0644)
+			}
+			write(filepath.Join(fakeBin, "npm"), fmt.Sprintf(`#!/bin/sh
 set -eu
-printf '%%s\n' "$*" > "$FAKE_NPM_LOG"
-mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/openclaw" <<'EOF'
+printf '%%s\n' "$*" "$PWD" > "$FAKE_NPM_LOG"
+mkdir -p node_modules/openclaw node_modules/.bin
+printf '{"name":"openclaw","version":"%s"}' > node_modules/openclaw/package.json
+cat > node_modules/openclaw/openclaw.mjs <<'EOF'
 #!/bin/sh
 echo 'OpenClaw %s'
 EOF
-chmod +x "$HOME/.local/bin/openclaw"
-`, openClawVersion))
-
-	if err := installOpenClaw(); err != nil {
-		t.Fatalf("installOpenClaw(): %v", err)
-	}
-
-	args, err := os.ReadFile(npmLog)
-	if err != nil {
-		t.Fatalf("read npm arguments: %v", err)
-	}
-	gotArgs := strings.TrimSpace(string(args))
-	if strings.Contains(gotArgs, "sudo") {
-		t.Fatalf("npm install unexpectedly requires sudo: %s", gotArgs)
-	}
-	if !strings.Contains(gotArgs, "--prefix "+filepath.Join(home, ".local")) {
-		t.Fatalf("npm install does not use the user prefix: %s", gotArgs)
-	}
-	if !strings.Contains(gotArgs, "openclaw@"+openClawVersion) {
-		t.Fatalf("npm install does not pin OpenClaw: %s", gotArgs)
-	}
-
-	path, err := exec.LookPath("openclaw")
-	if err != nil {
-		t.Fatalf("find installed openclaw: %v", err)
-	}
-	wantPath := filepath.Join(home, ".local", "bin", "openclaw")
-	if path != wantPath {
-		t.Fatalf("openclaw path = %q, want %q", path, wantPath)
-	}
-	out, err := exec.Command("openclaw", "--version").CombinedOutput()
-	if err != nil {
-		t.Fatalf("run installed openclaw: %v: %s", err, out)
-	}
-	if got, want := strings.TrimSpace(string(out)), "OpenClaw "+openClawVersion; got != want {
-		t.Fatalf("openclaw --version = %q, want %q", got, want)
+chmod +x node_modules/openclaw/openclaw.mjs
+ln -sf ../openclaw/openclaw.mjs node_modules/.bin/openclaw
+`, openClawVersion, openClawVersion), 0755)
+			if err := installOpenClaw(); err != nil {
+				t.Fatal(err)
+			}
+			args, err := os.ReadFile(npmLog)
+			if version == openClawVersion && tc.locked {
+				if !os.IsNotExist(err) {
+					t.Fatalf("exact locked version must skip npm: %s, %v", args, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(args), "ci --no-audit --no-fund\n"+runtimeDir+"\n"; got != want {
+				t.Fatalf("npm invocation = %q, want %q", got, want)
+			}
+			for name, want := range map[string][]byte{"package.json": cliversion.OpenClawPackageJSON, "package-lock.json": cliversion.OpenClawPackageLock} {
+				got, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil || string(got) != string(want) {
+					t.Fatalf("%s differs from embedded file: %v", name, err)
+				}
+			}
+			if got, err := installedOpenClawVersion(); err != nil || got != openClawVersion {
+				t.Fatalf("installed version = %q: %v", got, err)
+			}
+			if !openClawInstalledFromLock(pkgDir) {
+				t.Fatal("install marker missing after npm ci")
+			}
+			out, err := exec.Command("openclaw", "--version").CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != "OpenClaw "+openClawVersion {
+				t.Fatalf("run installed openclaw: %v: %s", err, out)
+			}
+		})
 	}
 }
 
 func TestInstallSelectedModelPluginInstallsPinnedCodexPluginOnce(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("fake openclaw executable uses POSIX shell")
+		t.Skip("fake executables use POSIX shell")
 	}
-
-	home := t.TempDir()
-	fakeBin := t.TempDir()
-	invocations := filepath.Join(t.TempDir(), "openclaw-args")
-	installedMarker := filepath.Join(t.TempDir(), "codex-installed")
-	t.Setenv("HOME", home)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("ELASTICCLAW_LLM_PROVIDER", "codex")
-	t.Setenv("OPENCLAW_INVOCATIONS", invocations)
-	t.Setenv("CODEX_INSTALLED_MARKER", installedMarker)
-
-	fakeOpenClaw := `#!/bin/sh
+	for _, initial := range []string{"", "2026.1.0", codexPluginVersion} {
+		t.Run("installed="+initial, func(t *testing.T) {
+			home := t.TempDir()
+			fakeBin := t.TempDir()
+			invocations := filepath.Join(t.TempDir(), "args")
+			installedMarker := filepath.Join(t.TempDir(), "codex-installed")
+			runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-codex-plugin")
+			t.Setenv("HOME", home)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ELASTICCLAW_LLM_PROVIDER", "codex")
+			t.Setenv("ELASTICCLAW_CODEX_PLUGIN_VERSION", "untrusted-version")
+			t.Setenv("OPENCLAW_INVOCATIONS", invocations)
+			t.Setenv("CODEX_INSTALLED_MARKER", installedMarker)
+			if initial != "" {
+				if err := os.WriteFile(installedMarker, []byte(initial), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fakeOpenClaw := `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
 if [ "$*" = "plugins info codex --json" ]; then
-  test -f "$CODEX_INSTALLED_MARKER"
-  exit $?
+  version="$(cat "$CODEX_INSTALLED_MARKER")"
+  printf '{"plugin":{"version":"%s"}}\n' "$version"
+  exit 0
 fi
-case "$*" in
-  "plugins install "*) touch "$CODEX_INSTALLED_MARKER" ;;
-esac
+test -f "$CODEX_INSTALLED_MARKER.npm"
+printf '%s' '` + codexPluginVersion + `' > "$CODEX_INSTALLED_MARKER"
 `
-	if err := os.WriteFile(filepath.Join(fakeBin, "openclaw"), []byte(fakeOpenClaw), 0755); err != nil {
-		t.Fatalf("write fake openclaw: %v", err)
+			fakeNPM := `#!/bin/sh
+set -eu
+printf 'npm %s\n%s\n' "$*" "$PWD" >> "$OPENCLAW_INVOCATIONS"
+test -f package.json && test -f package-lock.json
+touch "$CODEX_INSTALLED_MARKER.npm"
+`
+			for name, script := range map[string]string{"openclaw": fakeOpenClaw, "npm": fakeNPM} {
+				if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(script), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < 2; i++ {
+				if err := installSelectedModelPlugin(); err != nil {
+					t.Fatalf("installSelectedModelPlugin(): %v", err)
+				}
+			}
+			logData, err := os.ReadFile(invocations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logText := string(logData)
+			wantCount := 1
+			if initial == codexPluginVersion {
+				wantCount = 0
+			}
+			for _, command := range []string{
+				"plugins install -l " + filepath.Join(runtimeDir, "node_modules", "@openclaw", "codex") + " --force",
+				"npm ci --ignore-scripts --no-audit --no-fund\n" + runtimeDir,
+			} {
+				if got := strings.Count(logText, command); got != wantCount {
+					t.Fatalf("%q count = %d, want %d: %s", command, got, wantCount, logText)
+				}
+			}
+			for _, forbidden := range []string{"npm:@openclaw/codex", "deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS", "untrusted-version"} {
+				if strings.Contains(logText, forbidden) {
+					t.Fatalf("unexpected %s in commands: %s", forbidden, logText)
+				}
+			}
+			if wantCount == 0 {
+				if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
+					t.Fatalf("already installed plugin must skip runtime staging: %v", err)
+				}
+				return
+			}
+			for name, want := range map[string][]byte{"package.json": cliversion.CodexPluginPackageJSON, "package-lock.json": cliversion.CodexPluginPackageLock} {
+				got, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil || string(got) != string(want) {
+					t.Fatalf("%s differs from embedded file: %v", name, err)
+				}
+			}
+		})
 	}
+}
 
-	if err := installSelectedModelPlugin(); err != nil {
-		t.Fatalf("installSelectedModelPlugin(): %v", err)
+func TestInstallSelectedModelPluginFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake executables use POSIX shell")
 	}
-	if err := installSelectedModelPlugin(); err != nil {
-		t.Fatalf("second installSelectedModelPlugin(): %v", err)
-	}
-
-	logData, err := os.ReadFile(invocations)
-	if err != nil {
-		t.Fatalf("read OpenClaw invocations: %v", err)
-	}
-	logText := string(logData)
-	wantInstall := "plugins install npm:@openclaw/codex@" + codexPluginVersion
-	if strings.Count(logText, wantInstall) != 1 {
-		t.Fatalf("Codex plugin install count = %d, want 1\n%s", strings.Count(logText, wantInstall), logText)
-	}
-	if strings.Count(logText, "plugins info codex --json") != 3 {
-		t.Fatalf("Codex plugin verification count = %d, want 3\n%s", strings.Count(logText, "plugins info codex --json"), logText)
+	for _, tc := range []struct {
+		name, npm, openclaw, wantError string
+	}{
+		{"npm failure", "exit 1", "exit 1", "npm ci Codex plugin"},
+		{"link failure", "exit 0", "exit 1", "link Codex plugin"},
+		{"wrong version", "exit 0", `printf '{"version":"2026.1.0"}'`, "verify Codex plugin install"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			bin := t.TempDir()
+			marker := filepath.Join(home, "link-attempted")
+			t.Setenv("HOME", home)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ELASTICCLAW_LLM_PROVIDER", "codex")
+			script := "#!/bin/sh\nif [ \"$1 $2\" = \"plugins install\" ]; then touch " + shellQuote(marker) + "; fi\n" + tc.openclaw + "\n"
+			for name, content := range map[string]string{"npm": "#!/bin/sh\n" + tc.npm + "\n", "openclaw": script} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(content), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := installSelectedModelPlugin(); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("install error = %v, want %s", err, tc.wantError)
+			}
+			if tc.name == "npm failure" {
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatalf("npm failure must prevent linking: %v", err)
+				}
+			}
+		})
 	}
 }
 

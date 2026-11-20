@@ -1,6 +1,7 @@
 package cliversion
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +17,7 @@ func TestPinnedOpenClawVersions(t *testing.T) {
 	if got, want := OpenClawImageVersion, "2026.10.6"; got != want {
 		t.Fatalf("OpenClawImageVersion = %q, want %q", got, want)
 	}
-	if got, want := OpenClawImage, "ghcr.io/openclaw/openclaw:2026.10.6"; got != want {
+	if got, want := OpenClawImage, "ghcr.io/openclaw/openclaw:2026.10.6@sha256:7dbff0fe5f5359b1badefe90a23efa9f203cd0d3c36bee095f4896c7a1d3864b"; got != want {
 		t.Fatalf("OpenClawImage = %q, want %q", got, want)
 	}
 }
@@ -39,30 +40,24 @@ func TestPinnedGrokCLIVersion(t *testing.T) {
 	}
 }
 
-func TestAgentDockerfilePinMatchesOpenClawVersion(t *testing.T) {
-	// docker/agent.Dockerfile pre-installs OpenClaw with a hardcoded npm pin
-	// ("Keep in sync with pkg/cliversion OpenClawVersion"). Enforce that sync
-	// so the image cannot silently drift from the version bootstrap verifies.
+func TestAgentDockerfileInstallsOpenClawFromLock(t *testing.T) {
+	// docker/agent.Dockerfile must pre-install OpenClaw from the embedded lock
+	// and write the marker the bridge requires before reusing an install.
 	data, err := os.ReadFile(filepath.Join("..", "..", "docker", "agent.Dockerfile"))
 	if err != nil {
 		t.Fatalf("read agent.Dockerfile: %v", err)
 	}
-	m := regexp.MustCompile(`(?m)^RUN npm install -g openclaw@(\S+)`).FindSubmatch(data)
-	if m == nil {
-		t.Fatal("agent.Dockerfile: no `npm install -g openclaw@<version>` pin found")
+	for _, want := range []string{
+		"COPY pkg/cliversion/openclaw/package.json pkg/cliversion/openclaw/package-lock.json /usr/local/lib/openclaw-runtime/",
+		"npm ci --no-audit --no-fund",
+		"sha256sum package-lock.json | cut -d' ' -f1 > " + OpenClawInstallMarker,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("agent.Dockerfile missing %q", want)
+		}
 	}
-	if got := string(m[1]); got != OpenClawVersion {
-		t.Fatalf("agent.Dockerfile pins openclaw@%s, want OpenClawVersion %s", got, OpenClawVersion)
-	}
-}
-
-func TestFromEnvAllowsPinnedOverride(t *testing.T) {
-	t.Setenv("ELASTICCLAW_TEST_CLI_VERSION", "9.8.7")
-	if got := FromEnv("ELASTICCLAW_TEST_CLI_VERSION", "1.2.3"); got != "9.8.7" {
-		t.Fatalf("FromEnv override = %q", got)
-	}
-	if got := FromEnv("ELASTICCLAW_MISSING_VERSION", "1.2.3"); got != "1.2.3" {
-		t.Fatalf("FromEnv fallback = %q", got)
+	if regexp.MustCompile(`npm install -g openclaw`).Match(data) {
+		t.Fatal("agent.Dockerfile installs openclaw without the lockfile")
 	}
 }
 
@@ -113,5 +108,51 @@ func TestAgentDockerfileChecksNodeCompatible(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "\nRUN "+NodeCompatibleCheck+"\n") {
 		t.Fatal("agent.Dockerfile: missing `RUN <cliversion.NodeCompatibleCheck>` after the Node install")
+	}
+}
+
+func TestOpenClawLock(t *testing.T) {
+	testRuntimeLock(t, OpenClawPackageJSON, OpenClawPackageLock, "openclaw", OpenClawVersion)
+}
+
+func TestCodexPluginLock(t *testing.T) {
+	testRuntimeLock(t, CodexPluginPackageJSON, CodexPluginPackageLock, "@openclaw/codex", CodexPluginVersion)
+}
+
+func testRuntimeLock(t *testing.T, manifestJSON, lockJSON []byte, packageName, version string) {
+	t.Helper()
+	var manifest struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal(manifestJSON, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Dependencies[packageName] != version {
+		t.Fatal("package.json must pin requested version")
+	}
+	var lock struct {
+		LockfileVersion int `json:"lockfileVersion"`
+		Packages        map[string]struct {
+			Version      string            `json:"version"`
+			Integrity    string            `json:"integrity"`
+			Dependencies map[string]string `json:"dependencies"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal(lockJSON, &lock); err != nil {
+		t.Fatal(err)
+	}
+	if lock.LockfileVersion != 3 {
+		t.Fatalf("lockfileVersion = %d, want 3", lock.LockfileVersion)
+	}
+	if lock.Packages[""].Dependencies[packageName] != version {
+		t.Fatal("lock root must pin requested version")
+	}
+	if lock.Packages["node_modules/"+packageName].Version != version {
+		t.Fatal("locked package must match pinned version")
+	}
+	for name, pkg := range lock.Packages {
+		if name != "" && !strings.HasPrefix(pkg.Integrity, "sha512-") {
+			t.Errorf("%s has no sha512 integrity", name)
+		}
 	}
 }

@@ -29,7 +29,8 @@ type BootstrapParams struct {
 	LLMProvider     string
 
 	// claw-bridge binary source (HTTPS URL or OCI ref)
-	BridgeURL string
+	BridgeURL    string
+	BridgeSHA256 string
 
 	// Features
 	Nix    bool
@@ -51,31 +52,6 @@ type BootstrapParams struct {
 	ProviderConfig string            // python snippet to patch OpenClaw config
 	OnboardFlags   string            // --auth-choice ... flags for openclaw onboard
 	Env            map[string]string // custom env vars from workflow/factory secret_refs and template env
-}
-
-// bootstrapManagedEnvKeys lists values that the bootstrap script derives from
-// dedicated parameters. Custom env must not override or duplicate them.
-var bootstrapManagedEnvKeys = map[string]bool{
-	"ELASTICCLAW_HUB_URL":            true,
-	"ELASTICCLAW_CLAW_ID":            true,
-	"ELASTICCLAW_CLAW_TOKEN":         true,
-	"ELASTICCLAW_MODEL_AUTH_TOKEN":   true,
-	"ELASTICCLAW_CLAW_NAME":          true,
-	"ELASTICCLAW_TEMPLATE":           true,
-	"ELASTICCLAW_GITHUB_REPOS":       true,
-	"ELASTICCLAW_BOOTSTRAP":          true,
-	"ELASTICCLAW_WAIT_FOR_WORKSPACE": true,
-	"ELASTICCLAW_GATEWAY_PASSWORD":   true,
-	"OPENCLAW_GATEWAY_PASSWORD":      true,
-	"OPENCLAW_DEFAULT_MODEL":         true,
-	"ELASTICCLAW_LLM_PROVIDER":       true,
-	"ELASTICCLAW_NIX":                true,
-	"ELASTICCLAW_DOCKER":             true,
-	"ELASTICCLAW_PROVIDER_CONFIG":    true,
-	"ELASTICCLAW_API_KEY_AUTH_SYNC":  true,
-	"ELASTICCLAW_OAUTH_AUTH_SYNC":    true,
-	"ELASTICCLAW_ONBOARD_FLAGS":      true,
-	"LINEAR_API_KEY":                 true,
 }
 
 // shellVarNameRegex matches valid POSIX shell variable names.
@@ -479,7 +455,8 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 		sort.Strings(keys)
 		for _, k := range keys {
 			v := p.Env[k]
-			if bootstrapManagedEnvKeys[k] {
+			// LINEAR_API_KEY comes from the dedicated LinearEnv line above.
+			if isReservedSandboxEnvKey(k) || k == "LINEAR_API_KEY" {
 				continue
 			}
 			if !shellVarNameRegex.MatchString(k) {
@@ -521,32 +498,7 @@ export ELASTICCLAW_DOCKER=%s
 export ELASTICCLAW_ONBOARD_FLAGS=%s
 %s
 # ── Install claw-bridge ───────────────────────────────────────────────────────
-BRIDGE_SRC=%s
-download_connector_once() {
-  rm -f /tmp/claw-bridge
-  if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
-    curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
-  else
-    # OCI ref — use oras
-    if ! command -v oras &>/dev/null; then
-      echo "Installing oras..."
-      curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
-      sudo mv /tmp/oras /usr/local/bin/oras
-    fi
-    sudo apt-get install -y curl ca-certificates 2>/dev/null || true
-    rm -rf /tmp/claw-bridge-dl
-    mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
-    oras pull "$BRIDGE_SRC"
-    BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
-    if [ -z "$BINARY" ]; then
-      echo "ERROR: ElasticClaw connector binary not found after oras pull"
-      ls -la /tmp/claw-bridge-dl/
-      return 1
-    fi
-    cp "$BINARY" /tmp/claw-bridge
-    cd -
-  fi
-}
+%s
 
 CONNECTOR_DELAYS=(5 10 20 40 60)
 CONNECTOR_ATTEMPTS=6
@@ -649,7 +601,7 @@ exit 1
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ModelAuthToken), shellQuote(p.ClawName), shellQuote(p.TemplateName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(p.LLMProvider), shellQuote(nixFlag), shellQuote(dockerFlag),
 		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, oauthAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
-		shellQuote(p.BridgeURL),
+		bridgeDownloadShell(p.BridgeURL, p.BridgeSHA256, "/tmp/claw-bridge"),
 		customEnvPersist,
 	)
 }

@@ -17,7 +17,7 @@ Web UI for [ElasticClaw](https://github.com/elasticclaw/elasticclaw) — a real-
 cd web
 cp .env.example .env.local
 # Edit .env.local with your ElasticClaw Server URL, token, and a UI password
-npm install
+npm ci --ignore-scripts
 npm run dev
 ```
 
