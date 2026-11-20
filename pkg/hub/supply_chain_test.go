@@ -82,8 +82,12 @@ func TestBridgeChecksumCache(t *testing.T) {
 	var calls atomic.Int32
 	previous := http.DefaultClient
 	http.DefaultClient = &http.Client{Transport: checksumTransport(func(r *http.Request) (*http.Response, error) {
-		calls.Add(1)
-		if r.URL.String() != githubReleasesBase+"/v1/checksums.txt" {
+		switch r.URL.String() {
+		case githubReleasesBase + "/v1/checksums.txt":
+			calls.Add(1)
+		case githubReleasesBase + "/v1/checksums.txt.minisig":
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+		default:
 			t.Errorf("unexpected URL %s", r.URL)
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(digest + "  claw-bridge-linux-amd64\n")), Header: make(http.Header)}, nil
