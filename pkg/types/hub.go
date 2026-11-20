@@ -48,6 +48,8 @@ type HubMessage struct {
 	Format    string    `json:"format,omitempty" db:"format"` // "pre" = preserve whitespace
 	UserLogin *string   `json:"user_login,omitempty" db:"user_login"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	// ErrorClass is set only on a bridge error reply; it is not persisted.
+	ErrorClass TurnErrorClass `json:"error_class,omitempty"`
 }
 
 // WorkflowEffectFormatPrefix marks synthetic workflow v2 run-log messages that
