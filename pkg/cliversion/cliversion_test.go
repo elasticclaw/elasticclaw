@@ -108,14 +108,23 @@ func TestAgentDockerfileChecksNodeCompatible(t *testing.T) {
 }
 
 func TestOpenClawLock(t *testing.T) {
+	testRuntimeLock(t, OpenClawPackageJSON, OpenClawPackageLock, "openclaw", OpenClawVersion)
+}
+
+func TestCodexPluginLock(t *testing.T) {
+	testRuntimeLock(t, CodexPluginPackageJSON, CodexPluginPackageLock, "@openclaw/codex", CodexPluginVersion)
+}
+
+func testRuntimeLock(t *testing.T, manifestJSON, lockJSON []byte, packageName, version string) {
+	t.Helper()
 	var manifest struct {
 		Dependencies map[string]string `json:"dependencies"`
 	}
-	if err := json.Unmarshal(OpenClawPackageJSON, &manifest); err != nil {
+	if err := json.Unmarshal(manifestJSON, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Dependencies["openclaw"] != OpenClawVersion {
-		t.Fatal("package.json must pin OpenClawVersion")
+	if manifest.Dependencies[packageName] != version {
+		t.Fatal("package.json must pin requested version")
 	}
 	var lock struct {
 		LockfileVersion int `json:"lockfileVersion"`
@@ -125,17 +134,17 @@ func TestOpenClawLock(t *testing.T) {
 			Dependencies map[string]string `json:"dependencies"`
 		} `json:"packages"`
 	}
-	if err := json.Unmarshal(OpenClawPackageLock, &lock); err != nil {
+	if err := json.Unmarshal(lockJSON, &lock); err != nil {
 		t.Fatal(err)
 	}
 	if lock.LockfileVersion != 3 {
 		t.Fatalf("lockfileVersion = %d, want 3", lock.LockfileVersion)
 	}
-	if lock.Packages[""].Dependencies["openclaw"] != OpenClawVersion {
-		t.Fatal("lock root must pin OpenClawVersion")
+	if lock.Packages[""].Dependencies[packageName] != version {
+		t.Fatal("lock root must pin requested version")
 	}
-	if lock.Packages["node_modules/openclaw"].Version != OpenClawVersion {
-		t.Fatal("locked openclaw must match OpenClawVersion")
+	if lock.Packages["node_modules/"+packageName].Version != version {
+		t.Fatal("locked package must match pinned version")
 	}
 	for name, pkg := range lock.Packages {
 		if name != "" && !strings.HasPrefix(pkg.Integrity, "sha512-") {

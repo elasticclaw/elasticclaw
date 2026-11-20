@@ -144,7 +144,7 @@ func TestDaytonaInstallVersionsIgnoreEnv(t *testing.T) {
 	for _, tc := range []struct{ name, command, spec string }{
 		{"codex", daytonaInstallCodingModelCLICommand("codex/model"), "@openai/codex@" + cliversion.CodexCLIVersion},
 		{"grok", daytonaInstallCodingModelCLICommand("grok/model"), "@xai-official/grok@" + cliversion.GrokCLIVersion},
-		{"plugin", daytonaInstallModelPluginCommand("codex"), "npm:@openclaw/codex@" + cliversion.CodexPluginVersion},
+		{"plugin", daytonaInstallModelPluginCommand("codex"), shellQuote(cliversion.CodexPluginVersion)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(tc.command, tc.spec) || strings.Contains(tc.command, "untrusted-version") {

@@ -4066,26 +4066,70 @@ func installSelectedCodingModelCLI() error {
 	}
 }
 
+func installedCodexPluginVersion() (string, error) {
+	out, err := exec.Command("openclaw", "plugins", "info", "codex", "--json").Output()
+	if err != nil {
+		return "", err
+	}
+	var info struct {
+		Version string `json:"version"`
+		Plugin  struct {
+			Version string `json:"version"`
+		} `json:"plugin"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return "", err
+	}
+	if info.Plugin.Version != "" {
+		return info.Plugin.Version, nil
+	}
+	return info.Version, nil
+}
+
 func installSelectedModelPlugin() error {
 	if strings.TrimSpace(os.Getenv("ELASTICCLAW_LLM_PROVIDER")) != "codex" {
-		return nil
-	}
-	if err := exec.Command("openclaw", "plugins", "info", "codex", "--json").Run(); err == nil {
-		log.Printf("[bootstrap] Codex plugin already installed")
 		return nil
 	}
 	version := codexPluginVersion
 	if strings.TrimSpace(version) == "" {
 		return fmt.Errorf("empty version for @openclaw/codex")
 	}
-	spec := "npm:@openclaw/codex@" + version
-	log.Printf("[bootstrap] installing %s...", spec)
-	out, err := exec.Command("openclaw", "plugins", "install", spec).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("install %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
+	if installed, err := installedCodexPluginVersion(); err == nil && installed == version {
+		log.Printf("[bootstrap] Codex plugin already installed: %s", version)
+		return nil
 	}
-	if out, err := exec.Command("openclaw", "plugins", "info", "codex", "--json").CombinedOutput(); err != nil {
-		return fmt.Errorf("verify Codex plugin install: %w: %s", err, strings.TrimSpace(string(out)))
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-codex-plugin")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		return fmt.Errorf("prepare Codex plugin runtime: %w", err)
+	}
+	for name, data := range map[string][]byte{
+		"package.json":      cliversion.CodexPluginPackageJSON,
+		"package-lock.json": cliversion.CodexPluginPackageLock,
+	} {
+		if err := os.WriteFile(filepath.Join(runtimeDir, name), data, 0644); err != nil {
+			return fmt.Errorf("write Codex plugin %s: %w", name, err)
+		}
+	}
+	log.Printf("[bootstrap] installing @openclaw/codex@%s...", version)
+	cmd := exec.Command("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")
+	cmd.Dir = runtimeDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("npm ci Codex plugin: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	pluginDir := filepath.Join(runtimeDir, "node_modules", "@openclaw", "codex")
+	if out, err := exec.Command("openclaw", "plugins", "install", "-l", pluginDir, "--force").CombinedOutput(); err != nil {
+		return fmt.Errorf("link Codex plugin: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	installed, err := installedCodexPluginVersion()
+	if err != nil {
+		return fmt.Errorf("verify Codex plugin install: %w", err)
+	}
+	if installed != version {
+		return fmt.Errorf("verify Codex plugin install: got %q, want %s", installed, version)
 	}
 	log.Printf("[bootstrap] Codex plugin: %s", version)
 	return nil

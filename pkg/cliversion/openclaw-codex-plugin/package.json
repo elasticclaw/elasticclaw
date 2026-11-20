@@ -1,0 +1,1 @@
+{ "name": "elasticclaw-openclaw-codex-plugin", "private": true, "version": "0.0.0", "dependencies": { "@openclaw/codex": "2026.9.4" } }

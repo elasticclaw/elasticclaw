@@ -154,10 +154,142 @@ func TestDaytonaInstallModelPluginCommandPinsCodexPlugin(t *testing.T) {
 	cmd := daytonaInstallModelPluginCommand("codex")
 
 	assertContains(t, cmd, "plugins info codex --json", "checks for an existing Codex plugin")
-	assertContains(t, cmd, "npm:@openclaw/codex@"+cliversion.CodexPluginVersion, "pins the Codex plugin version")
+	assertContains(t, cmd, shellQuote(cliversion.CodexPluginVersion), "pins the Codex plugin version")
+	assertContains(t, cmd, "npm ci --ignore-scripts --no-audit --no-fund", "installs locked dependencies without scripts")
+	assertContains(t, cmd, "plugins install -l '/home/daytona/.local/lib/openclaw-codex-plugin/node_modules/@openclaw/codex' --force", "links the staged local plugin")
+	assertContains(t, cmd, base64.StdEncoding.EncodeToString(cliversion.CodexPluginPackageJSON), "embeds the pinned manifest")
+	assertContains(t, cmd, base64.StdEncoding.EncodeToString(cliversion.CodexPluginPackageLock), "embeds the integrity lock")
+	for _, forbidden := range []string{"npm:@openclaw/codex", "deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
+		assertNotContains(t, cmd, forbidden, "does not resolve dependencies through OpenClaw")
+	}
+	check := exec.Command("bash", "-n")
+	check.Stdin = strings.NewReader(cmd)
+	if out, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("plugin script syntax: %v: %s", err, out)
+	}
+	server, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"npm:@openclaw/codex", "deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
+		assertNotContains(t, string(server), forbidden, "bootstrap does not use removed dependency staging")
+	}
 	assertContains(t, cmd, "plugins install", "installs the missing Codex plugin")
 	if got := daytonaInstallModelPluginCommand("openai"); got != "" {
 		t.Fatalf("OpenAI plugin install command = %q, want empty", got)
+	}
+}
+
+func TestDaytonaCodexPluginLockedInstall(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH")
+	}
+	nodePath, err := exec.Command("node", "-p", "process.execPath").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, initial, npmExit, linkedVersion, infoExit string
+		wantError                                       bool
+	}{
+		{name: "missing"},
+		{name: "outdated", initial: "2026.1.0"},
+		{name: "installed", initial: cliversion.CodexPluginVersion},
+		{name: "npm failure", npmExit: "1", wantError: true},
+		{name: "incorrect linked version", linkedVersion: "2026.1.0", wantError: true},
+		{name: "info failure", initial: cliversion.CodexPluginVersion, infoExit: "1", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := filepath.Join(home, "nvm", "current", "bin")
+			runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-codex-plugin")
+			if err := os.MkdirAll(bin, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(strings.TrimSpace(string(nodePath)), filepath.Join(bin, "node")); err != nil {
+				t.Fatal(err)
+			}
+			write := func(path, content string, mode os.FileMode) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.initial != "" {
+				write(filepath.Join(home, "plugin-version"), tc.initial, 0600)
+			}
+			linkedVersion := tc.linkedVersion
+			if linkedVersion == "" {
+				linkedVersion = cliversion.CodexPluginVersion
+			}
+			infoExit := tc.infoExit
+			if infoExit == "" {
+				infoExit = "0"
+			}
+			write(filepath.Join(bin, "openclaw"), `#!/bin/sh
+set -eu
+if [ "$*" = "plugins info codex --json" ]; then
+  version="$(cat "$HOME/plugin-version")"
+  printf '{"plugin":{"version":"%s"}}\n' "$version"
+  exit `+infoExit+`
+else
+  test -f "$HOME/npm-args"
+  printf '%s\n' "$*" >> "$HOME/link-args"
+  printf '%s' '`+linkedVersion+`' > "$HOME/plugin-version"
+fi
+`, 0755)
+			npmExit := tc.npmExit
+			if npmExit == "" {
+				npmExit = "0"
+			}
+			write(filepath.Join(bin, "npm"), `#!/bin/sh
+set -eu
+printf '%s\n' "$*" "$PWD" >> "$HOME/npm-args"
+exit `+npmExit+`
+`, 0755)
+			script := strings.NewReplacer(
+				"/home/daytona", home,
+				"/usr/local/share/nvm", filepath.Join(home, "nvm"),
+			).Replace(daytonaInstallModelPluginCommand("codex"))
+			for i := 0; i < 2; i++ {
+				out, err := exec.Command("bash", "-c", script).CombinedOutput()
+				if (err != nil) != tc.wantError {
+					t.Fatalf("install: %v: %s", err, out)
+				}
+				if tc.wantError {
+					break
+				}
+			}
+			args, err := os.ReadFile(filepath.Join(home, "npm-args"))
+			if tc.initial == cliversion.CodexPluginVersion && tc.infoExit == "" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("installed plugin must skip npm: %s, %v", args, err)
+				}
+				return
+			}
+			if err != nil || string(args) != "ci --ignore-scripts --no-audit --no-fund\n"+runtimeDir+"\n" {
+				t.Fatalf("npm invocation: %q, %v", args, err)
+			}
+			link, err := os.ReadFile(filepath.Join(home, "link-args"))
+			if tc.npmExit != "" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("failed npm must prevent link: %s, %v", link, err)
+				}
+				return
+			}
+			if err != nil || string(link) != "plugins install -l "+runtimeDir+"/node_modules/@openclaw/codex --force\n" {
+				t.Fatalf("link invocation: %q, %v", link, err)
+			}
+			for name, want := range map[string][]byte{"package.json": cliversion.CodexPluginPackageJSON, "package-lock.json": cliversion.CodexPluginPackageLock} {
+				got, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil || string(got) != string(want) {
+					t.Fatalf("%s differs from embedded file: %v", name, err)
+				}
+			}
+		})
 	}
 }
 

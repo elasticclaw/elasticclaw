@@ -4576,17 +4576,7 @@ for cmd in node npm git python3 curl; do command -v "$cmd" >/dev/null || { echo 
 echo "preflight ok"`); err != nil {
 		return fmt.Errorf("daytona sandbox missing required commands: %w", err)
 	}
-	// Step 2b: Pre-stage plugin runtime dependencies before starting gateway.
-	// This prevents the gateway from doing expensive npm installs while
-	// clients are connected, which causes event-loop delays and connection drops.
-	if err := exec("stage openclaw plugin deps", 3*time.Minute,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; \
-export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
-openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"`); err != nil {
-		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
-	}
-
-	// Step 2c: Configure gateway bind/port and start it.
+	// Step 2b: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
 	gatewaySetup := `
 python3 - <<'PYEOF'
@@ -5158,17 +5148,29 @@ func daytonaInstallModelPluginCommand(provider string) string {
 	if provider != "codex" {
 		return ""
 	}
-	version := cliversion.CodexPluginVersion
-	spec := "npm:@openclaw/codex@" + version
-	return fmt.Sprintf(`export HOME=/home/daytona
+	const runtimeDir = "/home/daytona/.local/lib/openclaw-codex-plugin"
+	return fmt.Sprintf(`set -euo pipefail
+export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
 export PATH="$HOME/.local/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-if openclaw plugins info codex --json >/dev/null 2>&1; then
+plugin_version() {
+  openclaw plugins info codex --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const p = JSON.parse(s); console.log(p.plugin?.version || p.version) })'
+}
+if INSTALLED_VERSION="$(plugin_version 2>/dev/null)" && [ "$INSTALLED_VERSION" = %s ]; then
   echo "Codex plugin already installed"
 else
-  openclaw plugins install %s
+%s
+%s
+  cd %s
+  npm ci --ignore-scripts --no-audit --no-fund
+  openclaw plugins install -l %s --force
 fi
-openclaw plugins info codex --json >/dev/null`, shellQuote(spec))
+INSTALLED_VERSION="$(plugin_version)"
+[ "$INSTALLED_VERSION" = %s ]`, shellQuote(cliversion.CodexPluginVersion),
+		remoteWriteFileCommand(runtimeDir, "package.json", string(cliversion.CodexPluginPackageJSON)),
+		remoteWriteFileCommand(runtimeDir, "package-lock.json", string(cliversion.CodexPluginPackageLock)),
+		shellQuote(runtimeDir), shellQuote(path.Join(runtimeDir, "node_modules/@openclaw/codex")),
+		shellQuote(cliversion.CodexPluginVersion))
 }
 
 func daytonaOpenClawInstallStatusCommand() string {
