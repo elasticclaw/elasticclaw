@@ -55,8 +55,9 @@ import (
 
 // Server is the ElasticClaw hub.
 type Server struct {
-	bridgeChecksumMu sync.Mutex
-	bridgeChecksums  map[string]string // release claw-bridge URL -> sha256
+	bridgeChecksumMu     sync.Mutex
+	bridgeChecksums      map[string]bridgeChecksumEntry // release claw-bridge URL -> sha256 or recent failure
+	bridgeChecksumFlight singleflight.Group
 
 	branchSweepMu sync.Mutex // serialize branch ownership checks and registration
 	branchRetryMu sync.Mutex // keep pending-branch retry batches from overlapping

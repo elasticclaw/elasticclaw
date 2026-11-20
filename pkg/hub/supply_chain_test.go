@@ -13,8 +13,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	"github.com/elasticclaw/elasticclaw/pkg/install"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -93,7 +95,7 @@ func TestBridgeChecksumCache(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(digest + "  claw-bridge-linux-amd64\n")), Header: make(http.Header)}, nil
 	})}
 	defer func() { http.DefaultClient = previous }()
-	s := &Server{hubCfg: &types.HubConfig{Security: types.SecurityConfig{StrictSupplyChain: true}}}
+	s := &Server{hubCfg: &types.HubConfig{}}
 	for i := 0; i < 2; i++ {
 		got, err := s.bridgeSHA256(context.Background(), githubReleasesBase+"/v1/claw-bridge-linux-amd64")
 		if err != nil || got != digest {
@@ -102,6 +104,43 @@ func TestBridgeChecksumCache(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("fetched %d times", calls.Load())
+	}
+	if install.ReleaseMinisignPublicKey == "" {
+		// Strict mode must not trust checksums that no signature authenticates.
+		s.hubCfg.Security.StrictSupplyChain = true
+		if _, err := s.bridgeSHA256(context.Background(), githubReleasesBase+"/v1/claw-bridge-linux-amd64"); err == nil || !strings.Contains(err.Error(), "not signature-verified") {
+			t.Fatalf("strict mode accepted unsigned checksums: %v", err)
+		}
+	}
+}
+
+func TestBridgeChecksumFailureIsCachedBriefly(t *testing.T) {
+	var calls atomic.Int32
+	previous := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: checksumTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() == githubReleasesBase+"/v1/checksums.txt" {
+			calls.Add(1)
+		}
+		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})}
+	defer func() { http.DefaultClient = previous }()
+	s := &Server{hubCfg: &types.HubConfig{}}
+	ref := githubReleasesBase + "/v1/claw-bridge-linux-amd64"
+	for i := 0; i < 3; i++ {
+		if _, err := s.resolveBridgeSHA256(context.Background(), ref); err == nil {
+			t.Fatal("accepted failed checksum fetch")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("fetched %d times within the failure TTL", calls.Load())
+	}
+	s.bridgeChecksumMu.Lock()
+	entry := s.bridgeChecksums[ref]
+	entry.expires = time.Now().Add(-time.Second)
+	s.bridgeChecksums[ref] = entry
+	s.bridgeChecksumMu.Unlock()
+	if _, err := s.resolveBridgeSHA256(context.Background(), ref); err == nil || calls.Load() != 2 {
+		t.Fatalf("expired failure not refetched: calls=%d err=%v", calls.Load(), err)
 	}
 }
 

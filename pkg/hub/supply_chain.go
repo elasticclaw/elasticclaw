@@ -91,9 +91,19 @@ func releaseBridgeSHA256(ctx context.Context, client *http.Client, ref string) (
 	return digest, nil
 }
 
+// bridgeChecksumFailureTTL bounds how long a failed release checksum fetch is
+// reused, so an unreachable origin does not stall every provisioning.
+const bridgeChecksumFailureTTL = 30 * time.Second
+
+type bridgeChecksumEntry struct {
+	digest  string
+	err     error
+	expires time.Time // zero for a successful fetch, which never expires
+}
+
 // bridgeSHA256 returns the expected claw-bridge SHA256 for ref, or "" when it
 // cannot be determined and strict mode is off. Release checksums are fetched
-// once per URL; failures are not cached so a transient fetch error can recover.
+// once per URL; failures are cached briefly so a transient error can recover.
 // A pinned OCI digest is verified by oras itself, so it yields "".
 func (s *Server) bridgeSHA256(ctx context.Context, ref string) (string, error) {
 	if err := s.checkBridgeTransport(ref); err != nil {
@@ -103,28 +113,48 @@ func (s *Server) bridgeSHA256(ctx context.Context, ref string) (string, error) {
 	if err != nil {
 		return "", s.supplyChainViolation("cannot verify claw-bridge %q: %v", ref, err)
 	}
+	if digest != "" && strings.HasPrefix(ref, githubReleasesBase+"/") && install.ReleaseMinisignPublicKey == "" {
+		// Unsigned checksums only prove integrity against the same origin.
+		if err := s.supplyChainViolation("claw-bridge checksums for %q are not signature-verified: release signing key is not configured", ref); err != nil {
+			return "", err
+		}
+	}
 	return digest, nil
+}
+
+func (s *Server) releaseBridgeSHA256Cached(ctx context.Context, ref string) (string, error) {
+	s.bridgeChecksumMu.Lock()
+	entry, ok := s.bridgeChecksums[ref]
+	s.bridgeChecksumMu.Unlock()
+	if ok && (entry.expires.IsZero() || time.Now().Before(entry.expires)) {
+		return entry.digest, entry.err
+	}
+	// Fetch outside the lock; concurrent callers for one URL share a fetch that
+	// a single caller's cancellation cannot abort.
+	v, err, _ := s.bridgeChecksumFlight.Do(ref, func() (any, error) {
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		digest, err := releaseBridgeSHA256(fetchCtx, http.DefaultClient, ref)
+		entry := bridgeChecksumEntry{digest: digest, err: err}
+		if err != nil {
+			entry.expires = time.Now().Add(bridgeChecksumFailureTTL)
+		}
+		s.bridgeChecksumMu.Lock()
+		if s.bridgeChecksums == nil {
+			s.bridgeChecksums = make(map[string]bridgeChecksumEntry)
+		}
+		s.bridgeChecksums[ref] = entry
+		s.bridgeChecksumMu.Unlock()
+		return digest, err
+	})
+	digest, _ := v.(string)
+	return digest, err
 }
 
 func (s *Server) resolveBridgeSHA256(ctx context.Context, ref string) (string, error) {
 	switch {
 	case strings.HasPrefix(ref, githubReleasesBase+"/"):
-		s.bridgeChecksumMu.Lock()
-		defer s.bridgeChecksumMu.Unlock()
-		if digest, ok := s.bridgeChecksums[ref]; ok {
-			return digest, nil
-		}
-		fetchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		digest, err := releaseBridgeSHA256(fetchCtx, http.DefaultClient, ref)
-		if err != nil {
-			return "", err
-		}
-		if s.bridgeChecksums == nil {
-			s.bridgeChecksums = make(map[string]string)
-		}
-		s.bridgeChecksums[ref] = digest
-		return digest, nil
+		return s.releaseBridgeSHA256Cached(ctx, ref)
 	case strings.HasPrefix(ref, "https://"), strings.HasPrefix(ref, "http://"):
 		s.mu.RLock()
 		var digest string
