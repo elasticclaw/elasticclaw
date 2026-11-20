@@ -11,3 +11,7 @@ func openClawBootstrap() harness.Bootstrap {
 	}
 	return b
 }
+
+func openClawSandboxSteps() harness.SandboxSteps {
+	return openClawBootstrap().(harness.SandboxSteps)
+}

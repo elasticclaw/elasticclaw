@@ -4331,12 +4331,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	// that kills synchronous long-running commands.
 	// Uninstall old openclaw then reinstall pinned version (ensures nvm current symlink is updated)
 	if err := exec("uninstall old openclaw", 20*time.Second,
-		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-echo "npm=$NPM prefix=$PREFIX"; \
-sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true; \
-hash -r; \
-echo uninstalled`); err != nil {
+		daytonaUninstallOpenClawCommand()); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
@@ -4372,18 +4367,7 @@ echo uninstalled`); err != nil {
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
-NPM="$NVM_DIR/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
-hash -r; \
-OPENCLAW_PATH="$(command -v openclaw || true)"; \
-OPENCLAW_VERSION="$(openclaw --version 2>&1 || true)"; \
-PACKAGE_VERSION="$(PREFIX="$PREFIX" node -e "try{console.log(require(process.env.PREFIX + '/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
-echo "openclaw path=$OPENCLAW_PATH"; \
-echo "openclaw version=$OPENCLAW_VERSION"; \
-echo "openclaw package_version=$PACKAGE_VERSION"; \
-case "$OPENCLAW_VERSION" in *%s*) ;; *) echo "expected openclaw %s"; exit 1 ;; esac`, daytonaOpenClawVersion, daytonaOpenClawVersion)); err != nil {
+		daytonaVerifyOpenClawCommand(daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
@@ -4530,21 +4514,17 @@ docker --version`); err != nil {
 			return fmt.Errorf("install selected model cli: %w", err)
 		}
 	}
-	onboardCmd := fmt.Sprintf(
-		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
-		llmKeyEnvDaytona,
-		bootstrapCfg.OnboardFlags,
-	)
+	onboardCmd := daytonaOnboardCommand(llmKeyEnvDaytona, bootstrapCfg.OnboardFlags)
 	log.Printf("[daytona] onboard openclaw...")
 	onboardResult, onboardErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + onboardCmd}, 2*time.Minute)
 	if onboardErr != nil {
-		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
+		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", daytonaOpenClawConfigExistsCommand()}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
 			return fmt.Errorf("onboard openclaw: %s", sanitizeBootstrapError(onboardErr))
 		}
 		log.Printf("[daytona] onboard returned error, but config file exists; continuing")
 	} else if onboardResult.ExitCode != 0 {
-		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
+		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", daytonaOpenClawConfigExistsCommand()}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
 			return fmt.Errorf("onboard openclaw failed (exit %d): %s", onboardResult.ExitCode, sanitizeBootstrapOutput(onboardResult.Stdout))
 		}
@@ -4586,53 +4566,13 @@ echo "preflight ok"`); err != nil {
 	// This prevents the gateway from doing expensive npm installs while
 	// clients are connected, which causes event-loop delays and connection drops.
 	if err := exec("stage openclaw plugin deps", 3*time.Minute,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
-export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
-openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"`); err != nil {
+		daytonaStageOpenClawPluginDepsCommand()); err != nil {
 		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
 	}
 
 	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
-	gatewaySetup := `
-python3 - <<'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-with open(path) as f: cfg = json.load(f)
-cfg.setdefault('gateway', {})['bind'] = 'loopback'
-cfg['gateway']['port'] = 18789
-# Keep token auth that onboard generated - don't change auth mode
-with open(path, 'w') as f: json.dump(cfg, f, indent=2)
-print('gateway config updated')
-PYEOF
-export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
-export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
-# Phase 1: wait for HTTP server to be listening (quick)
-for i in $(seq 1 30); do
-  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
-  sleep 1
-done
-curl -sf http://localhost:18789/healthz >/dev/null || { echo 'gateway failed to listen'; tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true; exit 1; }
-# Phase 2: wait for gateway startup to complete. Do not use openclaw health
-# here: it pairs the CLI device with read-only scopes before claw-bridge can
-# connect, then claw-bridge is rejected as a scope-upgrade.
-for i in $(seq 1 30); do
-  if grep -q 'gateway ready' ~/.openclaw/gateway.log 2>/dev/null; then
-    echo "gateway ready"
-    exit 0
-  fi
-  curl -sf http://localhost:18789/healthz >/dev/null || break
-  sleep 1
-done
-# Fallback: if the readiness log line is unavailable but the gateway is still
-# listening and healthy, don't fail the bootstrap.
-if curl -sf http://localhost:18789/healthz >/dev/null; then
-  echo "gateway ready (healthz)"
-  exit 0
-fi
-echo 'gateway not ready'
-tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
-exit 1`
+	gatewaySetup := daytonaStartOpenClawGatewayCommand()
 	gatewaySetup = withDaytonaLLMKeyEnv(llmKeyEnvDaytona, gatewaySetup)
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
 		return err
@@ -5093,31 +5033,32 @@ echo "claw-bridge not running"
 exit 1`
 }
 
+func daytonaUninstallOpenClawCommand() string {
+	return openClawSandboxSteps().UninstallCommand()
+}
+
+func daytonaVerifyOpenClawCommand(version string) string {
+	return openClawSandboxSteps().VerifyVersionCommand(version)
+}
+
+func daytonaOnboardCommand(llmKeyEnv, onboardFlags string) string {
+	return openClawSandboxSteps().OnboardCommand(llmKeyEnv, onboardFlags)
+}
+
+func daytonaOpenClawConfigExistsCommand() string {
+	return openClawSandboxSteps().ConfigExistsCommand("/home/daytona")
+}
+
+func daytonaStageOpenClawPluginDepsCommand() string {
+	return openClawSandboxSteps().StagePluginDepsCommand()
+}
+
+func daytonaStartOpenClawGatewayCommand() string {
+	return openClawSandboxSteps().StartGatewayCommand(18789)
+}
+
 func daytonaStartOpenClawInstallCommand(version string) string {
-	installScript := fmt.Sprintf(`set -o pipefail
-export HOME=/home/daytona
-export NVM_DIR=/usr/local/share/nvm
-NPM="$NVM_DIR/current/bin/npm"
-PREFIX="$("$NPM" config get prefix)"
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-LOG=/tmp/openclaw-install.log
-STATUS=/tmp/openclaw-install.status
-echo "npm=$NPM prefix=$PREFIX"
-if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" 2>&1; then
-  hash -r
-  echo ok > "$STATUS"
-  echo "install done"
-else
-  rc=$?
-  echo "failed:$rc" > "$STATUS"
-  exit "$rc"
-fi`, version)
-	return fmt.Sprintf(`export HOME=/home/daytona
-LOG=/tmp/openclaw-install.log
-STATUS=/tmp/openclaw-install.status
-rm -f "$LOG" "$STATUS"
-setsid nohup bash -c %s > "$LOG" 2>&1 </dev/null &
-echo "openclaw-install-status=started"`, shellQuote(installScript))
+	return openClawSandboxSteps().InstallCommand("/home/daytona", version)
 }
 
 func daytonaInstallCodingModelCLICommand(model string) string {
@@ -5143,53 +5084,11 @@ hash -r
 }
 
 func daytonaInstallModelPluginCommand(provider string) string {
-	if provider != "codex" {
-		return ""
-	}
-	version := cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", cliversion.CodexPluginVersion)
-	spec := "npm:@openclaw/codex@" + version
-	return fmt.Sprintf(`export HOME=/home/daytona
-export NVM_DIR=/usr/local/share/nvm
-export PATH="$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-if openclaw plugins info codex --json >/dev/null 2>&1; then
-  echo "Codex plugin already installed"
-else
-  openclaw plugins install %s
-fi
-openclaw plugins info codex --json >/dev/null`, shellQuote(spec))
+	return openClawSandboxSteps().InstallModelPluginCommand("/home/daytona", provider, cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", cliversion.CodexPluginVersion))
 }
 
 func daytonaOpenClawInstallStatusCommand(version string) string {
-	return fmt.Sprintf(`export HOME=/home/daytona
-LOG=/tmp/openclaw-install.log
-STATUS=/tmp/openclaw-install.status
-if [ -s "$STATUS" ]; then
-  status="$(cat "$STATUS")"
-  case "$status" in
-    ok)
-      echo "openclaw-install-status=ok"
-      exit 0
-      ;;
-    failed:*)
-      echo "openclaw-install-status=failed"
-      echo "$status"
-      tail -n 120 "$LOG" 2>/dev/null || true
-      exit 0
-      ;;
-    *)
-      echo "openclaw-install-status=unknown:$status"
-      tail -n 120 "$LOG" 2>/dev/null || true
-      exit 0
-      ;;
-  esac
-fi
-if pgrep -af %s >/dev/null 2>&1; then
-  echo "openclaw-install-status=pending"
-  tail -n 20 "$LOG" 2>/dev/null || true
-  exit 0
-fi
-echo "openclaw-install-status=missing"
-tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
+	return openClawSandboxSteps().InstallStatusCommand("/home/daytona", version)
 }
 
 // daytonaLiveWorkspaceDir is the workspace the OpenClaw agent actually runs in.
