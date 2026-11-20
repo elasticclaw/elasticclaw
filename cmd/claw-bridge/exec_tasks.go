@@ -67,11 +67,9 @@ func (s *controlSupervisor) executeCommandTask(ctx context.Context, binding work
 
 	defer func() {
 		s.mu.RLock()
-		gateway := s.gateway
+		branches := s.branches
 		s.mu.RUnlock()
-		if gateway != nil {
-			gateway.branches.trigger()
-		}
+		branches.trigger()
 	}()
 
 	taskCtx, cancel := context.WithCancel(ctx)
