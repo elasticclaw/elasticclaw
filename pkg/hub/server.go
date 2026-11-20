@@ -4509,17 +4509,16 @@ docker --version`); err != nil {
 	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	modelAuthEnvDaytona := buildModelAuthEnv(s.hubCfg, llmKeyNameDaytona)
-	apiKeyAuthSyncDaytona := buildOpenClawAPIKeyAuthSyncShell(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	oauthAuthSyncDaytona := buildOpenClawOAuthAuthSyncShell(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona, defaultModelDaytona)
-	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: s.hubCfg.LLMKeys, SelectedKey: llmKeyNameDaytona, DefaultModel: defaultModelDaytona,
+	})
 	if activeKeyDaytona != nil {
 		activeKeyNameDaytona = activeKeyDaytona.Name
 		activeKeyProviderDaytona = activeKeyDaytona.Provider
 	}
 	s.mu.RUnlock()
 	log.Printf("[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
-		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, providerConfigScript != "")
+		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, bootstrapCfg.ProviderConfig != "")
 	gatewayPassword := randomHex(16)
 	if restoreShell := buildModelAuthRestoreShell(modelAuthEnvDaytona); restoreShell != "" {
 		if err := exec("restore model auth", 30*time.Second, "export HOME=/home/daytona; "+restoreShell); err != nil {
@@ -4534,7 +4533,7 @@ docker --version`); err != nil {
 	onboardCmd := fmt.Sprintf(
 		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
 		llmKeyEnvDaytona,
-		onboardFlags,
+		bootstrapCfg.OnboardFlags,
 	)
 	log.Printf("[daytona] onboard openclaw...")
 	onboardResult, onboardErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + onboardCmd}, 2*time.Minute)
@@ -4558,20 +4557,20 @@ docker --version`); err != nil {
 			return fmt.Errorf("install selected model plugin: %w", err)
 		}
 	}
-	if oauthAuthSyncDaytona != "" {
-		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + oauthAuthSyncDaytona
+	if bootstrapCfg.OAuthAuthSync != "" {
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + bootstrapCfg.OAuthAuthSync
 		if err := exec("sync openclaw OAuth auth", 30*time.Second, syncCmd); err != nil {
 			return fmt.Errorf("sync openclaw OAuth auth: %w", err)
 		}
 	}
-	if apiKeyAuthSyncDaytona != "" {
-		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + apiKeyAuthSyncDaytona
+	if bootstrapCfg.APIKeyAuthSync != "" {
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + bootstrapCfg.APIKeyAuthSync
 		if err := exec("sync openclaw api key auth", 30*time.Second, syncCmd); err != nil {
 			return fmt.Errorf("sync openclaw api key auth: %w", err)
 		}
 	}
 
-	configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + providerConfigScript
+	configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + bootstrapCfg.ProviderConfig
 	if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 		return err
 	}
@@ -5926,6 +5925,9 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	gatewayPassword := randomHex(16)
 
 	// Build bootstrap script using same pattern as replicated
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: hubCfg.LLMKeys, SelectedKey: llmKeyName, DefaultModel: defaultModel,
+	})
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -5944,11 +5946,11 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
-		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
-		OAuthAuthSync:   buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
+		APIKeyAuthSync:  bootstrapCfg.APIKeyAuthSync,
+		OAuthAuthSync:   bootstrapCfg.OAuthAuthSync,
 		LinearEnv:       buildLinearEnv(linearToken),
-		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
-		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
+		ProviderConfig:  bootstrapCfg.ProviderConfig,
+		OnboardFlags:    bootstrapCfg.OnboardFlags,
 		Env:             env,
 	})
 
@@ -6067,10 +6069,9 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 
 	gatewayPassword := randomHex(16)
-	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	oauthAuthSync := buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: hubCfg.LLMKeys, SelectedKey: llmKeyName, DefaultModel: defaultModel,
+	})
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed).
 	// Merge request and workflow environments, then overlay hub-managed values
@@ -6092,10 +6093,10 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_LLM_PROVIDER":       resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
-		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
-		"ELASTICCLAW_API_KEY_AUTH_SYNC":  apiKeyAuthSync,
-		"ELASTICCLAW_OAUTH_AUTH_SYNC":    oauthAuthSync,
-		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
+		"ELASTICCLAW_PROVIDER_CONFIG":    bootstrapCfg.ProviderConfig,
+		"ELASTICCLAW_API_KEY_AUTH_SYNC":  bootstrapCfg.APIKeyAuthSync,
+		"ELASTICCLAW_OAUTH_AUTH_SYNC":    bootstrapCfg.OAuthAuthSync,
+		"ELASTICCLAW_ONBOARD_FLAGS":      bootstrapCfg.OnboardFlags,
 	})
 
 	// Inject LLM keys: buildLLMKeyEnv returns "export VAR=val\n" lines — parse into k/v
@@ -6316,10 +6317,9 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 	if defaultModel == "" {
 		defaultModel = hubCfg.DefaultModel
 	}
-	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	oauthAuthSync := buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: hubCfg.LLMKeys, SelectedKey: llmKeyName, DefaultModel: defaultModel,
+	})
 	gatewayPassword := randomHex(16)
 
 	env := map[string]string{
@@ -6338,10 +6338,10 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		"ELASTICCLAW_LLM_PROVIDER":       resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
-		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
-		"ELASTICCLAW_API_KEY_AUTH_SYNC":  apiKeyAuthSync,
-		"ELASTICCLAW_OAUTH_AUTH_SYNC":    oauthAuthSync,
-		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
+		"ELASTICCLAW_PROVIDER_CONFIG":    bootstrapCfg.ProviderConfig,
+		"ELASTICCLAW_API_KEY_AUTH_SYNC":  bootstrapCfg.APIKeyAuthSync,
+		"ELASTICCLAW_OAUTH_AUTH_SYNC":    bootstrapCfg.OAuthAuthSync,
+		"ELASTICCLAW_ONBOARD_FLAGS":      bootstrapCfg.OnboardFlags,
 	}
 	for _, line := range strings.Split(llmKeyEnv+modelAuthEnv, "\n") {
 		line = strings.TrimSpace(line)
@@ -7509,6 +7509,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
 
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: hubCfg.LLMKeys, SelectedKey: llmKeyName, DefaultModel: defaultModel,
+	})
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -7527,11 +7530,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
-		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
-		OAuthAuthSync:   buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
+		APIKeyAuthSync:  bootstrapCfg.APIKeyAuthSync,
+		OAuthAuthSync:   bootstrapCfg.OAuthAuthSync,
 		LinearEnv:       buildLinearEnv(linearToken),
-		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
-		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
+		ProviderConfig:  bootstrapCfg.ProviderConfig,
+		OnboardFlags:    bootstrapCfg.OnboardFlags,
 		Env:             env,
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
