@@ -21,6 +21,9 @@ func TestIsReservedSandboxEnvKey(t *testing.T) {
 		"LD_PRELOAD", "LD_LIBRARY_PATH", "NIX_CONFIG", "NIX_PATH",
 		"ELASTICCLAW_CODEX_PLUGIN_VERSION", "ELASTICCLAW_CODEX_CLI_VERSION",
 		"ELASTICCLAW_GROK_CLI_VERSION", "ELASTICCLAW_FUTURE_VERSION",
+		"BASH_ENV", "ENV", "COREPACK_NPM_REGISTRY", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL",
+		"UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX",
+		"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !isReservedSandboxEnvKey(name) {
@@ -35,7 +38,7 @@ func TestIsReservedSandboxEnvKey(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"", "APP_TOKEN", "NPM_TOKEN", "MY_PATH", "PATH_EXTRA", "ELASTICCLAW_VERSION_EXTRA", "CODEX_CLI_VERSION", "node_options", "yarn_registry"} {
+	for _, name := range []string{"", "APP_TOKEN", "NPM_TOKEN", "MY_PATH", "PATH_EXTRA", "ELASTICCLAW_VERSION_EXTRA", "CODEX_CLI_VERSION", "node_options", "yarn_registry", "HTTPS_PROXY", "UV_CACHE_DIR"} {
 		t.Run(name, func(t *testing.T) {
 			if isReservedSandboxEnvKey(name) {
 				t.Errorf("%s should be allowed", name)

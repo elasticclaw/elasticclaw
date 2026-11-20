@@ -37,12 +37,19 @@ func isReservedSandboxEnvKey(name string) bool {
 		return true
 	}
 	if strings.HasPrefix(strings.ToUpper(name), "NPM_CONFIG_") ||
-		strings.HasPrefix(name, "YARN_") || strings.HasPrefix(name, "PNPM_") ||
+		strings.HasPrefix(name, "YARN_") || strings.HasPrefix(name, "PNPM_") || strings.HasPrefix(name, "COREPACK_") ||
 		(strings.HasPrefix(name, "ELASTICCLAW_") && strings.HasSuffix(name, "_VERSION")) {
 		return true
 	}
 	switch name {
-	case "NODE_OPTIONS", "NODE_PATH", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "NIX_CONFIG", "NIX_PATH":
+	case "NODE_OPTIONS", "NODE_PATH", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "NIX_CONFIG", "NIX_PATH",
+		// Sourced by every non-interactive bootstrap shell.
+		"BASH_ENV", "ENV",
+		// Package indexes for uvx MCP launches.
+		"PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX",
+		// TLS trust used by installers. Proxies stay allowed: without a
+		// custom CA they cannot alter verified HTTPS downloads.
+		"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE":
 		return true
 	}
 	return false
