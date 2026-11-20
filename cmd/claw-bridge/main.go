@@ -3671,9 +3671,12 @@ exec nix develop %s -c bash -c 'export PATH="$PATH:/usr/local/bin:/opt/homebrew/
 	return nil
 }
 
+// workspaceFlakeFlags keeps locked inputs as recorded without rewriting
+// flake.lock. A lock that is stale against flake.nix still evaluates (Nix
+// resolves the missing inputs in memory and warns) instead of failing bootstrap.
 func workspaceFlakeFlags(hasLock bool) string {
 	if hasLock {
-		return "--no-update-lock-file --no-write-lock-file"
+		return "--no-write-lock-file"
 	}
 	log.Printf("[supply-chain] WARNING workspace flake.lock is missing; flake inputs are unpinned")
 	return ""

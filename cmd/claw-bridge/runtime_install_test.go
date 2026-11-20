@@ -28,7 +28,7 @@ func TestWorkspaceFlakeFlags(t *testing.T) {
 	previous := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(previous)
-	if got := workspaceFlakeFlags(true); got != "--no-update-lock-file --no-write-lock-file" {
+	if got := workspaceFlakeFlags(true); got != "--no-write-lock-file" {
 		t.Fatalf("locked flags: %q", got)
 	}
 	if output.Len() != 0 {
