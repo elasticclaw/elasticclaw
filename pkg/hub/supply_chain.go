@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -151,4 +152,27 @@ func verifiedDockerBridgeBytes(data []byte, digest string) ([]byte, error) {
 		return nil, fmt.Errorf("docker claw-bridge verification: %w", err)
 	}
 	return data, nil
+}
+
+var npmExactVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
+var uvExactVersion = regexp.MustCompile(`^([0-9]+!)?[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?(\+[a-zA-Z0-9]+([._-][a-zA-Z0-9]+)*)?$`)
+
+func mcpPackagePinned(source types.MCPSource, pkg string) bool {
+	switch source {
+	case types.MCPSourceNpx:
+		i := strings.LastIndex(pkg, "@")
+		return i > 0 && npmExactVersion.MatchString(pkg[i+1:])
+	case types.MCPSourceUvx:
+		name, version, ok := strings.Cut(pkg, "==")
+		return ok && name != "" && uvExactVersion.MatchString(version)
+	default:
+		return true
+	}
+}
+
+func (s *Server) checkMCPPackage(source types.MCPSource, pkg string) error {
+	if !mcpPackagePinned(source, pkg) {
+		return s.supplyChainViolation("MCP %s package %q must have an exact version", source, pkg)
+	}
+	return nil
 }

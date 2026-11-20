@@ -36,6 +36,7 @@ func TestNodeGitInstallScriptRechecksNode(t *testing.T) {
 				"npm":  "#!/bin/sh\n",
 				"git":  "#!/bin/sh\necho git-fake\n",
 				"curl": "#!/bin/sh\n",
+				"gpg":  "#!/bin/sh\nprintf 'pub:::::::::\\nfpr:::::::::6F71F525282841EEDAF851B42F59B5F99B1BE0B4:\\n'\n",
 				// Drain stdin like the real `sudo tee`/`sudo gpg`, or pipefail sees SIGPIPE.
 				"sudo": "#!/bin/sh\ncat > /dev/null\necho \"$*\" >> \"$FAKE_APT_LOG\"\ncase \"$*\" in *'install -y --fix-broken nodejs'*) [ -n \"$FAKE_APT_UPGRADES\" ] && printf ok > \"$FAKE_NODE_STATE\";; esac\nexit 0\n",
 			}

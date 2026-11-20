@@ -3473,9 +3473,7 @@ NIX_INIT_MODE="none"
 if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
   NIX_INIT_MODE="systemd"
 fi
-curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-  sh -s -- install linux --no-confirm --init "$NIX_INIT_MODE" >> /tmp/nix-install.log 2>&1
-`
+` + cliversion.NixInstallerScript
 		err := runShell(script)
 		if err != nil {
 			log.Printf("[bootstrap] Nix install failed: %v", err)
@@ -3517,7 +3515,7 @@ fi
 sudo apt-get update -qq
 sudo apt-get install -y --fix-broken ca-certificates curl gnupg
 sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL "$DOCKER_GPG" | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+` + cliversion.VerifiedAPTKeyScript("$DOCKER_GPG", "/etc/apt/keyrings/docker.gpg", cliversion.DockerKeyFingerprint, "sudo ") + `
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
 # Add the repository to Apt sources
 echo "$DOCKER_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
@@ -3610,7 +3608,11 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 	hasFlakeLock := false
 	if _, err := os.Stat(flakeLockPath); err == nil {
 		hasFlakeLock = true
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to stat flake.lock: %w", err)
 	}
+
+	flakeFlags := workspaceFlakeFlags(hasFlakeLock)
 
 	// Create a dedicated flake directory
 	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
@@ -3629,11 +3631,14 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 
 	if hasFlakeLock {
 		flakeLockData, err := os.ReadFile(flakeLockPath)
-		if err == nil {
-			if err := os.WriteFile(filepath.Join(flakeDir, "flake.lock"), flakeLockData, 0644); err != nil {
-				return fmt.Errorf("failed to write flake.lock: %w", err)
-			}
+		if err != nil {
+			return fmt.Errorf("failed to read flake.lock: %w", err)
 		}
+		if err := os.WriteFile(filepath.Join(flakeDir, "flake.lock"), flakeLockData, 0644); err != nil {
+			return fmt.Errorf("failed to write flake.lock: %w", err)
+		}
+	} else if err := os.Remove(filepath.Join(flakeDir, "flake.lock")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove stale flake.lock: %w", err)
 	}
 
 	// Create the provider-neutral flake-run wrapper that enters devShells.default.
@@ -3648,8 +3653,8 @@ set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
 cd %q
-exec nix develop --accept-flake-config -c bash -c 'export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"; exec "$@"' bash "$@"
-`, flakeDir)
+exec nix develop %s -c bash -c 'export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"; exec "$@"' bash "$@"
+`, flakeDir, flakeFlags)
 	wrapperPath := filepath.Join(home, ".elasticclaw", "flake-run")
 	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0755); err != nil {
 		return fmt.Errorf("failed to write flake wrapper: %w", err)
@@ -3659,11 +3664,19 @@ exec nix develop --accept-flake-config -c bash -c 'export PATH="$PATH:/usr/local
 	// environment from the pinned flake.lock and fails fast on bad flakes.
 	log.Printf("[bootstrap] pre-evaluating workspace devShell via flake-run...")
 	if err := runShell(`~/.elasticclaw/flake-run true`); err != nil {
-		return fmt.Errorf("workspace flake devShell evaluation failed (try 'nix develop --accept-flake-config' locally to debug): %w", err)
+		return fmt.Errorf("workspace flake devShell evaluation failed (try 'nix develop' locally to debug): %w", err)
 	}
 
 	log.Printf("[bootstrap] flake environment ready at %s (devShell pre-evaluated)", flakeDir)
 	return nil
+}
+
+func workspaceFlakeFlags(hasLock bool) string {
+	if hasLock {
+		return "--no-update-lock-file --no-write-lock-file"
+	}
+	log.Printf("[supply-chain] WARNING workspace flake.lock is missing; flake inputs are unpinned")
+	return ""
 }
 
 // startGatewayWithFlake starts the gateway, optionally inside the flake environment.
@@ -3742,8 +3755,7 @@ sudo apt-get install -y --fix-broken curl ca-certificates git gnupg
 if ! command -v npm >/dev/null 2>&1 || ! node_compatible; then
   if [ ! -f /etc/apt/sources.list.d/nodesource.sources ] && [ ! -f /etc/apt/sources.list.d/nodesource.list ]; then
     sudo mkdir -p /etc/apt/keyrings
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
-      sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    %s
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | \
       sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
   fi
@@ -3756,7 +3768,7 @@ if ! node_compatible; then
 fi
 echo "Node: $(node --version)"
 echo "Git: $(git --version)"
-`, cliversion.NodeCompatibleCheck, cliversion.NodeCompatibleRange)
+`, cliversion.NodeCompatibleCheck, cliversion.VerifiedAPTKeyScript("https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key", "/etc/apt/keyrings/nodesource.gpg", cliversion.NodeSourceKeyFingerprint, "sudo "), cliversion.NodeCompatibleRange)
 
 const openClawVersion = cliversion.OpenClawVersion
 const codexPluginVersion = cliversion.CodexPluginVersion

@@ -137,10 +137,10 @@ func TestScriptInstallCaddy_SupportsAptAndRpmDistros(t *testing.T) {
 	assertContains(t, s, "command -v dnf", "dnf detection")
 	assertContains(t, s, "command -v yum", "yum detection")
 	assertContains(t, s, "apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null || true", "non-fatal apt prereq install")
-	assertContains(t, s, "https://api.github.com/repos/caddyserver/caddy/releases/latest", "latest caddy release lookup")
+	assertContains(t, s, "CADDY_VERSION=2.11.9", "pinned caddy version")
 	assertContains(t, s, "https://github.com/caddyserver/caddy/releases/download/", "versioned caddy asset download")
-	assertContains(t, s, "caddy_'\"${CADDY_VERSION#v}\"'_linux_", "versioned caddy asset filename")
-	assertContains(t, s, "install -m 0755 /tmp/caddy /usr/local/bin/caddy", "static caddy binary install")
+	assertContains(t, s, "caddy_${CADDY_VERSION}_linux_", "versioned caddy asset filename")
+	assertContains(t, s, `install -m 0755 "$CADDY_TMP/caddy" /usr/local/bin/caddy`, "static caddy binary install")
 	assertContains(t, s, "SUDO=\"sudo \"", "sudo mode wiring")
 	assertContains(t, s, "systemctl enable caddy", "caddy service enable")
 	assertContains(t, s, "unsupported Linux distribution", "unsupported distro message")
@@ -190,5 +190,22 @@ func assertContains(t *testing.T, s, substr, desc string) {
 	t.Helper()
 	if !strings.Contains(s, substr) {
 		t.Errorf("expected %s to contain %s\nwanted: %q", desc, desc, substr)
+	}
+}
+
+func TestScriptInstallCaddy_VerifiesDownloads(t *testing.T) {
+	for _, sudo := range []bool{false, true} {
+		s := install.ScriptInstallCaddy(sudo)
+		for _, want := range []string{install.CaddyAMD64SHA512, install.CaddyARM64SHA512, "sha512sum -c -", "fpr:::::::::65760C51EDEA2017CEA2CA15155B6D79CA56EA34:", "gpg --batch --show-keys --with-colons"} {
+			assertContains(t, s, want, "verified download")
+		}
+		if strings.Contains(s, "releases/latest") {
+			t.Fatal("unpinned Caddy download")
+		}
+		cmd := exec.Command("bash", "-n")
+		cmd.Stdin = strings.NewReader(s)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
 	}
 }

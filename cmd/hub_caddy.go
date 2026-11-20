@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/install"
 	"github.com/spf13/cobra"
 )
 
@@ -59,11 +60,7 @@ func runHubCaddyInstall(cmd *cobra.Command, args []string) error {
 	// Install Caddy if not present
 	if _, err := exec.LookPath("caddy"); err != nil {
 		fmt.Println("Installing Caddy...")
-		script := `apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl 2>/dev/null
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-apt-get update -qq
-apt-get install -y caddy`
+		script := install.ScriptInstallCaddy(false)
 		c := exec.Command("bash", "-c", script)
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr

@@ -19,7 +19,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Node.js 24 (same version claw-bridge would install at bootstrap time)
 # and fail the build below the CVE-2026-111497 fix. The check is
 # cliversion.NodeCompatibleCheck verbatim; a test keeps the two in sync.
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+RUN set -eu; key=$(mktemp) \
+    && curl -fsSL --proto '=https' https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o "$key" \
+    && key_info=$(gpg --batch --show-keys --with-colons "$key") \
+    && printf '%s\n' "$key_info" | awk -F: '$1 == "pub" { primary=1; next } $1 == "sub" { primary=0 } $1 == "fpr" && primary { print; primary=0 }' | grep -Fx 'fpr:::::::::6F71F525282841EEDAF851B42F59B5F99B1BE0B4:' \
+    && install -d /etc/apt/keyrings \
+    && gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg "$key" \
+    && rm -f "$key" \
+    && echo 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main' > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 RUN node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); process.exit((major === 24 && (minor > 22 || (minor === 22 && patch >= 1))) || major > 26 || (major === 26 && (minor > 12 || (minor === 12 && patch >= 1))) ? 0 : 1)'

@@ -1923,13 +1923,17 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			// Build command
 			cmd := hubMCP.Command
 			if len(cmd) == 0 {
+				if err := s.checkMCPPackage(hubMCP.Source, hubMCP.Package); err != nil {
+					log.Printf("[create] MCP server %q skipped: %v", mcpRef.Name, err)
+					continue
+				}
 				switch hubMCP.Source {
 				case types.MCPSourceNpx:
-					cmd = []string{"npx", "-y", hubMCP.Package}
+					cmd = []string{"npx", "--ignore-scripts", "-y", hubMCP.Package}
 				case types.MCPSourceUvx:
 					cmd = []string{"uvx", hubMCP.Package}
 				case types.MCPSourceSmithery:
-					cmd = []string{"npx", "-y", "@smithery/cli@latest", "run", hubMCP.Package}
+					cmd = []string{"npx", "--ignore-scripts", "-y", "@smithery/cli@" + cliversion.SmitheryCLIVersion, "run", hubMCP.Package}
 				case types.MCPSourceDocker:
 					cmd = []string{"docker", "run", "-i", "--rm", hubMCP.Image}
 				case types.MCPSourceSSE:
@@ -4390,9 +4394,10 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	_ = s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled)
 	if nixEnabled == 1 {
 		if err := exec("install nix", 3*time.Minute,
-			`export HOME=/home/daytona; \
-curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-  sh -s -- install linux --no-confirm --init none >> /tmp/nix-install.log 2>&1; \
+			`set -e
+export HOME=/home/daytona
+NIX_INIT_MODE=none
+`+cliversion.NixInstallerScript+`
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true; \
 nix --version`); err != nil {
 			log.Printf("[daytona] warning: nix install failed: %v", err)
@@ -4404,7 +4409,8 @@ nix --version`); err != nil {
 	_ = s.db.QueryRow(`SELECT docker FROM claws WHERE id=?`, clawID).Scan(&dockerEnabled)
 	if dockerEnabled == 1 {
 		if err := exec("install docker", 3*time.Minute,
-			`export HOME=/home/daytona; \
+			`set -e
+export HOME=/home/daytona; \
 . /etc/os-release; \
 if [ "$ID" = "debian" ] && [ -n "$VERSION_CODENAME" ]; then \
   DOCKER_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $VERSION_CODENAME stable"; \
@@ -4413,14 +4419,14 @@ else \
   DOCKER_REPO="deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable"; \
   DOCKER_GPG="https://download.docker.com/linux/ubuntu/gpg"; \
 fi; \
-sudo apt-get update -qq && \
-sudo apt-get install -y --fix-broken ca-certificates curl gnupg && \
-sudo install -m 0755 -d /etc/apt/keyrings && \
-curl -fsSL "$DOCKER_GPG" | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg && \
-sudo chmod a+r /etc/apt/keyrings/docker.gpg && \
-echo "$DOCKER_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && \
-sudo apt-get update -qq && \
-sudo apt-get install -y --fix-broken docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
+sudo apt-get update -qq; \
+sudo apt-get install -y --fix-broken ca-certificates curl gnupg; \
+sudo install -m 0755 -d /etc/apt/keyrings; \
+`+cliversion.VerifiedAPTKeyScript("$DOCKER_GPG", "/etc/apt/keyrings/docker.gpg", cliversion.DockerKeyFingerprint, "sudo ")+`
+sudo chmod a+r /etc/apt/keyrings/docker.gpg; \
+echo "$DOCKER_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null; \
+sudo apt-get update -qq; \
+sudo apt-get install -y --fix-broken docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; \
 sudo usermod -aG docker daytona 2>/dev/null || true && \
 docker --version`); err != nil {
 			log.Printf("[daytona] warning: docker install failed: %v", err)
@@ -8309,7 +8315,7 @@ If ` + "`REPO_INSTRUCTIONS.md`" + ` exists, read it before working inside any cl
 
 const repoEnvironmentAgentsSection = `## Repository Environments
 
-If ` + "`REPO_ENVIRONMENT.md`" + ` exists, read it before running commands inside cloned repositories. Repositories with ` + "`flake.nix`" + ` should run repo-local commands with that repository's own Nix development shell, for example ` + "`cd <repo> && nix develop --accept-flake-config -c <command>`" + `.`
+If ` + "`REPO_ENVIRONMENT.md`" + ` exists, read it before running commands inside cloned repositories. Repositories with ` + "`flake.nix`" + ` should run repo-local commands with that repository's own Nix development shell, for example ` + "`cd <repo> && nix develop -c <command>`" + `.`
 
 func buildRepoInstructionDiscoveryScript(workspaceDir string, repos []types.GitHubRepoAccess) string {
 	if len(repos) == 0 {
@@ -8361,8 +8367,8 @@ ENV_FOUND=0
 {
   printf '%%s\n\n' '# Repository Environments'
   printf '%%s\n\n' 'ElasticClaw detected repository-local Nix flakes. Run commands for each repository with that repository flake instead of assuming one global project environment.'
-  printf '%%s\n\n' 'For one command, use: cd <repo> && nix develop --accept-flake-config -c <command>'
-  printf '%%s\n\n' 'For a sequence of commands in one repository, use: cd <repo> && nix develop --accept-flake-config'
+  printf '%%s\n\n' 'For one command, use: cd <repo> && nix develop -c <command>'
+  printf '%%s\n\n' 'For a sequence of commands in one repository, use: cd <repo> && nix develop'
 `, repoInstructionsIndexName, repoInstructionsIndexName)
 	for _, repo := range repos {
 		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
@@ -8372,7 +8378,7 @@ ENV_FOUND=0
 		fmt.Fprintf(&b, `  REPO_DIR=%s
   if [ -f "$REPO_DIR/flake.nix" ]; then
     ENV_FOUND=1
-    printf -- '- %s: cd %s && nix develop --accept-flake-config -c <command>\n'
+    printf -- '- %s: cd %s && nix develop -c <command>\n'
   fi
 `, shellQuote(repoName), repoName, repoName)
 	}

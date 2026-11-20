@@ -232,3 +232,69 @@ func TestStrictMCPImagePolicyRejectsCreate(t *testing.T) {
 		t.Fatalf("rejected request created a claw: count=%d err=%v", count, err)
 	}
 }
+
+func TestMCPPackagePinned(t *testing.T) {
+	for _, tc := range []struct {
+		source types.MCPSource
+		pkg    string
+		want   bool
+	}{
+		{types.MCPSourceNpx, "server@1.2.3", true},
+		{types.MCPSourceNpx, "@scope/server@1.2.3-rc.1+build", true},
+		{types.MCPSourceNpx, "@scope/server", false},
+		{types.MCPSourceNpx, "server", false},
+		{types.MCPSourceNpx, "server@latest", false},
+		{types.MCPSourceNpx, "server@^1.2.3", false},
+		{types.MCPSourceNpx, "server@~1.2.3", false},
+		{types.MCPSourceNpx, "server@1.2", false},
+		{types.MCPSourceNpx, "server@1.2.*", false},
+		{types.MCPSourceUvx, "server==1.2.3", true},
+		{types.MCPSourceUvx, "server[cli]==1.2.3rc1", true},
+		{types.MCPSourceUvx, "server==1.2.3.post1", true},
+		{types.MCPSourceUvx, "server", false},
+		{types.MCPSourceUvx, "server>=1.2.3", false},
+		{types.MCPSourceUvx, "server==1.*", false},
+		{types.MCPSourceUvx, "server==1.2,<=2", false},
+		{types.MCPSourceUvx, "server==", false},
+	} {
+		t.Run(string(tc.source)+"/"+tc.pkg, func(t *testing.T) {
+			if got := mcpPackagePinned(tc.source, tc.pkg); got != tc.want {
+				t.Fatalf("pinned = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMCPPackageSupplyChainPolicy(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	s := &Server{hubCfg: &types.HubConfig{}}
+	for _, source := range []types.MCPSource{types.MCPSourceNpx, types.MCPSourceUvx} {
+		s.hubCfg.Security.StrictSupplyChain = false
+		output.Reset()
+		if err := s.checkMCPPackage(source, "server"); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(output.String(), "[supply-chain] WARNING MCP") {
+			t.Fatalf("missing warning: %s", &output)
+		}
+		s.hubCfg.Security.StrictSupplyChain = true
+		if err := s.checkMCPPackage(source, "server"); err == nil {
+			t.Fatal("strict mode must skip unpinned MCP")
+		}
+	}
+	for _, tc := range []struct {
+		source types.MCPSource
+		pkg    string
+	}{
+		{types.MCPSourceNpx, "server@1.2.3"},
+		{types.MCPSourceUvx, "server==1.2.3"},
+		{types.MCPSourceSmithery, "server"},
+	} {
+		if err := s.checkMCPPackage(tc.source, tc.pkg); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
