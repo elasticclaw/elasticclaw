@@ -3187,6 +3187,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				ModelProvider    string   `json:"model_provider"`
 				CacheReadTokens  *int     `json:"cache_read_tokens"`
 				CacheWriteTokens *int     `json:"cache_write_tokens"`
+				// Usage is the harness-neutral cumulative snapshot; old bridges omit it.
+				Usage *harness.UsageSnapshot `json:"usage"`
 				// Pointers on purpose: an old bridge omits both, which must
 				// stay distinguishable from a bridge reporting "no subagents"
 				// (see applySubagentHeartbeatLocked).
@@ -3362,7 +3364,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				s.maybeLiftBridgeErrorPause(clawID)
-				if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider, CacheReadTokens: hb.CacheReadTokens, CacheWriteTokens: hb.CacheWriteTokens}); err != nil {
+				if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider, CacheReadTokens: hb.CacheReadTokens, CacheWriteTokens: hb.CacheWriteTokens, Cumulative: hb.Usage}); err != nil {
 					log.Printf("[usage] heartbeat for %s: %v", clawID, err)
 				}
 				if res, err := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='offline'`, clawID); err == nil {
