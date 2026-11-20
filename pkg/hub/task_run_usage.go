@@ -8,12 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/google/uuid"
 )
 
 var unmatchedUsagePriceModels sync.Map
 
 type taskRunUsageSnapshot struct {
+	Cumulative                             *harness.UsageSnapshot
 	SessionKey                             string
 	InputTokens, OutputTokens, TotalTokens *int
 	EstimatedCostUSD                       *float64
@@ -25,7 +27,16 @@ type taskRunUsageSnapshot struct {
 }
 
 func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot) error {
-	if snapshot.SessionKey == "" || (snapshot.InputTokens == nil && snapshot.OutputTokens == nil && snapshot.TotalTokens == nil) {
+	if snapshot.SessionKey == "" && snapshot.Cumulative != nil {
+		snapshot.SessionKey = snapshot.Cumulative.SessionKey
+	}
+	if snapshot.Cumulative != nil && snapshot.Cumulative.SessionKey != snapshot.SessionKey {
+		snapshot.Cumulative = nil
+	}
+	// A sample with flat fields comes from an OpenClaw bridge, which bills only
+	// samples with flat tokens; only cumulative-only producers rely on usage.
+	flat := snapshot.InputTokens != nil || snapshot.OutputTokens != nil || snapshot.TotalTokens != nil || snapshot.EstimatedCostUSD != nil
+	if snapshot.SessionKey == "" || (snapshot.InputTokens == nil && snapshot.OutputTokens == nil && snapshot.TotalTokens == nil && (flat || snapshot.Cumulative == nil || (snapshot.Cumulative.InputTokens == nil && snapshot.Cumulative.OutputTokens == nil))) {
 		return nil
 	}
 	tx, err := s.db.Begin()
@@ -43,6 +54,7 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	var oldIn, oldOut, oldTotal, comIn, comOut, comTotal int
 	var oldCacheRead, oldCacheWrite sql.NullInt64
 	var oldModel, oldUsageDay, note string
+	var cumulative taskRunUsageBaseline
 	var oldCost sql.NullFloat64
 	var comCost float64
 	var committed, run, estimated usageCostComponents
@@ -51,15 +63,31 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	err = tx.QueryRow(`SELECT model,input_tokens,output_tokens,total_tokens,committed_input_tokens,committed_output_tokens,committed_total_tokens,committed_cost_usd,estimated_cost_usd,cost_source,usage_day,cache_read_tokens,cache_write_tokens,cost_note,
 		committed_input_cost_usd,committed_output_cost_usd,committed_cache_read_tokens,committed_cache_write_tokens,committed_cache_read_cost_usd,committed_cache_write_cost_usd,
 		run_input_cost_usd,run_output_cost_usd,run_cache_read_tokens,run_cache_write_tokens,run_cache_read_cost_usd,run_cache_write_cost_usd,run_cache_estimated,
-		est_cache_read_tokens,est_cache_write_tokens,est_cache_read_cost_usd,est_cache_write_cost_usd
+		est_cache_read_tokens,est_cache_write_tokens,est_cache_read_cost_usd,est_cache_write_cost_usd,
+		cum_epoch,cum_input_tokens,cum_output_tokens,cum_cost_usd,cum_run_base_cost_usd
 		FROM task_run_usage WHERE tenant_id=? AND run_id=? AND session_key=?`, tenant, runID, snapshot.SessionKey).Scan(
 		&oldModel, &oldIn, &oldOut, &oldTotal, &comIn, &comOut, &comTotal, &comCost, &oldCost, &oldSource, &oldUsageDay, &oldCacheRead, &oldCacheWrite, &note,
 		&committed.input, &committed.output, &committed.readTokens, &committed.writeTokens, &committed.readCost, &committed.writeCost,
 		&run.input, &run.output, &run.readTokens, &run.writeTokens, &run.readCost, &run.writeCost, &runEstimated,
-		&estimated.readTokens, &estimated.writeTokens, &estimated.readCost, &estimated.writeCost)
+		&estimated.readTokens, &estimated.writeTokens, &estimated.readCost, &estimated.writeCost,
+		&cumulative.epoch, &cumulative.in, &cumulative.out, &cumulative.cost, &cumulative.runBaseCost)
 	found := err == nil
 	if err != nil && err != sql.ErrNoRows {
 		return err
+	}
+	// A harness UsageSnapshot carries monotonic session totals. normalize turns
+	// them into the per-run sample below (flat OpenClaw fields stay
+	// authoritative when present) and the baseline is stored with the ledger.
+	if snapshot.Cumulative != nil && !found {
+		if err := cumulative.inherit(tx, tenant, runID, snapshot.Cumulative); err != nil {
+			return err
+		}
+	}
+	if snapshot.Cumulative != nil && cumulative.normalize(&snapshot, found, oldIn, oldOut) {
+		if err := cumulative.store(tx, tenant, runID, snapshot.SessionKey); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	in, out, total := oldIn, oldOut, oldTotal
 	if snapshot.InputTokens != nil {
@@ -224,6 +252,11 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 		estimated.readTokens, estimated.writeTokens, estimated.cacheCost(), estimated.readCost, estimated.writeCost, boolInt(approximate), note, tenant, runID, snapshot.SessionKey)
 	if err != nil {
 		return err
+	}
+	if snapshot.Cumulative != nil {
+		if err := cumulative.store(tx, tenant, runID, snapshot.SessionKey); err != nil {
+			return err
+		}
 	}
 	if newEstimate.cacheCost() > 0 {
 		if err := adjustUsageCacheEstimate(tx, tenant, runID, snapshot.SessionKey, usageDay, effectiveModel, newEstimate, 1); err != nil {

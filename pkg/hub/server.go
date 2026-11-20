@@ -36,6 +36,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
@@ -368,6 +369,7 @@ type clawConn struct {
 
 	id                     string
 	tenantID               string
+	harness                string
 	conn                   *websocket.Conn
 	tags                   []string        // cached from DB at registration time for access-control checks
 	contextUsage           int             // 0-100, updated from heartbeats
@@ -2868,7 +2870,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if this is a status channel registration BEFORE any DB upsert.
-	// Status channels must not mutate claw DB state (rp.GatewayReady is nil,
+	// Status channels must not mutate claw DB state (rp.Ready() is nil,
 	// so initialStatus would incorrectly overwrite 'starting'/'bootstrap_needed').
 	isStatusChannel := rp.Channel == "status"
 	var workflowControl *workflowV2ControlBinding
@@ -2904,7 +2906,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	if !isStatusChannel {
 		// Upsert claw and keep terminal/watching states sticky across reconnects.
-		desiredStatus := initialStatus(rp.GatewayReady)
+		desiredStatus := initialStatus(rp.Ready())
 		if !allowWakeBeforeBootstrap(provider, bootstrapOK) {
 			desiredStatus = "starting"
 		}
@@ -2996,7 +2998,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	if !noProgressPaused {
 		bridgeErrorPauseKind = ""
 	}
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
+	cc := &clawConn{id: clawID, tenantID: tenantID, harness: rp.Harness, conn: conn, gatewayReady: gatewayReadyBool(rp.Ready()), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -3170,24 +3172,23 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		if msg.Type == "heartbeat" {
 			payload, _ := json.Marshal(msg.Payload)
 			var hb struct {
-				GatewayHealthy bool  `json:"gateway_healthy"`
-				GatewayReady   *bool `json:"gateway_ready,omitempty"`
-				TurnActive     *bool `json:"turn_active"`
-				ContextUsage   int   `json:"context_usage"`
-				RestartCount   int   `json:"restart_count"`
+				heartbeatHarnessFields
+				TurnActive   *bool `json:"turn_active"`
+				ContextUsage int   `json:"context_usage"`
 				// SessionKey is the usage snapshot from sessions.describe. GatewaySessionKey
 				// is the live session identity used for loss detection; they must remain
 				// distinct because a degraded describe call can leave the snapshot stale.
-				SessionKey        string   `json:"session_key"`
-				GatewaySessionKey *string  `json:"gateway_session_key"`
-				InputTokens       *int     `json:"input_tokens"`
-				OutputTokens      *int     `json:"output_tokens"`
-				TotalTokens       *int     `json:"total_tokens"`
-				EstimatedCostUSD  *float64 `json:"estimated_cost_usd"`
-				Model             string   `json:"model"`
-				ModelProvider     string   `json:"model_provider"`
-				CacheReadTokens   *int     `json:"cache_read_tokens"`
-				CacheWriteTokens  *int     `json:"cache_write_tokens"`
+				SessionKey       string   `json:"session_key"`
+				InputTokens      *int     `json:"input_tokens"`
+				OutputTokens     *int     `json:"output_tokens"`
+				TotalTokens      *int     `json:"total_tokens"`
+				EstimatedCostUSD *float64 `json:"estimated_cost_usd"`
+				Model            string   `json:"model"`
+				ModelProvider    string   `json:"model_provider"`
+				CacheReadTokens  *int     `json:"cache_read_tokens"`
+				CacheWriteTokens *int     `json:"cache_write_tokens"`
+				// Usage is the harness-neutral cumulative snapshot; old bridges omit it.
+				Usage *harness.UsageSnapshot `json:"usage"`
 				// Pointers on purpose: an old bridge omits both, which must
 				// stay distinguishable from a bridge reporting "no subagents"
 				// (see applySubagentHeartbeatLocked).
@@ -3195,6 +3196,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				SubagentActiveCount *int  `json:"subagent_active_count"`
 			}
 			if err := json.Unmarshal(payload, &hb); err == nil {
+				hb.normalizeHarnessFields()
 				liveness := s.livenessSettings()
 				gatewayUnhealthyMax := liveness.gatewayUnhealthyMax
 				gatewayUnhealthyGrace := liveness.gatewayUnhealthyReconnectGrace
@@ -3362,7 +3364,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				s.maybeLiftBridgeErrorPause(clawID)
-				if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider, CacheReadTokens: hb.CacheReadTokens, CacheWriteTokens: hb.CacheWriteTokens}); err != nil {
+				if err := s.recordTaskRunUsage(clawID, taskRunUsageSnapshot{SessionKey: hb.SessionKey, InputTokens: hb.InputTokens, OutputTokens: hb.OutputTokens, TotalTokens: hb.TotalTokens, EstimatedCostUSD: hb.EstimatedCostUSD, Model: hb.Model, ModelProvider: hb.ModelProvider, CacheReadTokens: hb.CacheReadTokens, CacheWriteTokens: hb.CacheWriteTokens, Cumulative: hb.Usage}); err != nil {
 					log.Printf("[usage] heartbeat for %s: %v", clawID, err)
 				}
 				if res, err := s.db.Exec(`UPDATE claws SET status='connected' WHERE id=? AND status='offline'`, clawID); err == nil {
@@ -3588,7 +3590,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			automaticContinuationPaused := false
 			bridgeErrTurn := false
 			if !workflowV2Controlled {
-				automaticContinuationPaused, bridgeErrTurn = s.observeTurnOutcome(cc, clawID, hm.ID, turnContent)
+				automaticContinuationPaused, bridgeErrTurn = s.observeTurnOutcome(cc, clawID, hm.ID, turnContent, hm.ErrorClass)
 				if !automaticContinuationPaused {
 					s.handleInitialPlanResponse(clawID, tenantID, turnContent)
 				}
@@ -4331,12 +4333,7 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	// that kills synchronous long-running commands.
 	// Uninstall old openclaw then reinstall pinned version (ensures nvm current symlink is updated)
 	if err := exec("uninstall old openclaw", 20*time.Second,
-		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-echo "npm=$NPM prefix=$PREFIX"; \
-sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true; \
-hash -r; \
-echo uninstalled`); err != nil {
+		daytonaUninstallOpenClawCommand()); err != nil {
 		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
 	}
 
@@ -4372,18 +4369,7 @@ echo uninstalled`); err != nil {
 	}
 
 	if err := exec("verify openclaw", 20*time.Second,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
-NPM="$NVM_DIR/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
-hash -r; \
-OPENCLAW_PATH="$(command -v openclaw || true)"; \
-OPENCLAW_VERSION="$(openclaw --version 2>&1 || true)"; \
-PACKAGE_VERSION="$(PREFIX="$PREFIX" node -e "try{console.log(require(process.env.PREFIX + '/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
-echo "openclaw path=$OPENCLAW_PATH"; \
-echo "openclaw version=$OPENCLAW_VERSION"; \
-echo "openclaw package_version=$PACKAGE_VERSION"; \
-case "$OPENCLAW_VERSION" in *%s*) ;; *) echo "expected openclaw %s"; exit 1 ;; esac`, daytonaOpenClawVersion, daytonaOpenClawVersion)); err != nil {
+		daytonaVerifyOpenClawCommand(daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
@@ -4509,17 +4495,16 @@ docker --version`); err != nil {
 	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	modelAuthEnvDaytona := buildModelAuthEnv(s.hubCfg, llmKeyNameDaytona)
-	apiKeyAuthSyncDaytona := buildOpenClawAPIKeyAuthSyncShell(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	oauthAuthSyncDaytona := buildOpenClawOAuthAuthSyncShell(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	onboardFlags := buildOnboardFlags(s.hubCfg.LLMKeys, llmKeyNameDaytona, defaultModelDaytona)
-	providerConfigScript := buildOpenClawProviderConfig(s.hubCfg.LLMKeys, llmKeyNameDaytona)
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: s.hubCfg.LLMKeys, SelectedKey: llmKeyNameDaytona, DefaultModel: defaultModelDaytona,
+	})
 	if activeKeyDaytona != nil {
 		activeKeyNameDaytona = activeKeyDaytona.Name
 		activeKeyProviderDaytona = activeKeyDaytona.Provider
 	}
 	s.mu.RUnlock()
 	log.Printf("[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
-		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, providerConfigScript != "")
+		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, bootstrapCfg.ProviderConfig != "")
 	gatewayPassword := randomHex(16)
 	if restoreShell := buildModelAuthRestoreShell(modelAuthEnvDaytona); restoreShell != "" {
 		if err := exec("restore model auth", 30*time.Second, "export HOME=/home/daytona; "+restoreShell); err != nil {
@@ -4531,21 +4516,17 @@ docker --version`); err != nil {
 			return fmt.Errorf("install selected model cli: %w", err)
 		}
 	}
-	onboardCmd := fmt.Sprintf(
-		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
-		llmKeyEnvDaytona,
-		onboardFlags,
-	)
+	onboardCmd := daytonaOnboardCommand(llmKeyEnvDaytona, bootstrapCfg.OnboardFlags)
 	log.Printf("[daytona] onboard openclaw...")
 	onboardResult, onboardErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", "export HOME=/home/daytona; " + onboardCmd}, 2*time.Minute)
 	if onboardErr != nil {
-		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
+		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", daytonaOpenClawConfigExistsCommand()}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
 			return fmt.Errorf("onboard openclaw: %s", sanitizeBootstrapError(onboardErr))
 		}
 		log.Printf("[daytona] onboard returned error, but config file exists; continuing")
 	} else if onboardResult.ExitCode != 0 {
-		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", `export HOME=/home/daytona; [ -f "$HOME/.openclaw/openclaw.json" ] && echo exists || echo missing`}, 10*time.Second)
+		result, diagErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", daytonaOpenClawConfigExistsCommand()}, 10*time.Second)
 		if diagErr != nil || strings.TrimSpace(result.Stdout) != "exists" {
 			return fmt.Errorf("onboard openclaw failed (exit %d): %s", onboardResult.ExitCode, sanitizeBootstrapOutput(onboardResult.Stdout))
 		}
@@ -4558,20 +4539,20 @@ docker --version`); err != nil {
 			return fmt.Errorf("install selected model plugin: %w", err)
 		}
 	}
-	if oauthAuthSyncDaytona != "" {
-		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + oauthAuthSyncDaytona
+	if bootstrapCfg.OAuthAuthSync != "" {
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + bootstrapCfg.OAuthAuthSync
 		if err := exec("sync openclaw OAuth auth", 30*time.Second, syncCmd); err != nil {
 			return fmt.Errorf("sync openclaw OAuth auth: %w", err)
 		}
 	}
-	if apiKeyAuthSyncDaytona != "" {
-		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + apiKeyAuthSyncDaytona
+	if bootstrapCfg.APIKeyAuthSync != "" {
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + bootstrapCfg.APIKeyAuthSync
 		if err := exec("sync openclaw api key auth", 30*time.Second, syncCmd); err != nil {
 			return fmt.Errorf("sync openclaw api key auth: %w", err)
 		}
 	}
 
-	configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + providerConfigScript
+	configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + bootstrapCfg.ProviderConfig
 	if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 		return err
 	}
@@ -4587,53 +4568,13 @@ echo "preflight ok"`); err != nil {
 	// This prevents the gateway from doing expensive npm installs while
 	// clients are connected, which causes event-loop delays and connection drops.
 	if err := exec("stage openclaw plugin deps", 3*time.Minute,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
-export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
-openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"`); err != nil {
+		daytonaStageOpenClawPluginDepsCommand()); err != nil {
 		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
 	}
 
 	// Step 2c: Configure gateway bind/port and start it.
 	// Use token auth (what onboard sets up) — don't override auth mode.
-	gatewaySetup := `
-python3 - <<'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-with open(path) as f: cfg = json.load(f)
-cfg.setdefault('gateway', {})['bind'] = 'loopback'
-cfg['gateway']['port'] = 18789
-# Keep token auth that onboard generated - don't change auth mode
-with open(path, 'w') as f: json.dump(cfg, f, indent=2)
-print('gateway config updated')
-PYEOF
-export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
-export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
-# Phase 1: wait for HTTP server to be listening (quick)
-for i in $(seq 1 30); do
-  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
-  sleep 1
-done
-curl -sf http://localhost:18789/healthz >/dev/null || { echo 'gateway failed to listen'; tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true; exit 1; }
-# Phase 2: wait for gateway startup to complete. Do not use openclaw health
-# here: it pairs the CLI device with read-only scopes before claw-bridge can
-# connect, then claw-bridge is rejected as a scope-upgrade.
-for i in $(seq 1 30); do
-  if grep -q 'gateway ready' ~/.openclaw/gateway.log 2>/dev/null; then
-    echo "gateway ready"
-    exit 0
-  fi
-  curl -sf http://localhost:18789/healthz >/dev/null || break
-  sleep 1
-done
-# Fallback: if the readiness log line is unavailable but the gateway is still
-# listening and healthy, don't fail the bootstrap.
-if curl -sf http://localhost:18789/healthz >/dev/null; then
-  echo "gateway ready (healthz)"
-  exit 0
-fi
-echo 'gateway not ready'
-tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
-exit 1`
+	gatewaySetup := daytonaStartOpenClawGatewayCommand()
 	gatewaySetup = withDaytonaLLMKeyEnv(llmKeyEnvDaytona, gatewaySetup)
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
 		return err
@@ -4890,7 +4831,7 @@ gh auth status`
 			log.Printf("[daytona] clone repos done")
 
 			if len(repositories) > 0 {
-				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
+				verifyCloneScript := "export HOME=/home/daytona; cd ~/" + harness.WorkspaceDir + "; "
 				for _, repo := range repositories {
 					if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
 						continue
@@ -4907,7 +4848,7 @@ gh auth status`
 				}
 				log.Printf("[daytona] verify cloned repos done")
 			}
-			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repositories); discoveryScript != "" {
+			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/"+harness.WorkspaceDir, repositories); discoveryScript != "" {
 				if err := exec("discover repo instructions", 20*time.Second, "export HOME=/home/daytona; "+discoveryScript); err != nil {
 					log.Printf("[daytona] warning: repo instruction discovery failed for claw %s: %v", clawID, err)
 				} else {
@@ -4947,7 +4888,7 @@ gh auth status`
 	// against an incomplete workspace.
 	if len(repositories) > 0 {
 		s.setBootstrapStatus(clawID, "Verifying workspace readiness")
-		verifyScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
+		verifyScript := "export HOME=/home/daytona; cd ~/" + harness.WorkspaceDir + "; "
 		for _, repo := range repositories {
 			if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
 				continue
@@ -5094,31 +5035,32 @@ echo "claw-bridge not running"
 exit 1`
 }
 
+func daytonaUninstallOpenClawCommand() string {
+	return openClawSandboxSteps().UninstallCommand()
+}
+
+func daytonaVerifyOpenClawCommand(version string) string {
+	return openClawSandboxSteps().VerifyVersionCommand(version)
+}
+
+func daytonaOnboardCommand(llmKeyEnv, onboardFlags string) string {
+	return openClawSandboxSteps().OnboardCommand(llmKeyEnv, onboardFlags)
+}
+
+func daytonaOpenClawConfigExistsCommand() string {
+	return openClawSandboxSteps().ConfigExistsCommand("/home/daytona")
+}
+
+func daytonaStageOpenClawPluginDepsCommand() string {
+	return openClawSandboxSteps().StagePluginDepsCommand()
+}
+
+func daytonaStartOpenClawGatewayCommand() string {
+	return openClawSandboxSteps().StartGatewayCommand(18789)
+}
+
 func daytonaStartOpenClawInstallCommand(version string) string {
-	installScript := fmt.Sprintf(`set -o pipefail
-export HOME=/home/daytona
-export NVM_DIR=/usr/local/share/nvm
-NPM="$NVM_DIR/current/bin/npm"
-PREFIX="$("$NPM" config get prefix)"
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-LOG=/tmp/openclaw-install.log
-STATUS=/tmp/openclaw-install.status
-echo "npm=$NPM prefix=$PREFIX"
-if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" 2>&1; then
-  hash -r
-  echo ok > "$STATUS"
-  echo "install done"
-else
-  rc=$?
-  echo "failed:$rc" > "$STATUS"
-  exit "$rc"
-fi`, version)
-	return fmt.Sprintf(`export HOME=/home/daytona
-LOG=/tmp/openclaw-install.log
-STATUS=/tmp/openclaw-install.status
-rm -f "$LOG" "$STATUS"
-setsid nohup bash -c %s > "$LOG" 2>&1 </dev/null &
-echo "openclaw-install-status=started"`, shellQuote(installScript))
+	return openClawSandboxSteps().InstallCommand("/home/daytona", version)
 }
 
 func daytonaInstallCodingModelCLICommand(model string) string {
@@ -5144,57 +5086,15 @@ hash -r
 }
 
 func daytonaInstallModelPluginCommand(provider string) string {
-	if provider != "codex" {
-		return ""
-	}
-	version := cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", cliversion.CodexPluginVersion)
-	spec := "npm:@openclaw/codex@" + version
-	return fmt.Sprintf(`export HOME=/home/daytona
-export NVM_DIR=/usr/local/share/nvm
-export PATH="$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-if openclaw plugins info codex --json >/dev/null 2>&1; then
-  echo "Codex plugin already installed"
-else
-  openclaw plugins install %s
-fi
-openclaw plugins info codex --json >/dev/null`, shellQuote(spec))
+	return openClawSandboxSteps().InstallModelPluginCommand("/home/daytona", provider, cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", cliversion.CodexPluginVersion))
 }
 
 func daytonaOpenClawInstallStatusCommand(version string) string {
-	return fmt.Sprintf(`export HOME=/home/daytona
-LOG=/tmp/openclaw-install.log
-STATUS=/tmp/openclaw-install.status
-if [ -s "$STATUS" ]; then
-  status="$(cat "$STATUS")"
-  case "$status" in
-    ok)
-      echo "openclaw-install-status=ok"
-      exit 0
-      ;;
-    failed:*)
-      echo "openclaw-install-status=failed"
-      echo "$status"
-      tail -n 120 "$LOG" 2>/dev/null || true
-      exit 0
-      ;;
-    *)
-      echo "openclaw-install-status=unknown:$status"
-      tail -n 120 "$LOG" 2>/dev/null || true
-      exit 0
-      ;;
-  esac
-fi
-if pgrep -af %s >/dev/null 2>&1; then
-  echo "openclaw-install-status=pending"
-  tail -n 20 "$LOG" 2>/dev/null || true
-  exit 0
-fi
-echo "openclaw-install-status=missing"
-tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
+	return openClawSandboxSteps().InstallStatusCommand("/home/daytona", version)
 }
 
 // daytonaLiveWorkspaceDir is the workspace the OpenClaw agent actually runs in.
-const daytonaLiveWorkspaceDir = "/home/daytona/.openclaw/workspace"
+const daytonaLiveWorkspaceDir = "/home/daytona/" + harness.WorkspaceDir
 
 func sortedWorkspaceFileNames(files map[string]string) []string {
 	names := make([]string, 0, len(files))
@@ -5242,8 +5142,8 @@ func daytonaWorkspaceFilesReadinessCommand(files map[string]string) string {
 func daytonaPrepareBridgeCommand() string {
 	return `set -e
 export HOME=/home/daytona
-mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
-cd /home/daytona/.openclaw/workspace
+mkdir -p ` + daytonaLiveWorkspaceDir + ` /home/daytona/.openclaw/run /home/daytona/workspace
+cd ` + daytonaLiveWorkspaceDir + `
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   echo "claw-bridge already running pid=$(cat "$PIDFILE")"
@@ -5264,8 +5164,8 @@ rm -f "$PIDFILE"`
 
 func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName, llmKeyEnv string) string {
 	return withDaytonaLLMKeyEnv(llmKeyEnv, fmt.Sprintf(`export HOME=/home/daytona
-mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
-cd /home/daytona/.openclaw/workspace
+mkdir -p `+daytonaLiveWorkspaceDir+` /home/daytona/.openclaw/run /home/daytona/workspace
+cd `+daytonaLiveWorkspaceDir+`
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 LOG=/home/daytona/claw-bridge.log
 if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -5428,7 +5328,7 @@ func replicatedBootstrapDelay(delays []time.Duration, idx int) time.Duration {
 }
 
 func replicatedFinalWorkspaceDir(sshHome string) string {
-	return path.Join(sshHome, ".openclaw", "workspace")
+	return path.Join(sshHome, harness.WorkspaceDir)
 }
 
 // exedevRemoteHome returns the remote $HOME for an exe.dev VM.
@@ -5926,6 +5826,9 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	gatewayPassword := randomHex(16)
 
 	// Build bootstrap script using same pattern as replicated
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: hubCfg.LLMKeys, SelectedKey: llmKeyName, DefaultModel: defaultModel,
+	})
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -5944,11 +5847,11 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
-		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
-		OAuthAuthSync:   buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
+		APIKeyAuthSync:  bootstrapCfg.APIKeyAuthSync,
+		OAuthAuthSync:   bootstrapCfg.OAuthAuthSync,
 		LinearEnv:       buildLinearEnv(linearToken),
-		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
-		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
+		ProviderConfig:  bootstrapCfg.ProviderConfig,
+		OnboardFlags:    bootstrapCfg.OnboardFlags,
 		Env:             env,
 	})
 
@@ -6067,10 +5970,9 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 
 	gatewayPassword := randomHex(16)
-	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	oauthAuthSync := buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: hubCfg.LLMKeys, SelectedKey: llmKeyName, DefaultModel: defaultModel,
+	})
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed).
 	// Merge request and workflow environments, then overlay hub-managed values
@@ -6092,10 +5994,10 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_LLM_PROVIDER":       resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
-		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
-		"ELASTICCLAW_API_KEY_AUTH_SYNC":  apiKeyAuthSync,
-		"ELASTICCLAW_OAUTH_AUTH_SYNC":    oauthAuthSync,
-		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
+		"ELASTICCLAW_PROVIDER_CONFIG":    bootstrapCfg.ProviderConfig,
+		"ELASTICCLAW_API_KEY_AUTH_SYNC":  bootstrapCfg.APIKeyAuthSync,
+		"ELASTICCLAW_OAUTH_AUTH_SYNC":    bootstrapCfg.OAuthAuthSync,
+		"ELASTICCLAW_ONBOARD_FLAGS":      bootstrapCfg.OnboardFlags,
 	})
 
 	// Inject LLM keys: buildLLMKeyEnv returns "export VAR=val\n" lines — parse into k/v
@@ -6316,10 +6218,9 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 	if defaultModel == "" {
 		defaultModel = hubCfg.DefaultModel
 	}
-	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	oauthAuthSync := buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: hubCfg.LLMKeys, SelectedKey: llmKeyName, DefaultModel: defaultModel,
+	})
 	gatewayPassword := randomHex(16)
 
 	env := map[string]string{
@@ -6338,10 +6239,10 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		"ELASTICCLAW_LLM_PROVIDER":       resolveActiveProvider(hubCfg.LLMKeys, llmKeyName),
 		"ELASTICCLAW_NIX":                boolEnv(nixEnabled != 0),
 		"ELASTICCLAW_DOCKER":             boolEnv(dockerEnabled != 0),
-		"ELASTICCLAW_PROVIDER_CONFIG":    providerConfig,
-		"ELASTICCLAW_API_KEY_AUTH_SYNC":  apiKeyAuthSync,
-		"ELASTICCLAW_OAUTH_AUTH_SYNC":    oauthAuthSync,
-		"ELASTICCLAW_ONBOARD_FLAGS":      onboardFlags,
+		"ELASTICCLAW_PROVIDER_CONFIG":    bootstrapCfg.ProviderConfig,
+		"ELASTICCLAW_API_KEY_AUTH_SYNC":  bootstrapCfg.APIKeyAuthSync,
+		"ELASTICCLAW_OAUTH_AUTH_SYNC":    bootstrapCfg.OAuthAuthSync,
+		"ELASTICCLAW_ONBOARD_FLAGS":      bootstrapCfg.OnboardFlags,
 	}
 	for _, line := range strings.Split(llmKeyEnv+modelAuthEnv, "\n") {
 		line = strings.TrimSpace(line)
@@ -7509,6 +7410,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
 
+	bootstrapCfg := openClawBootstrap().Config(harness.BootstrapInput{
+		LLMKeys: hubCfg.LLMKeys, SelectedKey: llmKeyName, DefaultModel: defaultModel,
+	})
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -7527,11 +7431,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
-		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
-		OAuthAuthSync:   buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
+		APIKeyAuthSync:  bootstrapCfg.APIKeyAuthSync,
+		OAuthAuthSync:   bootstrapCfg.OAuthAuthSync,
 		LinearEnv:       buildLinearEnv(linearToken),
-		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
-		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
+		ProviderConfig:  bootstrapCfg.ProviderConfig,
+		OnboardFlags:    bootstrapCfg.OnboardFlags,
 		Env:             env,
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
@@ -8219,7 +8123,7 @@ func githubBootstrapCloneVerifyTimeout(repoCount int) time.Duration {
 
 func buildDaytonaGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	var b strings.Builder
-	b.WriteString("export HOME=/home/daytona; export GIT_TERMINAL_PROMPT=0; set +x; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; set -o pipefail; ")
+	b.WriteString("export HOME=/home/daytona; export GIT_TERMINAL_PROMPT=0; set +x; cd ~/" + harness.WorkspaceDir + "; git config --global --get credential.helper >/dev/null || exit 1; set -o pipefail; ")
 	// Resolve GH_TOKEN once so N clones do not each re-enter the credential helper
 	// before git uses it (helper still refreshes if git asks again).
 	b.WriteString(`. /etc/profile.d/elasticclaw-github.sh 2>/dev/null || true; `)
@@ -8519,7 +8423,7 @@ echo "GitHub credential helper installed"
 
 # Clone repos — non-fatal: token may not be available until bridge connects
 # The agent can clone manually if this fails
-cd "$HOME/.openclaw/workspace" || true
+cd "$HOME/`+harness.WorkspaceDir+`" || true
 (
 set +e
 FAILED=0
@@ -8527,8 +8431,8 @@ FAILED=0
 exit $FAILED
 ) || echo "Warning: repo clone failed — agent can retry after bridge connects"
 # Ensure any github.com remotes under the workspace use HTTPS (agent-proof).
-if command -v git &>/dev/null && [ -d "$HOME/.openclaw/workspace" ]; then
-  find "$HOME/.openclaw/workspace" -name .git -type d 2>/dev/null | while read -r gitdir; do
+if command -v git &>/dev/null && [ -d "$HOME/`+harness.WorkspaceDir+`" ]; then
+  find "$HOME/`+harness.WorkspaceDir+`" -name .git -type d 2>/dev/null | while read -r gitdir; do
     repo="$(dirname "$gitdir")"
     url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
     case "$url" in
@@ -8539,7 +8443,7 @@ if command -v git &>/dev/null && [ -d "$HOME/.openclaw/workspace" ]; then
     esac
   done
 fi
-%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
+%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/"+harness.WorkspaceDir, repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.

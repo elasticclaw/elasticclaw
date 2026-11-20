@@ -1,0 +1,9 @@
+export HOME=/home/daytona
+export NVM_DIR=/usr/local/share/nvm
+export PATH="$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+if openclaw plugins info codex --json >/dev/null 2>&1; then
+  echo "Codex plugin already installed"
+else
+  openclaw plugins install 'npm:@openclaw/codex@2026.7.1-'"'"'test'"'"''
+fi
+openclaw plugins info codex --json >/dev/null

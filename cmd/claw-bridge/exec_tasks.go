@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
 )
@@ -28,12 +29,12 @@ const (
 // and workspaces with a flake.nix run inside devShells.default via flake-run
 // so declared toolchains are available (the #526 contract).
 func bridgeWorkspaceCommand(command string) string {
-	inner := `cd "$HOME/.openclaw/workspace" && ` + command
+	inner := `cd "$HOME/` + harness.WorkspaceDir + `" && ` + command
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return inner
 	}
-	if _, err := os.Stat(filepath.Join(home, ".openclaw", "workspace", "flake.nix")); err == nil {
+	if _, err := os.Stat(filepath.Join(harness.WorkspacePath(home), "flake.nix")); err == nil {
 		return `~/.elasticclaw/flake-run bash -lc ` + shellQuote(inner)
 	}
 	return inner
@@ -67,11 +68,9 @@ func (s *controlSupervisor) executeCommandTask(ctx context.Context, binding work
 
 	defer func() {
 		s.mu.RLock()
-		gateway := s.gateway
+		branches := s.branches
 		s.mu.RUnlock()
-		if gateway != nil {
-			gateway.branches.trigger()
-		}
+		branches.trigger()
 	}()
 
 	taskCtx, cancel := context.WithCancel(ctx)

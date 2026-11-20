@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 )
 
 // stagedCheckpointManifest mirrors the hub's .complete marker: Files[i] is
@@ -54,7 +56,7 @@ func restoreStagedCheckpoint() error {
 		var destination, prefix string
 		switch {
 		case strings.HasPrefix(f.Path, "workspace/"):
-			destination, prefix = ".openclaw/workspace", "workspace/"
+			destination, prefix = harness.WorkspaceDir, "workspace/"
 		case strings.HasPrefix(f.Path, ".openclaw/agents/"):
 			destination, prefix = ".openclaw/agents", ".openclaw/agents/"
 		default:

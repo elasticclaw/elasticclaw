@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"nhooyr.io/websocket"
 )
@@ -19,7 +20,7 @@ import (
 // vision/media tools (which allowlist $HOME/.openclaw/workspace) can read them.
 func uploadDirPath() string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".openclaw", "workspace", "uploads")
+		return filepath.Join(harness.WorkspacePath(home), "uploads")
 	}
 	return "/tmp/elasticclaw-uploads"
 }

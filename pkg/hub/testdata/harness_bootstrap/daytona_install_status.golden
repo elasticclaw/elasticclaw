@@ -1,0 +1,30 @@
+export HOME=/home/daytona
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+if [ -s "$STATUS" ]; then
+  status="$(cat "$STATUS")"
+  case "$status" in
+    ok)
+      echo "openclaw-install-status=ok"
+      exit 0
+      ;;
+    failed:*)
+      echo "openclaw-install-status=failed"
+      echo "$status"
+      tail -n 120 "$LOG" 2>/dev/null || true
+      exit 0
+      ;;
+    *)
+      echo "openclaw-install-status=unknown:$status"
+      tail -n 120 "$LOG" 2>/dev/null || true
+      exit 0
+      ;;
+  esac
+fi
+if pgrep -af 'openclaw@2026.7.1-2' >/dev/null 2>&1; then
+  echo "openclaw-install-status=pending"
+  tail -n 20 "$LOG" 2>/dev/null || true
+  exit 0
+fi
+echo "openclaw-install-status=missing"
+tail -n 120 "$LOG" 2>/dev/null || true

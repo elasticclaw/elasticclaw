@@ -52,6 +52,8 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
+	"github.com/elasticclaw/elasticclaw/pkg/harness/openclaw"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	_ "modernc.org/sqlite"
 )
@@ -157,11 +159,12 @@ const (
 )
 
 type queuedMsg struct {
-	kind      queuedKind
-	content   string
-	messageID string
-	control   hubMsg
-	queuedAt  time.Time
+	kind       queuedKind
+	content    string
+	messageID  string
+	control    hubMsg
+	queuedAt   time.Time
+	errorClass types.TurnErrorClass
 }
 
 type msgQueue struct {
@@ -237,9 +240,14 @@ func (q *msgQueue) pushInput(messageID, content string) {
 
 // pushReply queues a completed agent reply awaiting delivery (never expires).
 func (q *msgQueue) pushReply(content string) {
+	q.pushErrorReply(content, "")
+}
+
+// pushErrorReply queues a reply with its error class so the replay sends both.
+func (q *msgQueue) pushErrorReply(content string, class types.TurnErrorClass) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.enqueueLocked(queuedMsg{kind: queuedReply, content: content, queuedAt: time.Now()})
+	q.enqueueLocked(queuedMsg{kind: queuedReply, content: content, errorClass: class, queuedAt: time.Now()})
 }
 
 // pushControl queues a recovery edge that could not be written. It must be
@@ -297,7 +305,13 @@ func replayQueued(queue *msgQueue, deliver func(role, content string) error, del
 	for _, m := range queue.drain() {
 		switch m.kind {
 		case queuedReply, queuedNotice:
-			if err := deliver("claw", m.content); err != nil {
+			var err error
+			if m.errorClass != "" {
+				err = deliverControl(errorReplyMessage("claw", m.content, m.errorClass))
+			} else {
+				err = deliver("claw", m.content)
+			}
+			if err != nil {
 				log.Printf("[bridge] replay deliver failed, re-queuing: %v", err)
 				queue.requeue(m)
 			}
@@ -1308,6 +1322,8 @@ type gatewaySession struct {
 	ctxMu        sync.RWMutex
 	contextUsage int
 	usage        gatewayUsage
+	// usageAcc turns usage into session totals; created on first Usage call.
+	usageAcc *openclaw.UsageAccumulator
 	// cacheUsagePolledAt throttles the sessions.usage transcript scan.
 	cacheUsagePolledAt time.Time
 	// cacheUsagePollFailed lifts the throttle until a poll succeeds again.
@@ -2627,10 +2643,14 @@ func (gs *gatewaySession) ContextUsage() int {
 	return gs.contextUsage
 }
 
-func (gs *gatewaySession) Usage() gatewayUsage {
-	gs.ctxMu.RLock()
-	defer gs.ctxMu.RUnlock()
-	return gs.usage
+func (gs *gatewaySession) Usage() (gatewayUsage, harness.UsageSnapshot) {
+	gs.ctxMu.Lock()
+	defer gs.ctxMu.Unlock()
+	if gs.usageAcc == nil {
+		gs.usageAcc = newOpenClawUsageAccumulator()
+	}
+	usage := gs.usage
+	return usage, gs.usageAcc.Observe(usage.sessionKey, usage.inputTokens, usage.outputTokens, usage.estimatedCostUSD, usage.model, usage.modelProvider, usage.cacheReadTokens, usage.cacheWriteTokens)
 }
 
 // IsReady returns true once the persistent gateway session is established.
@@ -2709,9 +2729,7 @@ func injectGatewayNudge(ctx context.Context, text string) {
 		log.Printf("[status] dropping nudge: gateway session not ready")
 		return
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	sent, err := gs.sendTurnScopedReq(reqCtx, "sessions.send", map[string]string{"key": gs.getSessionKey(), "message": text})
+	sent, err := gs.Steer(ctx, text)
 	if !sent {
 		log.Printf("[status] dropping nudge: no turn in flight")
 		return
@@ -3105,8 +3123,8 @@ func buildSessionRecoveryEdge(gs *gatewaySession, agentErr error, outcome string
 	return edge
 }
 
-func reportSessionRecovery(agentErr error, messageID string, reply *string, gwSession *gatewaySession, writeActivity func(agentActivity), writeHub func(hubMsg) error, queue *msgQueue) bool {
-	currentKey := gwSession.getSessionKey()
+func reportSessionRecovery(agentErr error, messageID string, reply *string, h Harness, writeActivity func(agentActivity), writeHub func(hubMsg) error, queue *msgQueue) bool {
+	currentKey := h.SessionKey()
 	outcome := sessionRecoveryOutcome(agentErr, currentKey)
 	if outcome == "preserved" {
 		reason := sessionLossReason(agentErr)
@@ -3120,7 +3138,7 @@ func reportSessionRecovery(agentErr error, messageID string, reply *string, gwSe
 		// lock across a network write. A reconnect can still replace the session in
 		// this tiny gap; that is acceptable because continuation prompts require git
 		// status before repeating work, while locking during I/O would be riskier.
-		recovery := buildSessionRecoveryEdge(gwSession, agentErr, outcome)
+		recovery := h.RecoveryEdge(agentErr, outcome)
 		recovery.InterruptedMessageID = messageID
 		payload, _ := json.Marshal(recovery)
 		edge := hubMsg{Type: "session_preserved", Payload: payload}
@@ -3136,7 +3154,7 @@ func reportSessionRecovery(agentErr error, messageID string, reply *string, gwSe
 		}
 		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
 		*reply = ""
-		recovery := buildSessionRecoveryEdge(gwSession, agentErr, outcome)
+		recovery := h.RecoveryEdge(agentErr, outcome)
 		recovery.InterruptedMessageID = messageID
 		keyPayload, _ := json.Marshal(recovery)
 		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
@@ -4265,7 +4283,7 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 		return fmt.Errorf("home dir: %w", err)
 	}
 	stagedDir := filepath.Join(home, "workspace")
-	activeDir := filepath.Join(home, ".openclaw", "workspace")
+	activeDir := harness.WorkspacePath(home)
 	if _, err := os.Stat(stagedDir); err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -4554,7 +4572,7 @@ func cloneConfiguredGitHubRepos() error {
 	if err != nil {
 		return fmt.Errorf("home dir: %w", err)
 	}
-	workspaceDir := filepath.Join(home, ".openclaw", "workspace")
+	workspaceDir := harness.WorkspacePath(home)
 	if err := os.MkdirAll(workspaceDir, 0700); err != nil {
 		return fmt.Errorf("create OpenClaw workspace: %w", err)
 	}
@@ -5355,6 +5373,7 @@ func main() {
 	setActiveGatewaySession(gwSession)
 	if control != nil {
 		control.setGatewaySession(gwSession)
+		control.setBranchReporter(gwSession.branches)
 	}
 
 	// Start status channel goroutine (lightweight second WS to hub)
@@ -5501,7 +5520,7 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 
 func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token, modelAuthToken string,
 	protocolRegistration bridgeProtocolRegistration, control *controlSupervisor, gwClient *gatewayClient,
-	gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
+	h Harness, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"User-Agent":                 {"claw-bridge/1.0"},
@@ -5520,6 +5539,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 
 	// Register with the hub — gateway_ready=false until session is established
+	ready := h.IsReady()
 	reg := hubMsg{
 		Type: "register",
 		Payload: mustJSON(map[string]interface{}{
@@ -5528,7 +5548,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			"template":         templateName,
 			"token":            token,
 			"model_auth_token": modelAuthToken,
-			"gateway_ready":    gwSession.IsReady(),
+			"gateway_ready":    ready,
+			"harness":          harnessName,
+			"harness_ready":    ready,
 			"bridge_version":   protocolRegistration.BridgeVersion,
 			"protocols":        protocolRegistration.Protocols,
 			"capabilities":     protocolRegistration.Capabilities,
@@ -5608,30 +5630,38 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			Payload: mustJSON(map[string]interface{}{"role": role, "content": content}),
 		})
 	}
+	deliverError := func(role, content string, class types.TurnErrorClass) error {
+		if class == "" {
+			return deliver(role, content)
+		}
+		return writeHub(errorReplyMessage(role, content, class))
+	}
 	runTurn := func(messageID, content string) {
 		queue.activeTurns.Add(1)
 		go func(c string) {
 			defer queue.activeTurns.Add(-1)
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 			defer agentCancel()
-			reply, agentErr := gwSession.SendMessage(agentCtx, c, messageID, func(chunk string) {
+			reply, agentErr := h.RunTurn(agentCtx, c, messageID, EventSink{OnChunk: func(chunk string) {
 				_ = writeHub(hubMsg{
 					Type:    "chunk",
 					Payload: mustJSON(map[string]interface{}{"role": "claw", "content": chunk}),
 				})
-			}, func(activity agentActivity) {
+			}, OnActivity: func(activity agentActivity) {
 				writeActivity(activity)
-			})
+			}})
+			var errorClass types.TurnErrorClass
 			if agentErr != nil {
-				if !reportSessionRecovery(agentErr, messageID, &reply, gwSession, writeActivity, writeHub, queue) {
+				if !reportSessionRecovery(agentErr, messageID, &reply, h, writeActivity, writeHub, queue) {
 					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
+					errorClass = openclaw.ClassifyErrorText(agentErr.Error(), false)
 				}
 			}
-			if writeErr := deliver("claw", reply); writeErr != nil {
+			if writeErr := deliverError("claw", reply, errorClass); writeErr != nil {
 				// Hub connection dropped — queue the completed reply, not the input,
 				// so the turn is not re-run (avoids duplicating side effects).
 				log.Printf("[bridge] hub write failed, queuing completed reply for redelivery: %v", writeErr)
-				queue.pushReply(reply)
+				queue.pushErrorReply(reply, errorClass)
 			}
 		}(content)
 	}
@@ -5647,10 +5677,10 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	// Capture this connection's writer. If this hub connection has died by the
 	// time a gateway reconnect replaces the session, the callback queues the
 	// edge for replay instead of writing through a newer connection implicitly.
-	gwSession.setOnSessionReplaced(func(previousKey, interruptedMessageID string) {
+	h.OnSessionReplaced(func(previousKey, interruptedMessageID string) {
 		activityMessage := "OpenClaw session was replaced after gateway reconnect; waiting for the hub to resume the task (reason=gateway_reconnect)"
 		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
-		recovery := buildSessionRecoveryEdge(gwSession, &sessionRotatedError{reason: types.SessionLossReasonGatewayReconnect, previousKey: previousKey}, "rotated")
+		recovery := h.RecoveryEdge(&sessionRotatedError{reason: types.SessionLossReasonGatewayReconnect, previousKey: previousKey}, "rotated")
 		recovery.InterruptedMessageID = interruptedMessageID
 		keyPayload, _ := json.Marshal(recovery)
 		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
@@ -5683,26 +5713,27 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				lastModelAuthSync.Store(time.Now().UnixNano())
 			}
 		}
-		go gwSession.refreshContextUsage(connCtx)
-		health := !gatewayProcessExited() && checkGateway(gwClient.addr)
-		cu := gwSession.ContextUsage()
-		usage := gwSession.Usage()
-		restarts := gatewayRestartBase + gatewayRestartCount()
+		go h.RefreshUsage(connCtx)
+		health := h.Healthy()
+		cu := h.ContextUsage()
+		usage, cumulative := h.Usage()
+		restarts := h.RestartCount()
 		// Best-effort subagent activity: subagentHeartbeatFields returns both
 		// fields only for a successful poll, so on any failure (RPC error,
 		// method not found on an older gateway, unparseable payload) the hub
 		// falls back to judging idleness without them, rather than being fed
 		// a fabricated "nothing running".
-		subagentFields, subagentLog := subagentHeartbeatFields(gwSession.IsReady(), func() (int, error) {
-			return gwSession.pollSubagentActivity(connCtx)
+		subagentFields, subagentLog := subagentHeartbeatFields(h.IsReady(), func() (int, error) {
+			return h.Subagents(connCtx)
 		}, &subagentPollFailLogged)
-		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d%s", health, gwSession.IsReady(), cu, restarts, subagentLog)
-		heartbeatPayload := map[string]interface{}{"gateway_healthy": health, "gateway_ready": gwSession.IsReady(), "context_usage": cu, "restart_count": restarts}
+		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d%s", health, h.IsReady(), cu, restarts, subagentLog)
+		heartbeatPayload := heartbeatPayload(health, h.IsReady(), cu, restarts)
 		queue.addTurnHeartbeat(heartbeatPayload)
 		for k, v := range subagentFields {
 			heartbeatPayload[k] = v
 		}
-		addHeartbeatSessionKeys(heartbeatPayload, usage.sessionKey, gwSession.getSessionKey())
+		addHeartbeatSessionKeys(heartbeatPayload, usage.sessionKey, h.SessionKey())
+		addHeartbeatCumulativeUsage(heartbeatPayload, usage, cumulative)
 		if usage.inputTokens != nil {
 			heartbeatPayload["input_tokens"] = usage.inputTokens
 		}
@@ -5760,7 +5791,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			queue.activeTurns.Add(1)
 			go func() {
 				defer queue.activeTurns.Add(-1)
-				if !gwSession.IsReady() {
+				if !h.IsReady() {
 					log.Printf("[bridge] gateway not ready, queuing message for later")
 					queue.pushInput(id, content)
 					return
@@ -5771,7 +5802,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 
 				log.Printf("[bridge] → openclaw: %q", content[:min(len(content), 80)])
 
-				reply, agentErr := gwSession.SendMessage(agentCtx, content, id, func(chunk string) {
+				reply, agentErr := h.RunTurn(agentCtx, content, id, EventSink{OnChunk: func(chunk string) {
 					_ = writeHub(hubMsg{
 						Type: "chunk",
 						Payload: mustJSON(map[string]interface{}{
@@ -5779,23 +5810,25 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 							"content": chunk,
 						}),
 					})
-				}, func(activity agentActivity) {
+				}, OnActivity: func(activity agentActivity) {
 					writeActivity(activity)
-				})
+				}})
+				var errorClass types.TurnErrorClass
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					if !reportSessionRecovery(agentErr, id, &reply, gwSession, writeActivity, writeHub, queue) {
+					if !reportSessionRecovery(agentErr, id, &reply, h, writeActivity, writeHub, queue) {
 						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
+						errorClass = openclaw.ClassifyErrorText(agentErr.Error(), true)
 					}
 				} else {
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
 				}
 
-				if writeErr := deliver("claw", reply); writeErr != nil {
+				if writeErr := deliverError("claw", reply, errorClass); writeErr != nil {
 					// Hub connection dropped — queue the completed reply for redelivery,
 					// not the input, so the turn is not re-run on reconnect.
 					log.Printf("[bridge] hub write failed, queuing completed reply for redelivery: %v", writeErr)
-					queue.pushReply(reply)
+					queue.pushErrorReply(reply, errorClass)
 				}
 			}()
 
@@ -5840,7 +5873,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 }
 
 // addHeartbeatSessionKeys keeps the usage snapshot and the live gateway
-// identity separate. The hub uses only gateway_session_key for session-loss
+// identity separate. The hub uses the live session key for session-loss
 // detection, since sessions.describe may be stale while a gateway recovers.
 func addHeartbeatSessionKeys(payload map[string]interface{}, snapshotKey, gatewayKey string) {
 	if snapshotKey != "" {
@@ -5848,6 +5881,20 @@ func addHeartbeatSessionKeys(payload map[string]interface{}, snapshotKey, gatewa
 	}
 	if gatewayKey != "" {
 		payload["gateway_session_key"] = gatewayKey
+		payload["harness_session_key"] = gatewayKey
+	}
+}
+
+// addHeartbeatCumulativeUsage attaches the session totals only to a sample
+// that carries this run's flat tokens. The accumulator keeps the last seen
+// tokens, so a tokenless sample would otherwise reach the hub as a
+// cumulative-only sample that the flat fields alone never billed.
+func addHeartbeatCumulativeUsage(payload map[string]interface{}, usage gatewayUsage, cumulative harness.UsageSnapshot) {
+	if usage.inputTokens == nil && usage.outputTokens == nil {
+		return
+	}
+	if cumulative.SessionKey != "" && (cumulative.InputTokens != nil || cumulative.OutputTokens != nil) {
+		payload["usage"] = cumulative
 	}
 }
 
