@@ -48,3 +48,12 @@ type Harness interface {
 }
 
 var _ Harness = (*gatewaySession)(nil)
+
+// TurnError preserves the underlying failure while identifying its recovery class.
+type TurnError struct {
+	Class types.TurnErrorClass
+	Err   error
+}
+
+func (e *TurnError) Error() string { return e.Err.Error() }
+func (e *TurnError) Unwrap() error { return e.Err }

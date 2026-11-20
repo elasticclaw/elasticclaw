@@ -4,11 +4,16 @@ import (
 	"context"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness/openclaw"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 func (gs *gatewaySession) RunTurn(ctx context.Context, message, messageID string, sink EventSink) (string, error) {
-	return gs.SendMessage(ctx, message, messageID, sink.OnChunk, sink.OnActivity)
+	reply, err := gs.SendMessage(ctx, message, messageID, sink.OnChunk, sink.OnActivity)
+	if err != nil {
+		return reply, &TurnError{Class: openclaw.ClassifyErrorText(err.Error(), true), Err: err}
+	}
+	return reply, nil
 }
 
 func (gs *gatewaySession) Steer(ctx context.Context, text string) (sent bool, err error) {

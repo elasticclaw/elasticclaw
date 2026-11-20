@@ -53,6 +53,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/harness"
+	"github.com/elasticclaw/elasticclaw/pkg/harness/openclaw"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	_ "modernc.org/sqlite"
 )
@@ -158,11 +159,12 @@ const (
 )
 
 type queuedMsg struct {
-	kind      queuedKind
-	content   string
-	messageID string
-	control   hubMsg
-	queuedAt  time.Time
+	kind       queuedKind
+	content    string
+	messageID  string
+	control    hubMsg
+	queuedAt   time.Time
+	errorClass types.TurnErrorClass
 }
 
 type msgQueue struct {
@@ -238,9 +240,14 @@ func (q *msgQueue) pushInput(messageID, content string) {
 
 // pushReply queues a completed agent reply awaiting delivery (never expires).
 func (q *msgQueue) pushReply(content string) {
+	q.pushErrorReply(content, "")
+}
+
+// pushErrorReply queues a reply with its error class so the replay sends both.
+func (q *msgQueue) pushErrorReply(content string, class types.TurnErrorClass) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.enqueueLocked(queuedMsg{kind: queuedReply, content: content, queuedAt: time.Now()})
+	q.enqueueLocked(queuedMsg{kind: queuedReply, content: content, errorClass: class, queuedAt: time.Now()})
 }
 
 // pushControl queues a recovery edge that could not be written. It must be
@@ -298,7 +305,13 @@ func replayQueued(queue *msgQueue, deliver func(role, content string) error, del
 	for _, m := range queue.drain() {
 		switch m.kind {
 		case queuedReply, queuedNotice:
-			if err := deliver("claw", m.content); err != nil {
+			var err error
+			if m.errorClass != "" {
+				err = deliverControl(errorReplyMessage("claw", m.content, m.errorClass))
+			} else {
+				err = deliver("claw", m.content)
+			}
+			if err != nil {
 				log.Printf("[bridge] replay deliver failed, re-queuing: %v", err)
 				queue.requeue(m)
 			}
@@ -5611,6 +5624,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			Payload: mustJSON(map[string]interface{}{"role": role, "content": content}),
 		})
 	}
+	deliverError := func(role, content string, class types.TurnErrorClass) error {
+		if class == "" {
+			return deliver(role, content)
+		}
+		return writeHub(errorReplyMessage(role, content, class))
+	}
 	runTurn := func(messageID, content string) {
 		queue.activeTurns.Add(1)
 		go func(c string) {
@@ -5625,16 +5644,18 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			}, OnActivity: func(activity agentActivity) {
 				writeActivity(activity)
 			}})
+			var errorClass types.TurnErrorClass
 			if agentErr != nil {
 				if !reportSessionRecovery(agentErr, messageID, &reply, h, writeActivity, writeHub, queue) {
 					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
+					errorClass = openclaw.ClassifyErrorText(agentErr.Error(), false)
 				}
 			}
-			if writeErr := deliver("claw", reply); writeErr != nil {
+			if writeErr := deliverError("claw", reply, errorClass); writeErr != nil {
 				// Hub connection dropped — queue the completed reply, not the input,
 				// so the turn is not re-run (avoids duplicating side effects).
 				log.Printf("[bridge] hub write failed, queuing completed reply for redelivery: %v", writeErr)
-				queue.pushReply(reply)
+				queue.pushErrorReply(reply, errorClass)
 			}
 		}(content)
 	}
@@ -5785,20 +5806,22 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				}, OnActivity: func(activity agentActivity) {
 					writeActivity(activity)
 				}})
+				var errorClass types.TurnErrorClass
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
 					if !reportSessionRecovery(agentErr, id, &reply, h, writeActivity, writeHub, queue) {
 						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
+						errorClass = openclaw.ClassifyErrorText(agentErr.Error(), true)
 					}
 				} else {
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
 				}
 
-				if writeErr := deliver("claw", reply); writeErr != nil {
+				if writeErr := deliverError("claw", reply, errorClass); writeErr != nil {
 					// Hub connection dropped — queue the completed reply for redelivery,
 					// not the input, so the turn is not re-run on reconnect.
 					log.Printf("[bridge] hub write failed, queuing completed reply for redelivery: %v", writeErr)
-					queue.pushReply(reply)
+					queue.pushErrorReply(reply, errorClass)
 				}
 			}()
 
