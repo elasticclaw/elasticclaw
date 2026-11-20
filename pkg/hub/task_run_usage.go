@@ -33,7 +33,10 @@ func (s *Server) recordTaskRunUsage(clawID string, snapshot taskRunUsageSnapshot
 	if snapshot.Cumulative != nil && snapshot.Cumulative.SessionKey != snapshot.SessionKey {
 		snapshot.Cumulative = nil
 	}
-	if snapshot.SessionKey == "" || (snapshot.InputTokens == nil && snapshot.OutputTokens == nil && snapshot.TotalTokens == nil && (snapshot.Cumulative == nil || (snapshot.Cumulative.InputTokens == nil && snapshot.Cumulative.OutputTokens == nil))) {
+	// A sample with flat fields comes from an OpenClaw bridge, which bills only
+	// samples with flat tokens; only cumulative-only producers rely on usage.
+	flat := snapshot.InputTokens != nil || snapshot.OutputTokens != nil || snapshot.TotalTokens != nil || snapshot.EstimatedCostUSD != nil
+	if snapshot.SessionKey == "" || (snapshot.InputTokens == nil && snapshot.OutputTokens == nil && snapshot.TotalTokens == nil && (flat || snapshot.Cumulative == nil || (snapshot.Cumulative.InputTokens == nil && snapshot.Cumulative.OutputTokens == nil))) {
 		return nil
 	}
 	tx, err := s.db.Begin()

@@ -36,7 +36,9 @@ func (b *taskRunUsageBaseline) normalize(snapshot *taskRunUsageSnapshot, found b
 		}
 		known = false
 	}
-	usable := found && known
+	// An inherited baseline is as usable as the row's own: the session's
+	// earlier task run already billed everything up to it.
+	usable := known
 	newRun := known && (int64(*c.InputTokens) != b.in.Int64 || int64(*c.OutputTokens) != b.out.Int64)
 	switch {
 	case flat:
@@ -53,8 +55,14 @@ func (b *taskRunUsageBaseline) normalize(snapshot *taskRunUsageSnapshot, found b
 	case usable:
 		// Cumulative-only producer: the run is the growth since the baseline.
 		in, out := oldIn, oldOut
-		if newRun {
+		switch {
+		case newRun:
 			in, out = *c.InputTokens-int(b.in.Int64), *c.OutputTokens-int(b.out.Int64)
+			b.runBaseCost = sql.NullFloat64{Float64: b.cost.Float64, Valid: true}
+		case !found:
+			// The run in progress was billed to the session's earlier task
+			// run; this row starts empty and takes only later corrections.
+			in, out = 0, 0
 			b.runBaseCost = sql.NullFloat64{Float64: b.cost.Float64, Valid: true}
 		}
 		snapshot.InputTokens, snapshot.OutputTokens = &in, &out

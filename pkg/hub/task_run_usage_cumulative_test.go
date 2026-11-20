@@ -55,6 +55,35 @@ func TestTaskRunUsageCumulativeEquivalence(t *testing.T) {
 	nilTokens.EstimatedCostUSD = ptr(.75)
 	contextChanged := priced
 	contextChanged.TotalTokens = ptr(999999)
+	// Samples without flat input/output tokens; the bridge sends no usage with
+	// them, so only the flat+usage path is compared.
+	tokenless := sample(0, 0, sonnet, nil)
+	tokenless.InputTokens, tokenless.OutputTokens, tokenless.TotalTokens = nil, nil, nil
+	contextOnly := tokenless
+	contextOnly.TotalTokens = ptr(1)
+	costOnly := tokenless
+	costOnly.EstimatedCostUSD = ptr(5.0)
+
+	flatOnly := []struct {
+		name  string
+		steps []cumulativeUsageStep
+	}{
+		{"tokenless sample after task run switch", []cumulativeUsageStep{
+			{snapshot: priced}, {snapshot: tokenless, runID: "run-next"}, {snapshot: contextOnly, runID: "run-next"},
+		}},
+		{"cost-only sample on same run", steps(priced, costOnly, tokenless, contextOnly)},
+		{"cost-only sample after task run switch", []cumulativeUsageStep{
+			{snapshot: priced}, {snapshot: costOnly, runID: "run-next"}, {snapshot: larger, runID: "run-next"},
+		}},
+	}
+	for _, tc := range flatOnly {
+		t.Run(tc.name, func(t *testing.T) {
+			states := replayCumulativeUsage(t, tc.steps)
+			for i := range tc.steps {
+				assertCumulativeUsageEqual(t, fmt.Sprintf("sample %d flat+usage", i), states[0][i], states[1][i])
+			}
+		})
+	}
 
 	cases := []struct {
 		name  string
@@ -186,7 +215,10 @@ func replayCumulativeUsage(t *testing.T, steps []cumulativeUsageStep) [3][]cumul
 			snapshot := step.snapshot
 			if mode != 0 {
 				cumulative := accumulator.Observe(snapshot.SessionKey, snapshot.InputTokens, snapshot.OutputTokens, snapshot.EstimatedCostUSD, snapshot.Model, snapshot.ModelProvider, snapshot.CacheReadTokens, snapshot.CacheWriteTokens)
-				snapshot.Cumulative = &cumulative
+				// Like the bridge, attach usage only to samples with flat tokens.
+				if mode == 2 || snapshot.InputTokens != nil || snapshot.OutputTokens != nil {
+					snapshot.Cumulative = &cumulative
+				}
 				key := runID + "/" + snapshot.SessionKey
 				if mode == 2 && seen[key] {
 					// Context occupancy is metadata, absent from UsageSnapshot;
@@ -384,5 +416,51 @@ func TestTaskRunUsageCumulativeFlatStaysAuthoritative(t *testing.T) {
 				assertCumulativeUsageEqual(t, fmt.Sprintf("sample %d flat+usage", i), states[0][i], states[1][i])
 			}
 		})
+	}
+}
+
+// A cumulative-only producer whose session moves to another task run starts
+// the new row from the session's inherited baseline instead of billing the
+// session's totals again.
+func TestTaskRunUsageCumulativeOnlyTaskRunSwitch(t *testing.T) {
+	s, db, claw := newUsageTestServer(t)
+	defer db.Close()
+	accumulator := openclaw.NewUsageAccumulator("epoch")
+	record := func(in, out int, cost float64) {
+		t.Helper()
+		c := accumulator.Observe("a", &in, &out, &cost, "unknown-model", "", nil, nil)
+		recordUsage(t, s, claw, taskRunUsageSnapshot{Cumulative: &c})
+	}
+	runUsage := func(runID string) (in, out int, cost float64) {
+		t.Helper()
+		if err := db.QueryRow(`SELECT committed_input_tokens,committed_output_tokens,committed_cost_usd FROM task_run_usage WHERE run_id=?`, runID).Scan(&in, &out, &cost); err != nil {
+			t.Fatal(err)
+		}
+		return in, out, cost
+	}
+	record(300000, 30000, 3.0)
+	for _, query := range []string{
+		`INSERT INTO task_runs(id,tenant_id,initial_attempt_id,run_kind,owner_type,claw_id,created_at,updated_at) VALUES('run-next','tenant','attempt-next','code_task','manual','claw-usage',0,0)`,
+		`INSERT INTO task_run_summaries(id,tenant_id,run_id,status,phase,started_at,last_event_at,materialized_at,updated_at) VALUES('summary-next','tenant','run-next','running','claimed',0,0,0,0)`,
+		`UPDATE claws SET task_run_id='run-next' WHERE id='claw-usage'`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record(300000, 30000, 3.0)
+	if in, out, cost := runUsage("run-next"); in != 0 || out != 0 || math.Abs(cost) > 1e-9 {
+		t.Fatalf("same run after switch = %d/%d/%v, want nothing billed", in, out, cost)
+	}
+	record(300000, 30000, 3.5)
+	if in, out, cost := runUsage("run-next"); in != 0 || out != 0 || math.Abs(cost-.5) > 1e-9 {
+		t.Fatalf("correction after switch = %d/%d/%v, want 0/0/0.5", in, out, cost)
+	}
+	record(100000, 10000, 1.0)
+	if in, out, cost := runUsage("run-next"); in != 100000 || out != 10000 || math.Abs(cost-1.5) > 1e-9 {
+		t.Fatalf("new run after switch = %d/%d/%v, want 100000/10000/1.5", in, out, cost)
+	}
+	if in, out, cost := runUsage("run-usage"); in != 300000 || out != 30000 || math.Abs(cost-3.0) > 1e-9 {
+		t.Fatalf("earlier run = %d/%d/%v, want 300000/30000/3", in, out, cost)
 	}
 }
