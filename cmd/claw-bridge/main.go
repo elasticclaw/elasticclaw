@@ -3778,10 +3778,8 @@ func ensureUserNPMBinOnPath() (string, error) {
 	prefix := filepath.Join(home, ".local")
 	binDir := filepath.Join(prefix, "bin")
 	pathEntries := filepath.SplitList(os.Getenv("PATH"))
-	for _, entry := range pathEntries {
-		if entry == binDir {
-			return prefix, nil
-		}
+	if len(pathEntries) > 0 && pathEntries[0] == binDir {
+		return prefix, nil
 	}
 	pathEntries = append([]string{binDir}, pathEntries...)
 	if err := os.Setenv("PATH", strings.Join(pathEntries, string(os.PathListSeparator))); err != nil {
@@ -3795,12 +3793,6 @@ func installUserNPMPackage(spec string, opts ...string) error {
 	if err != nil {
 		return err
 	}
-	// Base flags. OpenClaw installs must NOT pass --ignore-scripts: since
-	// 2026.9.x the package ships a lifecycle-pending marker that its pre/post
-	// install scripts clear, and the launcher refuses to run ("package
-	// lifecycle is incomplete") when it cannot write the lifecycle lock inside
-	// the install dir — which is exactly what happens for an unprivileged
-	// runtime user after a scripts-disabled install.
 	flags := ""
 	if len(opts) > 0 {
 		flags = " " + strings.Join(opts, " ")
@@ -3813,29 +3805,82 @@ func installUserNPMPackage(spec string, opts ...string) error {
 	))
 }
 
-// installOpenClaw installs the pinned OpenClaw CLI via npm.
+// installedOpenClawVersion reads the package behind the executable on PATH.
+func installedOpenClawVersion() (string, error) {
+	binary, err := exec.LookPath("openclaw")
+	if err != nil {
+		return "", err
+	}
+	binary, err = filepath.EvalSymlinks(binary)
+	if err != nil {
+		return "", err
+	}
+	for dir := filepath.Dir(binary); ; dir = filepath.Dir(dir) {
+		data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+		if err == nil {
+			var pkg struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			}
+			if err := json.Unmarshal(data, &pkg); err != nil {
+				return "", err
+			}
+			if pkg.Name == "openclaw" {
+				return pkg.Version, nil
+			}
+		}
+		if filepath.Dir(dir) == dir {
+			return "", fmt.Errorf("openclaw package.json not found")
+		}
+	}
+}
+
+// installOpenClaw installs the pinned OpenClaw CLI from the embedded lockfile.
 func installOpenClaw() error {
-	if _, err := ensureUserNPMBinOnPath(); err != nil {
+	prefix, err := ensureUserNPMBinOnPath()
+	if err != nil {
 		return err
 	}
-	if out, err := exec.Command("openclaw", "--version").CombinedOutput(); err == nil {
-		version := strings.TrimSpace(string(out))
-		if strings.Contains(version, openClawVersion) {
+	if version, err := installedOpenClawVersion(); err == nil {
+		if version == openClawVersion {
 			log.Printf("[bootstrap] OpenClaw already installed: %s", version)
 			return nil
 		}
 		log.Printf("[bootstrap] OpenClaw version %s found, installing pinned %s", version, openClawVersion)
 	}
 	log.Printf("[bootstrap] installing openclaw@%s...", openClawVersion)
-	if err := installUserNPMPackage("openclaw@" + openClawVersion); err != nil {
-		return fmt.Errorf("npm install openclaw: %w", err)
+	runtimeDir := filepath.Join(prefix, "lib", "openclaw-runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		return fmt.Errorf("prepare openclaw runtime: %w", err)
 	}
-	out, err := exec.Command("openclaw", "--version").CombinedOutput()
+	for name, data := range map[string][]byte{
+		"package.json":      cliversion.OpenClawPackageJSON,
+		"package-lock.json": cliversion.OpenClawPackageLock,
+	} {
+		if err := os.WriteFile(filepath.Join(runtimeDir, name), data, 0644); err != nil {
+			return fmt.Errorf("write openclaw %s: %w", name, err)
+		}
+	}
+	// Lifecycle scripts must run to complete OpenClaw's package setup.
+	if err := runShell("cd " + shellQuote(runtimeDir) + " && npm ci --no-audit --no-fund"); err != nil {
+		return fmt.Errorf("npm ci openclaw: %w", err)
+	}
+	binDir := filepath.Join(prefix, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return fmt.Errorf("prepare openclaw bin: %w", err)
+	}
+	binPath := filepath.Join(binDir, "openclaw")
+	if err := os.Remove(binPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove old openclaw bin: %w", err)
+	}
+	if err := os.Symlink(filepath.Join(runtimeDir, "node_modules", ".bin", "openclaw"), binPath); err != nil {
+		return fmt.Errorf("link openclaw bin: %w", err)
+	}
+	version, err := installedOpenClawVersion()
 	if err != nil {
-		return fmt.Errorf("verify openclaw install: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("verify openclaw install: %w", err)
 	}
-	version := strings.TrimSpace(string(out))
-	if !strings.Contains(version, openClawVersion) {
+	if version != openClawVersion {
 		return fmt.Errorf("verify openclaw install: got %q, want version %s", version, openClawVersion)
 	}
 	log.Printf("[bootstrap] OpenClaw: %s", version)

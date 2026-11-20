@@ -112,20 +112,42 @@ func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
 }
 
 func TestDaytonaOpenClawInstallCommands_AreAsyncAndPollable(t *testing.T) {
-	start := daytonaStartOpenClawInstallCommand("2026.7.1-2")
-	status := daytonaOpenClawInstallStatusCommand("2026.7.1-2")
+	start := daytonaStartOpenClawInstallCommand(cliversion.OpenClawVersion)
+	status := daytonaOpenClawInstallStatusCommand()
 
+	check := exec.Command("bash", "-n")
+	check.Stdin = strings.NewReader(start)
+	if out, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("install script syntax: %v: %s", err, out)
+	}
+	assertContains(t, daytonaAsyncBridgeCommand("hub", "id", "token", "auth", "name", "template", ""), `export PATH="$HOME/.local/bin:`, "bridge uses the user-owned binary")
 	assertContains(t, start, "setsid nohup bash -c", "install starts in a detached process")
 	assertContains(t, start, "openclaw-install.log", "install writes a log for diagnostics")
 	assertContains(t, start, "openclaw-install.status", "install writes a status marker")
-	assertContains(t, start, "openclaw@2026.7.1-2", "install pins the expected openclaw version")
+	assertContains(t, start, "ci --no-audit --no-fund", "install uses npm ci")
+	assertNotContains(t, start, "sudo", "install runs as daytona without sudo")
+	assertNotContains(t, start, "--ignore-scripts", "lifecycle scripts remain enabled")
+	assertContains(t, start, base64.StdEncoding.EncodeToString(cliversion.OpenClawPackageJSON), "embeds the pinned manifest")
+	assertContains(t, start, "gzip -df --", "decompresses the embedded integrity lock")
+	if len(start) >= 128*1024 {
+		t.Fatalf("install command exceeds Linux argument limit: %d bytes", len(start))
+	}
+	lockDir := t.TempDir()
+	if out, err := exec.Command("bash", "-c", daytonaOpenClawLockCommand(lockDir)).CombinedOutput(); err != nil {
+		t.Fatalf("write lock: %v: %s", err, out)
+	}
+	lock, err := os.ReadFile(filepath.Join(lockDir, "package-lock.json"))
+	if err != nil || string(lock) != string(cliversion.OpenClawPackageLock) {
+		t.Fatalf("remote lock differs from embedded bytes: %v", err)
+	}
+	assertContains(t, start, "$(id -un)", "checks the runtime user")
 	assertContains(t, start, "openclaw-install-status=started", "start command returns quickly after launching")
 
 	assertContains(t, status, "openclaw-install-status=ok", "status reports completion")
 	assertContains(t, status, "openclaw-install-status=pending", "status reports in-progress install")
 	assertContains(t, status, "openclaw-install-status=failed", "status reports failed install")
 	assertContains(t, status, "tail -n 120", "status includes install diagnostics")
-	assertContains(t, status, "openclaw@2026.7.1-2", "status checks the pinned install process")
+	assertContains(t, status, "[o]penclaw-runtime", "status checks the locked install process")
 }
 
 func TestDaytonaInstallModelPluginCommandPinsCodexPlugin(t *testing.T) {
@@ -1702,5 +1724,111 @@ func assertNotContains(t *testing.T, s, substr, desc string) {
 	t.Helper()
 	if strings.Contains(s, substr) {
 		t.Errorf("expected script NOT to contain %s\nfound: %q", desc, substr)
+	}
+}
+
+func TestDaytonaVerifyOpenClawExactVersion(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	for _, version := range []string{cliversion.OpenClawVersion, "2026.9.40", "", "OpenClaw " + cliversion.OpenClawVersion} {
+		t.Run(version, func(t *testing.T) {
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "node"), []byte("#!/bin/sh\nprintf '%s' \"$PACKAGE_TEST_VERSION\"\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			// Replace the fixed runtime PATH so this test needs no sandbox filesystem or ports.
+			script := daytonaVerifyOpenClawCommand(cliversion.OpenClawVersion)
+			script = strings.Replace(script, `export PATH="$HOME/.local/bin:/usr/local/share/nvm/current/bin:$PATH"`, "", 1)
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin", "PACKAGE_TEST_VERSION="+version)
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != (version == cliversion.OpenClawVersion) {
+				t.Fatalf("version %q: %v: %s", version, err, out)
+			}
+		})
+	}
+}
+
+func TestDaytonaOpenClawLockedInstall(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH")
+	}
+	// Resolve the executable because a version-manager shim may depend on HOME or PATH.
+	nodePath, err := exec.Command("node", "-p", "process.execPath").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := strings.TrimSpace(string(nodePath))
+	for _, version := range []string{"", cliversion.OpenClawVersion, "2026.9.40"} {
+		t.Run("installed-"+version, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := filepath.Join(home, "nvm", "current", "bin")
+			runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-runtime")
+			pkgDir := filepath.Join(runtimeDir, "node_modules", "openclaw")
+			for _, dir := range []string{bin, pkgDir} {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write := func(path, content string, mode os.FileMode) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version != "" {
+				write(filepath.Join(pkgDir, "package.json"), `{"version":"`+version+`"}`, 0644)
+			}
+			if err := os.Symlink(node, filepath.Join(bin, "node")); err != nil {
+				t.Fatal(err)
+			}
+			write(filepath.Join(bin, "id"), "#!/bin/sh\necho daytona\n", 0755)
+			write(filepath.Join(bin, "npm"), `#!/bin/sh
+set -eu
+printf '%s\n' "$*" "$PWD" > "$HOME/npm-args"
+mkdir -p node_modules/openclaw node_modules/.bin
+printf '{"version":"`+cliversion.OpenClawVersion+`"}' > node_modules/openclaw/package.json
+touch node_modules/openclaw/openclaw.mjs
+ln -sf ../openclaw/openclaw.mjs node_modules/.bin/openclaw
+`, 0755)
+			// Run the same generated installer synchronously under a temporary sandbox home.
+			script := daytonaStartOpenClawInstallCommand(cliversion.OpenClawVersion)
+			script = strings.NewReplacer(
+				"/home/daytona", home,
+				"/usr/local/share/nvm", filepath.Join(home, "nvm"),
+				"/tmp/openclaw-install", filepath.Join(home, "openclaw-install"),
+				"setsid nohup bash -c", "bash -c",
+				`> "$LOG" 2>&1 </dev/null &`, `> "$LOG" 2>&1 </dev/null`,
+			).Replace(script)
+			out, err := exec.Command("bash", "-c", script).CombinedOutput()
+			status, _ := os.ReadFile(filepath.Join(home, "openclaw-install.status"))
+			if err != nil || string(status) != "ok\n" {
+				log, _ := os.ReadFile(filepath.Join(home, "openclaw-install.log"))
+				t.Fatalf("install: %v, status %q: %s\n%s", err, status, out, log)
+			}
+			args, err := os.ReadFile(filepath.Join(home, "npm-args"))
+			if version == cliversion.OpenClawVersion {
+				if !os.IsNotExist(err) {
+					t.Fatalf("exact version must skip npm: %s, %v", args, err)
+				}
+				return
+			}
+			if err != nil || string(args) != "ci --no-audit --no-fund\n"+runtimeDir+"\n" {
+				t.Fatalf("npm invocation: %q, %v", args, err)
+			}
+			for name, want := range map[string][]byte{"package.json": cliversion.OpenClawPackageJSON, "package-lock.json": cliversion.OpenClawPackageLock} {
+				got, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil || string(got) != string(want) {
+					t.Fatalf("%s differs from embedded file: %v", name, err)
+				}
+			}
+			if target, err := filepath.EvalSymlinks(filepath.Join(home, ".local", "bin", "openclaw")); err != nil || target != filepath.Join(pkgDir, "openclaw.mjs") {
+				t.Fatalf("openclaw link target = %q, %v", target, err)
+			}
+		})
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 
 	"nhooyr.io/websocket"
@@ -1214,65 +1215,80 @@ func TestInstallOpenClawWithoutSudoInstallsAndRunsPinnedVersion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake npm executable uses POSIX shell")
 	}
-
-	home := t.TempDir()
-	fakeBin := t.TempDir()
-	npmLog := filepath.Join(t.TempDir(), "npm-args")
-	t.Setenv("HOME", home)
-	t.Setenv("FAKE_NPM_LOG", npmLog)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	writeExecutable := func(path, content string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(content), 0755); err != nil {
-			t.Fatalf("write executable %s: %v", path, err)
-		}
-	}
-	writeExecutable(filepath.Join(fakeBin, "openclaw"), "#!/bin/sh\necho 'OpenClaw 0.0.0'\n")
-	writeExecutable(filepath.Join(fakeBin, "npm"), fmt.Sprintf(`#!/bin/sh
+	for _, version := range []string{"", openClawVersion, "2026.9.40", "0.0.0"} {
+		t.Run("installed-"+version, func(t *testing.T) {
+			home := t.TempDir()
+			fakeBin := t.TempDir()
+			npmLog := filepath.Join(t.TempDir(), "npm-args")
+			t.Setenv("HOME", home)
+			t.Setenv("FAKE_NPM_LOG", npmLog)
+			runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-runtime")
+			pkgDir := filepath.Join(runtimeDir, "node_modules", "openclaw")
+			binDir := filepath.Join(home, ".local", "bin")
+			// The user binary must take precedence even if its directory is already on PATH.
+			t.Setenv("PATH", strings.Join([]string{fakeBin, os.Getenv("PATH"), binDir}, string(os.PathListSeparator)))
+			for _, dir := range []string{pkgDir, binDir} {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write := func(path, content string, mode os.FileMode) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(filepath.Join(fakeBin, "openclaw"), "#!/bin/sh\nexit 1\n", 0755)
+			if version != "" {
+				write(filepath.Join(pkgDir, "package.json"), fmt.Sprintf(`{"name":"openclaw","version":%q}`, version), 0644)
+				// CLI output deliberately claims the pinned version even when the package differs.
+				write(filepath.Join(pkgDir, "openclaw.mjs"), "#!/bin/sh\necho 'OpenClaw "+openClawVersion+"'\n", 0755)
+				if err := os.Symlink(filepath.Join(pkgDir, "openclaw.mjs"), filepath.Join(binDir, "openclaw")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(filepath.Join(fakeBin, "npm"), fmt.Sprintf(`#!/bin/sh
 set -eu
-printf '%%s\n' "$*" > "$FAKE_NPM_LOG"
-mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/openclaw" <<'EOF'
+printf '%%s\n' "$*" "$PWD" > "$FAKE_NPM_LOG"
+mkdir -p node_modules/openclaw node_modules/.bin
+printf '{"name":"openclaw","version":"%s"}' > node_modules/openclaw/package.json
+cat > node_modules/openclaw/openclaw.mjs <<'EOF'
 #!/bin/sh
 echo 'OpenClaw %s'
 EOF
-chmod +x "$HOME/.local/bin/openclaw"
-`, openClawVersion))
-
-	if err := installOpenClaw(); err != nil {
-		t.Fatalf("installOpenClaw(): %v", err)
-	}
-
-	args, err := os.ReadFile(npmLog)
-	if err != nil {
-		t.Fatalf("read npm arguments: %v", err)
-	}
-	gotArgs := strings.TrimSpace(string(args))
-	if strings.Contains(gotArgs, "sudo") {
-		t.Fatalf("npm install unexpectedly requires sudo: %s", gotArgs)
-	}
-	if !strings.Contains(gotArgs, "--prefix "+filepath.Join(home, ".local")) {
-		t.Fatalf("npm install does not use the user prefix: %s", gotArgs)
-	}
-	if !strings.Contains(gotArgs, "openclaw@"+openClawVersion) {
-		t.Fatalf("npm install does not pin OpenClaw: %s", gotArgs)
-	}
-
-	path, err := exec.LookPath("openclaw")
-	if err != nil {
-		t.Fatalf("find installed openclaw: %v", err)
-	}
-	wantPath := filepath.Join(home, ".local", "bin", "openclaw")
-	if path != wantPath {
-		t.Fatalf("openclaw path = %q, want %q", path, wantPath)
-	}
-	out, err := exec.Command("openclaw", "--version").CombinedOutput()
-	if err != nil {
-		t.Fatalf("run installed openclaw: %v: %s", err, out)
-	}
-	if got, want := strings.TrimSpace(string(out)), "OpenClaw "+openClawVersion; got != want {
-		t.Fatalf("openclaw --version = %q, want %q", got, want)
+chmod +x node_modules/openclaw/openclaw.mjs
+ln -sf ../openclaw/openclaw.mjs node_modules/.bin/openclaw
+`, openClawVersion, openClawVersion), 0755)
+			if err := installOpenClaw(); err != nil {
+				t.Fatal(err)
+			}
+			args, err := os.ReadFile(npmLog)
+			if version == openClawVersion {
+				if !os.IsNotExist(err) {
+					t.Fatalf("exact version must skip npm: %s, %v", args, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(args), "ci --no-audit --no-fund\n"+runtimeDir+"\n"; got != want {
+				t.Fatalf("npm invocation = %q, want %q", got, want)
+			}
+			for name, want := range map[string][]byte{"package.json": cliversion.OpenClawPackageJSON, "package-lock.json": cliversion.OpenClawPackageLock} {
+				got, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil || string(got) != string(want) {
+					t.Fatalf("%s differs from embedded file: %v", name, err)
+				}
+			}
+			if got, err := installedOpenClawVersion(); err != nil || got != openClawVersion {
+				t.Fatalf("installed version = %q: %v", got, err)
+			}
+			out, err := exec.Command("openclaw", "--version").CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != "OpenClaw "+openClawVersion {
+				t.Fatalf("run installed openclaw: %v: %s", err, out)
+			}
+		})
 	}
 }
 

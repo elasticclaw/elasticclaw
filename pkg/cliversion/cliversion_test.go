@@ -1,6 +1,7 @@
 package cliversion
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,5 +104,42 @@ func TestAgentDockerfileChecksNodeCompatible(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "\nRUN "+NodeCompatibleCheck+"\n") {
 		t.Fatal("agent.Dockerfile: missing `RUN <cliversion.NodeCompatibleCheck>` after the Node install")
+	}
+}
+
+func TestOpenClawLock(t *testing.T) {
+	var manifest struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal(OpenClawPackageJSON, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Dependencies["openclaw"] != OpenClawVersion {
+		t.Fatal("package.json must pin OpenClawVersion")
+	}
+	var lock struct {
+		LockfileVersion int `json:"lockfileVersion"`
+		Packages        map[string]struct {
+			Version      string            `json:"version"`
+			Integrity    string            `json:"integrity"`
+			Dependencies map[string]string `json:"dependencies"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal(OpenClawPackageLock, &lock); err != nil {
+		t.Fatal(err)
+	}
+	if lock.LockfileVersion != 3 {
+		t.Fatalf("lockfileVersion = %d, want 3", lock.LockfileVersion)
+	}
+	if lock.Packages[""].Dependencies["openclaw"] != OpenClawVersion {
+		t.Fatal("lock root must pin OpenClawVersion")
+	}
+	if lock.Packages["node_modules/openclaw"].Version != OpenClawVersion {
+		t.Fatal("locked openclaw must match OpenClawVersion")
+	}
+	for name, pkg := range lock.Packages {
+		if name != "" && !strings.HasPrefix(pkg.Integrity, "sha512-") {
+			t.Errorf("%s has no sha512 integrity", name)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -4344,17 +4345,6 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	// Step 1: Install pinned OpenClaw version.
 	// Run install in background and poll — avoids the 60s HTTP client timeout
 	// that kills synchronous long-running commands.
-	// Uninstall old openclaw then reinstall pinned version (ensures nvm current symlink is updated)
-	if err := exec("uninstall old openclaw", 20*time.Second,
-		`NPM="/usr/local/share/nvm/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-echo "npm=$NPM prefix=$PREFIX"; \
-sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true; \
-hash -r; \
-echo uninstalled`); err != nil {
-		log.Printf("[daytona] warning: uninstall failed (ok if not installed): %v", err)
-	}
-
 	const daytonaOpenClawVersion = cliversion.OpenClawVersion
 	if err := exec("start openclaw install", 20*time.Second, daytonaStartOpenClawInstallCommand(daytonaOpenClawVersion)); err != nil {
 		return err
@@ -4363,7 +4353,7 @@ echo uninstalled`); err != nil {
 	var lastInstallStatus string
 	installComplete := false
 	for !installComplete {
-		result, err := execResult("check openclaw install", 15*time.Second, daytonaOpenClawInstallStatusCommand(daytonaOpenClawVersion))
+		result, err := execResult("check openclaw install", 15*time.Second, daytonaOpenClawInstallStatusCommand())
 		if err != nil {
 			lastInstallStatus = err.Error()
 		} else {
@@ -4386,19 +4376,7 @@ echo uninstalled`); err != nil {
 		time.Sleep(10 * time.Second)
 	}
 
-	if err := exec("verify openclaw", 20*time.Second,
-		fmt.Sprintf(`export NVM_DIR=/usr/local/share/nvm; \
-NPM="$NVM_DIR/current/bin/npm"; \
-PREFIX="$("$NPM" config get prefix)"; \
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
-hash -r; \
-OPENCLAW_PATH="$(command -v openclaw || true)"; \
-OPENCLAW_VERSION="$(openclaw --version 2>&1 || true)"; \
-PACKAGE_VERSION="$(PREFIX="$PREFIX" node -e "try{console.log(require(process.env.PREFIX + '/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
-echo "openclaw path=$OPENCLAW_PATH"; \
-echo "openclaw version=$OPENCLAW_VERSION"; \
-echo "openclaw package_version=$PACKAGE_VERSION"; \
-case "$OPENCLAW_VERSION" in *%s*) ;; *) echo "expected openclaw %s"; exit 1 ;; esac`, daytonaOpenClawVersion, daytonaOpenClawVersion)); err != nil {
+	if err := exec("verify openclaw", 20*time.Second, daytonaVerifyOpenClawCommand(daytonaOpenClawVersion)); err != nil {
 		return err
 	}
 
@@ -4547,7 +4525,7 @@ docker --version`); err != nil {
 		}
 	}
 	onboardCmd := fmt.Sprintf(
-		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
+		"%sexport NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health %s 2>&1",
 		llmKeyEnvDaytona,
 		onboardFlags,
 	)
@@ -4574,13 +4552,13 @@ docker --version`); err != nil {
 		}
 	}
 	if oauthAuthSyncDaytona != "" {
-		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + oauthAuthSyncDaytona
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; ` + oauthAuthSyncDaytona
 		if err := exec("sync openclaw OAuth auth", 30*time.Second, syncCmd); err != nil {
 			return fmt.Errorf("sync openclaw OAuth auth: %w", err)
 		}
 	}
 	if apiKeyAuthSyncDaytona != "" {
-		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + apiKeyAuthSyncDaytona
+		syncCmd := `export HOME=/home/daytona; export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; ` + llmKeyEnvDaytona + apiKeyAuthSyncDaytona
 		if err := exec("sync openclaw api key auth", 30*time.Second, syncCmd); err != nil {
 			return fmt.Errorf("sync openclaw api key auth: %w", err)
 		}
@@ -4593,7 +4571,7 @@ docker --version`); err != nil {
 	// Step 2a: Preflight required commands and environment.
 	// Fail early if the sandbox is missing tools that OpenClaw or agents need.
 	if err := exec("preflight required commands", 30*time.Second,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; \
 for cmd in node npm git python3 curl; do command -v "$cmd" >/dev/null || { echo "missing: $cmd"; exit 1; }; done; \
 echo "preflight ok"`); err != nil {
 		return fmt.Errorf("daytona sandbox missing required commands: %w", err)
@@ -4602,7 +4580,7 @@ echo "preflight ok"`); err != nil {
 	// This prevents the gateway from doing expensive npm installs while
 	// clients are connected, which causes event-loop delays and connection drops.
 	if err := exec("stage openclaw plugin deps", 3*time.Minute,
-		`export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+		`export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; \
 export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
 openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"`); err != nil {
 		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
@@ -4622,7 +4600,7 @@ with open(path, 'w') as f: json.dump(cfg, f, indent=2)
 print('gateway config updated')
 PYEOF
 export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
-export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
+export NVM_DIR=/usr/local/share/nvm; export PATH=$HOME/.local/bin:$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
 # Phase 1: wait for HTTP server to be listening (quick)
 for i in $(seq 1 30); do
   curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
@@ -5101,25 +5079,51 @@ echo "claw-bridge not running"
 exit 1`
 }
 
+func daytonaVerifyOpenClawCommand(version string) string {
+	return fmt.Sprintf(`export HOME=/home/daytona
+export PATH="$HOME/.local/bin:/usr/local/share/nvm/current/bin:$PATH"
+PACKAGE_VERSION="$(node -p "require('/home/daytona/.local/lib/openclaw-runtime/node_modules/openclaw/package.json').version" 2>/dev/null)"
+echo "openclaw package_version=$PACKAGE_VERSION"
+[ "$PACKAGE_VERSION" = %s ] || { echo "unexpected openclaw package version"; exit 1; }`, shellQuote(version))
+}
+
+// Compress the embedded lock to keep the remote shell command below Linux's
+// per-argument size limit, including the detached bash -c invocation.
+func daytonaOpenClawLockCommand(runtimeDir string) string {
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	_, _ = zw.Write(cliversion.OpenClawPackageLock)
+	_ = zw.Close()
+	return remoteWriteFileCommand(runtimeDir, "package-lock.json.gz", compressed.String()) +
+		"\ngzip -df -- " + shellQuote(path.Join(runtimeDir, "package-lock.json.gz"))
+}
+
 func daytonaStartOpenClawInstallCommand(version string) string {
-	installScript := fmt.Sprintf(`set -o pipefail
+	const runtimeDir = "/home/daytona/.local/lib/openclaw-runtime"
+	installScript := fmt.Sprintf(`set -euo pipefail
 export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
 NPM="$NVM_DIR/current/bin/npm"
-PREFIX="$("$NPM" config get prefix)"
+PREFIX="$HOME/.local"
 export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status
-echo "npm=$NPM prefix=$PREFIX"
-if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" 2>&1; then
-  hash -r
-  echo ok > "$STATUS"
-  echo "install done"
-else
-  rc=$?
-  echo "failed:$rc" > "$STATUS"
-  exit "$rc"
-fi`, version)
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "failed:$rc" > "$STATUS"; fi' EXIT
+[ "$(id -un)" = daytona ] || { echo "OpenClaw must be installed as daytona"; exit 1; }
+mkdir -p "$PREFIX/bin"
+PACKAGE_VERSION="$(node -p "require('%s/node_modules/openclaw/package.json').version" 2>/dev/null || true)"
+if [ "$PACKAGE_VERSION" != %s ]; then
+%s
+%s
+  cd %s
+  "$NPM" ci --no-audit --no-fund 2>&1
+fi
+ln -sfn "$PREFIX/lib/openclaw-runtime/node_modules/.bin/openclaw" "$PREFIX/bin/openclaw"
+%s
+echo ok > "$STATUS"
+echo "install done"`, runtimeDir, shellQuote(version),
+		remoteWriteFileCommand(runtimeDir, "package.json", string(cliversion.OpenClawPackageJSON)),
+		daytonaOpenClawLockCommand(runtimeDir),
+		shellQuote(runtimeDir), daytonaVerifyOpenClawCommand(version))
 	return fmt.Sprintf(`export HOME=/home/daytona
 LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status
@@ -5158,7 +5162,7 @@ func daytonaInstallModelPluginCommand(provider string) string {
 	spec := "npm:@openclaw/codex@" + version
 	return fmt.Sprintf(`export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
-export PATH="$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
 if openclaw plugins info codex --json >/dev/null 2>&1; then
   echo "Codex plugin already installed"
 else
@@ -5167,7 +5171,7 @@ fi
 openclaw plugins info codex --json >/dev/null`, shellQuote(spec))
 }
 
-func daytonaOpenClawInstallStatusCommand(version string) string {
+func daytonaOpenClawInstallStatusCommand() string {
 	return fmt.Sprintf(`export HOME=/home/daytona
 LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status
@@ -5191,13 +5195,14 @@ if [ -s "$STATUS" ]; then
       ;;
   esac
 fi
+# The bracketed pattern keeps this script's own shell from matching itself.
 if pgrep -af %s >/dev/null 2>&1; then
   echo "openclaw-install-status=pending"
   tail -n 20 "$LOG" 2>/dev/null || true
   exit 0
 fi
 echo "openclaw-install-status=missing"
-tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
+tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("[b]ash -c .*[o]penclaw-runtime"))
 }
 
 // daytonaLiveWorkspaceDir is the workspace the OpenClaw agent actually runs in.
@@ -5271,6 +5276,7 @@ rm -f "$PIDFILE"`
 
 func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName, llmKeyEnv string) string {
 	return withDaytonaLLMKeyEnv(llmKeyEnv, fmt.Sprintf(`export HOME=/home/daytona
+export PATH="$HOME/.local/bin:/usr/local/share/nvm/current/bin:$PATH"
 mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
 cd /home/daytona/.openclaw/workspace
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid

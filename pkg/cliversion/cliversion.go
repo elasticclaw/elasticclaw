@@ -1,5 +1,13 @@
 package cliversion
 
+import _ "embed"
+
+//go:embed openclaw/package.json
+var OpenClawPackageJSON []byte
+
+//go:embed openclaw/package-lock.json
+var OpenClawPackageLock []byte
+
 const (
 	OrasVersion          = "1.2.2"
 	OrasLinuxAMD64SHA256 = "bff970346470e5ef888e9f2c0bf7f8ee47283f5a45207d6e7a037da1fb0eae0d"
