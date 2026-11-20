@@ -5519,6 +5519,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 
 	// Register with the hub — gateway_ready=false until session is established
+	ready := h.IsReady()
 	reg := hubMsg{
 		Type: "register",
 		Payload: mustJSON(map[string]interface{}{
@@ -5527,7 +5528,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			"template":         templateName,
 			"token":            token,
 			"model_auth_token": modelAuthToken,
-			"gateway_ready":    h.IsReady(),
+			"gateway_ready":    ready,
+			"harness":          harnessName,
+			"harness_ready":    ready,
 			"bridge_version":   protocolRegistration.BridgeVersion,
 			"protocols":        protocolRegistration.Protocols,
 			"capabilities":     protocolRegistration.Capabilities,
@@ -5696,7 +5699,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			return h.Subagents(connCtx)
 		}, &subagentPollFailLogged)
 		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d%s", health, h.IsReady(), cu, restarts, subagentLog)
-		heartbeatPayload := map[string]interface{}{"gateway_healthy": health, "gateway_ready": h.IsReady(), "context_usage": cu, "restart_count": restarts}
+		heartbeatPayload := heartbeatPayload(health, h.IsReady(), cu, restarts)
 		queue.addTurnHeartbeat(heartbeatPayload)
 		for k, v := range subagentFields {
 			heartbeatPayload[k] = v
@@ -5839,7 +5842,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 }
 
 // addHeartbeatSessionKeys keeps the usage snapshot and the live gateway
-// identity separate. The hub uses only gateway_session_key for session-loss
+// identity separate. The hub uses the live session key for session-loss
 // detection, since sessions.describe may be stale while a gateway recovers.
 func addHeartbeatSessionKeys(payload map[string]interface{}, snapshotKey, gatewayKey string) {
 	if snapshotKey != "" {
@@ -5847,6 +5850,7 @@ func addHeartbeatSessionKeys(payload map[string]interface{}, snapshotKey, gatewa
 	}
 	if gatewayKey != "" {
 		payload["gateway_session_key"] = gatewayKey
+		payload["harness_session_key"] = gatewayKey
 	}
 }
 

@@ -12,6 +12,19 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+// harnessName identifies the agent runtime this bridge drives in its hub registration.
+const harnessName = "openclaw"
+
+// heartbeatPayload builds the heartbeat status fields. The gateway_* names and
+// restart_count are kept for hubs older than the harness_* names.
+func heartbeatPayload(healthy, ready bool, contextUsage, restartCount int) map[string]interface{} {
+	return map[string]interface{}{
+		"gateway_healthy": healthy, "gateway_ready": ready,
+		"context_usage": contextUsage, "restart_count": restartCount,
+		"harness_healthy": healthy, "harness_ready": ready, "harness_restart_count": restartCount,
+	}
+}
+
 // EventSink receives a turn's streamed output.
 type EventSink struct {
 	OnChunk    func(string)
