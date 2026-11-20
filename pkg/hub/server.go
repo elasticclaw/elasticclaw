@@ -368,6 +368,7 @@ type clawConn struct {
 
 	id                     string
 	tenantID               string
+	harness                string
 	conn                   *websocket.Conn
 	tags                   []string        // cached from DB at registration time for access-control checks
 	contextUsage           int             // 0-100, updated from heartbeats
@@ -2868,7 +2869,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if this is a status channel registration BEFORE any DB upsert.
-	// Status channels must not mutate claw DB state (rp.GatewayReady is nil,
+	// Status channels must not mutate claw DB state (rp.Ready() is nil,
 	// so initialStatus would incorrectly overwrite 'starting'/'bootstrap_needed').
 	isStatusChannel := rp.Channel == "status"
 	var workflowControl *workflowV2ControlBinding
@@ -2904,7 +2905,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	if !isStatusChannel {
 		// Upsert claw and keep terminal/watching states sticky across reconnects.
-		desiredStatus := initialStatus(rp.GatewayReady)
+		desiredStatus := initialStatus(rp.Ready())
 		if !allowWakeBeforeBootstrap(provider, bootstrapOK) {
 			desiredStatus = "starting"
 		}
@@ -2996,7 +2997,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	if !noProgressPaused {
 		bridgeErrorPauseKind = ""
 	}
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
+	cc := &clawConn{id: clawID, tenantID: tenantID, harness: rp.Harness, conn: conn, gatewayReady: gatewayReadyBool(rp.Ready()), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -3170,24 +3171,21 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		if msg.Type == "heartbeat" {
 			payload, _ := json.Marshal(msg.Payload)
 			var hb struct {
-				GatewayHealthy bool  `json:"gateway_healthy"`
-				GatewayReady   *bool `json:"gateway_ready,omitempty"`
-				TurnActive     *bool `json:"turn_active"`
-				ContextUsage   int   `json:"context_usage"`
-				RestartCount   int   `json:"restart_count"`
+				heartbeatHarnessFields
+				TurnActive   *bool `json:"turn_active"`
+				ContextUsage int   `json:"context_usage"`
 				// SessionKey is the usage snapshot from sessions.describe. GatewaySessionKey
 				// is the live session identity used for loss detection; they must remain
 				// distinct because a degraded describe call can leave the snapshot stale.
-				SessionKey        string   `json:"session_key"`
-				GatewaySessionKey *string  `json:"gateway_session_key"`
-				InputTokens       *int     `json:"input_tokens"`
-				OutputTokens      *int     `json:"output_tokens"`
-				TotalTokens       *int     `json:"total_tokens"`
-				EstimatedCostUSD  *float64 `json:"estimated_cost_usd"`
-				Model             string   `json:"model"`
-				ModelProvider     string   `json:"model_provider"`
-				CacheReadTokens   *int     `json:"cache_read_tokens"`
-				CacheWriteTokens  *int     `json:"cache_write_tokens"`
+				SessionKey       string   `json:"session_key"`
+				InputTokens      *int     `json:"input_tokens"`
+				OutputTokens     *int     `json:"output_tokens"`
+				TotalTokens      *int     `json:"total_tokens"`
+				EstimatedCostUSD *float64 `json:"estimated_cost_usd"`
+				Model            string   `json:"model"`
+				ModelProvider    string   `json:"model_provider"`
+				CacheReadTokens  *int     `json:"cache_read_tokens"`
+				CacheWriteTokens *int     `json:"cache_write_tokens"`
 				// Pointers on purpose: an old bridge omits both, which must
 				// stay distinguishable from a bridge reporting "no subagents"
 				// (see applySubagentHeartbeatLocked).
@@ -3195,6 +3193,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				SubagentActiveCount *int  `json:"subagent_active_count"`
 			}
 			if err := json.Unmarshal(payload, &hb); err == nil {
+				hb.normalizeHarnessFields()
 				liveness := s.livenessSettings()
 				gatewayUnhealthyMax := liveness.gatewayUnhealthyMax
 				gatewayUnhealthyGrace := liveness.gatewayUnhealthyReconnectGrace

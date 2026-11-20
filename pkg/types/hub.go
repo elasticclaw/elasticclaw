@@ -173,10 +173,20 @@ type RegisterPayload struct {
 	Token          string   `json:"token"`                      // hub claw token for auth
 	ModelAuthToken string   `json:"model_auth_token,omitempty"` // per-claw proof for managed model credentials
 	GatewayReady   *bool    `json:"gateway_ready,omitempty"`    // true once openclaw gateway session is established; nil means unknown (old bridge, assume ready)
+	Harness        string   `json:"harness,omitempty"`          // agent runtime the bridge drives, e.g. "openclaw"; absent on old bridges
+	HarnessReady   *bool    `json:"harness_ready,omitempty"`    // neutral name for gateway_ready; read first by Ready()
 	Channel        string   `json:"channel,omitempty"`          // "status" for status channel, empty for main
 	BridgeVersion  string   `json:"bridge_version,omitempty"`   // protocol negotiation; absent on old bridges
 	Protocols      []string `json:"protocols,omitempty"`        // conversation.v1 and, on new bridges, control.v2
 	Capabilities   []string `json:"capabilities,omitempty"`     // optional narrow bridge capabilities
+}
+
+// Ready prefers harness readiness and falls back to older bridges' gateway readiness.
+func (p RegisterPayload) Ready() *bool {
+	if p.HarnessReady != nil {
+		return p.HarnessReady
+	}
+	return p.GatewayReady
 }
 
 // CheckpointCreatePayload asks a connected bridge to prepare a checkpoint.
