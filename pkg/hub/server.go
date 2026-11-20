@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -1247,6 +1248,22 @@ func (s *Server) tenantByClawToken(token string) (string, error) {
 	var id string
 	err := s.db.QueryRow(`SELECT id FROM tenants WHERE claw_token = ?`, token).Scan(&id)
 	return id, err
+}
+
+// validClawToken reports whether token authenticates a claw: either a tenant's
+// claw token (as on the WS register path) or the configured hub claw token.
+// An empty token or empty expected value never matches.
+func (s *Server) validClawToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	if _, err := s.tenantByClawToken(token); err == nil {
+		return true
+	}
+	s.mu.RLock()
+	want := s.hubCfg.ClawToken
+	s.mu.RUnlock()
+	return want != "" && subtle.ConstantTimeCompare([]byte(token), []byte(want)) == 1
 }
 
 // ─── REST handlers ────────────────────────────────────────────────────────────
@@ -9165,11 +9182,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	if clawToken == "" {
 		clawToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	// Single-tenant: validate against hub's claw_token directly
-	s.mu.RLock()
-	hubClawToken := s.hubCfg.ClawToken
-	s.mu.RUnlock()
-	if clawToken != hubClawToken {
+	if !s.validClawToken(clawToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

@@ -820,3 +820,71 @@ func TestReplicatedCredentialHelperInstallsDynamicGhTokenProfileAndWrapper(t *te
 	assertContains(t, script, "sudo tee /usr/local/bin/gh", "gh wrapper installed")
 	assertNotContains(t, script, "gh auth login", "replicated helper must not persist gh hosts.yml token")
 }
+
+func TestGitHubTokenEndpointFailsClosedOnClawToken(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"example-org"}}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/99":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"},"permissions":{"contents":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/example-repo/installation":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok","expires_at":"2099-01-01T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer github.Close()
+
+	// No claw_token in hub.yaml: the claw token lives only in the tenant table.
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "hub-token",
+		GitHubApps: []*types.GitHubAppConfig{{
+			AppID:         123,
+			PrivateKeyPEM: testGitHubAppPEM(t),
+		}},
+	}, github.URL, "", "")
+	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant-b','B','tenant-b-token','tenant-claw-token',?)`, now()); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+	reposJSON := `[{"repo":"example-org/example-repo","permissions":"read"}]`
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
+		"auth-claw", "tenant-b", "auth claw", "auth-ws", "noop", "", "{}", reposJSON, "", 0, 0, "", `[]`, "provisioning"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		query string
+		bear  string
+		want  int
+	}{
+		{name: "empty token with empty config", query: "claw_token=", want: http.StatusUnauthorized},
+		{name: "missing token", want: http.StatusUnauthorized},
+		{name: "wrong token", query: "claw_token=wrong", want: http.StatusUnauthorized},
+		{name: "wrong bearer", bear: "wrong", want: http.StatusUnauthorized},
+		{name: "tenant token", query: "claw_token=tenant-claw-token", want: http.StatusOK},
+		{name: "tenant bearer", bear: "tenant-claw-token", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url := "/api/github/token/auth-claw?repo=example-org/example-repo"
+			if tc.query != "" {
+				url += "&" + tc.query
+			}
+			req := httptest.NewRequest(http.MethodGet, url, nil)
+			if tc.bear != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bear)
+			}
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("token endpoint returned %d, want %d: %s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
