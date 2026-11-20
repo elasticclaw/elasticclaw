@@ -1966,6 +1966,9 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 					log.Printf("[create] SSE MCP server %q not yet supported for local stdio", mcpRef.Name)
 					continue
 				}
+				if hubMCP.Source == types.MCPSourceNpx || hubMCP.Source == types.MCPSourceSmithery {
+					log.Printf("[create] MCP server %q runs with npm install scripts disabled (--ignore-scripts); set an explicit command to allow them", mcpRef.Name)
+				}
 			}
 			if len(cmd) == 0 {
 				log.Printf("[create] MCP server %q has no command, skipping", mcpRef.Name)
