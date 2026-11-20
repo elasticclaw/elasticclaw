@@ -1,0 +1,12 @@
+export NVM_DIR=/usr/local/share/nvm; \
+NPM="$NVM_DIR/current/bin/npm"; \
+PREFIX="$("$NPM" config get prefix)"; \
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"; \
+hash -r; \
+OPENCLAW_PATH="$(command -v openclaw || true)"; \
+OPENCLAW_VERSION="$(openclaw --version 2>&1 || true)"; \
+PACKAGE_VERSION="$(PREFIX="$PREFIX" node -e "try{console.log(require(process.env.PREFIX + '/lib/node_modules/openclaw/package.json').version)}catch(e){process.exit(0)}" 2>/dev/null || true)"; \
+echo "openclaw path=$OPENCLAW_PATH"; \
+echo "openclaw version=$OPENCLAW_VERSION"; \
+echo "openclaw package_version=$PACKAGE_VERSION"; \
+case "$OPENCLAW_VERSION" in *2026.7.1-2*) ;; *) echo "expected openclaw 2026.7.1-2"; exit 1 ;; esac

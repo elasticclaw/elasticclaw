@@ -1,0 +1,6 @@
+NPM="/usr/local/share/nvm/current/bin/npm"; \
+PREFIX="$("$NPM" config get prefix)"; \
+echo "npm=$NPM prefix=$PREFIX"; \
+sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true; \
+hash -r; \
+echo uninstalled

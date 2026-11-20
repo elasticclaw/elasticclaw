@@ -1,0 +1,23 @@
+export HOME=/home/daytona
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+rm -f "$LOG" "$STATUS"
+setsid nohup bash -c 'set -o pipefail
+export HOME=/home/daytona
+export NVM_DIR=/usr/local/share/nvm
+NPM="$NVM_DIR/current/bin/npm"
+PREFIX="$("$NPM" config get prefix)"
+export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+LOG=/tmp/openclaw-install.log
+STATUS=/tmp/openclaw-install.status
+echo "npm=$NPM prefix=$PREFIX"
+if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@2026.7.1-'"'"'test'"'"' --prefix "$PREFIX" 2>&1; then
+  hash -r
+  echo ok > "$STATUS"
+  echo "install done"
+else
+  rc=$?
+  echo "failed:$rc" > "$STATUS"
+  exit "$rc"
+fi' > "$LOG" 2>&1 </dev/null &
+echo "openclaw-install-status=started"
