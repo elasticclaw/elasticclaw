@@ -22,7 +22,8 @@ const (
 	// bridge installs OpenClawVersion over it whenever the two differ. 2026.10.6
 	// is the first image whose Node (24.22.1) satisfies NodeCompatibleRange.
 	OpenClawImageVersion = "2026.10.6"
-	OpenClawImage        = "ghcr.io/openclaw/openclaw:" + OpenClawImageVersion
+	OpenClawImageDigest  = "sha256:7dbff0fe5f5359b1badefe90a23efa9f203cd0d3c36bee095f4896c7a1d3864b"
+	OpenClawImage        = "ghcr.io/openclaw/openclaw:" + OpenClawImageVersion + "@" + OpenClawImageDigest
 	CodexPluginVersion   = "2026.9.4"
 	CodexCLIVersion      = "0.153.4"
 	GrokCLIVersion       = "0.2.103"

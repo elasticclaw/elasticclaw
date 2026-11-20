@@ -1885,16 +1885,6 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	tagsJSON, _ := json.Marshal(tags)
 	color := resolveColor(req.Color, req.Name)
 
-	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
-	)
-	if err != nil {
-		http.Error(w, "db error", http.StatusInternalServerError)
-		return
-	}
-
 	// Convert string files to bytes for the provider
 	templateFiles := make(map[string][]byte, len(req.Files))
 	for k, v := range req.Files {
@@ -1923,6 +1913,12 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			if !hubMCP.Enabled {
 				log.Printf("[create] MCP server %q is disabled, skipping", mcpRef.Name)
 				continue
+			}
+			if hubMCP.Source == types.MCPSourceDocker {
+				if err := s.checkContainerImage("MCP docker", hubMCP.Image); err != nil {
+					jsonError(w, http.StatusUnprocessableEntity, err.Error())
+					return
+				}
 			}
 			// Build command
 			cmd := hubMCP.Command
@@ -1968,6 +1964,16 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		}
 	}
 	req.MCPs = mcpConfigs
+
+	_, err := s.db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
+	)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 
 	// Provision asynchronously so the HTTP request returns quickly
 	// Use a stable short ID as the provider-side name so renaming the claw
@@ -4226,6 +4232,10 @@ configureLoop:
 }
 
 func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
+	snapshot, err := s.daytonaSnapshot(req, cfg)
+	if err != nil {
+		return err
+	}
 	p, err := newDaytonaProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("daytona init: %w", err)
@@ -4241,11 +4251,6 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		}
 	}
 	s.setBootstrapStatus(clawID, "Creating sandbox")
-	// Resolve snapshot: template snapshot > hub default_snapshot
-	snapshot := req.Snapshot
-	if snapshot == "" {
-		snapshot = cfg.DefaultSnapshot
-	}
 	createReq := types.CreateRequest{
 		Name:          req.ProviderName, // stable ec-<shortid>, decoupled from display name
 		FromImage:     snapshot,
@@ -6058,6 +6063,12 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 }
 
 func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
+	if cfg.Image == "" {
+		cfg.Image = cliversion.OpenClawImage
+	}
+	if err := s.checkContainerImage("docker provider", cfg.Image); err != nil {
+		return err
+	}
 	p, err := newDockerProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("docker init: %w", err)

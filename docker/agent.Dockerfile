@@ -1,5 +1,5 @@
 # stage 1: compile claw-bridge statically (no Go required on the host)
-FROM golang:1.25 AS bridge-builder
+FROM golang:1.25@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS bridge-builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /out/claw-bridge ./cmd/claw-bridge
 
 # stage 2: agent runtime — Ubuntu with Node + OpenClaw pre-installed
-FROM ubuntu:22.04
+FROM ubuntu:22.04@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

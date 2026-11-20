@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/install"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 // supplyChainViolation reports a supply-chain check that could not be
@@ -28,6 +29,27 @@ func (s *Server) supplyChainViolation(format string, args ...any) error {
 	}
 	log.Printf("[supply-chain] WARNING %v", err)
 	return nil
+}
+
+// checkContainerImage requires a container image reference pinned by digest.
+func (s *Server) checkContainerImage(kind, image string) error {
+	if _, digest, pinned := strings.Cut(image, "@sha256:"); !pinned || !validSHA256(digest) {
+		return s.supplyChainViolation("%s image %q must be pinned with @sha256:<digest>", kind, image)
+	}
+	return nil
+}
+
+// daytonaSnapshot resolves the template snapshot, falling back to the hub
+// default, and flags an empty result that would use Daytona's own default.
+func (s *Server) daytonaSnapshot(req types.CreateClawRequest, cfg types.ProviderConfig) (string, error) {
+	snapshot := req.Snapshot
+	if snapshot == "" {
+		snapshot = cfg.DefaultSnapshot
+	}
+	if snapshot == "" {
+		return "", s.supplyChainViolation("Daytona snapshot is empty; provisioning uses Daytona's unpinned default snapshot")
+	}
+	return snapshot, nil
 }
 
 func bridgeLocalHost(host string) bool {

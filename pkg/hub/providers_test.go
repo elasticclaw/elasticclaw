@@ -1,12 +1,15 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	dockerpkg "github.com/elasticclaw/elasticclaw/pkg/provider/docker"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -96,5 +99,45 @@ func TestProvisionDockerEnvPrecedence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(workflowEnv, originalWorkflowEnv) || !reflect.DeepEqual(requestEnv, map[string]string{"REQUEST_ONLY": "request", "SHARED": "request"}) {
 		t.Fatal("container environment merge mutated an input map")
+	}
+}
+
+func TestProvisionDockerImageSupplyChainPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, image             string
+		strict, blocked, warned bool
+	}{
+		{"warn unpinned", "image:latest", false, false, true},
+		{"reject unpinned", "image:latest", true, true, false},
+		{"allow default", "", true, false, false},
+		{"allow pinned", cliversion.OpenClawImage, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := newClawRetryTestServer(t, "provisioning")
+			s.hubCfg.Security.StrictSupplyChain = tc.strict
+			var output bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&output)
+			t.Cleanup(func() { log.SetOutput(previous) })
+			original := createDockerContainer
+			t.Cleanup(func() { createDockerContainer = original })
+			called := false
+			stopped := errors.New("test container creation stopped")
+			createDockerContainer = func(_ *dockerpkg.Provider, _ context.Context, _ types.CreateRequest) (*types.Instance, error) {
+				called = true
+				return nil, stopped
+			}
+			err := s.provisionDocker(context.Background(), "retry-claw", types.CreateClawRequest{}, types.ProviderConfig{Image: tc.image}, nil, nil)
+			if tc.blocked {
+				if called || err == nil || !strings.Contains(err.Error(), "[supply-chain]") {
+					t.Fatalf("expected rejection before Docker create: called=%v err=%v", called, err)
+				}
+			} else if !called || !errors.Is(err, stopped) {
+				t.Fatalf("did not reach Docker create: called=%v err=%v", called, err)
+			}
+			if warned := strings.Contains(output.String(), "[supply-chain] WARNING docker provider"); warned != tc.warned {
+				t.Fatalf("unexpected warning %q", output.String())
+			}
+		})
 	}
 }

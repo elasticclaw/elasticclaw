@@ -17,7 +17,7 @@ func TestPinnedOpenClawVersions(t *testing.T) {
 	if got, want := OpenClawImageVersion, "2026.10.6"; got != want {
 		t.Fatalf("OpenClawImageVersion = %q, want %q", got, want)
 	}
-	if got, want := OpenClawImage, "ghcr.io/openclaw/openclaw:2026.10.6"; got != want {
+	if got, want := OpenClawImage, "ghcr.io/openclaw/openclaw:2026.10.6@sha256:7dbff0fe5f5359b1badefe90a23efa9f203cd0d3c36bee095f4896c7a1d3864b"; got != want {
 		t.Fatalf("OpenClawImage = %q, want %q", got, want)
 	}
 }

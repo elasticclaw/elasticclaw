@@ -158,3 +158,77 @@ func TestDockerBridgeDownloadVerification(t *testing.T) {
 		t.Fatal("download accepted checksum mismatch")
 	}
 }
+
+func TestContainerImageSupplyChainPolicy(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	for _, kind := range []string{"docker provider", "MCP docker"} {
+		for _, image := range []string{"", "image:latest", "image@sha256:invalid", cliversion.OpenClawImage} {
+			for _, strict := range []bool{false, true} {
+				output.Reset()
+				s := &Server{hubCfg: &types.HubConfig{Security: types.SecurityConfig{StrictSupplyChain: strict}}}
+				err := s.checkContainerImage(kind, image)
+				unpinned := image != cliversion.OpenClawImage
+				if (err != nil) != (strict && unpinned) {
+					t.Fatalf("%s image=%q strict=%v: %v", kind, image, strict, err)
+				}
+				if warned := strings.Contains(output.String(), "[supply-chain] WARNING "+kind); warned != (!strict && unpinned) {
+					t.Fatalf("image=%q strict=%v: unexpected warning %q", image, strict, output.String())
+				}
+			}
+		}
+	}
+}
+
+func TestDaytonaSnapshotSupplyChainPolicy(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	for _, tc := range []struct{ requested, configured, want string }{
+		{"", "", ""},
+		{"", "hub-snapshot", "hub-snapshot"},
+		{"template-snapshot", "hub-snapshot", "template-snapshot"},
+	} {
+		for _, strict := range []bool{false, true} {
+			output.Reset()
+			s := &Server{hubCfg: &types.HubConfig{Security: types.SecurityConfig{StrictSupplyChain: strict}}}
+			got, err := s.daytonaSnapshot(types.CreateClawRequest{Snapshot: tc.requested}, types.ProviderConfig{DefaultSnapshot: tc.configured})
+			if got != tc.want || (err != nil) != (strict && tc.want == "") {
+				t.Fatalf("snapshot=%q default=%q strict=%v: got %q, %v", tc.requested, tc.configured, strict, got, err)
+			}
+			if warned := strings.Contains(output.String(), "[supply-chain] WARNING Daytona snapshot is empty"); warned != (!strict && tc.want == "") {
+				t.Fatalf("unexpected warning %q", output.String())
+			}
+		}
+	}
+}
+
+func TestStrictImagePolicyStopsProvisioning(t *testing.T) {
+	s := &Server{hubCfg: &types.HubConfig{Security: types.SecurityConfig{StrictSupplyChain: true}}}
+	for _, provider := range []string{"docker", "daytona"} {
+		err := s.provisionWithProvider(context.Background(), provider, "claw", types.CreateClawRequest{}, types.ProviderConfig{Image: "image:latest"}, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "[supply-chain]") {
+			t.Fatalf("%s: expected supply-chain rejection before provider initialization, got %v", provider, err)
+		}
+	}
+}
+
+func TestStrictMCPImagePolicyRejectsCreate(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "provisioning")
+	s.hubCfg.Security.StrictSupplyChain = true
+	s.hubCfg.Providers = map[string]types.ProviderConfig{"docker": {}}
+	s.hubCfg.MCPServers = []*types.MCPServerHubConfig{{Name: "mcp", Source: types.MCPSourceDocker, Image: "image:latest", Enabled: true}}
+	request := httptest.NewRequest(http.MethodPost, "/api/claws", strings.NewReader(`{"name":"test","provider":"docker","mcps":[{"name":"mcp"}]}`))
+	response := httptest.NewRecorder()
+	s.handleCreateClaw(response, request, "tenant")
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "[supply-chain] MCP docker") {
+		t.Fatalf("got %d: %s", response.Code, response.Body.String())
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE name='test'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("rejected request created a claw: count=%d err=%v", count, err)
+	}
+}
