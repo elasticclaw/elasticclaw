@@ -42,6 +42,7 @@ bootopt
 
 # Docker dev environment (contains secrets — never commit)
 docker/hub.dev.yaml
+aws/lambda-microvm/.env
 tmp/
 
 # OpenCode agent config / skills (local-only)

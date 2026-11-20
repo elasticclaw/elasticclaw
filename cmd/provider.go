@@ -45,6 +45,11 @@ func runProviderList(cmd *cobra.Command, args []string) error {
 			Type:         types.ProviderTypeStateful,
 			Capabilities: []string{"exec", "ssh"},
 		},
+		{
+			Name:         "lambda-microvms",
+			Type:         types.ProviderTypeStateful,
+			Capabilities: []string{"alpha", "stateful", "https-bridge"},
+		},
 	}
 
 	if jsonOut {
