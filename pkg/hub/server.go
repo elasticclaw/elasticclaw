@@ -5166,6 +5166,8 @@ func daytonaOpenClawLockCommand(runtimeDir string) string {
 
 func daytonaStartOpenClawInstallCommand(version string) string {
 	const runtimeDir = "/home/daytona/.local/lib/openclaw-runtime"
+	// The marker proves a previous npm ci from this exact lock completed.
+	lockSHA := shellQuote(cliversion.OpenClawLockSHA256())
 	installScript := fmt.Sprintf(`set -euo pipefail
 export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
@@ -5177,19 +5179,23 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "failed:$rc" > "$STATUS"; fi' EXIT
 [ "$(id -un)" = daytona ] || { echo "OpenClaw must be installed as daytona"; exit 1; }
 mkdir -p "$PREFIX/bin"
 PACKAGE_VERSION="$(node -p "require('%s/node_modules/openclaw/package.json').version" 2>/dev/null || true)"
-if [ "$PACKAGE_VERSION" != %s ]; then
+MARKER=%s
+if [ "$PACKAGE_VERSION" != %s ] || [ "$(cat "$MARKER" 2>/dev/null)" != %s ]; then
+  rm -f "$MARKER"
 %s
 %s
   cd %s
   "$NPM" ci --no-audit --no-fund 2>&1
+  printf '%%s\n' %s > "$MARKER"
 fi
 ln -sfn "$PREFIX/lib/openclaw-runtime/node_modules/.bin/openclaw" "$PREFIX/bin/openclaw"
 %s
 echo ok > "$STATUS"
-echo "install done"`, runtimeDir, shellQuote(version),
+echo "install done"`, runtimeDir, shellQuote(path.Join(runtimeDir, cliversion.OpenClawInstallMarker)),
+		shellQuote(version), lockSHA,
 		remoteWriteFileCommand(runtimeDir, "package.json", string(cliversion.OpenClawPackageJSON)),
 		daytonaOpenClawLockCommand(runtimeDir),
-		shellQuote(runtimeDir), daytonaVerifyOpenClawCommand(version))
+		shellQuote(runtimeDir), lockSHA, daytonaVerifyOpenClawCommand(version))
 	return fmt.Sprintf(`export HOME=/home/daytona
 LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status

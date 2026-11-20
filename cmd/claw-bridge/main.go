@@ -3819,13 +3819,20 @@ func installUserNPMPackage(spec string, opts ...string) error {
 
 // installedOpenClawVersion reads the package behind the executable on PATH.
 func installedOpenClawVersion() (string, error) {
+	_, version, err := installedOpenClawPackage()
+	return version, err
+}
+
+// installedOpenClawPackage returns the package directory and version behind
+// the openclaw executable on PATH.
+func installedOpenClawPackage() (string, string, error) {
 	binary, err := exec.LookPath("openclaw")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	binary, err = filepath.EvalSymlinks(binary)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	for dir := filepath.Dir(binary); ; dir = filepath.Dir(dir) {
 		data, err := os.ReadFile(filepath.Join(dir, "package.json"))
@@ -3835,16 +3842,28 @@ func installedOpenClawVersion() (string, error) {
 				Version string `json:"version"`
 			}
 			if err := json.Unmarshal(data, &pkg); err != nil {
-				return "", err
+				return "", "", err
 			}
 			if pkg.Name == "openclaw" {
-				return pkg.Version, nil
+				return dir, pkg.Version, nil
 			}
 		}
 		if filepath.Dir(dir) == dir {
-			return "", fmt.Errorf("openclaw package.json not found")
+			return "", "", fmt.Errorf("openclaw package.json not found")
 		}
 	}
+}
+
+// openClawInstalledFromLock reports whether the runtime holding pkgDir
+// (<runtime>/node_modules/openclaw) finished `npm ci` from the embedded lock.
+func openClawInstalledFromLock(pkgDir string) bool {
+	runtimeDir := filepath.Dir(filepath.Dir(pkgDir))
+	marker, err := os.ReadFile(filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker))
+	if err != nil || strings.TrimSpace(string(marker)) != cliversion.OpenClawLockSHA256() {
+		return false
+	}
+	lock, err := os.ReadFile(filepath.Join(runtimeDir, "package-lock.json"))
+	return err == nil && bytes.Equal(lock, cliversion.OpenClawPackageLock)
 }
 
 // installOpenClaw installs the pinned OpenClaw CLI from the embedded lockfile.
@@ -3853,17 +3872,21 @@ func installOpenClaw() error {
 	if err != nil {
 		return err
 	}
-	if version, err := installedOpenClawVersion(); err == nil {
-		if version == openClawVersion {
+	if pkgDir, version, err := installedOpenClawPackage(); err == nil {
+		if version == openClawVersion && openClawInstalledFromLock(pkgDir) {
 			log.Printf("[bootstrap] OpenClaw already installed: %s", version)
 			return nil
 		}
-		log.Printf("[bootstrap] OpenClaw version %s found, installing pinned %s", version, openClawVersion)
+		log.Printf("[bootstrap] OpenClaw %s at %s is not a complete locked install, installing pinned %s", version, pkgDir, openClawVersion)
 	}
 	log.Printf("[bootstrap] installing openclaw@%s...", openClawVersion)
 	runtimeDir := filepath.Join(prefix, "lib", "openclaw-runtime")
 	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 		return fmt.Errorf("prepare openclaw runtime: %w", err)
+	}
+	markerPath := filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker)
+	if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove openclaw install marker: %w", err)
 	}
 	for name, data := range map[string][]byte{
 		"package.json":      cliversion.OpenClawPackageJSON,
@@ -3876,6 +3899,9 @@ func installOpenClaw() error {
 	// Lifecycle scripts must run to complete OpenClaw's package setup.
 	if err := runShell("cd " + shellQuote(runtimeDir) + " && npm ci --no-audit --no-fund"); err != nil {
 		return fmt.Errorf("npm ci openclaw: %w", err)
+	}
+	if err := os.WriteFile(markerPath, []byte(cliversion.OpenClawLockSHA256()+"\n"), 0644); err != nil {
+		return fmt.Errorf("write openclaw install marker: %w", err)
 	}
 	binDir := filepath.Join(prefix, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {

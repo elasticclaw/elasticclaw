@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1892,8 +1893,12 @@ func TestDaytonaOpenClawLockedInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := strings.TrimSpace(string(nodePath))
-	for _, version := range []string{"", cliversion.OpenClawVersion, "2026.9.40"} {
-		t.Run("installed-"+version, func(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		marker  bool
+	}{{"", false}, {cliversion.OpenClawVersion, true}, {cliversion.OpenClawVersion, false}, {"2026.9.40", true}} {
+		version := tc.version
+		t.Run(fmt.Sprintf("installed-%s-marker=%v", version, tc.marker), func(t *testing.T) {
 			home, err := filepath.EvalSymlinks(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
@@ -1914,6 +1919,10 @@ func TestDaytonaOpenClawLockedInstall(t *testing.T) {
 			}
 			if version != "" {
 				write(filepath.Join(pkgDir, "package.json"), `{"version":"`+version+`"}`, 0644)
+			}
+			marker := filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker)
+			if tc.marker {
+				write(marker, cliversion.OpenClawLockSHA256()+"\n", 0644)
 			}
 			if err := os.Symlink(node, filepath.Join(bin, "node")); err != nil {
 				t.Fatal(err)
@@ -1943,11 +1952,15 @@ ln -sf ../openclaw/openclaw.mjs node_modules/.bin/openclaw
 				t.Fatalf("install: %v, status %q: %s\n%s", err, status, out, log)
 			}
 			args, err := os.ReadFile(filepath.Join(home, "npm-args"))
-			if version == cliversion.OpenClawVersion {
+			if version == cliversion.OpenClawVersion && tc.marker {
 				if !os.IsNotExist(err) {
-					t.Fatalf("exact version must skip npm: %s, %v", args, err)
+					t.Fatalf("exact version with install marker must skip npm: %s, %v", args, err)
 				}
 				return
+			}
+			// A matching package.json without the marker is a partial install and must be redone.
+			if got, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(got)) != cliversion.OpenClawLockSHA256() {
+				t.Fatalf("install marker = %q, %v", got, err)
 			}
 			if err != nil || string(args) != "ci --no-audit --no-fund\n"+runtimeDir+"\n" {
 				t.Fatalf("npm invocation: %q, %v", args, err)

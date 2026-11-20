@@ -1,12 +1,27 @@
 package cliversion
 
-import _ "embed"
+import (
+	"crypto/sha256"
+	_ "embed"
+	"encoding/hex"
+)
 
 //go:embed openclaw/package.json
 var OpenClawPackageJSON []byte
 
 //go:embed openclaw/package-lock.json
 var OpenClawPackageLock []byte
+
+// OpenClawInstallMarker is written next to the OpenClaw runtime's
+// package-lock.json only after `npm ci` succeeds. It holds OpenClawLockSHA256,
+// so a partial install or one made without the embedded lock is never reused.
+const OpenClawInstallMarker = ".elasticclaw-install-complete"
+
+// OpenClawLockSHA256 is the hex SHA256 of the embedded OpenClaw lockfile.
+func OpenClawLockSHA256() string {
+	sum := sha256.Sum256(OpenClawPackageLock)
+	return hex.EncodeToString(sum[:])
+}
 
 //go:embed openclaw-codex-plugin/package.json
 var CodexPluginPackageJSON []byte

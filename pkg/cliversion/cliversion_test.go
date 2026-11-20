@@ -40,20 +40,24 @@ func TestPinnedGrokCLIVersion(t *testing.T) {
 	}
 }
 
-func TestAgentDockerfilePinMatchesOpenClawVersion(t *testing.T) {
-	// docker/agent.Dockerfile pre-installs OpenClaw with a hardcoded npm pin
-	// ("Keep in sync with pkg/cliversion OpenClawVersion"). Enforce that sync
-	// so the image cannot silently drift from the version bootstrap verifies.
+func TestAgentDockerfileInstallsOpenClawFromLock(t *testing.T) {
+	// docker/agent.Dockerfile must pre-install OpenClaw from the embedded lock
+	// and write the marker the bridge requires before reusing an install.
 	data, err := os.ReadFile(filepath.Join("..", "..", "docker", "agent.Dockerfile"))
 	if err != nil {
 		t.Fatalf("read agent.Dockerfile: %v", err)
 	}
-	m := regexp.MustCompile(`(?m)^RUN npm install -g openclaw@(\S+)`).FindSubmatch(data)
-	if m == nil {
-		t.Fatal("agent.Dockerfile: no `npm install -g openclaw@<version>` pin found")
+	for _, want := range []string{
+		"COPY pkg/cliversion/openclaw/package.json pkg/cliversion/openclaw/package-lock.json /usr/local/lib/openclaw-runtime/",
+		"npm ci --no-audit --no-fund",
+		"sha256sum package-lock.json | cut -d' ' -f1 > " + OpenClawInstallMarker,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("agent.Dockerfile missing %q", want)
+		}
 	}
-	if got := string(m[1]); got != OpenClawVersion {
-		t.Fatalf("agent.Dockerfile pins openclaw@%s, want OpenClawVersion %s", got, OpenClawVersion)
+	if regexp.MustCompile(`npm install -g openclaw`).Match(data) {
+		t.Fatal("agent.Dockerfile installs openclaw without the lockfile")
 	}
 }
 

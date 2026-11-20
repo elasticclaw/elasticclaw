@@ -1215,8 +1215,12 @@ func TestInstallOpenClawWithoutSudoInstallsAndRunsPinnedVersion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake npm executable uses POSIX shell")
 	}
-	for _, version := range []string{"", openClawVersion, "2026.9.40", "0.0.0"} {
-		t.Run("installed-"+version, func(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		locked  bool
+	}{{"", false}, {openClawVersion, true}, {openClawVersion, false}, {"2026.9.40", true}, {"0.0.0", false}} {
+		version := tc.version
+		t.Run(fmt.Sprintf("installed-%s-locked=%v", version, tc.locked), func(t *testing.T) {
 			home := t.TempDir()
 			fakeBin := t.TempDir()
 			npmLog := filepath.Join(t.TempDir(), "npm-args")
@@ -1247,6 +1251,11 @@ func TestInstallOpenClawWithoutSudoInstallsAndRunsPinnedVersion(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tc.locked {
+				// A Docker image or earlier bootstrap that completed npm ci from the embedded lock.
+				write(filepath.Join(runtimeDir, "package-lock.json"), string(cliversion.OpenClawPackageLock), 0644)
+				write(filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker), cliversion.OpenClawLockSHA256()+"\n", 0644)
+			}
 			write(filepath.Join(fakeBin, "npm"), fmt.Sprintf(`#!/bin/sh
 set -eu
 printf '%%s\n' "$*" "$PWD" > "$FAKE_NPM_LOG"
@@ -1263,9 +1272,9 @@ ln -sf ../openclaw/openclaw.mjs node_modules/.bin/openclaw
 				t.Fatal(err)
 			}
 			args, err := os.ReadFile(npmLog)
-			if version == openClawVersion {
+			if version == openClawVersion && tc.locked {
 				if !os.IsNotExist(err) {
-					t.Fatalf("exact version must skip npm: %s, %v", args, err)
+					t.Fatalf("exact locked version must skip npm: %s, %v", args, err)
 				}
 				return
 			}
@@ -1283,6 +1292,9 @@ ln -sf ../openclaw/openclaw.mjs node_modules/.bin/openclaw
 			}
 			if got, err := installedOpenClawVersion(); err != nil || got != openClawVersion {
 				t.Fatalf("installed version = %q: %v", got, err)
+			}
+			if !openClawInstalledFromLock(pkgDir) {
+				t.Fatal("install marker missing after npm ci")
 			}
 			out, err := exec.Command("openclaw", "--version").CombinedOutput()
 			if err != nil || strings.TrimSpace(string(out)) != "OpenClaw "+openClawVersion {
