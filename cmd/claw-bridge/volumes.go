@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"nhooyr.io/websocket"
 )
@@ -120,7 +121,7 @@ func validateVolumeMount(mount string) error {
 	}
 	clean := filepath.Clean(mount)
 	if clean == "/" ||
-		strings.HasPrefix(clean, "/home/daytona/.openclaw/workspace") ||
+		strings.HasPrefix(clean, "/home/daytona/"+harness.WorkspaceDir) ||
 		strings.HasPrefix(clean, "/workspace") {
 		return fmt.Errorf("volume mount must be outside the repository workspace")
 	}

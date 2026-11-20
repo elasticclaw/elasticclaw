@@ -52,6 +52,7 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	_ "modernc.org/sqlite"
 )
@@ -4263,7 +4264,7 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 		return fmt.Errorf("home dir: %w", err)
 	}
 	stagedDir := filepath.Join(home, "workspace")
-	activeDir := filepath.Join(home, ".openclaw", "workspace")
+	activeDir := harness.WorkspacePath(home)
 	if _, err := os.Stat(stagedDir); err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -4552,7 +4553,7 @@ func cloneConfiguredGitHubRepos() error {
 	if err != nil {
 		return fmt.Errorf("home dir: %w", err)
 	}
-	workspaceDir := filepath.Join(home, ".openclaw", "workspace")
+	workspaceDir := harness.WorkspacePath(home)
 	if err := os.MkdirAll(workspaceDir, 0700); err != nil {
 		return fmt.Errorf("create OpenClaw workspace: %w", err)
 	}

@@ -36,6 +36,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
@@ -4889,7 +4890,7 @@ gh auth status`
 			log.Printf("[daytona] clone repos done")
 
 			if len(repositories) > 0 {
-				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
+				verifyCloneScript := "export HOME=/home/daytona; cd ~/" + harness.WorkspaceDir + "; "
 				for _, repo := range repositories {
 					if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
 						continue
@@ -4906,7 +4907,7 @@ gh auth status`
 				}
 				log.Printf("[daytona] verify cloned repos done")
 			}
-			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repositories); discoveryScript != "" {
+			if discoveryScript := buildRepoInstructionDiscoveryScript("$HOME/"+harness.WorkspaceDir, repositories); discoveryScript != "" {
 				if err := exec("discover repo instructions", 20*time.Second, "export HOME=/home/daytona; "+discoveryScript); err != nil {
 					log.Printf("[daytona] warning: repo instruction discovery failed for claw %s: %v", clawID, err)
 				} else {
@@ -4946,7 +4947,7 @@ gh auth status`
 	// against an incomplete workspace.
 	if len(repositories) > 0 {
 		s.setBootstrapStatus(clawID, "Verifying workspace readiness")
-		verifyScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
+		verifyScript := "export HOME=/home/daytona; cd ~/" + harness.WorkspaceDir + "; "
 		for _, repo := range repositories {
 			if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
 				continue
@@ -5193,7 +5194,7 @@ tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
 }
 
 // daytonaLiveWorkspaceDir is the workspace the OpenClaw agent actually runs in.
-const daytonaLiveWorkspaceDir = "/home/daytona/.openclaw/workspace"
+const daytonaLiveWorkspaceDir = "/home/daytona/" + harness.WorkspaceDir
 
 func sortedWorkspaceFileNames(files map[string]string) []string {
 	names := make([]string, 0, len(files))
@@ -5241,8 +5242,8 @@ func daytonaWorkspaceFilesReadinessCommand(files map[string]string) string {
 func daytonaPrepareBridgeCommand() string {
 	return `set -e
 export HOME=/home/daytona
-mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
-cd /home/daytona/.openclaw/workspace
+mkdir -p ` + daytonaLiveWorkspaceDir + ` /home/daytona/.openclaw/run /home/daytona/workspace
+cd ` + daytonaLiveWorkspaceDir + `
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   echo "claw-bridge already running pid=$(cat "$PIDFILE")"
@@ -5263,8 +5264,8 @@ rm -f "$PIDFILE"`
 
 func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName, llmKeyEnv string) string {
 	return withDaytonaLLMKeyEnv(llmKeyEnv, fmt.Sprintf(`export HOME=/home/daytona
-mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
-cd /home/daytona/.openclaw/workspace
+mkdir -p `+daytonaLiveWorkspaceDir+` /home/daytona/.openclaw/run /home/daytona/workspace
+cd `+daytonaLiveWorkspaceDir+`
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 LOG=/home/daytona/claw-bridge.log
 if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -5427,7 +5428,7 @@ func replicatedBootstrapDelay(delays []time.Duration, idx int) time.Duration {
 }
 
 func replicatedFinalWorkspaceDir(sshHome string) string {
-	return path.Join(sshHome, ".openclaw", "workspace")
+	return path.Join(sshHome, harness.WorkspaceDir)
 }
 
 // exedevRemoteHome returns the remote $HOME for an exe.dev VM.
@@ -8218,7 +8219,7 @@ func githubBootstrapCloneVerifyTimeout(repoCount int) time.Duration {
 
 func buildDaytonaGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	var b strings.Builder
-	b.WriteString("export HOME=/home/daytona; export GIT_TERMINAL_PROMPT=0; set +x; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; set -o pipefail; ")
+	b.WriteString("export HOME=/home/daytona; export GIT_TERMINAL_PROMPT=0; set +x; cd ~/" + harness.WorkspaceDir + "; git config --global --get credential.helper >/dev/null || exit 1; set -o pipefail; ")
 	// Resolve GH_TOKEN once so N clones do not each re-enter the credential helper
 	// before git uses it (helper still refreshes if git asks again).
 	b.WriteString(`. /etc/profile.d/elasticclaw-github.sh 2>/dev/null || true; `)
@@ -8518,7 +8519,7 @@ echo "GitHub credential helper installed"
 
 # Clone repos — non-fatal: token may not be available until bridge connects
 # The agent can clone manually if this fails
-cd "$HOME/.openclaw/workspace" || true
+cd "$HOME/`+harness.WorkspaceDir+`" || true
 (
 set +e
 FAILED=0
@@ -8526,8 +8527,8 @@ FAILED=0
 exit $FAILED
 ) || echo "Warning: repo clone failed — agent can retry after bridge connects"
 # Ensure any github.com remotes under the workspace use HTTPS (agent-proof).
-if command -v git &>/dev/null && [ -d "$HOME/.openclaw/workspace" ]; then
-  find "$HOME/.openclaw/workspace" -name .git -type d 2>/dev/null | while read -r gitdir; do
+if command -v git &>/dev/null && [ -d "$HOME/`+harness.WorkspaceDir+`" ]; then
+  find "$HOME/`+harness.WorkspaceDir+`" -name .git -type d 2>/dev/null | while read -r gitdir; do
     repo="$(dirname "$gitdir")"
     url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
     case "$url" in
@@ -8538,7 +8539,7 @@ if command -v git &>/dev/null && [ -d "$HOME/.openclaw/workspace" ]; then
     esac
   done
 fi
-%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
+%s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(hubURL, clawID, clawToken), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/"+harness.WorkspaceDir, repos))
 }
 
 // syncedWriter wraps a bytes.Buffer with a mutex to make it safe for concurrent writes.
