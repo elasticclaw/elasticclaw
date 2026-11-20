@@ -4430,6 +4430,12 @@ func (s *Server) bootstrapDaytona(ctx context.Context, clawID, clawName, instanc
 	// Step 1: Install pinned OpenClaw version.
 	// Run install in background and poll — avoids the 60s HTTP client timeout
 	// that kills synchronous long-running commands.
+	// Remove the snapshot's unpinned global OpenClaw so shells without
+	// $HOME/.local/bin first on PATH cannot run it against the pinned state.
+	if err := exec("uninstall old openclaw", 20*time.Second, daytonaUninstallGlobalOpenClawCommand); err != nil {
+		log.Printf("[daytona] warning: uninstall old openclaw failed: %v", err)
+	}
+
 	const daytonaOpenClawVersion = cliversion.OpenClawVersion
 	if err := exec("start openclaw install", 20*time.Second, daytonaStartOpenClawInstallCommand(daytonaOpenClawVersion)); err != nil {
 		return err
@@ -5155,6 +5161,12 @@ fi
 echo "claw-bridge not running"
 exit 1`
 }
+
+const daytonaUninstallGlobalOpenClawCommand = `NPM="/usr/local/share/nvm/current/bin/npm"
+PREFIX="$("$NPM" config get prefix)"
+sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true
+hash -r
+echo uninstalled`
 
 func daytonaVerifyOpenClawCommand(version string) string {
 	return fmt.Sprintf(`export HOME=/home/daytona
