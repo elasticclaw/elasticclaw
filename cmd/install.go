@@ -240,11 +240,11 @@ func findGitHubRelease(owner, repo, tag string) error {
 	return nil
 }
 
-// extractTrack returns the non-incrementing prefix of a CalVer/SemVer tag.
+// extractTrack returns the non-incrementing prefix of a CalVer tag.
 //
-//	"2026.05.11-beta.2" → "2026.05.11-beta"
-//	"2026.05.11.1"      → "2026.05.11"
-//	"2026.05.11"        → "2026.05.11"
+//	"2026.7.7-beta.2" → "2026.7.7-beta"
+//	"2026.7.7.1"      → "2026.7.7"
+//	"2026.7.7"        → "2026.7.7"
 func extractTrack(version string) string {
 	if idx := strings.LastIndex(version, "-"); idx != -1 {
 		suffix := version[idx+1:]
