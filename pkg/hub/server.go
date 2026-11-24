@@ -5162,16 +5162,25 @@ echo "claw-bridge not running"
 exit 1`
 }
 
-const daytonaUninstallGlobalOpenClawCommand = `NPM="/usr/local/share/nvm/current/bin/npm"
-PREFIX="$("$NPM" config get prefix 2>/dev/null)"
-case "$PREFIX" in
-/?*) ;;
-*) echo "skip: npm prefix unavailable ($PREFIX)"; exit 0 ;;
-esac
-# Remove the files directly; an npm uninstall walks the whole tree and can exceed the step timeout.
-# Drop every bin link into the package, not only "openclaw", so none is left dangling on PATH.
-sudo find "$PREFIX/bin" -maxdepth 1 -type l -lname '*node_modules/openclaw/*' -delete 2>/dev/null || true
-sudo rm -rf "$PREFIX/lib/node_modules/openclaw"
+// daytonaUninstallGlobalOpenClawCommand removes the snapshot's global OpenClaw
+// from npm's current prefix and from every nvm Node: daytonaNodeSetup may have
+// switched nvm's current Node, leaving the snapshot's copy under another one.
+const daytonaUninstallGlobalOpenClawCommand = `NVM_DIR="/usr/local/share/nvm"
+PREFIXES="$("$NVM_DIR/current/bin/npm" config get prefix 2>/dev/null || true)"
+for dir in "$NVM_DIR"/versions/node/*; do
+  [ -d "$dir" ] && PREFIXES="$PREFIXES
+$dir"
+done
+printf '%s\n' "$PREFIXES" | while IFS= read -r PREFIX; do
+  case "$PREFIX" in
+  /?*) ;;
+  *) echo "skip: npm prefix unavailable ($PREFIX)"; continue ;;
+  esac
+  # Remove the files directly; an npm uninstall walks the whole tree and can exceed the step timeout.
+  # Drop every bin link into the package, not only "openclaw", so none is left dangling on PATH.
+  sudo find "$PREFIX/bin" -maxdepth 1 -type l -lname '*node_modules/openclaw/*' -delete 2>/dev/null || true
+  sudo rm -rf "$PREFIX/lib/node_modules/openclaw"
+done
 hash -r
 echo uninstalled`
 
