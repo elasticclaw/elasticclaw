@@ -2,9 +2,11 @@ package hub
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -45,33 +47,57 @@ func TestBootstrapDaytonaGatewayCommand_Shellcheck(t *testing.T) {
 	}
 }
 
-// gatewaySupervisorCmd prepares the supervisor with stub openclaw, curl and
-// sleep binaries. Each gateway run appends to dir/runs; curl reports the port
-// as healthy only when healthyAfterRuns > 0 and that many gateways have run.
-func gatewaySupervisorCmd(t *testing.T, openclawStub string, healthyAfterRuns int) (cmd *exec.Cmd, dir string) {
+// gatewaySupervisorStubs tunes the stub binaries the supervisor runs against.
+type gatewaySupervisorStubs struct {
+	openclaw           string // body of the stub gateway, after it records its run
+	healthyAfterRuns   int    // curl reports healthy once this many gateways ran (0 = never)
+	healthyAfterProbes int    // ...and curl has been called this many times
+	rivalProcess       bool   // pgrep reports another gateway process
+	port               int    // gateway port; 0 picks one nothing listens on
+}
+
+// gatewaySupervisorCmd prepares the supervisor with stub openclaw, curl, pgrep
+// and sleep binaries and a private HOME. Each gateway run appends to dir/runs.
+func gatewaySupervisorCmd(t *testing.T, stubs gatewaySupervisorStubs) (cmd *exec.Cmd, dir string) {
 	t.Helper()
 	dir = t.TempDir()
 	bin := filepath.Join(dir, "bin")
 	if err := os.Mkdir(bin, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	stubs := map[string]string{
-		"openclaw": `echo run >> "$STUB_DIR/runs"` + "\n" + openclawStub,
-		"sleep":    `exit 0`,
-		"curl": `runs=$(wc -l < "$STUB_DIR/runs" 2>/dev/null || echo 0)
-[ "$HEALTHY_AFTER" -gt 0 ] && [ "$runs" -ge "$HEALTHY_AFTER" ]`,
+	if stubs.port == 0 {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("pick free port: %v", err)
+		}
+		stubs.port = l.Addr().(*net.TCPAddr).Port
+		l.Close()
 	}
-	for name, body := range stubs {
+	rival := "exit 1"
+	if stubs.rivalProcess {
+		rival = "exit 0"
+	}
+	for name, body := range map[string]string{
+		"openclaw": `echo run >> "$STUB_DIR/runs"` + "\n" + stubs.openclaw,
+		"sleep":    `exit 0`,
+		"pgrep":    rival,
+		"curl": `echo probe >> "$STUB_DIR/probes"
+runs=$(wc -l < "$STUB_DIR/runs" 2>/dev/null || echo 0)
+probes=$(wc -l < "$STUB_DIR/probes")
+[ "$HEALTHY_AFTER_RUNS" -gt 0 ] && [ "$runs" -ge "$HEALTHY_AFTER_RUNS" ] && [ "$probes" -ge "$HEALTHY_AFTER_PROBES" ]`,
+	} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/bash\n"+body+"\n"), 0o755); err != nil {
 			t.Fatalf("write stub %s: %v", name, err)
 		}
 	}
 	cmd = exec.Command("bash", "-c", daytonaGatewaySupervisorScript(), "openclaw-gateway-supervisor",
-		filepath.Join(dir, "supervisor.pid"), filepath.Join(dir, "gateway.log"))
+		filepath.Join(dir, "supervisor.pid"), filepath.Join(dir, "gateway.log"), strconv.Itoa(stubs.port))
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+":"+os.Getenv("PATH"),
+		"HOME="+dir,
 		"STUB_DIR="+dir,
-		"HEALTHY_AFTER="+strconv.Itoa(healthyAfterRuns),
+		"HEALTHY_AFTER_RUNS="+strconv.Itoa(stubs.healthyAfterRuns),
+		"HEALTHY_AFTER_PROBES="+strconv.Itoa(stubs.healthyAfterProbes),
 	)
 	return cmd, dir
 }
@@ -89,18 +115,21 @@ func exitCodeOf(t *testing.T, err error) int {
 }
 
 // runGatewaySupervisor runs the supervisor against a gateway that always
-// exits 1 and reports what happened.
-func runGatewaySupervisor(t *testing.T, healthyAfterRuns int) (runs int, log string, exitCode int, pidfile string) {
+// exits 1 (unless stubs says otherwise) and reports what happened.
+func runGatewaySupervisor(t *testing.T, stubs gatewaySupervisorStubs) (runs int, log string, exitCode int, dir string) {
 	t.Helper()
-	cmd, dir := gatewaySupervisorCmd(t, "exit 1", healthyAfterRuns)
+	if stubs.openclaw == "" {
+		stubs.openclaw = "exit 1"
+	}
+	cmd, dir := gatewaySupervisorCmd(t, stubs)
 	exitCode = exitCodeOf(t, cmd.Run())
 	data, _ := os.ReadFile(filepath.Join(dir, "runs"))
 	logData, _ := os.ReadFile(filepath.Join(dir, "gateway.log"))
-	return strings.Count(string(data), "run"), string(logData), exitCode, filepath.Join(dir, "supervisor.pid")
+	return strings.Count(string(data), "run"), string(logData), exitCode, dir
 }
 
 func TestBootstrapDaytonaGatewaySupervisor_RestartsUntilBudgetExhausted(t *testing.T) {
-	runs, log, exitCode, pidfile := runGatewaySupervisor(t, 0)
+	runs, log, exitCode, dir := runGatewaySupervisor(t, gatewaySupervisorStubs{})
 
 	if runs != 6 {
 		t.Fatalf("gateway runs = %d, want 6 (first start + 5 restarts)\nlog:\n%s", runs, log)
@@ -110,25 +139,104 @@ func TestBootstrapDaytonaGatewaySupervisor_RestartsUntilBudgetExhausted(t *testi
 	}
 	assertContains(t, log, "restarting (attempt 5/5) in 80s", "backs off exponentially")
 	assertContains(t, log, "restart budget exhausted after 5 attempts", "logs the exhausted budget")
-	if _, err := os.Stat(pidfile); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "supervisor.pid")); !os.IsNotExist(err) {
 		t.Fatalf("supervisor pid file still present after exit (stat err: %v)", err)
 	}
 }
 
-func TestBootstrapDaytonaGatewaySupervisor_YieldsToHealthyGateway(t *testing.T) {
-	runs, log, exitCode, _ := runGatewaySupervisor(t, 1)
-
+func assertGatewaySupervisorYielded(t *testing.T, runs int, log string, exitCode int) {
+	t.Helper()
 	if runs != 1 {
 		t.Fatalf("gateway runs = %d, want 1: a gateway started elsewhere must not get a rival\nlog:\n%s", runs, log)
 	}
 	if exitCode != 0 {
-		t.Fatalf("supervisor exit code = %d, want 0", exitCode)
+		t.Fatalf("supervisor exit code = %d, want 0\nlog:\n%s", exitCode, log)
 	}
-	assertContains(t, log, "another gateway is already serving port 18789", "logs why it yields")
+	assertContains(t, log, "another gateway is already serving port", "logs why it yields")
+}
+
+func TestBootstrapDaytonaGatewaySupervisor_YieldsToHealthyGateway(t *testing.T) {
+	runs, log, exitCode, _ := runGatewaySupervisor(t, gatewaySupervisorStubs{healthyAfterRuns: 1})
+
+	assertGatewaySupervisorYielded(t, runs, log, exitCode)
+}
+
+func TestBootstrapDaytonaGatewaySupervisor_WaitsForStartingRivalProcess(t *testing.T) {
+	runs, log, exitCode, _ := runGatewaySupervisor(t, gatewaySupervisorStubs{
+		healthyAfterRuns: 1, healthyAfterProbes: 10, rivalProcess: true,
+	})
+
+	assertGatewaySupervisorYielded(t, runs, log, exitCode)
+}
+
+func TestBootstrapDaytonaGatewaySupervisor_WaitsForStartingRivalListener(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+
+	runs, log, exitCode, _ := runGatewaySupervisor(t, gatewaySupervisorStubs{
+		healthyAfterRuns: 1, healthyAfterProbes: 10, port: l.Addr().(*net.TCPAddr).Port,
+	})
+
+	assertGatewaySupervisorYielded(t, runs, log, exitCode)
+}
+
+func TestBootstrapDaytonaGatewaySupervisor_RestartsOverRivalThatStaysUnhealthy(t *testing.T) {
+	// Nothing is healthy until the supervisor's own second gateway has run.
+	runs, log, exitCode, _ := runGatewaySupervisor(t, gatewaySupervisorStubs{healthyAfterRuns: 2, rivalProcess: true})
+
+	if runs != 2 || exitCode != 0 {
+		t.Fatalf("gateway runs = %d, exit code = %d; want 2 and 0\nlog:\n%s", runs, exitCode, log)
+	}
+	assertContains(t, log, "another gateway is not healthy after 30s; restarting anyway", "bounds the wait for a rival")
+}
+
+func TestBootstrapDaytonaGatewaySupervisor_SourcesEnvBeforeEachStart(t *testing.T) {
+	// The first gateway sees the env written before the supervisor started and
+	// rewrites it, as an operator would before killing the gateway.
+	cmd, dir := gatewaySupervisorCmd(t, gatewaySupervisorStubs{
+		openclaw: `echo "$GATEWAY_MARK" >> "$STUB_DIR/marks"
+echo 'export GATEWAY_MARK=updated' > "$HOME/.openclaw/env"
+exit 1`,
+		healthyAfterRuns: 2,
+	})
+	if err := os.Mkdir(filepath.Join(dir, ".openclaw"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".openclaw", "env"), []byte("export GATEWAY_MARK=bootstrap\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	if code := exitCodeOf(t, cmd.Run()); code != 0 {
+		t.Fatalf("supervisor exit code = %d, want 0", code)
+	}
+
+	marks, _ := os.ReadFile(filepath.Join(dir, "marks"))
+	if got, want := string(marks), "bootstrap\nupdated\n"; got != want {
+		t.Fatalf("gateway env per start = %q, want %q", got, want)
+	}
+}
+
+func TestBootstrapDaytonaGatewaySupervisor_RivalPatternIgnoresSupervisor(t *testing.T) {
+	re := regexp.MustCompile(daytonaGatewayRivalPattern)
+	for _, cmdline := range []string{"openclaw-gateway", "openclaw gateway run", "node /usr/local/bin/openclaw gateway run"} {
+		if !re.MatchString(cmdline) {
+			t.Errorf("rival pattern does not match gateway command line %q", cmdline)
+		}
+	}
+	// pgrep -f sees the supervisor and the bootstrap shell with their scripts
+	// inline; matching them would make every restart wait for a phantom rival.
+	supervisor := "bash -c " + daytonaGatewaySupervisorScript() + " openclaw-gateway-supervisor /home/daytona/.openclaw/run/openclaw-gateway-supervisor.pid /home/daytona/.openclaw/gateway.log"
+	for name, cmdline := range map[string]string{"supervisor": supervisor, "bootstrap": "bash -c " + daytonaStartGatewayCommand()} {
+		if loc := re.FindString(cmdline); loc != "" {
+			t.Errorf("rival pattern matches the %s command line at %q", name, loc)
+		}
+	}
 }
 
 func TestBootstrapDaytonaGatewaySupervisor_TermStopsGateway(t *testing.T) {
-	cmd, dir := gatewaySupervisorCmd(t, `echo $$ > "$STUB_DIR/gateway.pid"; exec /bin/sleep 30`, 0)
+	cmd, dir := gatewaySupervisorCmd(t, gatewaySupervisorStubs{openclaw: `echo $$ > "$STUB_DIR/gateway.pid"; exec /bin/sleep 30`})
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start supervisor: %v", err)
 	}

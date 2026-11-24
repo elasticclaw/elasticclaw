@@ -1,15 +1,26 @@
 package hub
 
+// daytonaGatewayRivalPattern is the pgrep -f pattern for a gateway process. It
+// must not match the supervisor's own command line, which embeds the script.
+const daytonaGatewayRivalPattern = `(^|/)openclaw[ -]gateway( |$)`
+
 // daytonaGatewaySupervisorScript keeps `openclaw gateway run` alive on Daytona,
 // where no claw-bridge bootstrap supervises it. It runs as
-// `bash -c <script> name PIDFILE LOG` and restarts the gateway with backoff
-// after any exit, up to a budget that resets once a gateway stays up for five
-// minutes. A gateway that is already healthy on the port when a restart is due
-// was started by someone else (an explicit restart or a bootstrap retry), so
-// the supervisor yields to it instead of racing it for the port.
+// `bash -c <script> name PIDFILE LOG [PORT]` and restarts the gateway with
+// backoff after any exit, up to a budget that resets once a gateway stays up
+// for five minutes. ~/.openclaw/env is sourced before every start, so a
+// restart picks up env changes made after bootstrap.
+//
+// To restart the gateway explicitly, kill it and let the supervisor start the
+// next one. To run a gateway by hand, TERM the supervisor first (pid in
+// ~/.openclaw/run/openclaw-gateway-supervisor.pid). A gateway started behind
+// the supervisor's back is still tolerated: when a restart is due and another
+// gateway process or a listener on the port exists, the supervisor gives it
+// 30s to become healthy and then yields instead of racing it for the port.
 func daytonaGatewaySupervisorScript() string {
 	return `PIDFILE="$1"
 LOG="$2"
+PORT="${3:-18789}"
 exec >> "$LOG" 2>&1
 budget=5
 echo $$ > "$PIDFILE"
@@ -19,10 +30,18 @@ trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child" 2>/dev/n
 # Restart in-process on config changes instead of spawning a detached gateway
 # the supervisor cannot see.
 export OPENCLAW_NO_RESPAWN=1
+gateway_healthy() {
+  curl -sf --max-time 5 "http://localhost:$PORT/healthz" >/dev/null 2>&1
+}
+# A gateway this supervisor did not start: its process, or a listener on the port.
+rival_gateway() {
+  pgrep -f '` + daytonaGatewayRivalPattern + `' >/dev/null 2>&1 || (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null
+}
 restarts=0
 backoff=5
 while :; do
   started_at=$(date +%s)
+  if [ -f "$HOME/.openclaw/env" ]; then . "$HOME/.openclaw/env"; fi
   openclaw gateway run </dev/null &
   child=$!
   wait "$child"
@@ -39,8 +58,17 @@ while :; do
   restarts=$((restarts + 1))
   echo "[gateway-supervisor] openclaw gateway exited (code=$rc); restarting (attempt $restarts/$budget) in ${backoff}s"
   sleep "$backoff"
-  if curl -sf --max-time 5 http://localhost:18789/healthz >/dev/null 2>&1; then
-    echo "[gateway-supervisor] another gateway is already serving port 18789; supervisor exiting"
+  waited=0
+  while ! gateway_healthy && rival_gateway; do
+    if [ "$waited" -ge 30 ]; then
+      echo "[gateway-supervisor] another gateway is not healthy after ${waited}s; restarting anyway"
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if gateway_healthy; then
+    echo "[gateway-supervisor] another gateway is already serving port $PORT; supervisor exiting"
     exit 0
   fi
   backoff=$((backoff * 2))
