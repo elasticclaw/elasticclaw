@@ -831,21 +831,25 @@ type LivenessConfig struct {
 	// ever delivered one was a human typing "continue".
 	IdleResume *bool `yaml:"idle_resume,omitempty" json:"idleResume,omitempty"`
 	// IdleResumeAfter is how long an eligible claw must sit with no turn
-	// running before the hub injects the resume prompt. Deliberately longer
-	// than the agent_idle alert threshold so the alert stays the early signal
-	// and the resume is the escalation.
+	// running before the hub injects the resume prompt. The agent_idle alert
+	// waits for the resume and fires only if it did not help.
 	//
-	// Set it ABOVE the longest legitimate wait between turns for the factory
-	// it applies to. The hub cannot distinguish "stalled in a tool call that
-	// will never return" from "correctly waiting longer than this for
-	// something real": a claw that legitimately waits longer is poked and told
-	// to stop waiting, which is at best a wasted turn and at worst pushes the
-	// agent off a wait it should have kept. Because the attempt counter behind
-	// the runaway cap is a LIFETIME counter (it is not reset by a turn, or the
-	// cap could never be reached in the wake-do-nothing-idle loop it exists to
-	// bound), every premature poke permanently consumes part of that claw's
-	// recovery budget — a threshold set too low can exhaust the budget on
-	// healthy waits and leave nothing for the stall it was added for.
+	// Running subagents count as activity: a claw parked on sessions_yield is
+	// not idle while the bridge reports spawned work in flight, and the clock
+	// restarts when that work ends. Subagents still running after 45 minutes
+	// stop holding the resume off.
+	//
+	// Otherwise, set it ABOVE the longest legitimate wait between turns for
+	// the factory it applies to. The hub cannot distinguish "stalled in a tool
+	// call that will never return" from "correctly waiting longer than this
+	// for something real": a claw that legitimately waits longer is poked and
+	// told to stop waiting, which is at best a wasted turn and at worst pushes
+	// the agent off a wait it should have kept. Every poke also spends one of
+	// the claw's resume attempts for its current unit of work (the counter is
+	// not reset by a turn, or the cap could never be reached in the
+	// wake-do-nothing-idle loop it exists to bound), so a threshold set too
+	// low can exhaust the budget on healthy waits and leave nothing for the
+	// stall it was added for.
 	IdleResumeAfter string `yaml:"idle_resume_after,omitempty" json:"idleResumeAfter,omitempty"`
 }
 

@@ -169,9 +169,13 @@ type agentIdleSnapshot struct {
 	// stale one — a bridge that died mid-spawn — must expire (see
 	// subagentsActiveFreshFor) rather than silence the alert forever.
 	subagentsActive bool
-	lastTurn        time.Time
-	notifiedAt      time.Time
-	connectedAt     time.Time
+	// subagentsActiveSince is when the current run of subagent activity began
+	// (zero when none is running). It bounds how long running subagents may
+	// hold off the auto-resume (agentIdleResumeSubagentCeiling).
+	subagentsActiveSince time.Time
+	lastTurn             time.Time
+	notifiedAt           time.Time
+	connectedAt          time.Time
 	// turnBoundarySeen is false while the hub has never watched a turn end on
 	// this connection, which is exactly when it cannot tell an idle agent from
 	// one whose turn it simply cannot see.
@@ -180,6 +184,16 @@ type agentIdleSnapshot struct {
 	// all (registration always stamps connectedAt, so this is unreachable in
 	// production and simply means "do not judge this claw").
 	stretchStartAt time.Time
+	// idleFrom is when the claw was last seen doing anything: stretchStartAt,
+	// pushed forward to the last heartbeat that reported running subagents.
+	// A parent parked on sessions_yield is not idle while its subagents work,
+	// so the thresholds count from here. The stretch identity (latches, event
+	// keys) stays on stretchStartAt.
+	idleFrom time.Time
+	// subagentsEnded is true when subagents ran during this stretch and have
+	// since stopped, which is the sessions_yield shape where the completion
+	// never woke the parent.
+	subagentsEnded bool
 }
 
 // agentIdleSnapshotOf computes the idle stretch start under a single read lock.
@@ -218,6 +232,21 @@ func agentIdleSnapshotOf(cc *clawConn) agentIdleSnapshot {
 		start = cc.connectedAt
 	}
 	snap.stretchStartAt = start
+	snap.idleFrom = start
+	lastSeen := cc.subagentsLastSeenAt
+	if cc.subagentsActiveAt.After(lastSeen) {
+		lastSeen = cc.subagentsActiveAt
+	}
+	if lastSeen.After(start) {
+		snap.idleFrom = lastSeen
+		snap.subagentsEnded = !snap.subagentsActive
+	}
+	if snap.subagentsActive {
+		snap.subagentsActiveSince = cc.subagentsActiveSince
+		if snap.subagentsActiveSince.IsZero() {
+			snap.subagentsActiveSince = cc.subagentsActiveAt
+		}
+	}
 	return snap
 }
 
@@ -291,7 +320,10 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 	if stretchStartAt.IsZero() {
 		return // no usable clock at all (registration always stamps connectedAt)
 	}
-	idleFor := nowAt.Sub(stretchStartAt)
+	// Gate on idleFrom so a stretch spent waiting on subagents does not count:
+	// otherwise the tick after the last subagent ends would alert at once,
+	// before the auto-resume had its chance.
+	idleFor := nowAt.Sub(snap.idleFrom)
 	if idleFor < lifecycleIdleAfter(cfg.Lifecycle) {
 		return
 	}
@@ -473,6 +505,14 @@ const (
 	agentIdleResumeMaxAttempts = 10
 
 	agentIdleResumePrefix = "[hub] No turn has been running for"
+
+	// agentIdleResumeSubagentCeiling is how long running subagents may hold
+	// off the auto-resume. Without it a subagent that hangs with an active
+	// run keeps its parent parked forever, and neither the resume nor the
+	// alert (which is suppressed while subagents run) would ever fire. 45m is
+	// long enough for real delegated work and in line with the
+	// stage_progress_after values hubs run with.
+	agentIdleResumeSubagentCeiling = 45 * time.Minute
 )
 
 // agentIdleResumeBaseline returns the moment from which idle stretches may be
@@ -529,9 +569,6 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		return // the agent is waiting on the hub's stage command, not stalled
 	}
 	snap := agentIdleSnapshotOf(cc)
-	// snap.subagentsActive is deliberately NOT consulted here: the auto-resume
-	// still fires for a claw parked on sessions_yield with spawned work
-	// running. Only the notification is suppressed by that signal.
 	if snap.busy {
 		// A turn is running: nothing to resume.
 		//
@@ -559,10 +596,21 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	if snap.stretchStartAt.IsZero() {
 		return
 	}
-	idleFor := nowAt.Sub(snap.stretchStartAt)
+	// Running subagents are work, not a stall: the idle clock counts from the
+	// last heartbeat that saw them (idleFrom), so the resume waits them out
+	// and then fires idle_resume_after past their end. That end is the
+	// sessions_yield failure this resume exists for — the completion never
+	// woke the parent. Past agentIdleResumeSubagentCeiling, subagents still
+	// "running" are treated as stuck and stop holding the resume off.
+	idleFor := nowAt.Sub(snap.idleFrom)
+	subagentsStuck := snap.subagentsActive && nowAt.Sub(snap.subagentsActiveSince) >= agentIdleResumeSubagentCeiling
+	if subagentsStuck {
+		idleFor = nowAt.Sub(snap.stretchStartAt)
+	}
 	if idleFor < cfg.idleResumeAfter {
 		return
 	}
+	parentIdle := nowAt.Sub(snap.stretchStartAt)
 
 	var status, taskRunID, pipelineStage string
 	var resumeAt, resumeCount, createdAtSec int64
@@ -618,7 +666,14 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		log.Printf("[agent-idle] latch resume for claw %s: %v", shortID(clawID), err)
 		return
 	}
-	log.Printf("[agent-idle] auto-resuming claw %s after %d minutes idle (attempt %d/%d)", shortID(clawID), int(idleFor.Minutes()), resumeCount+1, agentIdleResumeMaxAttempts)
+	reason := agentIdleResumeReasonIdle
+	switch {
+	case subagentsStuck:
+		reason = agentIdleResumeReasonSubagentsStuck
+	case snap.subagentsEnded:
+		reason = agentIdleResumeReasonSubagentsEnded
+	}
+	log.Printf("[agent-idle] auto-resuming claw %s after %d minutes idle, %s (attempt %d/%d)", shortID(clawID), int(parentIdle.Minutes()), reason, resumeCount+1, agentIdleResumeMaxAttempts)
 	if resumeCount+1 >= agentIdleResumeMaxAttempts {
 		log.Printf("[agent-idle] claw %s reached the auto-resume cap of %d for its current unit of work; no further resumes until the stage changes or the sandbox is replaced", shortID(clawID), agentIdleResumeMaxAttempts)
 	}
@@ -629,7 +684,7 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	// case it does cover — successive stretches whose prompts are byte-equal
 	// while an earlier one sits undelivered on a wedged socket — so no
 	// uniqueness marker is appended to defeat it.
-	s.injectHubMessageByID(clawID, agentIdleResumeMessage(idleFor))
+	s.injectHubMessageByID(clawID, agentIdleResumeMessage(parentIdle, reason, nowAt.Sub(snap.idleFrom)))
 }
 
 // parkAgentIdleResumeStretch latches a stretch as handled WITHOUT injecting a
@@ -648,9 +703,31 @@ func (s *Server) parkAgentIdleResumeStretch(clawID string, stretchStart int64) {
 // (the incident's actual shape: waiting on spawned work that never reported),
 // and otherwise repeats the workspace-recovery wording of
 // enqueueSessionLostResume so a resumed agent never starts over.
-func agentIdleResumeMessage(idleFor time.Duration) string {
-	return fmt.Sprintf("%s %d minutes. If you are blocked waiting on background or spawned work that has not reported back, stop waiting for it and follow your task's degradation path instead of waiting longer. Otherwise, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes. Then resume the current stage from where the workspace shows it stopped. Do not start over and do not discard existing work.", agentIdleResumePrefix, int(idleFor.Minutes()))
+//
+// When the hub saw subagents during the stretch it says so, because the next
+// step differs: finished subagents have results to collect, stuck ones have
+// to be given up on.
+func agentIdleResumeMessage(idleFor time.Duration, reason agentIdleResumeReason, sinceSubagents time.Duration) string {
+	var situation string
+	switch reason {
+	case agentIdleResumeReasonSubagentsEnded:
+		situation = fmt.Sprintf("Your spawned subagents finished %d minutes ago, but their completion did not wake this session. Collect their results and continue with them; do not spawn them again.", int(sinceSubagents.Minutes()))
+	case agentIdleResumeReasonSubagentsStuck:
+		situation = fmt.Sprintf("Your spawned subagents have been running for over %d minutes. Check whether they are still making progress; if they are not, stop waiting for them and follow your task's degradation path.", int(agentIdleResumeSubagentCeiling.Minutes()))
+	default:
+		situation = "If you are blocked waiting on background or spawned work that has not reported back, stop waiting for it and follow your task's degradation path instead of waiting longer."
+	}
+	return fmt.Sprintf("%s %d minutes. %s Otherwise, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes. Then resume the current stage from where the workspace shows it stopped. Do not start over and do not discard existing work.", agentIdleResumePrefix, int(idleFor.Minutes()), situation)
 }
+
+// agentIdleResumeReason says why a stretch was resumed, for the prompt and the log.
+type agentIdleResumeReason string
+
+const (
+	agentIdleResumeReasonIdle           agentIdleResumeReason = "no activity"
+	agentIdleResumeReasonSubagentsEnded agentIdleResumeReason = "subagents finished without waking the session"
+	agentIdleResumeReasonSubagentsStuck agentIdleResumeReason = "subagents running past the ceiling"
+)
 
 // agentIdleAlertDeferredToResume reports whether the idle alert should wait
 // for the auto-resume. In production, 70% of agent_idle alerts were sent on the

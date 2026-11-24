@@ -45,10 +45,16 @@ func TestAgentIdleSuppressedWhileSubagentsActive(t *testing.T) {
 
 	// The report goes stale without a zero-subagents heartbeat ever arriving:
 	// the claw may be genuinely stuck and the alert must not stay silenced.
+	// The idle clock restarts at the last report, so the alert waits
+	// idle_after past it rather than firing on the next tick.
 	cc.mu.Lock()
 	cc.subagentsActiveAt = time.Now().Add(-subagentsActiveFreshFor - time.Second)
 	cc.mu.Unlock()
 	s.checkAgentIdle(time.Now(), clawID, cc)
+	if got := clawIdleSince(t, db, clawID); got != 0 {
+		t.Fatalf("alert fired %s after the last subagent report, want it to wait idle_after", subagentsActiveFreshFor)
+	}
+	s.checkAgentIdle(time.Now().Add(lifecycleDefaultIdleAfter), clawID, cc)
 	if clawIdleSince(t, db, clawID) == 0 {
 		t.Fatal("stale subagent state kept suppressing the alert")
 	}
