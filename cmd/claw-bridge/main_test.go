@@ -1615,14 +1615,12 @@ func TestGatewaySessionSurfacesLifecycleRawErrorFromSessionsGet(t *testing.T) {
 			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
 			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": generic},
-		})}); err != nil {
-			t.Error(err)
+		})}) {
 			return
 		}
 
@@ -1755,14 +1753,12 @@ func TestGatewaySessionLifecycleErrorWinsOverDisconnectDuringCauseLookup(t *test
 			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
 			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": generic},
-		})}); err != nil {
-			t.Error(err)
+		})}) {
 			return
 		}
 		// Drop the socket while the cause lookup is pending.
@@ -1815,8 +1811,7 @@ func TestGatewaySessionCompletesSlashCommandFromFinalChatReply(t *testing.T) {
 			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 			return
 		}
 		payload := mustJSON(map[string]interface{}{
@@ -1920,7 +1915,7 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 			t.Errorf("first frame type = %q, want register", reg.Type)
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "registered"}); err != nil {
+		if !writeTestFrame(t, conn, hubMsg{Type: "registered"}) {
 			return
 		}
 		// Close immediately to force the bridge onto its reconnect path.
@@ -2002,22 +1997,19 @@ func TestRunHubLoopReportsMidTurnLockConflictRecovery(t *testing.T) {
 				if !ok {
 					return
 				}
-				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-					t.Errorf("accept sessions.send: %v", err)
+				if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 					return
 				}
-				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+				if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
 					"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": lockConflict},
-				})}); err != nil {
-					t.Errorf("write lifecycle error: %v", err)
+				})}) {
 					return
 				}
 				abort, ok := read("sessions.abort")
 				if !ok {
 					return
 				}
-				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
-					t.Errorf("accept sessions.abort: %v", err)
+				if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abort.ID, OK: true}) {
 					return
 				}
 				probe, ok := read("sessions.describe")
@@ -2027,9 +2019,7 @@ func TestRunHubLoopReportsMidTurnLockConflictRecovery(t *testing.T) {
 				if tt.rotateKey {
 					gs.setSessionKey("session-2")
 				}
-				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
-					t.Errorf("accept sessions.describe: %v", err)
-				}
+				writeTestFrame(t, conn, gwFrame{Type: "res", ID: probe.ID, OK: true})
 			}))
 			defer gateway.Close()
 
@@ -2046,12 +2036,10 @@ func TestRunHubLoopReportsMidTurnLockConflictRecovery(t *testing.T) {
 					t.Errorf("read registration: %v", err)
 					return
 				}
-				if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "registered"}); err != nil {
-					t.Errorf("write registration acknowledgement: %v", err)
+				if !writeTestFrame(t, conn, hubMsg{Type: "registered"}) {
 					return
 				}
-				if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "message", Payload: mustJSON(map[string]interface{}{"id": "turn-1", "content": "continue the task"})}); err != nil {
-					t.Errorf("write hub turn: %v", err)
+				if !writeTestFrame(t, conn, hubMsg{Type: "message", Payload: mustJSON(map[string]interface{}{"id": "turn-1", "content": "continue the task"})}) {
 					return
 				}
 				var messages []hubMsg
@@ -2410,16 +2398,14 @@ func testGatewaySessionResetsAfterLifecycleError(t *testing.T, providerErr, want
 			return
 		}
 		if rejectSend {
-			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: false, Error: &gwError{Code: "provider_error", Message: providerErr}}); err != nil {
-				t.Errorf("reject sessions.send: %v", err)
+			if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: false, Error: &gwError{Code: "provider_error", Message: providerErr}}) {
 				return
 			}
 		} else {
-			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
-				t.Errorf("accept sessions.send: %v", err)
+			if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}) {
 				return
 			}
-			if err := wsjson.Write(r.Context(), conn, gwFrame{
+			if !writeTestFrame(t, conn, gwFrame{
 				Type:  "event",
 				Event: "agent",
 				Payload: mustJSON(map[string]interface{}{
@@ -2430,8 +2416,7 @@ func testGatewaySessionResetsAfterLifecycleError(t *testing.T, providerErr, want
 						"error": providerErr,
 					},
 				}),
-			}); err != nil {
-				t.Errorf("write lifecycle error: %v", err)
+			}) {
 				return
 			}
 		}
@@ -2449,8 +2434,7 @@ func testGatewaySessionResetsAfterLifecycleError(t *testing.T, providerErr, want
 			t.Errorf("sessions.abort key = %q, want session-1", abortParams["key"])
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}); err != nil {
-			t.Errorf("abort poisoned session: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}) {
 			return
 		}
 
@@ -2458,13 +2442,12 @@ func testGatewaySessionResetsAfterLifecycleError(t *testing.T, providerErr, want
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
+		if !writeTestFrame(t, conn, gwFrame{
 			Type:    "res",
 			ID:      createReq.ID,
 			OK:      true,
 			Payload: mustJSON(map[string]string{"key": "session-2"}),
-		}); err != nil {
-			t.Errorf("create replacement session: %v", err)
+		}) {
 			return
 		}
 
@@ -2472,8 +2455,7 @@ func testGatewaySessionResetsAfterLifecycleError(t *testing.T, providerErr, want
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}); err != nil {
-			t.Errorf("subscribe replacement session: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}) {
 			return
 		}
 
@@ -2549,11 +2531,10 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
-			t.Errorf("accept sessions.send: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
+		if !writeTestFrame(t, conn, gwFrame{
 			Type:  "event",
 			Event: "agent",
 			Payload: mustJSON(map[string]interface{}{
@@ -2564,8 +2545,7 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 					"error": sessionErr,
 				},
 			}),
-		}); err != nil {
-			t.Errorf("write lifecycle error: %v", err)
+		}) {
 			return
 		}
 
@@ -2582,8 +2562,7 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 			t.Errorf("sessions.abort key = %q, want session-1", abortParams["key"])
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}); err != nil {
-			t.Errorf("abort poisoned session: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}) {
 			return
 		}
 
@@ -2594,11 +2573,10 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 			if !ok {
 				return
 			}
-			if err := wsjson.Write(r.Context(), conn, gwFrame{
+			if !writeTestFrame(t, conn, gwFrame{
 				Type: "res", ID: probeReq.ID, OK: false,
 				Error: &gwError{Code: "unavailable", Message: "session unavailable"},
-			}); err != nil {
-				t.Errorf("reject session probe: %v", err)
+			}) {
 				return
 			}
 		}
@@ -2607,13 +2585,12 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
+		if !writeTestFrame(t, conn, gwFrame{
 			Type:    "res",
 			ID:      createReq.ID,
 			OK:      true,
 			Payload: mustJSON(map[string]string{"key": "session-2"}),
-		}); err != nil {
-			t.Errorf("create replacement session: %v", err)
+		}) {
 			return
 		}
 
@@ -2621,8 +2598,7 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}); err != nil {
-			t.Errorf("subscribe replacement session: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}) {
 			return
 		}
 
@@ -2693,30 +2669,26 @@ func TestGatewaySessionPreservesSessionAfterMidTurnLockConflictProbe(t *testing.
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
-			t.Errorf("accept sessions.send: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
 			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr},
-		})}); err != nil {
-			t.Errorf("write lifecycle error: %v", err)
+		})}) {
 			return
 		}
 		abortReq, ok := readRequest("sessions.abort")
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}); err != nil {
-			t.Errorf("abort session: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}) {
 			return
 		}
 		probeReq, ok := readRequest("sessions.describe")
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probeReq.ID, OK: true}); err != nil {
-			t.Errorf("accept session probe: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: probeReq.ID, OK: true}) {
 			return
 		}
 		// A successful probe must end the recovery: nothing else may reach the
@@ -2790,20 +2762,17 @@ func TestGatewaySessionProbeRechecksConcurrentRotationAfterSuccess(t *testing.T)
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}) {
 			return
 		}
 		abort, ok := read("sessions.abort")
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abort.ID, OK: true}) {
 			return
 		}
 		probe, ok := read("sessions.describe")
@@ -2813,9 +2782,7 @@ func TestGatewaySessionProbeRechecksConcurrentRotationAfterSuccess(t *testing.T)
 		// Rotate after the read-only probe succeeds to exercise the defensive
 		// re-check immediately before reporting the session as preserved.
 		gs.setSessionKey("session-2")
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
-			t.Error(err)
-		}
+		writeTestFrame(t, conn, gwFrame{Type: "res", ID: probe.ID, OK: true})
 	}))
 	defer srv.Close()
 
@@ -2864,12 +2831,10 @@ func TestGatewaySessionProbeDetectsConcurrentRotation(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}) {
 			return
 		}
 		abort, ok := read("sessions.abort")
@@ -2888,8 +2853,7 @@ func TestGatewaySessionProbeDetectsConcurrentRotation(t *testing.T) {
 			t.Errorf("sessions.abort key = %q, want turn session-1", abortParams["key"])
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abort.ID, OK: true}) {
 			return
 		}
 		idleCtx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
@@ -2944,14 +2908,12 @@ func TestGatewaySessionLockConflictAlreadyRotatedSkipsAbortAndProbe(t *testing.T
 			t.Fatalf("read sessions.send: method=%q err=%v", send.Method, err)
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 			return
 		}
 		// Tag the event with the still-current key so readLoop's foreign-session
 		// filter dispatches it to the in-flight turn instead of dropping it.
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}) {
 			return
 		}
 		idleCtx, cancel := context.WithTimeout(r.Context(), 150*time.Millisecond)
@@ -3009,20 +2971,17 @@ func TestGatewaySessionProbesAfterTurnContextExpires(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}) {
 			return
 		}
 		abort, ok := read("sessions.abort")
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abort.ID, OK: true}) {
 			return
 		}
 		// The accepted turn's context has expired, but recovery must use its
@@ -3033,9 +2992,7 @@ func TestGatewaySessionProbesAfterTurnContextExpires(t *testing.T) {
 			return
 		}
 		close(probed)
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
-			t.Error(err)
-		}
+		writeTestFrame(t, conn, gwFrame{Type: "res", ID: probe.ID, OK: true})
 	}))
 	defer srv.Close()
 	connCtx, connCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3093,7 +3050,7 @@ func TestGatewaySessionRetriesSameSessionAfterLockConflictSendError(t *testing.T
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
+		if !writeTestFrame(t, conn, gwFrame{
 			Type: "res",
 			ID:   sendReq.ID,
 			OK:   false,
@@ -3101,8 +3058,7 @@ func TestGatewaySessionRetriesSameSessionAfterLockConflictSendError(t *testing.T
 				Code:    "session_file_lock_conflict",
 				Message: sessionErr,
 			},
-		}); err != nil {
-			t.Errorf("reject first sessions.send: %v", err)
+		}) {
 			return
 		}
 
@@ -3120,11 +3076,10 @@ func TestGatewaySessionRetriesSameSessionAfterLockConflictSendError(t *testing.T
 			t.Errorf("retry sessions.send key = %q, want same session session-1", retrySendParams["key"])
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: retrySendReq.ID, OK: true}); err != nil {
-			t.Errorf("accept retry sessions.send: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: retrySendReq.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
+		if !writeTestFrame(t, conn, gwFrame{
 			Type:  "event",
 			Event: "agent",
 			Payload: mustJSON(map[string]interface{}{
@@ -3132,11 +3087,10 @@ func TestGatewaySessionRetriesSameSessionAfterLockConflictSendError(t *testing.T
 				"sessionKey": "session-1",
 				"data":       map[string]string{"delta": "hello"},
 			}),
-		}); err != nil {
-			t.Errorf("write assistant event: %v", err)
+		}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
+		if !writeTestFrame(t, conn, gwFrame{
 			Type:  "event",
 			Event: "agent",
 			Payload: mustJSON(map[string]interface{}{
@@ -3144,8 +3098,7 @@ func TestGatewaySessionRetriesSameSessionAfterLockConflictSendError(t *testing.T
 				"sessionKey": "session-1",
 				"data":       map[string]string{"phase": "end"},
 			}),
-		}); err != nil {
-			t.Errorf("write lifecycle end: %v", err)
+		}) {
 			return
 		}
 
@@ -3230,7 +3183,7 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 				t.Errorf("sessions.send attempt %d key = %q, want session-1", i+1, sendParams["key"])
 				return
 			}
-			if err := wsjson.Write(r.Context(), conn, gwFrame{
+			if !writeTestFrame(t, conn, gwFrame{
 				Type: "res",
 				ID:   sendReq.ID,
 				OK:   false,
@@ -3238,8 +3191,7 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 					Code:    "session_file_lock_conflict",
 					Message: sessionErr,
 				},
-			}); err != nil {
-				t.Errorf("reject sessions.send attempt %d: %v", i+1, err)
+			}) {
 				return
 			}
 		}
@@ -3249,8 +3201,7 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}); err != nil {
-			t.Errorf("abort session before rotation: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}) {
 			return
 		}
 
@@ -3258,13 +3209,12 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
+		if !writeTestFrame(t, conn, gwFrame{
 			Type:    "res",
 			ID:      createReq.ID,
 			OK:      true,
 			Payload: mustJSON(map[string]string{"key": "session-2"}),
-		}); err != nil {
-			t.Errorf("create replacement session: %v", err)
+		}) {
 			return
 		}
 
@@ -3272,8 +3222,7 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}); err != nil {
-			t.Errorf("subscribe replacement session: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}) {
 			return
 		}
 
@@ -3360,17 +3309,14 @@ func testGatewaySessionAcceptedTurnDeadline(t *testing.T, recovery string) {
 			return req
 		}
 		respond := func(req gwFrame, ok bool, payload json.RawMessage) {
-			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: req.ID, OK: ok, Payload: payload}); err != nil {
-				t.Error(err)
-			}
+			writeTestFrame(t, conn, gwFrame{Type: "res", ID: req.ID, OK: ok, Payload: payload})
 		}
 		respond(read("sessions.send"), true, nil)
 		for _, event := range []map[string]interface{}{
 			{"stream": "assistant", "sessionKey": "session-1", "data": map[string]string{"delta": "Investigated the failing test"}},
 			{"stream": "tool", "sessionKey": "session-1", "data": map[string]string{"phase": "start", "name": "exec", "command": "git status", "toolCallId": "call-1"}},
 		} {
-			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(event)}); err != nil {
-				t.Error(err)
+			if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(event)}) {
 				return
 			}
 		}
@@ -3629,8 +3575,7 @@ func TestReconnectGatewayReportsReplacementWhenSessionMissing(t *testing.T) {
 		ctx := r.Context()
 
 		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
-			t.Errorf("write challenge: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}) {
 			return
 		}
 		var connectReq gwFrame
@@ -3638,8 +3583,7 @@ func TestReconnectGatewayReportsReplacementWhenSessionMissing(t *testing.T) {
 			t.Errorf("read connect request: %v", err)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
-			t.Errorf("write connect response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}) {
 			return
 		}
 
@@ -3652,8 +3596,7 @@ func TestReconnectGatewayReportsReplacementWhenSessionMissing(t *testing.T) {
 			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
-			t.Errorf("write subscribe error: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}) {
 			return
 		}
 
@@ -3667,8 +3610,7 @@ func TestReconnectGatewayReportsReplacementWhenSessionMissing(t *testing.T) {
 			return
 		}
 		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
-			t.Errorf("write create response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}) {
 			return
 		}
 
@@ -3681,8 +3623,7 @@ func TestReconnectGatewayReportsReplacementWhenSessionMissing(t *testing.T) {
 			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
-			t.Errorf("write resubscribe response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}) {
 			return
 		}
 		<-ctx.Done()
@@ -3744,8 +3685,7 @@ func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) 
 
 		connID := connections.Add(1)
 		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
-			t.Errorf("write challenge: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}) {
 			return
 		}
 		var connectReq gwFrame
@@ -3753,8 +3693,7 @@ func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) 
 			t.Errorf("read connect request: %v", err)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
-			t.Errorf("write connect response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}) {
 			return
 		}
 
@@ -3775,8 +3714,7 @@ func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) 
 			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
-			t.Errorf("write subscribe error: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}) {
 			return
 		}
 
@@ -3790,8 +3728,7 @@ func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) 
 			return
 		}
 		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
-			t.Errorf("write create response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}) {
 			return
 		}
 
@@ -3804,8 +3741,7 @@ func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) 
 			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
-			t.Errorf("write resubscribe response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}) {
 			return
 		}
 		<-ctx.Done()
@@ -3922,8 +3858,7 @@ func TestNewGatewaySessionReadLoopOutlivesAttemptTimeout(t *testing.T) {
 		ctx := r.Context()
 
 		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
-			t.Errorf("write challenge: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}) {
 			return
 		}
 		for {
@@ -3933,8 +3868,7 @@ func TestNewGatewaySessionReadLoopOutlivesAttemptTimeout(t *testing.T) {
 			}
 			switch req.Method {
 			case "connect", "sessions.subscribe", "sessions.get":
-				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true}); err != nil {
-					t.Errorf("write %s response: %v", req.Method, err)
+				if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: req.ID, OK: true}) {
 					return
 				}
 				if req.Method == "sessions.get" {
@@ -3942,15 +3876,13 @@ func TestNewGatewaySessionReadLoopOutlivesAttemptTimeout(t *testing.T) {
 				}
 			case "sessions.create":
 				payload, _ := json.Marshal(map[string]string{"key": "session-1"})
-				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: payload}); err != nil {
-					t.Errorf("write sessions.create response: %v", err)
+				if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: payload}) {
 					return
 				}
 			case "sessions.describe":
 				// setReady() kicks off an async context-usage poll; answer it so
 				// it doesn't trip the "unexpected request method" default below.
-				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true}); err != nil {
-					t.Errorf("write sessions.describe response: %v", err)
+				if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: req.ID, OK: true}) {
 					return
 				}
 			default:
@@ -4008,8 +3940,7 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 		connID := connections.Add(1)
 		ctx := r.Context()
 		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
-			t.Errorf("write challenge: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}) {
 			return
 		}
 		var connectReq gwFrame
@@ -4021,8 +3952,7 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 			t.Errorf("first request method = %q, want connect", connectReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
-			t.Errorf("write connect response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}) {
 			return
 		}
 
@@ -4042,8 +3972,7 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 			t.Errorf("reconnect request method = %q, want sessions.subscribe", subReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: true}); err != nil {
-			t.Errorf("write subscribe response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: subReq.ID, OK: true}) {
 			return
 		}
 
@@ -4057,8 +3986,7 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 			return
 		}
 		acceptedSends.Add(1)
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
-			t.Errorf("write sessions.send response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}) {
 			return
 		}
 
@@ -4067,8 +3995,7 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 			"sessionKey": "session-1",
 			"data":       map[string]string{"delta": "hello"},
 		})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: assistantPayload}); err != nil {
-			t.Errorf("write assistant event: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: assistantPayload}) {
 			return
 		}
 		endPayload, _ := json.Marshal(map[string]interface{}{
@@ -4076,8 +4003,7 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 			"sessionKey": "session-1",
 			"data":       map[string]string{"phase": "end"},
 		})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload}); err != nil {
-			t.Errorf("write lifecycle event: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload}) {
 			return
 		}
 		<-testDone
@@ -4174,14 +4100,7 @@ func TestGatewaySessionSendStalledAcrossReconnectIsNotFailedByOldDisconnect(t *t
 		defer conn.CloseNow()
 
 		connID := connections.Add(1)
-		bg := context.Background()
-		write := func(frame gwFrame) bool {
-			if err := wsjson.Write(bg, conn, frame); err != nil {
-				t.Errorf("gateway %d write %s%s: %v", connID, frame.Type, frame.Event, err)
-				return false
-			}
-			return true
-		}
+		write := func(frame gwFrame) bool { return writeTestFrame(t, conn, frame) }
 		read := func(method string) (gwFrame, bool) {
 			var req gwFrame
 			if err := wsjson.Read(r.Context(), conn, &req); err != nil || req.Method != method {
@@ -4309,8 +4228,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 
 		connID := connections.Add(1)
 		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
-			t.Errorf("write challenge: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}) {
 			return
 		}
 		var connectReq gwFrame
@@ -4318,8 +4236,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 			t.Errorf("read connect request: %v", err)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
-			t.Errorf("write connect response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}) {
 			return
 		}
 
@@ -4340,8 +4257,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
-			t.Errorf("write subscribe error: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}) {
 			return
 		}
 
@@ -4355,8 +4271,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 			return
 		}
 		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
-			t.Errorf("write create response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}) {
 			return
 		}
 
@@ -4369,8 +4284,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
-			t.Errorf("write resubscribe response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}) {
 			return
 		}
 		close(resubscribeDone)
@@ -4388,8 +4302,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 			}
 			if req.Method == "sessions.describe" {
 				describePayload, _ := json.Marshal(map[string]interface{}{"session": map[string]interface{}{}})
-				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: describePayload}); err != nil {
-					t.Errorf("write sessions.describe response: %v", err)
+				if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: describePayload}) {
 					return
 				}
 				continue
@@ -4401,8 +4314,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 			t.Errorf("retry request method = %q, want sessions.send", sendReq.Method)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
-			t.Errorf("write sessions.send response: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}) {
 			return
 		}
 		assistantPayload, _ := json.Marshal(map[string]interface{}{
@@ -4410,8 +4322,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 			"sessionKey": "session-2",
 			"data":       map[string]string{"delta": "hello"},
 		})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: assistantPayload}); err != nil {
-			t.Errorf("write assistant event: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: assistantPayload}) {
 			return
 		}
 		endPayload, _ := json.Marshal(map[string]interface{}{
@@ -4419,8 +4330,7 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 			"sessionKey": "session-2",
 			"data":       map[string]string{"phase": "end"},
 		})
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload}); err != nil {
-			t.Errorf("write lifecycle event: %v", err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload}) {
 			return
 		}
 		// Drain and answer any further requests (e.g. a still-pending
@@ -4855,12 +4765,10 @@ func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
 			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: send.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": lifecycleErr}})}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": lifecycleErr}})}) {
 			return
 		}
 		var abort gwFrame
@@ -4873,8 +4781,7 @@ func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
 		}
 		_ = json.Unmarshal(abort.Params, &params)
 		abortKey <- params.Key
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: abort.ID, OK: true}) {
 			return
 		}
 		// Answer the rotation's sessions.create so SendMessage can finish.
