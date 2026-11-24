@@ -28,7 +28,9 @@ func newReaperTestServer(t *testing.T, cfg *types.HubConfig) (*Server, *sql.DB) 
 	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant','Tenant','token','claw-token',?)`, now()); err != nil {
 		t.Fatal(err)
 	}
-	return &Server{db: db, hubCfg: cfg, claws: make(map[string]*clawConn), users: make(map[string]*userConn), reaperFirstSeen: make(map[string]time.Time)}, db
+	s := &Server{db: db, hubCfg: cfg, claws: make(map[string]*clawConn), users: make(map[string]*userConn), reaperFirstSeen: make(map[string]time.Time)}
+	stopBackgroundOnCleanup(t, s)
+	return s, db
 }
 
 func TestReconcileOnBootRepairsStrandedRecords(t *testing.T) {
@@ -164,15 +166,15 @@ func TestReaperRedrivesVMAndCommentAfterClosingRows(t *testing.T) {
 	go func() { s.reapOnce(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("reaper blocked while redriving rows on a single DB connection")
 	}
 	select {
 	case <-terminated:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("VM redrive was not dispatched")
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var providerID string
 		if err := db.QueryRow(`SELECT provider_id FROM claws WHERE id='redrive-vm'`).Scan(&providerID); err != nil {
@@ -239,7 +241,7 @@ func TestReaperRedrivesStopComment(t *testing.T) {
 		tm = tm.Add(redriveGrace + time.Second)
 		s.reapOnce()
 
-		deadline := time.After(time.Second)
+		deadline := time.After(testWaitTimeout)
 		for {
 			select {
 			case request := <-requests:
@@ -248,7 +250,7 @@ func TestReaperRedrivesStopComment(t *testing.T) {
 						t.Fatalf("stop comment = %q, want agent-stopped comment with diagnostic", request)
 					}
 					var pending int
-					for stop := time.Now().Add(time.Second); ; time.Sleep(10 * time.Millisecond) {
+					for stop := time.Now().Add(testWaitTimeout); ; time.Sleep(10 * time.Millisecond) {
 						if err := db.QueryRow(`SELECT stop_comment_pending FROM claws WHERE id='comment'`).Scan(&pending); err != nil {
 							t.Fatal(err)
 						}
@@ -303,10 +305,10 @@ func TestReaperRedrivesStopComment(t *testing.T) {
 
 		select {
 		case <-requests:
-		case <-time.After(time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("tracker did not receive failed delivery")
 		}
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(testWaitTimeout)
 		for {
 			var pending int
 			if err := db.QueryRow(`SELECT stop_comment_pending FROM claws WHERE id='failed'`).Scan(&pending); err != nil {
@@ -644,7 +646,7 @@ func TestReaperOfflineReplicatedVM(t *testing.T) {
 			// Stopping clears provider_id, asynchronously when it terminates the
 			// VM; wait so that write cannot outlive the test's database.
 			var status, reason, providerID string
-			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			for deadline := time.Now().Add(testWaitTimeout); ; time.Sleep(10 * time.Millisecond) {
 				if err := db.QueryRow(`SELECT status, bootstrap_diagnostic, COALESCE(provider_id,'') FROM claws WHERE id='offline-vm'`).Scan(&status, &reason, &providerID); err != nil {
 					t.Fatal(err)
 				}
@@ -767,7 +769,7 @@ func TestReaperOfflineVMLookupBudget(t *testing.T) {
 	}
 	// Fallback stops terminate the VM asynchronously and then clear provider_id;
 	// wait so that write cannot outlive the test's database.
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(testWaitTimeout); ; time.Sleep(10 * time.Millisecond) {
 		var pending int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE COALESCE(provider_id,'') != ''`).Scan(&pending); err != nil {
 			t.Fatal(err)
@@ -956,7 +958,7 @@ func deleteClawForTest(t *testing.T, s *Server, db *sql.DB, clawID string) int {
 	rec := httptest.NewRecorder()
 	s.handleClawDetail(rec, req)
 	if rec.Code == http.StatusNoContent {
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(testWaitTimeout)
 		for {
 			var n int
 			if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&n); err != nil {

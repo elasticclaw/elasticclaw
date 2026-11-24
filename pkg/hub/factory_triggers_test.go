@@ -19,7 +19,9 @@ func newFactoryTriggerTestServer(t *testing.T) *Server {
 	_, _ = db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,?)`,
 		"tenant", "tenant", "token", "claw-token", now())
 	t.Cleanup(func() { db.Close() })
-	return &Server{db: db}
+	s := &Server{db: db}
+	stopBackgroundOnCleanup(t, s)
+	return s
 }
 
 func TestFailedFactoryTriggerIsRetriedAfterServerRestart(t *testing.T) {

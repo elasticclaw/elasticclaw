@@ -141,7 +141,7 @@ func TestWorkflowV2ControlWebSocketAuthenticatesBindsSnapshotsAndDeduplicates(t 
 		t.Fatalf("durable rejected event missing: %#v", inspection.RecentEvents)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		ready, err := store.ReadyControl(ctx, "run-control-ws", attempt.ID, 10)
 		if err != nil {
@@ -515,7 +515,7 @@ stages:
 		t.Fatalf("task-completion receipt = %#v, err=%v", completedReceipt, err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	var v1Stage, v2Stage string
 	var persisted int
 	for time.Now().Before(deadline) {

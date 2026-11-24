@@ -300,7 +300,7 @@ func TestBranchSweepWaitsForTurnToDeliverPR(t *testing.T) {
 		if !settled {
 			t.Fatal("nudge deferred after turn completion")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("nudge blocked after turn completion released the signal lock")
 	}
 	if !s.pipelineAwaitsDoneSignal(clawID) {

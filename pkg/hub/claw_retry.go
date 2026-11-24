@@ -299,11 +299,15 @@ func (s *Server) scheduleClawRetry(clawID, reason string) clawRetryDisposition {
 	})
 
 	delay := retryDelay(clawRetryBackoff, plan.attempt-2)
-	go func() {
+	s.goBG("claw instance replacement", func() {
+		// A hub that shuts down during the backoff leaves the retry scheduled,
+		// exactly as when the process used to exit under this goroutine.
+		if !s.bgSleep(delay) {
+			return
+		}
 		err := retryOperation(retryOptions{
 			Label:    "claw instance replacement",
 			Attempts: 1,
-			Delays:   []time.Duration{delay},
 			Run: func() error {
 				return s.replaceClawInstance(context.Background(), plan.tenantID, clawID, reason, plan.attempt)
 			},
@@ -312,7 +316,7 @@ func (s *Server) scheduleClawRetry(clawID, reason string) clawRetryDisposition {
 			log.Printf("[claw-retry] replacement failed for %s: %v", shortID(clawID), err)
 			s.stopAgentTerminalWithReason(clawID, fmt.Sprintf("Restore failed: %v", err), false)
 		}
-	}()
+	})
 	return clawRetryScheduled
 }
 
@@ -344,10 +348,10 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 	}
 	s.mu.Unlock()
 	if providerID != "" {
-		go func() {
+		s.goBG("terminate replaced VM", func() {
 			s.captureGatewayLog(clawID, provider, providerID)
 			s.terminateVM(provider, providerID)
-		}()
+		})
 	}
 
 	bootstrapStatus := fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxClawAttempts)
@@ -394,7 +398,7 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 	} else {
 		log.Printf("[claw-retry] replacing %s after %s (attempt %d/%d, checkpoint=%q)", shortID(clawID), sanitizeFailureDetails(reason), attempt, maxClawAttempts, checkpointID)
 	}
-	go s.provisionStoredClaw(clawID)
+	s.goBG("provisionStoredClaw", func() { s.provisionStoredClaw(clawID) })
 	return nil
 }
 

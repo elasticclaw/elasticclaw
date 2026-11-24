@@ -350,7 +350,7 @@ func TestJiraTerminateSignalCommentsIssue(t *testing.T) {
 
 func waitForJiraClawCount(t *testing.T, db *sql.DB, issueID string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	var last int
 	for time.Now().Before(deadline) {
 		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE jira_issue_id=?`, issueID).Scan(&last); err != nil {
@@ -676,7 +676,7 @@ func (m *mockJira) setIssue(key, project, status string, labels []string) {
 
 func (m *mockJira) waitForComment(t *testing.T, key string) string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		m.mu.Lock()
 		comments := append([]string(nil), m.comments[key]...)

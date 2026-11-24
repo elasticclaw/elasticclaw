@@ -1667,11 +1667,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	}
 
 	if stage.OnEnter.MergePR {
-		go s.mergePRForClaw(clawID)
+		s.goBG("mergePRForClaw", func() { s.mergePRForClaw(clawID) })
 	}
 
 	if stage.OnEnter.CloseIssue {
-		go s.closeGitHubIssueForClaw(clawID)
+		s.goBG("closeGitHubIssueForClaw", func() { s.closeGitHubIssueForClaw(clawID) })
 	}
 
 	// Handle add_labels / remove_labels for GitHub Issues
@@ -2278,7 +2278,7 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 		})
 
 		if providerID != "" {
-			go s.terminateVMForClaw(clawID, provider, providerID)
+			s.goBG("terminateVMForClaw", func() { s.terminateVMForClaw(clawID, provider, providerID) })
 		}
 	}
 	return true, injectDelivered
@@ -2665,10 +2665,10 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 
 	// 5. Terminate VM if still running
 	if providerID != "" && !skipVMTerminate {
-		go func() {
+		s.goBG("terminate stopped claw VM", func() {
 			s.captureGatewayLog(clawID, provider, providerID)
 			s.terminateVMForClaw(clawID, provider, providerID)
-		}()
+		})
 	}
 
 	log.Printf("[stopAgent] claw %s stopped: %s", clawID[:8], reason)
@@ -2687,7 +2687,7 @@ func (s *Server) dispatchStopComment(clawID string, deliver func()) {
 		return
 	}
 	if rows, _ := res.RowsAffected(); rows == 1 {
-		go deliver()
+		s.goBG("stop feedback delivery", deliver)
 	}
 }
 

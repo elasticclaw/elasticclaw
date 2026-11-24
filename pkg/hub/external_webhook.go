@@ -653,13 +653,13 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	})
 
 	if isPending {
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return clawID, nil
 	}
 
 	// Provision asynchronously
 	provCfg, _ := providers[provider]
-	go func() {
+	s.goBG("provision external webhook claw", func() {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
@@ -688,7 +688,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 			s.recordPipelineFailureRecord(clawID, "provision", "provision", "FATAL", provErr.Error(), map[string]interface{}{"error.type": "provision_failed"})
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
-	}()
+	})
 
 	return clawID, nil
 }

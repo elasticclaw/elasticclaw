@@ -788,7 +788,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 	}
 
 	if isPending {
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return nil
 	}
 
@@ -799,7 +799,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 		ProviderName: "ec-" + clawID[:8],
 	}
 
-	go func() {
+	s.goBG("provision shortcut claw", func() {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
@@ -814,7 +814,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 			log.Printf("[factory:%s] provision failed for %s: %v", factory.Name, clawID[:8], provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
-	}()
+	})
 
 	return nil
 }

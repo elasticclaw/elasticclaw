@@ -22,11 +22,21 @@ type TestServer struct {
 
 func (ts *TestServer) URL() string { return ts.HTTPSrv.URL }
 
+// WaitTimeout is the least any Wait helper waits before failing the test.
+// A wait returns as soon as its condition holds, so a generous deadline costs
+// nothing on a passing run, while the 5s callers pass is too short on a loaded
+// 2-CPU CI runner.
+const WaitTimeout = 15 * time.Second
+
+func waitDeadline(timeout time.Duration) time.Time {
+	return time.Now().Add(max(timeout, WaitTimeout))
+}
+
 func (ts *TestServer) ClawToken() string { return "test-claw-token" }
 
 func (ts *TestServer) WaitForClawWithIssue(t *testing.T, issueID string, timeout time.Duration) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := waitDeadline(timeout)
 	for time.Now().Before(deadline) {
 		var clawID string
 		ts.DB.QueryRow(`SELECT id FROM claws WHERE linear_issue_id=?`, issueID).Scan(&clawID)
@@ -41,7 +51,7 @@ func (ts *TestServer) WaitForClawWithIssue(t *testing.T, issueID string, timeout
 
 func (ts *TestServer) WaitForClawWithExternalTrigger(t *testing.T, triggerID string, timeout time.Duration) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := waitDeadline(timeout)
 	for time.Now().Before(deadline) {
 		var clawID string
 		ts.DB.QueryRow(`SELECT id FROM claws WHERE external_trigger_id=?`, triggerID).Scan(&clawID)
@@ -56,7 +66,7 @@ func (ts *TestServer) WaitForClawWithExternalTrigger(t *testing.T, triggerID str
 
 func (ts *TestServer) WaitForClawWithStory(t *testing.T, storyID string, timeout time.Duration) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := waitDeadline(timeout)
 	for time.Now().Before(deadline) {
 		var clawID string
 		ts.DB.QueryRow(`SELECT id FROM claws WHERE shortcut_story_id=?`, storyID).Scan(&clawID)
@@ -71,7 +81,7 @@ func (ts *TestServer) WaitForClawWithStory(t *testing.T, storyID string, timeout
 
 func (ts *TestServer) WaitForClawStatus(t *testing.T, clawID, status string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := waitDeadline(timeout)
 	for time.Now().Before(deadline) {
 		var current string
 		ts.DB.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&current)

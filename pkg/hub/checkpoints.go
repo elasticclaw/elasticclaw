@@ -182,11 +182,12 @@ func (s *Server) requestIdleCheckpoints() {
 		if s.hasRecentCheckpoint(item.id, checkpointMinInterval) {
 			continue
 		}
-		go func(clawID string) {
+		clawID := item.id
+		s.goBG("idle checkpoint", func() {
 			if _, err := s.requestCheckpoint(context.Background(), clawID, "idle-timer", "hub", false, checkpointRequestTimeout); err != nil {
 				log.Printf("[checkpoint] idle request for %s failed: %v", shortID(clawID), err)
 			}
-		}(item.id)
+		})
 	}
 }
 
@@ -381,7 +382,7 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	}
 	s.mu.Unlock()
 	if providerID != "" {
-		go s.terminateVM(provider, providerID)
+		s.goBG("terminateVM", func() { s.terminateVM(provider, providerID) })
 	}
 
 	if err := s.beginRestoreProvision(tenantID, clawID, checkpointID); err != nil {
@@ -391,7 +392,7 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "provisioning", "bootstrap_status": "Restoring checkpoint"},
 	})
-	go s.provisionStoredClaw(clawID)
+	s.goBG("provisionStoredClaw", func() { s.provisionStoredClaw(clawID) })
 	return nil
 }
 
@@ -692,15 +693,18 @@ func (s *Server) drainPendingCheckpoint(clawID string) {
 	if checkpointID == "" || reason == "" || inProgress {
 		return
 	}
-	go func() {
+	s.goBG("queued checkpoint", func() {
 		if _, err := s.dispatchCheckpoint(context.Background(), cc, clawID, checkpointID, reason, false, checkpointRequestTimeout); err != nil {
 			log.Printf("[checkpoint] queued request for %s failed: %v", shortID(clawID), err)
 		}
-	}()
+	})
 }
 
+// checkpointBeforeTermination is best effort: it waits for the bridge up to
+// checkpointTerminationTimeout, and gives up early when the hub shuts down so
+// the caller's teardown is not left hanging on a bridge that never answers.
 func (s *Server) checkpointBeforeTermination(clawID, reason string) {
-	if _, err := s.requestCheckpoint(context.Background(), clawID, "termination:"+reason, "hub", true, checkpointTerminationTimeout); err != nil {
+	if _, err := s.requestCheckpoint(s.bgContext(), clawID, "termination:"+reason, "hub", true, checkpointTerminationTimeout); err != nil {
 		log.Printf("[checkpoint] termination checkpoint for %s failed: %v", shortID(clawID), err)
 	}
 }

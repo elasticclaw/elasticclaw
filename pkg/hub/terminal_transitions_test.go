@@ -90,7 +90,7 @@ func TestStopAgentTerminalIsIdempotent(t *testing.T) {
 	// exactly once and the second (idempotent no-op) not at all.
 	select {
 	case <-terminations:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("VM terminate was not invoked by the first stop")
 	}
 	select {
@@ -100,7 +100,7 @@ func TestStopAgentTerminalIsIdempotent(t *testing.T) {
 	}
 	// Wait for the terminate goroutine's provider_id clear so it cannot
 	// outlive the test and race the DB teardown.
-	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(testWaitTimeout); ; time.Sleep(10 * time.Millisecond) {
 		var providerID string
 		if err := db.QueryRow(`SELECT provider_id FROM claws WHERE id='terminal-once'`).Scan(&providerID); err != nil {
 			t.Fatal(err)

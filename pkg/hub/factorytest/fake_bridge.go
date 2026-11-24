@@ -114,7 +114,7 @@ func (fb *FakeBridge) SendDone(prURL string) {
 
 func (fb *FakeBridge) WaitForMessage(t *testing.T, contains string, timeout time.Duration) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := waitDeadline(timeout)
 	for time.Now().Before(deadline) {
 		fb.mu.Lock()
 		for _, m := range fb.Messages {

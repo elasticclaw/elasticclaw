@@ -117,7 +117,7 @@ func (s *Server) registerClawPR(ctx context.Context, clawID, tenantID, repo stri
 			typesv2.PullRequestClaim{URL: prURL}, s.workflowV2PullRequestVerifier())
 		if err == nil {
 			err = s.associateWorkflowV2TaskRunPR(clawID, pr)
-			go s.maybeFinishWorkflowV2Parent(context.Background(), binding.RunID)
+			s.goBG("maybeFinishWorkflowV2Parent", func() { s.maybeFinishWorkflowV2Parent(context.Background(), binding.RunID) })
 		}
 	} else {
 		registered, err = s.storePRRegistration(clawID, repo, number, prURL, source)

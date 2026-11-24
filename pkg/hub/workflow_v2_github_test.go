@@ -91,7 +91,7 @@ func TestWorkflowV2GitHubRequestHonorsContextCancellation(t *testing.T) {
 	}
 	select {
 	case <-requestCancelled:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("GitHub request did not observe context cancellation")
 	}
 }

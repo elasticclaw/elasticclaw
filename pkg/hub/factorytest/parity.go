@@ -181,7 +181,7 @@ func RunParityMatrix(t *testing.T, sc Scenario) {
 // comparing IDs across time are deterministic even if rows are re-inserted.
 func WaitForClawWithTracker(t *testing.T, ts *TestServer, td TrackerDispatcher, timeout time.Duration) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := waitDeadline(timeout)
 	for time.Now().Before(deadline) {
 		var clawID string
 		var err error

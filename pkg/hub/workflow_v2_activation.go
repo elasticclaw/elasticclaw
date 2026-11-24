@@ -131,7 +131,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			log.Printf("[workflow-v2] manual trigger start command for run %s: %v", runID, err)
 		}
 		// The start command may have transitioned straight to a terminal state.
-		go s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+		s.goBG("maybeFinishWorkflowV2Parent", func() { s.maybeFinishWorkflowV2Parent(context.Background(), runID) })
 	}
 	status := "created"
 	if finishedAtActivation {

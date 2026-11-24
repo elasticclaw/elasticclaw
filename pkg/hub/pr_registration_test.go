@@ -453,7 +453,7 @@ delivery:
 		t.Fatalf("run=%+v facts=%v", inspection.Run, inspection.Facts["delivery"])
 	}
 	assertTaskRunPR(t, db, taskRunID, "owner/repo", 1, taskRunPRStateOpen, false)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var status string
 		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {

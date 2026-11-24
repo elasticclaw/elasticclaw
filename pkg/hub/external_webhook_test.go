@@ -88,7 +88,7 @@ func sendGenericWebhook(t *testing.T, ts *factorytest.TestServer, body []byte, d
 
 func waitForExternalClawCount(t *testing.T, ts *factorytest.TestServer, factoryName string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		var count int
 		if err := ts.DB.QueryRow(`SELECT COUNT(*) FROM claws WHERE factory_name=?`, factoryName).Scan(&count); err != nil {
@@ -204,7 +204,7 @@ func TestExternalWebhook_ConcurrentDeliveryCreatesOneClaw(t *testing.T) {
 
 	// Wait for at most one claw to be created
 	clawID := ""
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		var id string
 		ts.DB.QueryRow(`SELECT id FROM claws WHERE external_trigger_id=?`, triggerID).Scan(&id)
@@ -278,7 +278,7 @@ func TestExternalWebhook_SecondDeliveryIsIdempotent(t *testing.T) {
 
 	// Wait for claw to be created
 	clawID := ""
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		var id string
 		ts.DB.QueryRow(`SELECT id FROM claws WHERE external_trigger_id=?`, triggerID).Scan(&id)

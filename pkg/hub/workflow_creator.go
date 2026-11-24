@@ -286,7 +286,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			log.Printf("[workflow] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
 		}
 		s.activatingClaws.Delete(clawID)
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
 	if opts.beforeProvision != nil {
@@ -312,9 +312,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 					log.Printf("[workflow] failed to finish dequeue-failed claw %s: %v", clawID[:8], finishErr)
 				}
 				s.activatingClaws.Delete(clawID)
-				go s.promotePendingClaws()
+				s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 			}
-			go s.finishWorkflowV2ClawAfterActivation(finished.runID, clawID, result)
+			s.goBG("finishWorkflowV2ClawAfterActivation", func() { s.finishWorkflowV2ClawAfterActivation(finished.runID, clawID, result) })
 			return clawID, false, nil
 		}
 		if err != nil {
@@ -322,7 +322,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 				"workflow v2 activation failed: "+err.Error(), terminalTxOpts{})
 			s.activatingClaws.Delete(clawID)
 			s.cancelWorkflowV2RunForClaw(callbackCtx, clawID, "workflow v2 activation failed")
-			go s.promotePendingClaws()
+			s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 			return "", false, fmt.Errorf("activate workflow v2 run: %w", err)
 		}
 		s.activatingClaws.Delete(clawID)
@@ -335,7 +335,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	})
 
 	if isPending {
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return clawID, true, nil
 	}
 
@@ -356,7 +356,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		fileBytes[k] = []byte(v)
 	}
 
-	go func() {
+	s.goBG("provision workflow claw", func() {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
@@ -369,7 +369,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow provision failed: %v", provErr), false)
 			s.cancelWorkflowV2RunForClaw(context.Background(), clawID, "claw provision failed")
 		}
-	}()
+	})
 
 	return clawID, false, nil
 }

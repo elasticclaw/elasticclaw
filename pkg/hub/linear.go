@@ -746,7 +746,7 @@ func (s *Server) terminateClawForIssue(issueID string) {
 		s.trackFactoryTermination(factoryName, issueID, clawID, "issue left trigger status")
 	}
 	// Promote any pending claws now that a slot is free
-	go s.promotePendingClaws()
+	s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 }
 
 func (s *Server) defaultProvider() string {
@@ -1037,7 +1037,7 @@ func (s *Server) promotePendingClaws() {
 		})
 
 		// Start provisioning asynchronously
-		go s.provisionPendingClaw(clawID)
+		s.goBG("provisionPendingClaw", func() { s.provisionPendingClaw(clawID) })
 	}
 }
 
@@ -1214,7 +1214,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		// Slot is now free (error claws don't count toward limit); try to
 		// promote the next pending claw.
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return
 	}
 
@@ -1491,7 +1491,7 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 		// The move is retried with backoff; run it off the done-signal path so
 		// a slow or failing tracker cannot delay marking the claw idle.
 		factoryCopy := *factory
-		go s.moveFactoryIssueToStatus(&factoryCopy, issueID, targetStatus)
+		s.goBG("moveFactoryIssueToStatus", func() { s.moveFactoryIssueToStatus(&factoryCopy, issueID, targetStatus) })
 	}
 
 	// Keep the claw running — it stays connected to watch for CI failures,
@@ -1659,7 +1659,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
-	go func() {
+	s.goBG("terminate completed claw", func() {
 		s.checkpointBeforeTermination(clawID, "task-completed")
 		if providerID != "" {
 			s.terminateVMForClaw(clawID, provider, providerID)
@@ -1667,7 +1667,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 		// Keep messages (including agent activity logs) for post-mortem diagnosis.
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 		s.promotePendingClaws()
-	}()
+	})
 }
 
 // handleClawTerminateSignal is called when a claw sends a message containing [TERMINATE].
@@ -1772,7 +1772,7 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 
 	// Terminate the provider VM asynchronously
 	if providerID != "" {
-		go s.terminateVM(provider, providerID)
+		s.goBG("terminateVM", func() { s.terminateVM(provider, providerID) })
 	}
 
 	// Track analytics
@@ -1781,7 +1781,7 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	}
 
 	// Promote any pending claws now that a slot is free
-	go s.promotePendingClaws()
+	s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 
 	log.Printf("[terminate] claw %s terminated successfully", clawID[:8])
 }
