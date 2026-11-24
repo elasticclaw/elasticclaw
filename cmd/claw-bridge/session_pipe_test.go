@@ -84,7 +84,9 @@ func TestGatewaySessionClearsTurnMessageIDAfterSuccess(t *testing.T) {
 		}
 		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
 			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "end"},
-		})}); err != nil {
+		})}); err != nil && ctx.Err() == nil {
+			// SendMessage returns on the "res" frame, so the test may finish and
+			// cancel ctx before this write; only a write on a live test fails it.
 			t.Error(err)
 		}
 		<-ctx.Done()
