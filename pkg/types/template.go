@@ -734,6 +734,9 @@ type LifecycleNotificationsConfig struct {
 	// running, none finished recently) before an agent_idle notification
 	// fires. Default "5m", minimum "1m". Detection rides the 2-minute status
 	// watchdog tick, so the alert lands between IdleAfter and IdleAfter+2m.
+	// While liveness.idle_resume can still unstick the agent, the alert waits
+	// for it: it fires only after idle_resume_after + IdleAfter, or as soon as
+	// the resume is paused by the no-progress watchdog or out of attempts.
 	IdleAfter string `yaml:"idle_after,omitempty" json:"idleAfter,omitempty"`
 	// StageProgressAfter alerts when a pipeline stage receives no meaningful
 	// progress for this duration. Empty disables this opt-in alert.
@@ -828,21 +831,33 @@ type LivenessConfig struct {
 	// ever delivered one was a human typing "continue".
 	IdleResume *bool `yaml:"idle_resume,omitempty" json:"idleResume,omitempty"`
 	// IdleResumeAfter is how long an eligible claw must sit with no turn
-	// running before the hub injects the resume prompt. Deliberately longer
-	// than the agent_idle alert threshold so the alert stays the early signal
-	// and the resume is the escalation.
+	// running before the hub injects the resume prompt. No ordering against
+	// the agent_idle alert's idle_after is required: while the resume can
+	// still help, the alert waits for it and fires only once the stretch
+	// outlives idle_resume_after + idle_after (see
+	// agentIdleAlertDeferredToResume in pkg/hub).
 	//
-	// Set it ABOVE the longest legitimate wait between turns for the factory
-	// it applies to. The hub cannot distinguish "stalled in a tool call that
-	// will never return" from "correctly waiting longer than this for
-	// something real": a claw that legitimately waits longer is poked and told
-	// to stop waiting, which is at best a wasted turn and at worst pushes the
-	// agent off a wait it should have kept. Because the attempt counter behind
-	// the runaway cap is a LIFETIME counter (it is not reset by a turn, or the
-	// cap could never be reached in the wake-do-nothing-idle loop it exists to
-	// bound), every premature poke permanently consumes part of that claw's
-	// recovery budget — a threshold set too low can exhaust the budget on
-	// healthy waits and leave nothing for the stall it was added for.
+	// Running subagents count as activity: a claw parked on sessions_yield is
+	// not idle while the bridge reports spawned work in flight, and the clock
+	// restarts at the last report that saw them. The hold has a fixed,
+	// non-configurable ceiling of 45 minutes (agentIdleResumeSubagentCeiling):
+	// past it, subagents still reported running are presumed hung and the
+	// parent is resumed once its own idle time passes this threshold, with a
+	// prompt to check whether they are still making progress rather than to
+	// abandon them. A factory whose subagents legitimately run longer gets
+	// one such prompt per stretch, which spends one resume attempt.
+	//
+	// Otherwise, set it ABOVE the longest legitimate wait between turns for
+	// the factory it applies to. The hub cannot distinguish "stalled in a tool
+	// call that will never return" from "correctly waiting longer than this
+	// for something real": a claw that legitimately waits longer is poked and
+	// told to stop waiting, which is at best a wasted turn and at worst pushes
+	// the agent off a wait it should have kept. Every poke also spends one of
+	// the claw's resume attempts for its current unit of work (the counter is
+	// not reset by a turn, or the cap could never be reached in the
+	// wake-do-nothing-idle loop it exists to bound), so a threshold set too
+	// low can exhaust the budget on healthy waits and leave nothing for the
+	// stall it was added for.
 	IdleResumeAfter string `yaml:"idle_resume_after,omitempty" json:"idleResumeAfter,omitempty"`
 }
 

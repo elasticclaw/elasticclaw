@@ -1377,7 +1377,9 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		}
 		s.publishHubNotice(clawID, startMsg)
 		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
+		s.stageCommandsRunning.Store(clawID, struct{}{})
 		result, err := s.executePipelineRunAction(clawID, stage.OnEnter.Run)
+		s.stageCommandsRunning.Delete(clawID)
 		// Persist output so later stages can reference it via {{ .Outputs.<name>.<key> }}
 		if stage.OnEnter.Run.Output != "" && result != nil {
 			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)

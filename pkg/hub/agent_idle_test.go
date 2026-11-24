@@ -24,6 +24,15 @@ func idleTestConn(clawID string, idleFor time.Duration) *clawConn {
 	}
 }
 
+// disableIdleResume turns the auto-resume off so a test can exercise the alert
+// at idle_after without the alert deferring to the resume.
+func disableIdleResume(s *Server) {
+	off := false
+	s.mu.Lock()
+	s.hubCfg.Liveness = &types.LivenessConfig{IdleResume: &off}
+	s.mu.Unlock()
+}
+
 func clawIdleSince(t *testing.T, db *sql.DB, clawID string) int64 {
 	t.Helper()
 	var v int64
@@ -87,6 +96,7 @@ func agentIdleEventCount(t *testing.T, db *sql.DB, runID string) int {
 func TestAgentIdleAdhocNotifiesOncePerStretchAndRearms(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	disableIdleResume(s)
 	const clawID = "idle-adhoc"
 	insertSlackTestClaw(t, db, clawID, "connected", 0, "", oldEnough)
 	setClawPipelineStage(t, db, clawID, "implement")
@@ -171,6 +181,7 @@ func TestAgentIdleAdhocNotifiesOncePerStretchAndRearms(t *testing.T) {
 func TestAgentIdleNeverTurnClawDoesNotReAlertOnReconnect(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	disableIdleResume(s)
 	const clawID = "idle-noturn"
 	// Created an hour ago: created_at must predate every connection, as it
 	// does in production (a claw exists before its bridge first registers).
@@ -289,6 +300,7 @@ func TestAgentIdlePreBaselineNeverTurnStallStaysParkedAcrossReconnect(t *testing
 func TestAgentIdleExclusions(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	disableIdleResume(s)
 	setLifecycleClawBaseline(t, s)
 	backdateAgentIdleBaseline(t, s)
 	setSlackWatermark(t, s, 0)
@@ -573,6 +585,7 @@ func TestAgentIdleToggleParksBothPassesWithoutReplay(t *testing.T) {
 func TestAgentIdleFirstEnableParksPreexistingStretches(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	disableIdleResume(s)
 	// The baseline is deliberately NOT backdated: it was stamped at server
 	// boot, so both claws' 10-minute-old stretches predate it — exactly a
 	// first deploy over a hub with already-idle claws.
@@ -639,6 +652,7 @@ func TestAgentIdleFirstEnableParksPreexistingStretches(t *testing.T) {
 func TestAgentIdleDisabledWindowDoesNotReplayOnReenable(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	disableIdleResume(s)
 	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 0, "", oldEnough)
 	setClawPipelineStage(t, db, "claw-adhoc", "implement")
 	seedIdleTestBaseline(t, s)
