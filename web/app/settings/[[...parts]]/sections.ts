@@ -3,6 +3,7 @@ export const VALID_SECTIONS = [
   "models",
   "github",
   "authentication",
+  "api-tokens",
   "issue-trackers",
   "workspaces",
   "workflows",

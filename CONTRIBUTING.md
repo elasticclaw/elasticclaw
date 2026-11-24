@@ -154,6 +154,8 @@ make test-install        # container integration test (needs Docker)
 ELASTICCLAW_INSTALL_TESTS=1 make test-install  # actually spins Ubuntu container
 ```
 
+Test binaries run with an isolated `HOME` and `ELASTICCLAW_HUB_CONFIG` (see `internal/testenv`), so they never read your real `~/.elasticclaw` credentials. Don't wrap `go test` in `HOME=$(mktemp -d)`: the Go build and module caches then land in that directory (~1.6 GB per run). Automated loops should use `hack/go-test.sh [args]`, which refuses to run when disk space is low.
+
 ### Working on the claw-bridge
 
 The claw-bridge runs on each VM and connects back to ElasticClaw Server. After changes:

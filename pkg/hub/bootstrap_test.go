@@ -998,6 +998,62 @@ func TestBuildOpenClawProviderConfig_ConfiguresGrokProvider(t *testing.T) {
 	assertContains(t, snippet, "providers['grok']", "writes Grok provider config")
 }
 
+// A reasoning model's maxTokens covers reasoning plus the answer. At 8192,
+// fireworks glm-5p3 spent the whole budget reasoning and never called a tool.
+func TestBuildOpenClawProviderConfig_ReasoningModelsGetRoomToAnswer(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+
+	for _, tc := range []struct {
+		key      *types.LLMKeyConfig
+		model    string
+		provider string
+	}{
+		{&types.LLMKeyConfig{Name: "fireworks-main", Provider: "fireworks", Default: true}, "fireworks/accounts/fireworks/models/glm-5p3", "fireworks"},
+		{&types.LLMKeyConfig{Name: "grok-main", Provider: "grok", Default: true}, "grok/grok-build-0.1", "grok"},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			snippet := buildOpenClawProviderConfig([]*types.LLMKeyConfig{tc.key}, tc.key.Name)
+			home := t.TempDir()
+			cmd := exec.Command("bash", "-c", snippet)
+			cmd.Env = append(os.Environ(), "HOME="+home, "OPENCLAW_DEFAULT_MODEL="+tc.model)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("run config snippet: %v\n%s", err, string(out))
+			}
+			data, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
+			if err != nil {
+				t.Fatalf("read patched config: %v", err)
+			}
+			var config struct {
+				Models struct {
+					Providers map[string]struct {
+						Models []struct {
+							Reasoning     bool `json:"reasoning"`
+							ContextWindow int  `json:"contextWindow"`
+							MaxTokens     int  `json:"maxTokens"`
+						} `json:"models"`
+					} `json:"providers"`
+				} `json:"models"`
+			}
+			if err := json.Unmarshal(data, &config); err != nil {
+				t.Fatalf("parse patched config: %v", err)
+			}
+			models := config.Models.Providers[tc.provider].Models
+			if len(models) != 1 {
+				t.Fatalf("%s provider models = %#v", tc.provider, models)
+			}
+			m := models[0]
+			if !m.Reasoning || m.MaxTokens != 32768 || m.ContextWindow != 256000 {
+				t.Fatalf("%s model = %+v, want reasoning with maxTokens 32768 in a 256000 window", tc.provider, m)
+			}
+		})
+	}
+}
+
 func TestBuildOpenClawProviderConfig_UsesNativeXAIForGrokOAuth(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not in PATH")

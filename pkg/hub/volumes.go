@@ -30,6 +30,10 @@ const (
 	emptyVolumeArchive = "empty"
 )
 
+// volumeLeaseSlotGrace is how long after its last bridge heartbeat a finished
+// claw's unreleased writable lease still holds its concurrency slot.
+const volumeLeaseSlotGrace = 2 * time.Minute
+
 type workflowVolumeRuntime struct {
 	types.WorkflowVolume
 	LeaseID        string `json:"lease_id,omitempty"`

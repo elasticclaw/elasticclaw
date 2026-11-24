@@ -14,7 +14,7 @@ import (
 )
 
 func TestSessionLossReason(t *testing.T) {
-	for _, reason := range []string{types.SessionLossReasonTurnTimeout, types.SessionLossReasonLockConflict, types.SessionLossReasonGatewayReconnect, types.SessionLossReasonProviderError, types.SessionLossReasonUnknown} {
+	for _, reason := range []string{types.SessionLossReasonTurnTimeout, types.SessionLossReasonLockConflict, types.SessionLossReasonGatewayReconnect, types.SessionLossReasonProviderError, types.SessionLossReasonProviderRefusal, types.SessionLossReasonUnknown} {
 		for _, err := range []error{&sessionPreservedError{err: errors.New("interrupted"), reason: reason}, &sessionRotatedError{err: errors.New("interrupted"), reason: reason}} {
 			if got := sessionLossReason(fmt.Errorf("wrapped: %w", err)); got != reason {
 				t.Errorf("reason = %q, want %q", got, reason)

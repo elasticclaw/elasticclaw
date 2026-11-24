@@ -55,7 +55,7 @@ export interface Claw {
 
 export interface Message {
   id: string
-  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary" | "state"
+  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary" | "state" | "effect"
   content: string
   format?: string // "pre" = preserve whitespace
   timestamp: Date
@@ -95,6 +95,25 @@ export interface AgentActivity {
   subagent_prompt?: string
 }
 
+/** Structured payload behind "workflow:effect:<json>" run-log messages (workflow v2). */
+export interface WorkflowEffectEvent {
+  kind: string
+  phase: "planned" | "started" | "dispatched" | "finished" | "assigned"
+  status?: string
+  attempt?: number
+  definition_path?: string
+  command?: string
+  /** Correlation id from the assignment receipt; the authoritative "finished" line arrives separately. */
+  task_id?: string
+  exit_code?: number
+  succeeded?: boolean
+  stdout?: string
+  stderr?: string
+  error?: string
+  instructions?: string
+  terminal_reason?: string
+}
+
 // Raw API types
 export interface ApiClaw {
   id: string
@@ -121,7 +140,7 @@ export interface ApiMessage {
   id: string
   claw_id: string
   tenant_id: string
-  role: "user" | "claw" | "hub" | "activity" | "activity_summary" | "state"
+  role: "user" | "claw" | "hub" | "activity" | "activity_summary" | "state" | "effect"
   content: string
   format?: string
   created_at: string
@@ -137,6 +156,7 @@ export interface CreateClawRequest {
 }
 
 export interface TaskRunAnalyticsFilters {
+  runKind?: string
   status?: string
   ownerType?: string
   workspace?: string
@@ -173,10 +193,12 @@ export interface TaskRunAnalyticsSummary {
 }
 
 export interface CostBucket {
+  approximateCostUsd?: number
   costUsd: number
 }
 
 export interface CostToday {
+  approximateCostUsd?: number
   costUsd: number
   totalTokens: number
   deltaPctVsYesterday: number | null
@@ -189,6 +211,7 @@ export interface CostProjection {
 }
 
 export interface CostDailyPoint {
+  approximateCostUsd?: number
   date: string
   costUsd: number
   totalTokens: number
@@ -198,6 +221,7 @@ export interface CostDailyPoint {
 export interface CostModelSeries { model: string; dailySeries: CostDailyPoint[] }
 
 export interface CostOverview {
+  approximateCostUsd?: number
   today: CostToday
   week: CostBucket
   month: CostBucket
@@ -222,7 +246,8 @@ export interface GeneralStats {
 }
 
 export interface AnalyticsEffectiveness {
-  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[] | null
+  ticketCostUsd?: number
+  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number; cancelled?: number }[] | null
   funnel: { agentStarted: number; prOpened: number; prFinished: number }
   costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[] | null; average: number }
   mergeRate: number
@@ -231,8 +256,9 @@ export interface AnalyticsEffectiveness {
   ticketSuccessRate: number
   ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[] | null
   runsPerTicket: { bucket: string; tickets: number }[] | null
-  topTicketsByCost: { ticketKey: string; issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[] | null
+  topTicketsByCost: { ticketKey: string; issueId: string; issueTitle: string; costUsd: number; approximate?: boolean; runs: number; outcome: string }[] | null
   prior?: {
+    ticketCostUsd?: number
     successRate: number
     ticketSuccessRate: number
     uniqueTickets: number
@@ -241,6 +267,7 @@ export interface AnalyticsEffectiveness {
 }
 
 export interface AnalyticsCostDriver {
+  approximate?: boolean
   name: string
   runs: number
   successRate: number
@@ -251,6 +278,7 @@ export interface AnalyticsCostDriver {
 }
 
 export interface TaskRunSummary {
+  outcome?: "delivered" | "no_changes" | "closed" | "failed" | "cancelled"
   runId: string
   initialAttemptId: string
   currentAttemptId: string
@@ -299,6 +327,18 @@ export interface TaskRunSummary {
   outputTokens?: number
   totalTokens?: number
   estimatedCostUsd?: number
+  costSource?: "openclaw" | "fallback" | "mixed"
+  costApproximate?: boolean
+  costBreakdown?: {
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheWriteTokens: number
+    inputCostUsd: number
+    outputCostUsd: number
+    cacheReadCostUsd: number
+    cacheWriteCostUsd: number
+  }
   issueTitle?: string
 }
 
@@ -318,6 +358,8 @@ export interface TaskRunsResponse {
 }
 
 export interface AnalyticsTicketRunSummary {
+  outcome?: string
+  approximate?: boolean
   runId: string
   status: string
   phase: string
@@ -346,6 +388,7 @@ export interface AnalyticsTicketStoryEntry {
 }
 
 export interface AnalyticsTicket {
+  approximate?: boolean
   ticketKey: string
   issueId: string
   issueTitle: string
@@ -371,6 +414,10 @@ export interface AnalyticsTicket {
   openPrCount: number
   timeToFirstRun: number
   leadTime: number
+  factoryTime: number
+  awaitingMergeTime: number
+  prOpenedAt: number
+  clockRunning: boolean
   lastActivity: number
   story: AnalyticsTicketStoryEntry[]
 }

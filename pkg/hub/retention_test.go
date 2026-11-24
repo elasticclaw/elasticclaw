@@ -133,6 +133,25 @@ func TestRetentionPlanRecordsExpansion(t *testing.T) {
 	}
 }
 
+// A bridge retry re-plans the same checkpoint with a new tree; the row must
+// follow it so the collector keeps the new tree's blobs alive.
+func TestRetentionReplanRepointsCreatingCheckpoint(t *testing.T) {
+	s := retentionServer(t)
+	first, firstFile := retentionBlob(t, "tree-1"), retentionBlob(t, "file-1")
+	second, secondFile := retentionBlob(t, "tree-2"), retentionBlob(t, "file-2")
+	insertTestCheckpoint(t, s, "retry", "manual")
+	retentionRecord(t, s, "retry", first, firstFile)
+	retentionRecord(t, s, "retry", second, secondFile)
+	if got := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE id='retry' AND root_tree_sha256=?`, second); got != 1 {
+		t.Fatal("replan did not repoint the creating checkpoint")
+	}
+	if _, err := s.collectCheckpointBlobs(time.Now(), false); err != nil {
+		t.Fatal(err)
+	}
+	retentionExists(t, checkpointBlobPath(secondFile), true)
+	retentionExists(t, checkpointBlobPath(firstFile), false)
+}
+
 func TestRetentionRejectsNonHexDigests(t *testing.T) {
 	s := retentionServer(t)
 	at := time.Now().UTC()

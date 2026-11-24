@@ -323,7 +323,7 @@ func TestDeliveryUpgradesMentionOnlyRow(t *testing.T) {
 	s, db, _, _ := multiPRFixture(t, "claw-upgrade")
 	const url = "https://github.com/owner/repo/pull/9"
 
-	s.scanMessageForPRs("claw-upgrade", "this depends on "+url, true)
+	s.scanMessageForPRs("claw-upgrade", "this depends on "+url, true, "mention")
 	var mentionOnly int
 	if err := db.QueryRow(`SELECT mention_only FROM claw_prs WHERE claw_id=? AND pr_url=?`, "claw-upgrade", url).Scan(&mentionOnly); err != nil {
 		t.Fatal(err)
@@ -1006,7 +1006,7 @@ func TestPipelineGateRegisteredPRBlocksFinalization(t *testing.T) {
 	s, db, _, _ := multiPRFixture(t, "claw-gate-registered")
 	const url = "https://github.com/owner/repo/pull/31"
 
-	s.scanMessageForPRs("claw-gate-registered", `{"prs":["`+url+`"]}`, false)
+	s.scanMessageForPRs("claw-gate-registered", `{"prs":["`+url+`"]}`, false, "gate")
 	var mentionOnly int
 	if err := db.QueryRow(`SELECT mention_only FROM claw_prs WHERE claw_id=? AND pr_url=?`, "claw-gate-registered", url).Scan(&mentionOnly); err != nil {
 		t.Fatal(err)

@@ -58,9 +58,19 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	unlock, done := s.signalWorkflowV2ManualTrigger(w, r, workspace, workflow)
+	if done {
+		return
+	}
+	if unlock != nil {
+		defer unlock()
+	}
+
 	workspaceYAML := []byte(workspace.Files["elasticclaw-config.yaml"])
 	workflowYAML := []byte(workflow.RawConfig)
 	runID := uuid.NewString()
+	finishedAtActivation := false
+	var finishedStatus workflowv2.RunStatus
 	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
 		ctx: r.Context(), inputs: inputs, reason: "manual workflow v2 trigger",
 		beforeProvision: func(ctx context.Context, clawID, tenantID string) error {
@@ -82,10 +92,14 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			}
 			_, err = store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(workspace.Files))
 			if err == nil {
-				err = store.CompleteActivation(ctx, run.ID)
+				err = s.completeWorkflowV2Activation(ctx, store, run.ID)
 			}
-			if err == nil {
-				return nil
+			var finished workflowV2FinishedAtActivationError
+			if errors.As(err, &finished) {
+				finishedAtActivation, finishedStatus = true, finished.status
+			}
+			if err == nil || finishedAtActivation {
+				return err
 			}
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -103,7 +117,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		jsonError(w, http.StatusInternalServerError, "failed to create workflow v2 run: "+err.Error())
 		return
 	}
-	if startCommand := v2WorkflowStartCommand(workflow.RawConfig); startCommand != "" {
+	if startCommand := v2WorkflowStartCommand(workflow.RawConfig); startCommand != "" && !finishedAtActivation {
 		store := workflowv2.NewStore(s.db)
 		if _, err := store.ApplyCommand(r.Context(), runID, startCommand, workflowv2.CommandInput{
 			ID:        uuid.NewString(),
@@ -119,7 +133,55 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		// The start command may have transitioned straight to a terminal state.
 		go s.maybeFinishWorkflowV2Parent(context.Background(), runID)
 	}
-	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": "created"})
+	status := "created"
+	if finishedAtActivation {
+		// No claw was provisioned; report the terminal state the run reached
+		// (completed or cancelled).
+		status = string(finishedStatus)
+	}
+	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": status})
+}
+
+// signalWorkflowV2ManualTrigger applies a cron trigger's signal overlap policy
+// to a manual trigger: while a run is open, the trigger delivers cron.tick to
+// it instead of starting a duplicate run, and trigger inputs are ignored. done
+// reports that the response was written. Otherwise a non-nil unlock holds the
+// signal lock, which the caller keeps through activation so a concurrent tick
+// cannot miss the new run.
+func (s *Server) signalWorkflowV2ManualTrigger(w http.ResponseWriter, r *http.Request,
+	workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) (unlock func(), done bool) {
+	cs := s.cronSchedulerV2
+	trigger, ok := cronTriggerFromV2Workflow(workflow)
+	if cs == nil || !ok || !strings.EqualFold(strings.TrimSpace(trigger.OverlapPolicy), "signal") {
+		return nil, false
+	}
+	sw := &scheduledWorkflowV2{workspace: workspace, workflow: workflow, trigger: trigger,
+		key: workspace.Name + "/" + workflow.Name}
+	tenantID := tenantFromCtx(r)
+	if strings.TrimSpace(tenantID) == "" {
+		var err error
+		if tenantID, err = cs.tenantIDForWorkspace(workspace.Name); err != nil {
+			jsonError(w, http.StatusInternalServerError, "resolve tenant: "+err.Error())
+			return nil, true
+		}
+	}
+	unlock = cs.lockSignal(sw.key)
+	status, targets, handled, err := cs.signalOpenRuns(workflowv2.NewStore(s.db), sw, tenantID, time.Now().UTC())
+	if !handled {
+		return unlock, false
+	}
+	unlock()
+	switch {
+	case errors.Is(err, errCronSchedulerStopping):
+		jsonError(w, http.StatusServiceUnavailable, err.Error())
+	case err != nil:
+		jsonError(w, http.StatusInternalServerError, "failed to signal workflow v2 run: "+err.Error())
+	case status == workflowRunSkipped:
+		jsonError(w, http.StatusConflict, "a workflow v2 run is still pending activation")
+	default:
+		jsonOK(w, map[string]interface{}{"status": string(status), "target_run_ids": targets})
+	}
+	return nil, true
 }
 
 func v2WorkflowStartCommand(rawConfig string) string {

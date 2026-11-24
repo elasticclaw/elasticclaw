@@ -1661,6 +1661,86 @@ func TestGatewaySessionSurfacesLifecycleRawErrorFromSessionsGet(t *testing.T) {
 	}
 }
 
+// startLifecycleEndGateway serves one accepted sessions.send whose turn ends
+// with a lifecycle end carrying data, then keeps the socket open.
+func startLifecycleEndGateway(t *testing.T, data map[string]interface{}) *gatewaySession {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+			"stream": "assistant", "sessionKey": "session-1", "data": map[string]string{"delta": "partial"},
+		})})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": data,
+		})})
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.CloseNow() })
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	return gs
+}
+
+// OpenClaw 2026.9.4 ends a turn whose reasoning-only retries are exhausted
+// with lifecycle end livenessState=abandoned (its terminalError
+// non_deliverable_terminal_turn stays in the trajectory file).
+func TestGatewaySessionUndeliverableTurnFailsOnlyWhenRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		data     map[string]interface{}
+		required bool
+		wantErr  string
+	}{
+		{"abandoned required", map[string]interface{}{"phase": "end", "livenessState": "abandoned", "replayInvalid": true},
+			true, "agent turn ended without a deliverable answer: livenessState=abandoned"},
+		{"blocked required", map[string]interface{}{"phase": "end", "livenessState": "blocked", "stopReason": "length"},
+			true, "agent turn ended without a deliverable answer: livenessState=blocked stopReason=length"},
+		{"abandoned not required", map[string]interface{}{"phase": "end", "livenessState": "abandoned"}, false, ""},
+		{"working required", map[string]interface{}{"phase": "end", "livenessState": "working", "stopReason": "stop"}, true, ""},
+		{"aborted required", map[string]interface{}{"phase": "end", "livenessState": "blocked", "aborted": true}, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gs := startLifecycleEndGateway(t, tc.data)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if tc.required {
+				ctx = requireDeliverableTurn(ctx)
+			}
+			reply, err := gs.SendMessage(ctx, "repair", "turn-1", nil, nil)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("SendMessage = %q, %v; want error %q", reply, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || reply != "partial" {
+				t.Fatalf("SendMessage = %q, %v; want completed reply", reply, err)
+			}
+		})
+	}
+}
+
 func TestGatewaySessionLifecycleErrorWinsOverDisconnectDuringCauseLookup(t *testing.T) {
 	const generic = "⚠️ Agent run failed (model: anthropic/claude-sonnet-5)"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2073,6 +2153,9 @@ func TestIsRecoverableSessionLifecycleError(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "provider format rejection", err: errString("LLM request failed: " + providerRequestFormatErrorFragment + "."), want: true},
+		{name: "provider reasoning_extraction refusal", err: errString(productionRefusalError), want: true},
+		{name: "send request provider refusal", err: &sessionSendRequestError{err: errString(productionRefusalError)}, want: true},
+		{name: "other refusal category", err: errString("The provider refused this request (category: cyber). Revise the request and try again."), want: false},
 		{name: "accepted turn deadline", err: context.DeadlineExceeded, want: true},
 		{name: "send request deadline", err: &sessionSendRequestError{err: context.DeadlineExceeded}, want: false},
 		{name: "caller cancellation", err: context.Canceled, want: false},
@@ -2251,10 +2334,55 @@ func TestReplayQueuedDeliversRecoveryEdgeBeforeEmptyReply(t *testing.T) {
 	}
 }
 
+func TestSessionRotationReasonPrefersProviderRefusal(t *testing.T) {
+	refusal := errString(productionRefusalError)
+	lockConflict := errString("error: session file changed while embedded prompt lock was released")
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "refusal", err: refusal, want: types.SessionLossReasonProviderRefusal},
+		{name: "refusal joined with deadline", err: errors.Join(context.DeadlineExceeded, refusal), want: types.SessionLossReasonProviderRefusal},
+		{name: "refusal wrapping deadline", err: fmt.Errorf("%s: %w", productionRefusalError, context.DeadlineExceeded), want: types.SessionLossReasonProviderRefusal},
+		{name: "refusal joined with lock conflict", err: errors.Join(lockConflict, refusal), want: types.SessionLossReasonProviderRefusal},
+		{name: "deadline", err: context.DeadlineExceeded, want: types.SessionLossReasonTurnTimeout},
+		{name: "lock conflict", err: lockConflict, want: types.SessionLossReasonLockConflict},
+		{name: "provider format", err: errString("LLM request failed: " + providerRequestFormatErrorFragment + "."), want: types.SessionLossReasonProviderError},
+		{name: "other", err: errString("boom"), want: types.SessionLossReasonUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionRotationReason(tt.err); got != tt.want {
+				t.Fatalf("sessionRotationReason(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// productionRefusalError is the lifecycle error text claw-bridge logged on
+// Faster claws in Nov 2026 ("[gateway] agent turn error: ...").
+const productionRefusalError = "The provider refused this request (category: reasoning_extraction). Revise the request and try again."
+
 func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
+	testGatewaySessionResetsAfterLifecycleError(t, "LLM request failed: "+providerRequestFormatErrorFragment+".", types.SessionLossReasonProviderError, false)
+}
+
+func TestGatewaySessionResetsAfterProviderRefusalLifecycleError(t *testing.T) {
+	testGatewaySessionResetsAfterLifecycleError(t, productionRefusalError, types.SessionLossReasonProviderRefusal, false)
+}
+
+// A refusal reported by sessions.send itself still rotates through the
+// session_rotated edge instead of replaying the bare message into a fresh
+// session; the fake gateway fails the test on any second sessions.send.
+func TestGatewaySessionResetsAfterProviderRefusalSendError(t *testing.T) {
+	testGatewaySessionResetsAfterLifecycleError(t, productionRefusalError, types.SessionLossReasonProviderRefusal, true)
+}
+
+func testGatewaySessionResetsAfterLifecycleError(t *testing.T, providerErr, wantReason string, rejectSend bool) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
-	const providerErr = "LLM request failed: " + providerRequestFormatErrorFragment + "."
 	testDone := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -2281,24 +2409,31 @@ func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 		if !ok {
 			return
 		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
-			t.Errorf("accept sessions.send: %v", err)
-			return
-		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
-			Type:  "event",
-			Event: "agent",
-			Payload: mustJSON(map[string]interface{}{
-				"stream":     "lifecycle",
-				"sessionKey": "session-1",
-				"data": map[string]string{
-					"phase": "error",
-					"error": providerErr,
-				},
-			}),
-		}); err != nil {
-			t.Errorf("write lifecycle error: %v", err)
-			return
+		if rejectSend {
+			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: false, Error: &gwError{Code: "provider_error", Message: providerErr}}); err != nil {
+				t.Errorf("reject sessions.send: %v", err)
+				return
+			}
+		} else {
+			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+				t.Errorf("accept sessions.send: %v", err)
+				return
+			}
+			if err := wsjson.Write(r.Context(), conn, gwFrame{
+				Type:  "event",
+				Event: "agent",
+				Payload: mustJSON(map[string]interface{}{
+					"stream":     "lifecycle",
+					"sessionKey": "session-1",
+					"data": map[string]string{
+						"phase": "error",
+						"error": providerErr,
+					},
+				}),
+			}); err != nil {
+				t.Errorf("write lifecycle error: %v", err)
+				return
+			}
 		}
 
 		abortReq, ok := readRequest("sessions.abort")
@@ -2375,6 +2510,9 @@ func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	}
 	if got := loadBridgeSession(); got != "session-2" {
 		t.Fatalf("persisted session key = %q, want session-2", got)
+	}
+	if got := sessionLossReason(err); got != wantReason {
+		t.Fatalf("session loss reason = %q, want %q", got, wantReason)
 	}
 }
 
@@ -4630,5 +4768,76 @@ func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("no sessions.abort observed")
+	}
+}
+
+func TestParseSessionCacheTokens(t *testing.T) {
+	read, write, err := parseSessionCacheTokens([]byte(`{"sessions":[{"key":"k","usage":{"input":10,"output":5,"cacheRead":1200,"cacheWrite":300,"totalCost":0}}]}`))
+	if err != nil || read == nil || write == nil || *read != 1200 || *write != 300 {
+		t.Fatalf("got %v %v %v, want 1200 300", read, write, err)
+	}
+	if _, _, err := parseSessionCacheTokens([]byte(`{"sessions":[{"key":"k","usage":null}]}`)); err == nil {
+		t.Fatal("missing usage must be an error, not zero cache tokens")
+	}
+}
+
+func TestGatewayCostUnknown(t *testing.T) {
+	n, zero, cost := 10, 0.0, 0.5
+	for _, tc := range []struct {
+		usage gatewayUsage
+		want  bool
+	}{
+		{gatewayUsage{inputTokens: &n, estimatedCostUSD: &zero}, true},
+		{gatewayUsage{outputTokens: &n}, true},
+		{gatewayUsage{inputTokens: &n, estimatedCostUSD: &cost}, false},
+		{gatewayUsage{estimatedCostUSD: &zero}, false},
+	} {
+		if got := tc.usage.gatewayCostUnknown(); got != tc.want {
+			t.Errorf("%+v: got %v, want %v", tc.usage, got, tc.want)
+		}
+	}
+}
+
+func TestNeedsCacheTokensAfterGatewayPricing(t *testing.T) {
+	n, cost, read := 10, 0.5, 100
+	priced := gatewayUsage{sessionKey: "a", inputTokens: &n, estimatedCostUSD: &cost}
+	if priced.needsCacheTokens(gatewayUsage{sessionKey: "a"}) {
+		t.Fatal("gateway-priced session without counters must not poll")
+	}
+	if !priced.needsCacheTokens(gatewayUsage{sessionKey: "a", cacheReadTokens: &read}) {
+		t.Fatal("gateway-priced turn after counters must keep the cache baseline current")
+	}
+	if priced.needsCacheTokens(gatewayUsage{sessionKey: "b", cacheReadTokens: &read}) {
+		t.Fatal("another session's counters must not trigger polling")
+	}
+}
+
+func TestNewTurnSince(t *testing.T) {
+	a, b := 10, 20
+	prev := gatewayUsage{sessionKey: "s", inputTokens: &a, outputTokens: &a}
+	if (gatewayUsage{sessionKey: "s", inputTokens: &a, outputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("same totals are the same turn")
+	}
+	if !(gatewayUsage{sessionKey: "s", inputTokens: &b, outputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("changed input totals are a new turn")
+	}
+	if !(gatewayUsage{sessionKey: "s", inputTokens: &a}).newTurnSince(prev) {
+		t.Fatal("a dropped output total is a new turn")
+	}
+}
+
+func TestMaxIntPtr(t *testing.T) {
+	one, two := 1, 2
+	if got := maxIntPtr(&two, &one); *got != 2 {
+		t.Fatalf("max(2,1) = %d", *got)
+	}
+	if got := maxIntPtr(nil, &one); *got != 1 {
+		t.Fatalf("max(nil,1) = %d", *got)
+	}
+	if got := maxIntPtr(&one, nil); *got != 1 {
+		t.Fatalf("max(1,nil) = %d", *got)
+	}
+	if maxIntPtr(nil, nil) != nil {
+		t.Fatal("max(nil,nil) must stay nil")
 	}
 }

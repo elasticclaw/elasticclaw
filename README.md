@@ -116,6 +116,53 @@ For deterministic plan approval (schema gate instead of freeform chat), see
 [linear-issue-plan-gate.yaml](examples/workflows/linear-issue-plan-gate.yaml)
 and the docs on [plan approval](https://elasticclaw.ai/docs/workflows#plan-approval).
 
+### V1 stage triggers
+
+A stage's `message_contains` trigger accepts a token at the start of a message
+line (leading whitespace and markdown decoration are allowed). Optional `from`
+restricts the trigger to the claw's current stage ID: use a string or a non-empty
+list of existing stage IDs. Omit `from` to preserve matching from any stage.
+Blank, unknown or non-string IDs are validation errors.
+
+```yaml
+stages:
+  - id: implementation
+    entry: true
+  - id: build_check
+    triggers:
+      - message_contains: "[IMPLEMENTATION_DONE]"
+        from: implementation
+      - message_contains: "[RETRY_BUILD]"
+        from: fix_build
+  - id: fix_build
+    triggers:
+      - gate_result: {stage: build_check, verdict: fail}
+        from: build_check
+  - id: finished
+    terminal: true
+    triggers:
+      - message_contains: "[DONE]"
+        from: build_check
+  - id: blocked
+    terminal: true
+    triggers:
+      - message_contains: "[BLOCKED]"
+        from: [implementation, fix_build]
+```
+
+`from` also applies to `output_matches`, `gate_result`, `judge_verdict`,
+`pr_merged`, `pr_closed` and `pr_conditions`. It permits retry loops; it does not
+impose a forward-only stage order. An anchored token excluded by every matching
+trigger produces one hub correction per claw, stage and token, listing the
+message signals accepted in that stage.
+For `pr_merged`/`pr_closed`, `from` only restricts the pipeline transition; if no
+trigger matches in the current stage, the existing PR-closed/merged handling
+(stopping the claw) still applies.
+
+The v1-to-v2 converter preserves explicit `from` for supported PR triggers.
+`message_contains` still requires a manual choice of trusted v2 evidence and is
+reported as a conversion warning.
+
 ## Three ways to start work
 
 **From an issue tracker**
@@ -129,6 +176,25 @@ Create and inspect agents, manage workspaces and workflows, configure providers,
 **From your own automation**
 
 Use webhooks and the ElasticClaw Server API to connect private queues, release events, internal systems, or scheduled work.
+
+## Factory MCP server
+
+The hub exposes a stateless Streamable HTTP MCP server at `/mcp`. Sign in with GitHub as an admin (password sessions cannot manage tokens) and create a personal token in **Settings → API Tokens**, then configure Claude Code:
+
+```sh
+export FACTORY_API_TOKEN='ecf_...'
+claude mcp add --transport http factory https://your-hub.example/mcp \
+  --header "Authorization: Bearer $FACTORY_API_TOKEN"
+```
+
+Only `Authorization: Bearer` personal API tokens are accepted. Every request checks that the token is active and its owner is still an admin. Tokens do not authenticate existing REST or WebSocket routes. Tool calls use the owner's tenant and permissions and are recorded in `api_token_audit` before they run (a call is refused if its audit row cannot be written). Audit rows store the tool arguments, truncated to 1 KiB, with `content` shortened, workflow `input` reduced to its keys, and values of credential-like keys (token, secret, password, API key) redacted (error details are withheld for such calls); the hub prunes them after 90 days, independently of checkpoint retention settings.
+
+- Agents: `list_claws`, `get_claw`, `get_claw_timeline`, `get_claw_activity`, `get_claw_prs`, `get_gateway_diagnostics`.
+- Workflows: `list_workspaces`, `list_workflows`, `list_workflow_runs`, `get_workflow_run`, `get_workflow_run_logs`, `list_workflow_run_attempts`, `get_workflow_attempt_logs` (run and attempt tools cover v2 workflows only).
+- Analytics: `analytics_summary`, `analytics_general_stats`, `analytics_effectiveness`, `analytics_runs`, `analytics_run`, `analytics_tickets`, `analytics_costs`, `analytics_cost_drivers`, `analytics_filter_options`.
+- Interactions: `send_message`, `trigger_workflow`, `update_claw`, `kill_claw` (irreversibly terminates the agent and its sandbox).
+
+`list_claws` defaults to 50 agents. Analytics tools expose the REST filters using their canonical names; multi-value filters accept comma-separated strings. Log tools support the same time and pagination filters as the dashboard. Captured diagnostics return newest files first with a total tail budget of 64 KiB by default (128 KiB maximum). Successful tool output is capped at 200 KiB; narrow filters or use `limit` when truncated. `trigger_workflow.input` is the entire trigger request body, for example `{"inputs":{"issue_number":"123"}}`.
 
 ## Architecture
 
@@ -153,6 +219,8 @@ ElasticClaw Server owns policy. Providers own compute. OpenClaw owns the coding 
 - [GitHub integration](https://elasticclaw.ai/docs/github-integration)
 - [Linear integration](https://elasticclaw.ai/docs/linear-integration)
 - [CLI reference](https://elasticclaw.ai/docs/cli-reference)
+
+V1 workflows accept top-level `initial_plan: false` to disable the freeform initial-plan handshake (default: `true`). This key is also supported inside legacy factory `pipeline_yaml`. Deterministic `plan_gate` approval still disables the freeform handshake; `initial_plan` does not skip stages or gates. When freeform approval runs on a pipeline, its proceed message keeps the agent on the current stage.
 
 ## Project status
 

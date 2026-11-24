@@ -110,6 +110,7 @@ var reservedWorkspaceNames = map[string]bool{
 	"models":              true,
 	"github":              true,
 	"authentication":      true,
+	"api-tokens":          true,
 	"issue-trackers":      true,
 	"workspaces":          true,
 	"workflows":           true,
@@ -465,10 +466,22 @@ func loadExternalWorkflowDocument(fileName string, data []byte) (*types.Workflow
 		name := strings.TrimSuffix(fileName, ".yaml")
 		enabled := false // missing/invalid v2 documents are always fail-closed
 		manualTrigger := false
+		runKind, requiresPR, analyticsEnabled := "code_task", true, true
 		if resolved, err := v2.ParseAndValidateWorkflow(data); err == nil && resolved.Workflow.Name != "" {
 			name = resolved.Workflow.Name
 			enabled = resolved.Workflow.Enabled
 			manualTrigger = resolved.Workflow.ManualTrigger
+			if analytics := resolved.Workflow.Analytics; analytics != nil {
+				if analytics.RunKind != "" {
+					runKind = analytics.RunKind
+				}
+				if analytics.RequiresPR != nil {
+					requiresPR = *analytics.RequiresPR
+				}
+				if analytics.Enabled != nil {
+					analyticsEnabled = *analytics.Enabled
+				}
+			}
 		} else {
 			var probe struct {
 				Name string `yaml:"name"`
@@ -483,6 +496,9 @@ func loadExternalWorkflowDocument(fileName string, data []byte) (*types.Workflow
 		}
 		return &types.WorkflowConfig{
 			SchemaVersion:       "2",
+			RunKind:             runKind,
+			RequiresPR:          &requiresPR,
+			AnalyticsEnabled:    &analyticsEnabled,
 			Name:                name,
 			Enabled:             &enabled,
 			EnableManualTrigger: manualTrigger,

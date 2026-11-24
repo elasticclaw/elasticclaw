@@ -18,6 +18,7 @@ import (
 func TestAgentIdleSuppressedWhileSubagentsActive(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	disableIdleResume(s)
 	const clawID = "idle-subagents"
 	insertSlackTestClaw(t, db, clawID, "connected", 0, "", oldEnough)
 	setClawPipelineStage(t, db, clawID, "implement")
@@ -63,6 +64,7 @@ func TestAgentIdleSuppressedWhileSubagentsActive(t *testing.T) {
 func TestAgentIdleZeroSubagentHeartbeatClearsSuppression(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	disableIdleResume(s)
 	const clawID = "idle-subagents-zero"
 	insertSlackTestClaw(t, db, clawID, "connected", 0, "", oldEnough)
 	setClawPipelineStage(t, db, clawID, "implement")

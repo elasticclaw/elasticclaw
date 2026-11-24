@@ -110,6 +110,12 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 		StartedAt: ts + 8000, RequiresPR: boolPtr(false), ExcludedReason: "not_pr_task",
 	})
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-maintenance", AttemptID: "attempt-maintenance", ClawID: "claw-maintenance", TenantID: "test-tenant-id",
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+		Workspace: "internal", Workflow: "deps-cve", Integration: "github", Repo: "elastic/internal", Model: "gpt-5",
+		StartedAt: ts - 1000, FinishedAt: ts, RequiresPR: boolPtr(false), RunKind: taskRunKindMaintenance, ExcludedReason: "non_pr_producing",
+	})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-disabled", AttemptID: "attempt-disabled", ClawID: "claw-disabled", TenantID: "test-tenant-id",
 		Status: taskRunStatusFailed, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory,
 		Workspace: "disabled", Factory: "hidden", Integration: "github", Repo: "elastic/hidden", Model: "gpt-4.1",
@@ -135,7 +141,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	allSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", "test-token")
 	var allSummary taskRunAnalyticsSummaryResponse
 	decodeTaskRunAnalyticsAPI(t, allSummaryRR, &allSummary)
-	if allSummary.TotalRuns != 4 || allSummary.ByStatus[taskRunStatusClean] != 1 || allSummary.ByStatus[taskRunStatusHumanInTheLoop] != 1 || allSummary.ByStatus[taskRunStatusRunning] != 1 || allSummary.ByStatus[taskRunStatusFailed] != 1 {
+	if allSummary.TotalRuns != 5 || allSummary.ByStatus[taskRunStatusClean] != 2 || allSummary.ByStatus[taskRunStatusHumanInTheLoop] != 1 || allSummary.ByStatus[taskRunStatusRunning] != 1 || allSummary.ByStatus[taskRunStatusFailed] != 1 {
 		t.Fatalf("summary should include only authenticated tenant runs, got %#v", allSummary)
 	}
 	if allSummary.WarningBreakdown[taskRunWarningHumanPRComment] != 1 || allSummary.HumanInteractions != 3 {
@@ -174,8 +180,15 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	page2RR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?limit=2&cursor="+page1.NextCursor, "test-token")
 	var page2 taskRunAnalyticsRunsResponse
 	decodeTaskRunAnalyticsAPI(t, page2RR, &page2)
-	if len(page2.Runs) != 2 || page2.NextCursor != "" || page2.Runs[0].RunID != "run-failed" || page2.Runs[1].RunID != "run-running" {
+	if len(page2.Runs) != 2 || page2.NextCursor == "" || page2.Runs[0].RunID != "run-failed" || page2.Runs[1].RunID != "run-running" {
 		t.Fatalf("unexpected second page: %#v", page2)
+	}
+
+	page3RR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?limit=2&cursor="+page2.NextCursor, "test-token")
+	var page3 taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, page3RR, &page3)
+	if len(page3.Runs) != 1 || page3.NextCursor != "" || page3.Runs[0].RunID != "run-maintenance" {
+		t.Fatalf("unexpected third page: %#v", page3)
 	}
 
 	warningRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?warning_type=human_pr_comment", "test-token")
@@ -215,7 +228,7 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	nonPRRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs?requires_pr=false", "test-token")
 	var nonPRPage taskRunAnalyticsRunsResponse
 	decodeTaskRunAnalyticsAPI(t, nonPRRR, &nonPRPage)
-	if len(nonPRPage.Runs) != 1 || nonPRPage.Runs[0].RunID != "run-non-pr" {
+	if len(nonPRPage.Runs) != 2 || nonPRPage.Runs[0].RunID != "run-non-pr" || nonPRPage.Runs[1].RunID != "run-maintenance" {
 		t.Fatalf("requires_pr=false filter mismatch: %#v", nonPRPage)
 	}
 
@@ -910,6 +923,7 @@ type apiRunFixture struct {
 	AnalyticsEnabled  *bool
 	RequiresPR        *bool
 	ExcludedReason    string
+	RunKind           string
 	InputTokens       int64
 	OutputTokens      int64
 	TotalTokens       int64
@@ -955,13 +969,14 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 	if fixture.RequiresPR != nil {
 		requiresPR = *fixture.RequiresPR
 	}
+	runKind := firstNonEmpty(fixture.RunKind, taskRunKindPRTask)
 	_, err := db.Exec(`
 		INSERT INTO task_runs(
 			id, tenant_id, initial_attempt_id, current_attempt_id, run_kind, owner_type,
 			workspace_name, workflow_name, factory_name, owner_display_name, integration,
 			issue_id, issue_created_at, claw_id, model, tags, analytics_enabled, requires_pr, excluded_reason, created_at, updated_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		fixture.RunID, fixture.TenantID, fixture.AttemptID, fixture.AttemptID, taskRunKindPRTask, fixture.OwnerType,
+		fixture.RunID, fixture.TenantID, fixture.AttemptID, fixture.AttemptID, runKind, fixture.OwnerType,
 		fixture.Workspace, fixture.Workflow, fixture.Factory, firstNonEmpty(fixture.Workflow, fixture.Factory),
 		fixture.Integration, "ISSUE-"+fixture.RunID, fixture.IssueCreatedAt, fixture.ClawID, fixture.Model, "[]", boolInt(analyticsEnabled), boolInt(requiresPR), fixture.ExcludedReason,
 		fixture.StartedAt, fixture.StartedAt,
@@ -998,7 +1013,7 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"summary-"+fixture.RunID, fixture.TenantID, fixture.RunID, fixture.AttemptID, fixture.AttemptID,
 		fixture.Status, fixture.Phase, 1, fixture.OwnerType, fixture.Workspace, fixture.Workflow, fixture.Factory,
-		firstNonEmpty(fixture.Workflow, fixture.Factory), taskRunKindPRTask, fixture.Integration,
+		firstNonEmpty(fixture.Workflow, fixture.Factory), runKind, fixture.Integration,
 		"ISSUE-"+fixture.RunID, fixture.IssueCreatedAt, fixture.ClawID, fixture.Model, fixture.Repo,
 		"https://github.com/"+fixture.Repo+"/pull/1", fixture.PRCount, fixture.OpenPRCount,
 		fixture.MergedPRCount, fixture.ClosedPRCount, warningsJSON, fixture.FailureType,
@@ -1111,4 +1126,65 @@ func prStateForFixture(fixture apiRunFixture) string {
 		return taskRunPRStateOpen
 	}
 	return taskRunPRStateUnknown
+}
+
+func TestTaskRunAnalyticsCostMetadata(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	for i, source := range []string{"", "gateway", "hub_pricing", "mixed"} {
+		runID := fmt.Sprintf("cost-metadata-%d", i)
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: runID, AttemptID: runID + "-attempt", TenantID: "test-tenant-id", OwnerType: "manual", StartedAt: 1760000000000 + int64(i)})
+		if source == "" {
+			continue
+		}
+		sources := []string{source}
+		if source == "mixed" {
+			sources = []string{"gateway", "hub_pricing", "hub_pricing"}
+		}
+		for j, src := range sources {
+			_, err := db.Exec(`INSERT INTO task_run_usage(id,tenant_id,run_id,session_key,cost_source,committed_input_tokens,committed_output_tokens,committed_cache_read_tokens,committed_cache_write_tokens,committed_input_cost_usd,committed_output_cost_usd,committed_cache_read_cost_usd,committed_cache_write_cost_usd,cost_approximate,first_seen_at,updated_at) VALUES(?,'test-tenant-id',?,?,?,10,20,30,40,1,2,3,4,?,0,0)`, fmt.Sprintf("%s-%d", runID, j), runID, fmt.Sprint(j), src, boolInt(src == "hub_pricing"))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.Exec(`UPDATE task_run_summaries SET cost_approximate=?, usage_updated_at=1, estimated_cost_usd=10 WHERE run_id=?`, boolInt(source != "gateway"), runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var list taskRunAnalyticsRunsResponse
+	decodeTaskRunAnalyticsAPI(t, requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", "test-token"), &list)
+	if len(list.Runs) != 4 {
+		t.Fatalf("runs = %d", len(list.Runs))
+	}
+	for _, run := range list.Runs {
+		var detail taskRunAnalyticsRunDetailResponse
+		decodeTaskRunAnalyticsAPI(t, requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/"+run.RunID, "test-token"), &detail)
+		for _, got := range []taskRunAnalyticsRunView{run, detail.Run} {
+			wantSource := map[string]string{"cost-metadata-0": "", "cost-metadata-1": "openclaw", "cost-metadata-2": "fallback", "cost-metadata-3": "mixed"}[got.RunID]
+			if got.CostSource != wantSource || got.CostApproximate != (wantSource == "fallback" || wantSource == "mixed") {
+				t.Fatalf("metadata = %#v", got)
+			}
+			if wantSource == "fallback" || wantSource == "mixed" {
+				n := int64(1)
+				if wantSource == "mixed" {
+					n = 2
+				}
+				want := taskRunAnalyticsCostBreakdown{InputTokens: 10 * n, OutputTokens: 20 * n, CacheReadTokens: 30 * n, CacheWriteTokens: 40 * n, InputCostUsd: float64(n), OutputCostUsd: 2 * float64(n), CacheReadCostUsd: 3 * float64(n), CacheWriteCostUsd: 4 * float64(n)}
+				if got.CostBreakdown == nil || *got.CostBreakdown != want {
+					t.Fatalf("breakdown = %+v, want %+v", got.CostBreakdown, want)
+				}
+			} else if got.CostBreakdown != nil {
+				t.Fatalf("unexpected breakdown: %+v", got.CostBreakdown)
+			}
+			redactTaskRunAnalyticsRunCost(&got)
+			data, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"estimatedCostUsd", "costSource", "costApproximate", "costBreakdown"} {
+				if strings.Contains(string(data), `"`+field+`"`) {
+					t.Fatalf("redacted run contains %s: %s", field, data)
+				}
+			}
+		}
+	}
 }

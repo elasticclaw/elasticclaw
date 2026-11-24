@@ -1,6 +1,12 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"path"
+	"path/filepath"
+	"strings"
+	"time"
+)
 
 // Claw represents an agent instance registered with the hub.
 type Claw struct {
@@ -42,6 +48,59 @@ type HubMessage struct {
 	Format    string    `json:"format,omitempty" db:"format"` // "pre" = preserve whitespace
 	UserLogin *string   `json:"user_login,omitempty" db:"user_login"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
+}
+
+// WorkflowEffectFormatPrefix marks synthetic workflow v2 run-log messages that
+// carry a WorkflowEffectEvent payload. The hub merges effect and agent-task
+// lifecycle lines into run logs with Format "workflow:effect:<json>" so CLI and
+// UI consumers can render command output, receipts, and task detail.
+const WorkflowEffectFormatPrefix = "workflow:effect:"
+
+// Workflow effect event phases, the lifecycle points a run-log line can mark.
+// Emitters must use these constants; the web parser validates against the
+// same set (derived from its WorkflowEffectEvent["phase"] union).
+const (
+	WorkflowEffectPhasePlanned    = "planned"
+	WorkflowEffectPhaseStarted    = "started"
+	WorkflowEffectPhaseDispatched = "dispatched"
+	WorkflowEffectPhaseFinished   = "finished"
+	WorkflowEffectPhaseAssigned   = "assigned"
+)
+
+// WorkflowEffectEvent describes one effect or agent-task lifecycle point for a
+// workflow v2 run, embedded in run-log messages behind
+// WorkflowEffectFormatPrefix. Phase is one of the WorkflowEffectPhase*
+// constants: dispatched marks that a durable task was handed off (correlated
+// by TaskID) — the authoritative completion arrives as a separate finished
+// line; receipts contribute ExitCode/Succeeded/Stdout/Stderr/Error.
+type WorkflowEffectEvent struct {
+	Kind           string `json:"kind"`
+	Phase          string `json:"phase"`
+	Status         string `json:"status,omitempty"`
+	Attempt        int    `json:"attempt,omitempty"`
+	DefinitionPath string `json:"definition_path,omitempty"`
+	Command        string `json:"command,omitempty"`
+	TaskID         string `json:"task_id,omitempty"`
+	ExitCode       *int   `json:"exit_code,omitempty"`
+	Succeeded      *bool  `json:"succeeded,omitempty"`
+	Stdout         string `json:"stdout,omitempty"`
+	Stderr         string `json:"stderr,omitempty"`
+	Error          string `json:"error,omitempty"`
+	Instructions   string `json:"instructions,omitempty"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
+}
+
+// ParseWorkflowEffectFormat decodes a "workflow:effect:<json>" log format. It
+// returns false for other formats or malformed payloads.
+func ParseWorkflowEffectFormat(format string) (WorkflowEffectEvent, bool) {
+	if !strings.HasPrefix(format, WorkflowEffectFormatPrefix) {
+		return WorkflowEffectEvent{}, false
+	}
+	var event WorkflowEffectEvent
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(format, WorkflowEffectFormatPrefix)), &event); err != nil {
+		return WorkflowEffectEvent{}, false
+	}
+	return event, true
 }
 
 // WSMessage is the WebSocket envelope for hub<->claw and hub<->browser comms.
@@ -102,6 +161,7 @@ const (
 	SessionLossReasonLockConflict     = "lock_conflict"
 	SessionLossReasonGatewayReconnect = "gateway_reconnect"
 	SessionLossReasonProviderError    = "provider_error"
+	SessionLossReasonProviderRefusal  = "provider_refusal"
 	SessionLossReasonUnknown          = "unknown"
 )
 
@@ -125,6 +185,24 @@ type CheckpointCreatePayload struct {
 	Reason       string `json:"reason"`
 	HubURL       string `json:"hub_url"`
 	ClawToken    string `json:"claw_token"`
+}
+
+// MaxCheckpointBlobBytes is the largest single file the hub accepts in a checkpoint.
+const MaxCheckpointBlobBytes = 256 << 20
+
+// IsOpenClawAgentDBFile reports whether the file at path belongs to OpenClaw's
+// runtime agent database: any openclaw-agent.sqlite* file (the database, its
+// -wal and -shm sidecars, companion lock databases, temp copies) inside the
+// OpenClaw agents directory. These must never be checkpointed or restored. The
+// gateway already has a fresh database open when a restore runs, and writing
+// another sandbox's WAL and shared-memory index under it corrupts its view of
+// the schema ("no such table: session_nodes"), so the bridge can never open a
+// session. Files outside .openclaw/agents/, such as a user's backup copy in
+// the workspace, are still captured.
+func IsOpenClawAgentDBFile(filePath string) bool {
+	slashed := "/" + filepath.ToSlash(filePath)
+	return strings.Contains(slashed, "/.openclaw/agents/") &&
+		strings.HasPrefix(path.Base(slashed), "openclaw-agent.sqlite")
 }
 
 // CheckpointFile describes one content-addressed file in a bridge checkpoint.

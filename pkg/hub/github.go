@@ -31,6 +31,7 @@ type githubInstallation struct {
 
 // githubAppMeta is the response from GET /app (authenticated as the App).
 type githubAppMeta struct {
+	Slug        string            `json:"slug"`
 	Permissions map[string]string `json:"permissions"`
 }
 
@@ -458,14 +459,35 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 // GET /app (authenticated as the App). It returns a map of permission name ->
 // granted level ("read", "write", or "").
 func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[string]string, error) {
+	meta, err := p.appMeta(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return meta.Permissions, nil
+}
+
+// AppSlug returns the App's slug via GET /app; its bot login is "<slug>[bot]".
+func (p *GitHubTokenProvider) AppSlug(ctx context.Context) (string, error) {
+	meta, err := p.appMeta(ctx)
+	if err != nil {
+		return "", err
+	}
+	if meta.Slug == "" {
+		return "", fmt.Errorf("github get app returned no slug")
+	}
+	return meta.Slug, nil
+}
+
+func (p *GitHubTokenProvider) appMeta(ctx context.Context) (githubAppMeta, error) {
+	var meta githubAppMeta
 	appJWT, err := p.appJWT()
 	if err != nil {
-		return nil, fmt.Errorf("sign app jwt: %w", err)
+		return meta, fmt.Errorf("sign app jwt: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiURL("/app"), nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return meta, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+appJWT)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -473,7 +495,7 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("github get app: %w", err)
+		return meta, fmt.Errorf("github get app: %w", err)
 	}
 	defer resp.Body.Close()
 	defaultGitHubClient.observe(resp.StatusCode, resp.Header, nil)
@@ -481,14 +503,13 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 	if resp.StatusCode != http.StatusOK {
 		var errBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errBody)
-		return nil, fmt.Errorf("github get app %d: %v", resp.StatusCode, errBody["message"])
+		return meta, fmt.Errorf("github get app %d: %v", resp.StatusCode, errBody["message"])
 	}
 
-	var meta githubAppMeta
 	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
-		return nil, fmt.Errorf("decode app meta: %w", err)
+		return meta, fmt.Errorf("decode app meta: %w", err)
 	}
-	return meta.Permissions, nil
+	return meta, nil
 }
 
 // installationPermissionLevel returns the normalized permission level granted to

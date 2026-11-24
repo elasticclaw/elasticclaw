@@ -37,6 +37,7 @@ type agentFailureKind string
 
 const (
 	agentFailureUnknown            agentFailureKind = "unknown"
+	agentFailureProviderQuota      agentFailureKind = "provider_quota"
 	agentFailureTrackerRead        agentFailureKind = "tracker_read"
 	agentFailureTemplate           agentFailureKind = "template"
 	agentFailureProviderConfig     agentFailureKind = "provider_config"
@@ -46,6 +47,7 @@ const (
 	agentFailureTriggerClaim       agentFailureKind = "trigger_claim"
 	agentFailureTaskRunAnalytics   agentFailureKind = "task_run_analytics"
 	agentFailureProvisioning       agentFailureKind = "provisioning"
+	agentFailureBridgeArtifact     agentFailureKind = "bridge_artifact"
 	agentFailureBootstrap          agentFailureKind = "bootstrap"
 	agentFailureWorkspaceReadiness agentFailureKind = "workspace_readiness"
 	agentFailureWorkspaceFiles     agentFailureKind = "workspace_files"
@@ -77,6 +79,8 @@ type agentFailureRule struct {
 }
 
 var agentFailureRules = []agentFailureRule{
+	{agentFailureBridgeArtifact, []string{"bridge artifact unavailable:"}},
+	{agentFailureProviderQuota, []string{"exceeds available credits"}},
 	{agentFailureProviderLost, []string{"provider vm lost", "vm not found", "provider lost"}},
 	{agentFailureTrackerRead, []string{"cannot read issue", "fetchgithubissuedetails", "fetchlinearissuedetails"}},
 	{agentFailureTemplate, []string{"template \"", "template '", "resolvetemplatefiles"}},
@@ -85,7 +89,7 @@ var agentFailureRules = []agentFailureRule{
 	{agentFailureWorkspaceSecrets, []string{"load workspace secrets", "secret_ref"}},
 	{agentFailureTriggerClaim, []string{"claim workflow trigger", "claim factory trigger", "complete workflow trigger", "complete factory trigger"}},
 	{agentFailureTaskRunAnalytics, []string{"task run analytics"}},
-	{agentFailureProvisioning, []string{"provisioning failed", "factory provision failed", "workflow provision failed", "restore provision failed", "provision failed"}},
+	{agentFailureProvisioning, []string{"provisioning failed", "provisioning timed out", "factory provision failed", "workflow provision failed", "restore provision failed", "provision failed"}},
 	{agentFailureBootstrap, []string{"bootstrap failed", "daytona bootstrap failed", "exedev bootstrap failed", "install openclaw failed", "start claw-bridge", "connector download"}},
 	{agentFailureWorkspaceReadiness, []string{"workspace readiness failed", "workspace incomplete", "workspace unresponsive", "agent unresponsive", "agent process unhealthy for", "no status updates for", "agent repeatedly stuck mid-turn"}},
 	{agentFailureWorkspaceFiles, []string{"could not write workspace files", "workspace files incomplete", "template file staging failed", "docker file copy failed", "invalid template file path", "path must stay inside workspace"}},
@@ -151,6 +155,8 @@ func agentFailureUserMessage(kind agentFailureKind) string {
 		return "ElasticClaw could not read the source issue/ticket."
 	case agentFailureTemplate:
 		return "ElasticClaw could not load the workspace template."
+	case agentFailureProviderQuota:
+		return "The execution provider has insufficient credits."
 	case agentFailureProviderConfig:
 		return "ElasticClaw could not find a valid execution provider."
 	case agentFailureHubPersistence:
@@ -163,6 +169,8 @@ func agentFailureUserMessage(kind agentFailureKind) string {
 		return "ElasticClaw could not create the run tracking record."
 	case agentFailureProvisioning:
 		return "ElasticClaw could not start the agent workspace."
+	case agentFailureBridgeArtifact:
+		return "ElasticClaw connector artifact is unavailable."
 	case agentFailureBootstrap:
 		return "ElasticClaw started the workspace but could not finish preparing it."
 	case agentFailureWorkspaceReadiness:
@@ -198,6 +206,10 @@ func agentFailureUserMessage(kind agentFailureKind) string {
 
 func agentFailureNextStep(kind agentFailureKind) string {
 	switch kind {
+	case agentFailureBridgeArtifact:
+		return "Publish the connector artifact or update bridge_image, then re-trigger the workflow."
+	case agentFailureProviderQuota:
+		return "Add provider credits, then re-trigger the workflow."
 	case agentFailureTrackerRead, agentFailureTrackerAPI:
 		return "Check the issue tracker token permissions, then re-trigger the workflow."
 	case agentFailureTemplate, agentFailureProviderConfig, agentFailureWorkspaceSecrets, agentFailureGitHubCredentials, agentFailureWorkflowVolume:

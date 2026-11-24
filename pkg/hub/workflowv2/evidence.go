@@ -207,7 +207,7 @@ func (s *Store) recordEvidenceSet(ctx context.Context, scopes []EvidenceScope, i
 	var headGeneration int
 	if err := tx.QueryRowContext(ctx, `SELECT p.current_head_sha,COALESCE(MAX(h.generation),0)
 		FROM workflow_v2_delivery_prs p LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
-		WHERE p.id=? AND p.run_id=? AND p.active=1 GROUP BY p.id`, prID, runID).Scan(
+		WHERE p.id=? AND p.run_id=? AND p.active=1 AND p.registered_only=0 GROUP BY p.id`, prID, runID).Scan(
 		&currentHead, &headGeneration); err != nil {
 		return DeliveryPolicyResult{}, fmt.Errorf("load active delivery: %w", err)
 	}
@@ -304,11 +304,14 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 					Facts: map[string]interface{}{
 						"ci.policy": requirements.CIPolicy, "ci.status": status, "ci.policy_revision": result.Revision,
 					},
-					Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerCI), ObservedAt: observed},
+					Provenance:  typesv2.EvidenceProvenance{Producer: string(ProducerCI), ObservedAt: observed},
+					observation: true,
 				})
 				if err != nil {
 					return err
 				}
+				// A deferred event is accepted too: fall through so delivery
+				// facts stay consistent with the CI facts while suspended.
 				if event.Disposition != typesv2.DispositionAccepted {
 					return fmt.Errorf("CI policy event was %s: %s", event.Disposition, event.Reason)
 				}
@@ -330,7 +333,8 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 						"review.policy": requirements.ReviewPolicy, "review.status": status,
 						"review.policy_revision": result.Revision,
 					},
-					Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerReview), ObservedAt: observed},
+					Provenance:  typesv2.EvidenceProvenance{Producer: string(ProducerReview), ObservedAt: observed},
+					observation: true,
 				})
 				if err != nil {
 					return err
@@ -356,12 +360,13 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 			"delivery.review_satisfied": result.ReviewSatisfied, "delivery.all_merged": result.AllMerged,
 			"delivery.satisfied": result.Satisfied, "delivery.policy_revision": result.Revision,
 		},
-		Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerEngine), ObservedAt: observed},
+		Provenance:  typesv2.EvidenceProvenance{Producer: string(ProducerEngine), ObservedAt: observed},
+		observation: true,
 	})
 	if err != nil {
 		return err
 	}
-	if deliveryEvent.Disposition != typesv2.DispositionAccepted {
+	if deliveryEvent.Disposition != typesv2.DispositionAccepted && !deliveryEvent.Deferred {
 		return fmt.Errorf("delivery policy event was %s: %s", deliveryEvent.Disposition, deliveryEvent.Reason)
 	}
 	return nil
@@ -530,7 +535,7 @@ func loadDeliveryPolicySubjects(ctx context.Context, queryer policyQueryer, runI
 	rows, err := queryer.QueryContext(ctx, `SELECT p.id,p.repository,p.pr_number,p.state,p.current_head_sha,
 		COALESCE(MAX(h.generation),0) FROM workflow_v2_delivery_prs p
 		LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
-		WHERE p.run_id=? AND p.active=1 GROUP BY p.id ORDER BY p.repository,p.pr_number`, runID)
+		WHERE p.run_id=? AND p.active=1 AND p.registered_only=0 GROUP BY p.id ORDER BY p.repository,p.pr_number`, runID)
 	if err != nil {
 		return nil, err
 	}

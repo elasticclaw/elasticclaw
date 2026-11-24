@@ -835,7 +835,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
-	if groupLimit > 0 && activeCount >= groupLimit {
+	if groupLimit > 0 && (activeCount >= groupLimit || s.hasPendingInGroup(groupName)) {
 		isPending = true
 		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for GitHub issue %s as pending", groupName, activeCount, groupLimit, issueID)
 	}
@@ -907,6 +907,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	if isPending {
+		go s.promotePendingClaws()
 		return nil
 	}
 
@@ -934,21 +935,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 			fileBytes[k] = []byte(v)
 		}
 
-		var provErr error
-		switch provider {
-		case "replicated":
-			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-		case "daytona":
-			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-		case "exedev":
-			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-		case "noop":
-			// Noop provider is not implemented; skip
-		default:
-			provErr = fmt.Errorf("unknown provider %s", provider)
-		}
+		provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 
 		if provErr != nil {
 			log.Printf("[factory] claw %s provision failed: %v", clawID[:8], provErr)

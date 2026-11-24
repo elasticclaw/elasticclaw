@@ -9,6 +9,7 @@ export type DetailState = {
 
 export const urlFilterKeys = [
   "status",
+  "runKind",
   "factory",
   "workflow",
   "repo",

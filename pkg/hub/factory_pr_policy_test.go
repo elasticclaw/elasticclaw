@@ -17,6 +17,9 @@ func TestDefaultFactoryPRPolicyText(t *testing.T) {
 		"[DONE] https://github.com/org/repo/pull/N",
 		"do not send `[DONE]`",
 		"Report the blocker",
+		"detected automatically once created",
+		"`[DONE]` is still required",
+		"`[DONE]` alone is accepted when an open PR was already registered",
 	}
 	for _, want := range required {
 		if !strings.Contains(policy, want) {

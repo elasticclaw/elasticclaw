@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -91,6 +93,47 @@ func TestPrepareClawRetryCreatesAttemptAndEmitsProviderLost(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_key=?`, runID, "retry:retry-claw:2").Scan(&retryEvents)
 	if failedCount != 1 || runningCount != 1 || retryEvents != 1 {
 		t.Fatalf("failed=%d running=%d retryEvents=%d, want 1/1/1", failedCount, runningCount, retryEvents)
+	}
+}
+
+func TestProvisioningTimeoutIsRetryable(t *testing.T) {
+	failure := classifyAgentFailure("provisioning timed out")
+	if failure.Kind != agentFailureProvisioning {
+		t.Fatalf("kind=%q, want %q", failure.Kind, agentFailureProvisioning)
+	}
+	if !retryableAgentFailure(failure.Kind) {
+		t.Fatal("provisioning timeout is not retryable")
+	}
+}
+
+func TestPrepareClawRetryProvisioningTimeout(t *testing.T) {
+	for _, status := range []string{"provisioning", "starting"} {
+		t.Run(status, func(t *testing.T) {
+			s, db, runID := newClawRetryTestServer(t, status)
+			for attempt := 1; attempt <= maxClawAttempts; attempt++ {
+				disposition, plan, err := s.prepareClawRetry("retry-claw", "provisioning timed out")
+				if err != nil {
+					t.Fatalf("prepare retry: %v", err)
+				}
+				if attempt == maxClawAttempts {
+					if disposition != clawRetryNotApplicable {
+						t.Fatalf("disposition=%v, want terminal", disposition)
+					}
+				} else if disposition != clawRetryScheduled || plan.attempt != attempt+1 || plan.failureType != taskRunFailureProvisionFailed {
+					t.Fatalf("unexpected retry plan: disposition=%v plan=%+v", disposition, plan)
+				}
+				if _, err := db.Exec(`UPDATE claws SET status=? WHERE id='retry-claw'`, status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_attempts WHERE run_id=?`, runID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != maxClawAttempts {
+				t.Fatalf("attempt count=%d, want %d", count, maxClawAttempts)
+			}
+		})
 	}
 }
 
@@ -622,10 +665,9 @@ func TestWatchdogActionTrustsHeartbeatOverStaleStatusChannel(t *testing.T) {
 	}
 }
 
-// A gateway transport-error pause that survives into a replacement sandbox is
-// human-only again: the kind is cleared (so the gateway auto-lift cannot tell
-// a checkpoint-restored session "nothing was lost") while the pause stays.
-func TestResetClawForRetryKeepsTransportPauseHumanOnly(t *testing.T) {
+// A bridge transport-error pause blamed the sandbox being replaced, so the
+// replacement lifts it and the re-brief is not left pending (NEXT-1407).
+func TestResetClawForRetryLiftsTransportPause(t *testing.T) {
 	s, db, _ := newClawRetryTestServer(t, "error")
 	if _, err := db.Exec(`UPDATE claws SET no_progress_paused=1, bridge_error_pause_kind='gateway', bridge_error_auto_resumes=1 WHERE id=?`, "retry-claw"); err != nil {
 		t.Fatal(err)
@@ -633,12 +675,201 @@ func TestResetClawForRetryKeepsTransportPauseHumanOnly(t *testing.T) {
 	if reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", ""); err != nil || !reset {
 		t.Fatalf("reset: reset=%v err=%v", reset, err)
 	}
-	var paused, resumes int
+	var paused, resumes, rebrief int
 	var kind string
-	if err := db.QueryRow(`SELECT no_progress_paused, bridge_error_pause_kind, bridge_error_auto_resumes FROM claws WHERE id=?`, "retry-claw").Scan(&paused, &kind, &resumes); err != nil {
+	if err := db.QueryRow(`SELECT no_progress_paused, bridge_error_pause_kind, bridge_error_auto_resumes, rebrief_pending FROM claws WHERE id=?`, "retry-claw").Scan(&paused, &kind, &resumes, &rebrief); err != nil {
 		t.Fatal(err)
 	}
-	if paused == 0 || kind != "" || resumes != 0 {
-		t.Fatalf("after replacement paused=%d kind=%q resumes=%d, want paused, '' and 0", paused, kind, resumes)
+	if paused != 0 || kind != "" || resumes != 0 || rebrief != 1 {
+		t.Fatalf("after replacement paused=%d kind=%q resumes=%d rebrief=%d, want 0, '', 0, 1", paused, kind, resumes, rebrief)
 	}
+}
+
+// A pause that is not a bridge-error pause stays latched across replacement.
+func TestResetClawForRetryKeepsNonTransportPause(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "error")
+	if _, err := db.Exec(`UPDATE claws SET no_progress_paused=1, bridge_error_pause_kind='' WHERE id=?`, "retry-claw"); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", ""); err != nil || !reset {
+		t.Fatalf("reset: reset=%v err=%v", reset, err)
+	}
+	var paused int
+	if err := db.QueryRow(`SELECT no_progress_paused FROM claws WHERE id=?`, "retry-claw").Scan(&paused); err != nil {
+		t.Fatal(err)
+	}
+	if paused == 0 {
+		t.Fatal("non-transport pause was lifted by replacement")
+	}
+}
+
+func TestReaperGivesRetriedProvisioningClawFreshWindow(t *testing.T) {
+	s, db, runID := newClawRetryTestServer(t, "provisioning")
+	base := time.Now().UTC()
+	// The predecessor has already been provisioning for longer than the window.
+	s.reaperFirstSeen = map[string]time.Time{
+		reaperClawKey("retry-claw", "provisioning"): base.Add(-31 * time.Minute),
+		reaperClawKey("retry-claw", "starting"):     base.Add(-31 * time.Minute),
+	}
+	// Stand in for the retry path re-provisioning the claw.
+	if _, err := db.Exec(`UPDATE claws SET status='error' WHERE id='retry-claw'`); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "", ""); err != nil || !reset {
+		t.Fatalf("reset=%v err=%v", reset, err)
+	}
+	for _, key := range []string{reaperClawKey("retry-claw", "provisioning"), reaperClawKey("retry-claw", "starting")} {
+		if _, ok := s.reaperFirstSeen[key]; ok {
+			t.Fatalf("%s survived the retry reset", key)
+		}
+	}
+	s.nowFunc = func() time.Time { return base }
+	s.reapOnce()
+	var status string
+	var attempts int
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='retry-claw'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT attempt_count FROM task_runs WHERE id=?`, runID).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "provisioning" || attempts != 1 {
+		t.Fatalf("status=%q attempts=%d, successor reaped before its own window", status, attempts)
+	}
+	if got := s.reaperFirstSeen[reaperClawKey("retry-claw", "provisioning")]; !got.Equal(base) {
+		t.Fatalf("first seen=%v, want the successor's own start %v", got, base)
+	}
+}
+
+func TestSupersededBootstrapFailureDoesNotStopSuccessor(t *testing.T) {
+	for _, tc := range []struct{ status, providerID string }{
+		{"provisioning", ""},
+		{"starting", "vm-successor"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			s, db, runID := newClawRetryTestServer(t, tc.status)
+			// A retry already replaced vm-predecessor; the invalid template
+			// metadata makes the predecessor's bootstrap fail deterministically.
+			if _, err := db.Exec(`UPDATE claws SET provider='replicated', provider_id=?, template_files='not json' WHERE id='retry-claw'`, tc.providerID); err != nil {
+				t.Fatal(err)
+			}
+			s.bootstrapReplicated("retry-claw", "Retry Claw", "vm-predecessor", types.ProviderConfig{}, nil)
+
+			var status, providerID string
+			var attempts, attemptRows int
+			if err := db.QueryRow(`SELECT status, COALESCE(provider_id,'') FROM claws WHERE id='retry-claw'`).Scan(&status, &providerID); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT attempt_count FROM task_runs WHERE id=?`, runID).Scan(&attempts); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_attempts WHERE run_id=?`, runID).Scan(&attemptRows); err != nil {
+				t.Fatal(err)
+			}
+			if status != tc.status || providerID != tc.providerID || attempts != 1 || attemptRows != 1 {
+				t.Fatalf("status=%q provider_id=%q attempts=%d rows=%d, successor charged with predecessor's failure", status, providerID, attempts, attemptRows)
+			}
+		})
+	}
+}
+
+func TestStopAgentIfInstanceStopsCurrentInstance(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, db, runID := newClawRetryTestServer(t, "starting")
+	if _, err := db.Exec(`UPDATE claws SET provider_id='vm-current' WHERE id='retry-claw'`); err != nil {
+		t.Fatal(err)
+	}
+	// Exhaust retries so the stop settles on the synchronous terminal path.
+	if _, err := db.Exec(`UPDATE task_runs SET attempt_count=? WHERE id=?`, maxClawAttempts, runID); err != nil {
+		t.Fatal(err)
+	}
+	s.stopAgentIfInstance("retry-claw", "vm-current", "Bootstrap failed: ssh dial", true)
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='retry-claw'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "error" {
+		t.Fatalf("status=%q, want error for a failure on the current instance", status)
+	}
+}
+
+func TestSupersededBootstrapKeepsSuccessorBootstrapEnv(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "provisioning")
+	// A retry re-provisioned the claw on vm-successor and staged its env
+	// while the predecessor's bootstrap was still running.
+	if _, err := db.Exec(`UPDATE claws SET provider='replicated', provider_id='vm-successor', template_files='not json' WHERE id='retry-claw'`); err != nil {
+		t.Fatal(err)
+	}
+	s.rememberReplicatedBootstrapEnv("retry-claw", "vm-successor", map[string]string{"DEPOT_TOKEN": "successor"})
+	s.bootstrapReplicated("retry-claw", "Retry Claw", "vm-predecessor", types.ProviderConfig{}, nil)
+
+	env, ok := s.loadReplicatedBootstrapEnv("retry-claw")
+	if !ok || env["DEPOT_TOKEN"] != "successor" {
+		t.Fatalf("env=%v found=%v, predecessor bootstrap dropped the successor's env", env, ok)
+	}
+	s.forgetReplicatedBootstrapEnvForVM("retry-claw", "vm-successor")
+	if _, ok := s.loadReplicatedBootstrapEnv("retry-claw"); ok {
+		t.Fatal("env survived a forget by its own VM")
+	}
+}
+
+func TestReplicatedVMSyncIgnoresLossOfSupersededVM(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		respond  func(http.ResponseWriter)
+		replaced bool
+		want     string
+	}{
+		{"404 after replacement", respondReplicatedVMNotFound, true, "starting"},
+		{"terminated after replacement", respondReplicatedVMTerminated, true, "starting"},
+		{"404 on current VM", respondReplicatedVMNotFound, false, "error"},
+		{"terminated on current VM", respondReplicatedVMTerminated, false, "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db, runID := newClawRetryTestServer(t, "starting")
+			if _, err := db.Exec(`UPDATE claws SET provider='replicated', provider_id='vm-old' WHERE id='retry-claw'`); err != nil {
+				t.Fatal(err)
+			}
+			// Exhaust retries so an honoured stop settles synchronously as error.
+			if _, err := db.Exec(`UPDATE task_runs SET attempt_count=? WHERE id=?`, maxClawAttempts, runID); err != nil {
+				t.Fatal(err)
+			}
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/vm/vm-old" {
+					http.NotFound(w, r)
+					return
+				}
+				// A retry replaces the VM while this lookup is in flight.
+				if tc.replaced {
+					if _, err := db.Exec(`UPDATE claws SET provider_id='vm-new' WHERE id='retry-claw'`); err != nil {
+						t.Error(err)
+					}
+				}
+				tc.respond(w)
+			}))
+			t.Cleanup(api.Close)
+			s.hubCfg.Providers = map[string]types.ProviderConfig{"replicated": {Token: "token", APIURL: api.URL}}
+			s.vmSyncGo = func(f func()) { f() }
+
+			s.syncReplicatedVMs()
+
+			var status string
+			if err := db.QueryRow(`SELECT status FROM claws WHERE id='retry-claw'`).Scan(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status != tc.want {
+				t.Fatalf("status=%q, want %q", status, tc.want)
+			}
+		})
+	}
+}
+
+func respondReplicatedVMNotFound(w http.ResponseWriter) {
+	http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+}
+
+func respondReplicatedVMTerminated(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"vm":{"id":"vm-old","status":"terminated"}}`))
 }

@@ -20,6 +20,7 @@ import (
 )
 
 func TestGitHubIssuesIntegrationWebhookCreatesFactoryClaw(t *testing.T) {
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	ghi := factorytest.NewMockGitHubIssues(t)
 	ghi.WebhookSecret = "test-webhook-secret"
 	li := factorytest.NewMockLinear(t)

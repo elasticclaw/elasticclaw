@@ -249,8 +249,10 @@ func (s *Store) Snapshot(ctx context.Context, runID, attemptID string) (typesv2.
 		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id,url,repository,repository_name,pr_number,source_branch,base_branch,
-		current_head_sha,state,supersedes_id,verified_at,provenance_json FROM workflow_v2_delivery_prs
-		WHERE run_id=? AND active=1 ORDER BY repository,pr_number`, runID)
+		current_head_sha,state,supersedes_id,verified_at,provenance_json,
+		CASE WHEN mergeable_head_sha=current_head_sha THEN base_sha ELSE '' END,
+		CASE WHEN mergeable_head_sha=current_head_sha THEN mergeable_state ELSE '' END FROM workflow_v2_delivery_prs
+		WHERE run_id=? AND active=1 AND registered_only=0 ORDER BY repository,pr_number`, runID)
 	if err != nil {
 		return typesv2.WorkflowSnapshot{}, err
 	}
@@ -260,7 +262,7 @@ func (s *Store) Snapshot(ctx context.Context, runID, attemptID string) (typesv2.
 		var verified int64
 		var provenanceJSON string
 		if err := rows.Scan(&pr.ID, &pr.URL, &pr.Repository, &pr.RepositoryName, &pr.Number, &pr.SourceBranch,
-			&pr.BaseBranch, &pr.HeadSHA, &pr.State, &pr.Supersedes, &verified, &provenanceJSON); err != nil {
+			&pr.BaseBranch, &pr.HeadSHA, &pr.State, &pr.Supersedes, &verified, &provenanceJSON, &pr.BaseSHA, &pr.MergeableState); err != nil {
 			return typesv2.WorkflowSnapshot{}, err
 		}
 		pr.VerifiedAt = time.UnixMilli(verified).UTC()
@@ -405,6 +407,13 @@ func (s *Store) rejectControl(ctx context.Context, runID, attemptID string, rece
 		}
 		reason += ": " + detail
 	}
+	run, _, err := getRunForUpdate(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	if err := discardUnverifiedEffects(ctx, tx, run, time.UnixMilli(now).UTC()); err != nil {
+		return err
+	}
 	result, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
 		WHERE id=? AND current_attempt_id=? AND status IN ('active','suspended')`, reason, now, runID, attemptID)
 	if err != nil {
@@ -495,7 +504,7 @@ func (s *Store) RejectAgentControl(ctx context.Context, envelope typesv2.Control
 		return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: typesv2.DispositionDuplicate,
 			StateVersion: run.StateVersion, Reason: duplicateReason}, nil
 	}
-	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.AttemptID, input.ExpectedStateVersion,
 		run.StateVersion, typesv2.DispositionRejected, reason, ProducerAgent, input.Provenance, nil, nil, now); err != nil {
 		return typesv2.ControlReceipt{}, err
 	}

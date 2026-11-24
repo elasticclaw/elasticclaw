@@ -324,6 +324,8 @@ type Pipeline struct {
 	Connection string `yaml:"connection" json:"connection"`
 	Repository string `yaml:"repository" json:"repository"`
 	Workflow   string `yaml:"workflow,omitempty" json:"workflow,omitempty"`
+	CheckName  string `yaml:"check_name,omitempty" json:"check_name,omitempty"`
+	AppSlug    string `yaml:"app_slug,omitempty" json:"app_slug,omitempty"`
 	Project    string `yaml:"project,omitempty" json:"project,omitempty"`
 	Pipeline   string `yaml:"pipeline,omitempty" json:"pipeline,omitempty"`
 	Job        string `yaml:"job,omitempty" json:"job,omitempty"`

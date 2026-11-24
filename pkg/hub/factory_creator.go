@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -330,7 +329,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 
 	activeCount := s.countActiveClawsInGroup(groupName)
 	isPending := false
-	if groupLimit > 0 && activeCount >= groupLimit {
+	if groupLimit > 0 && (activeCount >= groupLimit || s.hasPendingInGroup(groupName)) {
 		isPending = true
 		log.Printf("[factory] concurrency limit reached for group %q (active=%d, limit=%d) — queueing claw for factory %s as pending", groupName, activeCount, groupLimit, factory.Name)
 	}
@@ -406,6 +405,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	})
 
 	if isPending {
+		go s.promotePendingClaws()
 		return clawID, true, nil
 	}
 
@@ -433,26 +433,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			fileBytes[k] = []byte(v)
 		}
 
-		var provErr error
-		switch provider {
-		case "replicated":
-			provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
-		case "daytona":
-			provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
-		case "exedev":
-			provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
-		case "lambda-microvms":
-			provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
-		case "noop":
-			if os.Getenv("ELASTICCLAW_NOOP_PROVIDER") == "" {
-				provErr = fmt.Errorf("noop provider requires ELASTICCLAW_NOOP_PROVIDER=1 (test use only)")
-			} else {
-				providerID := "noop-vm-" + clawID[:8]
-				_, _ = s.db.Exec(`UPDATE claws SET status='connected', provider='noop', provider_id=? WHERE id=? AND status NOT IN ('idle','deleted','error')`, providerID, clawID)
-			}
-		default:
-			provErr = fmt.Errorf("unsupported provider: %s", provider)
-		}
+		provErr := s.provisionWithProvider(ctx, provider, clawID, req, provCfg, fileBytes, env)
 		if provErr != nil {
 			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)

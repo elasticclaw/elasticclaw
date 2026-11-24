@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -154,7 +155,14 @@ func (s *Server) handleWorkflowV2ControlWS(w http.ResponseWriter, r *http.Reques
 func (s *Server) applyWorkflowV2ClawControl(ctx context.Context, store *workflowv2.Store,
 	envelope typesv2.ControlEnvelope) (typesv2.ControlReceipt, error) {
 	if envelope.Kind == typesv2.MessageDeliverySubmitted || envelope.Kind == typesv2.MessagePullRequestClaimed {
-		return store.ApplyDeliveryControl(ctx, envelope, s.workflowV2PullRequestVerifier())
+		receipt, err := store.ApplyDeliveryControl(ctx, envelope, s.workflowV2PullRequestVerifier())
+		if err == nil && envelope.Kind == typesv2.MessagePullRequestClaimed &&
+			(receipt.Disposition == typesv2.DispositionAccepted || receipt.Disposition == typesv2.DispositionDuplicate) {
+			if err := s.associateWorkflowV2ClaimedPRs(ctx, envelope); err != nil {
+				log.Printf("[task-run-analytics] failed to associate claimed PRs for workflow run %s: %v", envelope.RunID, err)
+			}
+		}
+		return receipt, err
 	}
 	switch envelope.Kind {
 	case typesv2.MessageExecRunCompleted, typesv2.MessageExecRunFailed,
@@ -162,6 +170,30 @@ func (s *Server) applyWorkflowV2ClawControl(ctx context.Context, store *workflow
 		return store.ApplyCommandReceipt(ctx, envelope)
 	}
 	return store.ApplyAgentControl(ctx, envelope)
+}
+
+func (s *Server) associateWorkflowV2ClaimedPRs(ctx context.Context, envelope typesv2.ControlEnvelope) error {
+	var clawID string
+	if err := s.db.QueryRowContext(ctx, `SELECT claw_id FROM workflow_v2_attempts WHERE id=? AND run_id=?`,
+		envelope.AttemptID, envelope.RunID).Scan(&clawID); err != nil {
+		return err
+	}
+	var manifest typesv2.DeliveryManifest
+	if err := json.Unmarshal(envelope.Payload, &manifest); err != nil {
+		return err
+	}
+	for _, claim := range manifest.PullRequests {
+		var pr typesv2.VerifiedPullRequest
+		if err := s.db.QueryRowContext(ctx, `SELECT url,repository,pr_number,current_head_sha,state
+			FROM workflow_v2_delivery_prs WHERE run_id=? AND url=?`, envelope.RunID, strings.TrimSpace(claim.URL)).Scan(
+			&pr.URL, &pr.Repository, &pr.Number, &pr.HeadSHA, &pr.State); err != nil {
+			return err
+		}
+		if err := s.associateWorkflowV2TaskRunPR(clawID, pr); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) sendWorkflowV2ControlOutbox(ctx context.Context, store *workflowv2.Store,

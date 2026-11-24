@@ -328,3 +328,42 @@ func seedTaskRunAnalyticsRunUsageWithModel(t *testing.T, db *sql.DB, runID, sess
 		t.Fatal(err)
 	}
 }
+
+func TestTaskRunAnalyticsCostsApproximateLedger(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	today := time.Now().UTC()
+	for _, model := range []string{"m1", "m2", "m3", "m4", "m5", "m6"} {
+		seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", today, "eng", model, 10, 100)
+	}
+	seedTaskRunAnalyticsUsage(t, db, "other-tenant-id", today, "eng", "m1", 1000, 100)
+	if _, err := db.Exec(`UPDATE usage_daily SET approx_cost_usd=cost_usd/2`); err != nil {
+		t.Fatal(err)
+	}
+	var response taskRunAnalyticsCostsResponse
+	decodeTaskRunAnalyticsAPI(t, requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/costs?scope=ledger&groupBy=model", "test-token"), &response)
+	if response.ApproximateCostUsd != 30 || response.Today.ApproximateCostUsd != 30 || response.Week.ApproximateCostUsd != 30 || response.Month.ApproximateCostUsd != 30 {
+		t.Fatalf("approximate totals = %+v", response)
+	}
+	last := response.DailySeries[len(response.DailySeries)-1]
+	if last.CostUsd != 60 || last.ApproximateCostUsd != 30 {
+		t.Fatalf("daily total = %+v", last)
+	}
+	var modelApprox float64
+	if len(response.SeriesByModel) != 5 {
+		t.Fatalf("model series = %d", len(response.SeriesByModel))
+	}
+	for _, series := range response.SeriesByModel {
+		point := series.DailySeries[len(series.DailySeries)-1]
+		want := 5.0
+		if series.Model == "other" {
+			want = 10
+		}
+		if point.ApproximateCostUsd != want {
+			t.Fatalf("model %s approximate = %v, want %v", series.Model, point.ApproximateCostUsd, want)
+		}
+		modelApprox += point.ApproximateCostUsd
+	}
+	if modelApprox != response.ApproximateCostUsd {
+		t.Fatalf("model total = %v", modelApprox)
+	}
+}

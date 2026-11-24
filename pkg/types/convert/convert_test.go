@@ -339,3 +339,45 @@ func TestConvertWorkspaceV1ToV2WarnsAboutSessionResume(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertWorkflowPreservesTriggerFrom(t *testing.T) {
+	for _, from := range []string{"review", "[working, review]"} {
+		t.Run(from, func(t *testing.T) {
+			input := `name: scoped
+stages:
+  - id: working
+    entry: true
+  - id: review
+  - id: merged
+    terminal: true
+    triggers:
+      - pr_merged:
+        from: ` + from + `
+      - message_contains: "[DONE]"
+        from: review
+`
+			res, err := convert.Convert(convert.KindWorkflow, []byte(input), convert.Options{To: "2"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolved, err := v2.ParseAndValidateWorkflow(res.Output)
+			if err != nil {
+				t.Fatalf("invalid output: %v\n%s", err, res.Output)
+			}
+			tr := resolved.Workflow.Transitions["to_merged_via_pr_merged"]
+			if from == "review" {
+				if tr.From != "review" {
+					t.Fatalf("from = %#v, want review", tr.From)
+				}
+			} else {
+				sources, ok := tr.From.([]interface{})
+				if !ok || len(sources) != 2 || sources[0] != "working" || sources[1] != "review" {
+					t.Fatalf("from = %#v, want [working, review]", tr.From)
+				}
+			}
+			if !strings.Contains(strings.Join(res.Warnings, "\n"), "message_contains") {
+				t.Fatal("expected warning for unsupported message_contains conversion")
+			}
+		})
+	}
+}

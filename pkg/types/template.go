@@ -734,6 +734,9 @@ type LifecycleNotificationsConfig struct {
 	// running, none finished recently) before an agent_idle notification
 	// fires. Default "5m", minimum "1m". Detection rides the 2-minute status
 	// watchdog tick, so the alert lands between IdleAfter and IdleAfter+2m.
+	// While liveness.idle_resume can still unstick the agent, the alert waits
+	// for it: it fires only after idle_resume_after + IdleAfter, or as soon as
+	// the resume is paused by the no-progress watchdog or out of attempts.
 	IdleAfter string `yaml:"idle_after,omitempty" json:"idleAfter,omitempty"`
 	// StageProgressAfter alerts when a pipeline stage receives no meaningful
 	// progress for this duration. Empty disables this opt-in alert.
@@ -813,8 +816,12 @@ type LivenessConfig struct {
 	// dying in a restart loop keeps a non-zero counter and escalates as before.
 	// Set to "0" to disable and restore the un-graced behaviour.
 	GatewayUnhealthyReconnectGrace string `yaml:"gateway_unhealthy_reconnect_grace,omitempty" json:"gatewayUnhealthyReconnectGrace,omitempty"`
-	BusyTurnMax                    string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
-	SilentDeathMax                 string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
+	// BusyTurnMax bounds open turns (default and minimum 70m).
+	BusyTurnMax string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
+	// LostTurnGrace (lost_turn_grace) recovers an open turn after the bridge
+	// continuously reports turn_active=false for this long (default 5m, minimum 2m).
+	LostTurnGrace  string `yaml:"lost_turn_grace,omitempty" json:"lostTurnGrace,omitempty"`
+	SilentDeathMax string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
 	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
 	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
 	// IdleResume controls the idle auto-resume recovery (default on). It lives

@@ -165,8 +165,9 @@ type queuedMsg struct {
 }
 
 type msgQueue struct {
-	mu   sync.Mutex
-	msgs []queuedMsg
+	activeTurns atomic.Int64 // accepted inputs, including queued and replayed turns
+	mu          sync.Mutex
+	msgs        []queuedMsg
 
 	// dropped tracks inputs discarded (TTL or overflow) while the hub was
 	// unreachable, so drain() can tell the hub instead of losing them silently.
@@ -217,6 +218,7 @@ func (q *msgQueue) enqueueLocked(m queuedMsg) {
 		for i, existing := range q.msgs {
 			if existing.kind == queuedInput {
 				q.recordDropLocked(existing.content)
+				q.activeTurns.Add(-1)
 				q.msgs = append(q.msgs[:i], q.msgs[i+1:]...)
 				break
 			}
@@ -229,6 +231,7 @@ func (q *msgQueue) enqueueLocked(m queuedMsg) {
 func (q *msgQueue) pushInput(messageID, content string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.activeTurns.Add(1)
 	q.enqueueLocked(queuedMsg{kind: queuedInput, messageID: messageID, content: content, queuedAt: time.Now()})
 }
 
@@ -267,6 +270,7 @@ func (q *msgQueue) drain() []queuedMsg {
 		if m.kind == queuedInput && time.Since(m.queuedAt) >= msgQueueTTL {
 			log.Printf("[bridge] dropped queued input (TTL exceeded): %q", m.content[:min(len(m.content), 60)])
 			q.recordDropLocked(m.content)
+			q.activeTurns.Add(-1)
 			continue
 		}
 		out = append(out, m)
@@ -304,6 +308,7 @@ func replayQueued(queue *msgQueue, deliver func(role, content string) error, del
 			}
 		default: // queuedInput
 			runTurn(m.messageID, m.content)
+			queue.activeTurns.Add(-1)
 		}
 	}
 }
@@ -684,6 +689,42 @@ func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn,
 type agentResult struct {
 	text string
 	err  error
+	// undeliverable is set when OpenClaw ended the turn without a deliverable
+	// answer; see undeliverableTurnReason.
+	undeliverable string
+}
+
+// undeliverableTurnReason reports why a lifecycle end closed a turn without a
+// deliverable answer. OpenClaw 2026.9.4 keeps its terminalError
+// (non_deliverable_terminal_turn) in the trajectory file only; on the gateway
+// wire the run's lifecycle end carries livenessState, which its own terminal
+// classification (resolveAgentRunTerminalFacts) treats as a failure when
+// "abandoned" (incomplete turn, e.g. reasoning-only retries exhausted) or
+// "blocked". Aborts keep their existing handling.
+func undeliverableTurnReason(livenessState, stopReason string, aborted bool) string {
+	state := strings.ToLower(strings.TrimSpace(livenessState))
+	if aborted || (state != "abandoned" && state != "blocked") {
+		return ""
+	}
+	reason := "agent turn ended without a deliverable answer: livenessState=" + state
+	if stopReason = strings.TrimSpace(stopReason); stopReason != "" {
+		reason += " stopReason=" + stopReason
+	}
+	return reason
+}
+
+type deliverableTurnKey struct{}
+
+// requireDeliverableTurn makes SendMessage fail a turn OpenClaw ended without
+// a deliverable answer instead of returning it as a completed reply. Workflow
+// v2 agent tasks opt in so the hub applies their failure transitions.
+func requireDeliverableTurn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deliverableTurnKey{}, true)
+}
+
+func deliverableTurnRequired(ctx context.Context) bool {
+	required, _ := ctx.Value(deliverableTurnKey{}).(bool)
+	return required
 }
 
 type agentActivity struct {
@@ -1227,7 +1268,8 @@ func redactActivityPrefix(value, prefix, replacement string) string {
 // gatewaySession is a long-lived connection to the OpenClaw gateway that
 // maintains a single persistent agent session across all messages.
 type gatewaySession struct {
-	client *gatewayClient
+	branches *branchReporter
+	client   *gatewayClient
 
 	sessionMu              sync.RWMutex
 	sessionKey             string
@@ -1266,6 +1308,10 @@ type gatewaySession struct {
 	ctxMu        sync.RWMutex
 	contextUsage int
 	usage        gatewayUsage
+	// cacheUsagePolledAt throttles the sessions.usage transcript scan.
+	cacheUsagePolledAt time.Time
+	// cacheUsagePollFailed lifts the throttle until a poll succeeds again.
+	cacheUsagePollFailed bool
 
 	// ready is true once the gateway session is established and ready for messages
 	readyMu sync.RWMutex
@@ -1278,6 +1324,9 @@ type gatewayUsage struct {
 	estimatedCostUSD                       *float64
 	model                                  string
 	modelProvider                          string
+	// Session-cumulative cache tokens, only polled when the gateway cannot
+	// price the model; see sessionCacheTokens.
+	cacheReadTokens, cacheWriteTokens *int
 }
 
 // newGatewaySession creates a gatewaySession, establishes the gateway
@@ -1945,9 +1994,17 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			if agentPayload.Stream == "lifecycle" {
 				switch agentPayload.Data.Phase {
 				case "end":
-					log.Printf("[gateway] agent turn complete")
+					livenessState, _ := rawAgentPayload.Data["livenessState"].(string)
+					stopReason, _ := rawAgentPayload.Data["stopReason"].(string)
+					aborted, _ := rawAgentPayload.Data["aborted"].(bool)
+					undeliverable := undeliverableTurnReason(livenessState, stopReason, aborted)
+					if undeliverable != "" {
+						log.Printf("[gateway] %s", undeliverable)
+					} else {
+						log.Printf("[gateway] agent turn complete")
+					}
 					inf.transcriptOnce.Do(func() { gs.transcript.noteAssistant(inf.assistantText()) })
-					deliverInFlight(inf, agentResult{text: strings.TrimSpace(inf.assistantText())})
+					deliverInFlight(inf, agentResult{text: strings.TrimSpace(inf.assistantText()), undeliverable: undeliverable})
 				case "error":
 					msg := agentPayload.Data.Error
 					if msg == "" {
@@ -2341,8 +2398,21 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 		log.Printf("[session] unmarshal sessions.describe response: %v", err)
 		return
 	}
+	usage := gatewayUsage{sessionKey: sessionKey, inputTokens: payload.Session.InputTokens, outputTokens: payload.Session.OutputTokens, totalTokens: payload.Session.TotalTokens, estimatedCostUSD: payload.Session.EstimatedCostUSD, model: payload.Session.Model, modelProvider: payload.Session.ModelProvider}
 	gs.ctxMu.Lock()
-	gs.usage = gatewayUsage{sessionKey: sessionKey, inputTokens: payload.Session.InputTokens, outputTokens: payload.Session.OutputTokens, totalTokens: payload.Session.TotalTokens, estimatedCostUSD: payload.Session.EstimatedCostUSD, model: payload.Session.Model, modelProvider: payload.Session.ModelProvider}
+	prev := gs.usage
+	gs.ctxMu.Unlock()
+	if usage.needsCacheTokens(prev) {
+		usage.cacheReadTokens, usage.cacheWriteTokens = gs.sessionCacheTokens(ctx, sessionKey, usage.newTurnSince(prev))
+	}
+	gs.ctxMu.Lock()
+	if gs.usage.sessionKey == usage.sessionKey {
+		// Concurrent refreshes can finish out of order; cache counters are
+		// cumulative, so never publish a lower value for the same session.
+		usage.cacheReadTokens = maxIntPtr(gs.usage.cacheReadTokens, usage.cacheReadTokens)
+		usage.cacheWriteTokens = maxIntPtr(gs.usage.cacheWriteTokens, usage.cacheWriteTokens)
+	}
+	gs.usage = usage
 	if payload.Session.ContextTokens > 0 && payload.Session.TotalTokens != nil {
 		usage := *payload.Session.TotalTokens * 100 / payload.Session.ContextTokens
 		if usage > 100 {
@@ -2351,6 +2421,113 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 		gs.contextUsage = usage
 	}
 	gs.ctxMu.Unlock()
+}
+
+// needsCacheTokens reports whether to poll sessions.usage. Polling continues
+// once a session has counters: a gateway-priced turn still advances the
+// cumulative cache, and the hub must baseline it instead of charging it later.
+func (u gatewayUsage) needsCacheTokens(prev gatewayUsage) bool {
+	hasCounters := prev.sessionKey == u.sessionKey && (prev.cacheReadTokens != nil || prev.cacheWriteTokens != nil)
+	return u.gatewayCostUnknown() || hasCounters
+}
+
+// newTurnSince reports a completed reply: OpenClaw overwrites the session's
+// input/output totals with each run's own.
+func (u gatewayUsage) newTurnSince(prev gatewayUsage) bool {
+	return prev.sessionKey != u.sessionKey || !equalIntPtr(prev.inputTokens, u.inputTokens) || !equalIntPtr(prev.outputTokens, u.outputTokens)
+}
+
+func equalIntPtr(a, b *int) bool {
+	return a == b || (a != nil && b != nil && *a == *b)
+}
+
+// gatewayCostUnknown reports a session that used tokens but has no gateway
+// cost: OpenClaw reports $0 (or nothing) for models outside its price catalog.
+func (u gatewayUsage) gatewayCostUnknown() bool {
+	used := (u.inputTokens != nil && *u.inputTokens > 0) || (u.outputTokens != nil && *u.outputTokens > 0)
+	return used && (u.estimatedCostUSD == nil || *u.estimatedCostUSD == 0)
+}
+
+const sessionCacheUsagePollInterval = time.Minute
+
+// sessionCacheTokens returns the session's cumulative cache read/write tokens
+// from sessions.usage, which sessions.describe omits. The hub needs them to
+// price models the gateway cannot. sessions.usage scans transcripts, so it is
+// polled at most once per sessionCacheUsagePollInterval; between polls, and
+// when a poll fails, the last values for the same session are reused.
+func (gs *gatewaySession) sessionCacheTokens(ctx context.Context, sessionKey string, newTurn bool) (read, write *int) {
+	gs.ctxMu.Lock()
+	last := gs.usage
+	sameSession := last.sessionKey == sessionKey
+	if !sameSession {
+		last = gatewayUsage{}
+	}
+	// A new turn always polls: its counters must land with the turn that spent
+	// them, or the next differently-priced turn would absorb them.
+	if sameSession && !newTurn && !gs.cacheUsagePollFailed && time.Since(gs.cacheUsagePolledAt) < sessionCacheUsagePollInterval {
+		gs.ctxMu.Unlock()
+		return last.cacheReadTokens, last.cacheWriteTokens
+	}
+	gs.ctxMu.Unlock()
+
+	// A failed poll is retried on the next refresh, even inside the window of
+	// an earlier success, while the turn that spent the cache is current.
+	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := gs.sendReq(pollCtx, "sessions.usage", map[string]any{"key": sessionKey, "range": "all", "groupBy": "family", "limit": 1})
+	if err == nil {
+		read, write, err = parseSessionCacheTokens(resp.Payload)
+	}
+	gs.ctxMu.Lock()
+	gs.cacheUsagePollFailed = err != nil
+	if err == nil {
+		gs.cacheUsagePolledAt = time.Now()
+	}
+	gs.ctxMu.Unlock()
+	if err != nil {
+		log.Printf("[session] sessions.usage for cache tokens: %v", err)
+		return last.cacheReadTokens, last.cacheWriteTokens
+	}
+	return read, write
+}
+
+// maxIntPtr returns the larger of two optional counters, or whichever is set.
+func maxIntPtr(a, b *int) *int {
+	if a == nil {
+		return b
+	}
+	if b == nil || *a > *b {
+		return a
+	}
+	return b
+}
+
+// parseSessionCacheTokens extracts cacheRead/cacheWrite from the single
+// session in a sessions.usage response.
+func parseSessionCacheTokens(payload []byte) (read, write *int, err error) {
+	var parsed struct {
+		Sessions []struct {
+			Usage *struct {
+				CacheRead  *float64 `json:"cacheRead"`
+				CacheWrite *float64 `json:"cacheWrite"`
+			} `json:"usage"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return nil, nil, err
+	}
+	if len(parsed.Sessions) == 0 || parsed.Sessions[0].Usage == nil {
+		return nil, nil, fmt.Errorf("no usage for session")
+	}
+	toInt := func(v *float64) *int {
+		if v == nil {
+			return nil
+		}
+		n := int(*v)
+		return &n
+	}
+	u := parsed.Sessions[0].Usage
+	return toInt(u.CacheRead), toInt(u.CacheWrite), nil
 }
 
 // countActiveSubagents extracts, from a sessions.list response, how many
@@ -2662,6 +2839,14 @@ func (gs *gatewaySession) probeSession(ctx context.Context, key string) error {
 // depends on this upstream compatibility string, so keep the coupling explicit.
 const providerRequestFormatErrorFragment = "provider rejected the request schema or tool payload"
 
+// providerRefusalErrorFragment is OpenClaw's user-facing text for an Anthropic
+// safety refusal of this category: "The provider refused this request
+// (category: reasoning_extraction). Revise the request and try again." The
+// refusal is deterministic for the session's transcript: every later turn in
+// that session is refused too, including a human "try again". In production
+// (Faster, Nov 2026) only a fresh session (/new plus a re-brief) recovered.
+const providerRefusalErrorFragment = "provider refused this request (category: reasoning_extraction)"
+
 const (
 	sessionRotatedErrorSuffix   = "OpenClaw session reset so the next message can continue"
 	sessionPreservedErrorSuffix = "OpenClaw session preserved; the turn was aborted but its history is intact"
@@ -2714,20 +2899,52 @@ func isProviderRequestFormatError(err error) bool {
 	return strings.Contains(msg, providerRequestFormatErrorFragment)
 }
 
+func isProviderRefusalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), providerRefusalErrorFragment)
+}
+
 // isRecoverableSessionLifecycleError identifies failures that can leave an
 // accepted OpenClaw turn stuck in the persistent session. Unlike a rejected
 // sessions.send request, these turns must not be replayed because they may
 // already have performed tool side effects. Timeouts and lock conflicts probe
-// and re-attach intact history; provider-rejected transcripts must be replaced.
+// and re-attach intact history; provider-rejected or provider-refused
+// transcripts must be replaced. A refusal is recovered the same way even when
+// sessions.send itself reports it: the poisoned transcript refuses every
+// retry, and rotating through the session_rotated edge re-briefs the fresh
+// session with task context instead of replaying a bare message into it.
 func isRecoverableSessionLifecycleError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if isProviderRefusalError(err) {
+		return true
 	}
 	var sendErr *sessionSendRequestError
 	if errors.As(err, &sendErr) {
 		return false
 	}
 	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err) || isSessionFileLockConflictError(err)
+}
+
+// sessionRotationReason names why a recoverable lifecycle error replaced the
+// session. A refusal wins over every other cause: only the provider_refusal
+// re-brief omits the earlier agent output that would poison the new session.
+func sessionRotationReason(err error) string {
+	switch {
+	case isProviderRefusalError(err):
+		return types.SessionLossReasonProviderRefusal
+	case isSessionFileLockConflictError(err):
+		return types.SessionLossReasonLockConflict
+	case errors.Is(err, context.DeadlineExceeded):
+		return types.SessionLossReasonTurnTimeout
+	case isProviderRequestFormatError(err):
+		return types.SessionLossReasonProviderError
+	default:
+		return types.SessionLossReasonUnknown
+	}
 }
 
 // isSessionFileLockConflictError detects OpenClaw 2026.7.x's "session file
@@ -2948,6 +3165,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 	// Serialise: only one message in flight at a time
 	gs.sendMu.Lock()
 	defer gs.sendMu.Unlock()
+	defer gs.branches.trigger()
 	gs.infMu.Lock()
 	gs.turnMessageID = messageID
 	gs.infMu.Unlock()
@@ -3038,7 +3256,9 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 			if abortErr != nil {
 				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
 			}
-			if isSessionFileLockConflictError(err) || (errors.Is(err, context.DeadlineExceeded) && abortErr == nil) {
+			// A refused transcript is never worth preserving, even when the
+			// error also carries a deadline or lock conflict.
+			if !isProviderRefusalError(err) && (isSessionFileLockConflictError(err) || (errors.Is(err, context.DeadlineExceeded) && abortErr == nil)) {
 				origKey := turnKey
 				reason := types.SessionLossReasonLockConflict
 				if errors.Is(err, context.DeadlineExceeded) {
@@ -3082,15 +3302,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 			if resetErr != nil {
 				return reply, fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
-			reason := types.SessionLossReasonUnknown
-			if isSessionFileLockConflictError(err) {
-				reason = types.SessionLossReasonLockConflict
-			} else if errors.Is(err, context.DeadlineExceeded) {
-				reason = types.SessionLossReasonTurnTimeout
-			} else if isProviderRequestFormatError(err) {
-				reason = types.SessionLossReasonProviderError
-			}
-			return reply, &sessionRotatedError{err: err, reason: reason, previousKey: turnKey}
+			return reply, &sessionRotatedError{err: err, reason: sessionRotationReason(err), previousKey: turnKey}
 		}
 		// Same-session retries exhausted: rotate as a last resort and surface
 		// the reset error instead of silently replaying, so the hub injects a
@@ -3168,6 +3380,9 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, turnKey, message 
 		case result := <-inf.done:
 			if result.err != nil {
 				return "", result.err
+			}
+			if result.undeliverable != "" && deliverableTurnRequired(ctx) {
+				return "", errors.New(result.undeliverable)
 			}
 			// Refresh context usage after each turn (best-effort)
 			go gs.refreshContextUsage(context.Background())
@@ -3533,22 +3748,21 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-// nodeCompatibleExpr mirrors OpenClaw 2026.9.x's engines clause
-// ">=24.16.0 <25 || >=26.1.0" — Node 24 from 24.16, anything 26.1 or newer
-// (the clause is unbounded above 26.1, so Node 27+ is supported), and never
-// 25.x or early 24.x. One expression shared by the bootstrap script and its
-// test so the two cannot drift.
-const nodeCompatibleExpr = "(major === 24 && minor >= 16) || major > 26 || (major === 26 && minor >= 1)"
-
 // installNodeGit installs Node.js 24 and git via apt.
 func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
-	// The OpenClaw npm preinstall aborts the install on anything else.
-	script := fmt.Sprintf(`
+	return runShell(nodeGitInstallScript)
+}
+
+// nodeGitInstallScript fails unless the node left on PATH satisfies
+// cliversion.NodeCompatibleRange: OpenClaw's npm preinstall aborts outside its
+// engines range, and older patches carry CVE-2026-111497. apt can succeed
+// without upgrading, and another node can shadow the apt one, so the result is
+// checked again after the install.
+var nodeGitInstallScript = fmt.Sprintf(`
 set -euo pipefail
 node_compatible() {
-  command -v node >/dev/null 2>&1 &&
-    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(%s ? 0 : 1)'
+  command -v node >/dev/null 2>&1 && %s
 }
 if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node_compatible; then
   echo "Node: $(node --version)"
@@ -3570,11 +3784,13 @@ if ! command -v npm >/dev/null 2>&1 || ! node_compatible; then
   sudo apt-get update -qq
   sudo apt-get install -y --fix-broken nodejs
 fi
+if ! node_compatible; then
+  echo "Node $(node --version 2>/dev/null || echo 'not found') does not satisfy %s (CVE-2026-111497)" >&2
+  exit 1
+fi
 echo "Node: $(node --version)"
 echo "Git: $(git --version)"
-`, nodeCompatibleExpr)
-	return runShell(script)
-}
+`, cliversion.NodeCompatibleCheck, cliversion.NodeCompatibleRange)
 
 const openClawVersion = cliversion.OpenClawVersion
 const codexPluginVersion = cliversion.CodexPluginVersion
@@ -4801,6 +5017,9 @@ func runBootstrap() error {
 	if err := cloneConfiguredGitHubRepos(); err != nil {
 		return fmt.Errorf("cloneConfiguredGitHubRepos: %w", err)
 	}
+	if err := restoreStagedCheckpoint(); err != nil {
+		return fmt.Errorf("restoreStagedCheckpoint: %w", err)
+	}
 
 	if err := syncOpenClawAPIKeyAuth(); err != nil {
 		return err
@@ -4997,36 +5216,39 @@ func printVersion() {
 	fmt.Printf("claw-bridge %s (commit: %s, built: %s)\n", Version, Commit, BuildDate)
 }
 
+// daemonLockPath is a fixed literal: TMPDIR and HOME vary across exec shells
+// in a sandbox, and a derived path would let a second daemon start.
+const daemonLockPath = "/tmp/elasticclaw-claw-bridge.lock"
+
 func main() {
-	// Retain restart history when an external supervisor relaunches this bridge.
-	gatewayRestartBase = gatewayRestartBaseFromEnv()
-
-	// Handle version requests very early, before any env var requirements.
-	// Supports: claw-bridge version, claw-bridge --version, claw-bridge -v
-	if len(os.Args) > 1 {
-		arg := os.Args[1]
-		if arg == "version" || arg == "--version" || arg == "-v" {
-			printVersion()
-			os.Exit(0)
-		}
-	}
-
-	// Subcommand dispatch: linear CLI embedded in the bridge binary.
-	if len(os.Args) > 1 && os.Args[1] == "linear" {
+	command, bootstrapFlag := classifyBridgeArgs(os.Args[1:])
+	switch command {
+	case "help":
+		printBridgeUsage(os.Stdout)
+		return
+	case "invalid":
+		printBridgeUsage(os.Stderr)
+		os.Exit(2)
+	case "version":
+		printVersion()
+		return
+	case "linear":
 		os.Exit(runLinearCLI(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "control" {
+	case "control":
 		os.Exit(runControlCLI(os.Args[2:]))
 	}
 
-	// Bootstrap mode: run all VM setup steps before entering the bridge loop.
-	// Activated by --bootstrap flag or ELASTICCLAW_BOOTSTRAP=1 env var.
-	bootstrapMode := os.Getenv("ELASTICCLAW_BOOTSTRAP") == "1"
-	for _, arg := range os.Args[1:] {
-		if arg == "--bootstrap" {
-			bootstrapMode = true
-		}
+	lock, err := acquireDaemonLock(daemonLockPath)
+	if err != nil {
+		log.Fatal(err)
 	}
+	if lock != nil {
+		defer lock.Close()
+	}
+
+	// Retain restart history when an external supervisor relaunches this bridge.
+	gatewayRestartBase = gatewayRestartBaseFromEnv()
+	bootstrapMode := bootstrapFlag || os.Getenv("ELASTICCLAW_BOOTSTRAP") == "1"
 	if bootstrapMode {
 		if err := runBootstrap(); err != nil {
 			log.Fatalf("[bootstrap] fatal: %v", err)
@@ -5129,6 +5351,7 @@ func main() {
 		break
 	}
 	log.Printf("[bridge] gateway session ready: %s", gwSession.getSessionKey())
+	gwSession.branches = newBranchReporter(ctx, hubURL, clawID, token)
 	setActiveGatewaySession(gwSession)
 	if control != nil {
 		control.setGatewaySession(gwSession)
@@ -5369,6 +5592,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			lastPayload = payload
 		}
 	}()
+	if control != nil {
+		control.setActivitySink(writeActivity)
+		// Reconnects run sequentially, so clearing on exit never drops the
+		// next connection's sink; task activity is skipped while disconnected.
+		defer control.setActivitySink(nil)
+	}
 
 	// Replay any queued entries that accumulated while we were disconnected.
 	// Completed replies/notices are delivered directly; only unprocessed inputs
@@ -5380,7 +5609,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		})
 	}
 	runTurn := func(messageID, content string) {
+		queue.activeTurns.Add(1)
 		go func(c string) {
+			defer queue.activeTurns.Add(-1)
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 			defer agentCancel()
 			reply, agentErr := gwSession.SendMessage(agentCtx, c, messageID, func(chunk string) {
@@ -5467,6 +5698,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		}, &subagentPollFailLogged)
 		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d%s", health, gwSession.IsReady(), cu, restarts, subagentLog)
 		heartbeatPayload := map[string]interface{}{"gateway_healthy": health, "gateway_ready": gwSession.IsReady(), "context_usage": cu, "restart_count": restarts}
+		queue.addTurnHeartbeat(heartbeatPayload)
 		for k, v := range subagentFields {
 			heartbeatPayload[k] = v
 		}
@@ -5489,6 +5721,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		if usage.modelProvider != "" {
 			heartbeatPayload["model_provider"] = usage.modelProvider
 		}
+		if usage.cacheReadTokens != nil {
+			heartbeatPayload["cache_read_tokens"] = usage.cacheReadTokens
+		}
+		if usage.cacheWriteTokens != nil {
+			heartbeatPayload["cache_write_tokens"] = usage.cacheWriteTokens
+		}
 		_ = writeHub(hubMsg{Type: "heartbeat", Payload: mustJSON(heartbeatPayload)})
 	})
 
@@ -5502,24 +5740,26 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		log.Printf("recv type=%s", msg.Type)
 		switch msg.Type {
 		case "message":
-			go func(payload json.RawMessage) {
-				var m map[string]interface{}
-				if err := json.Unmarshal(payload, &m); err != nil {
-					log.Printf("payload unmarshal error: %v", err)
-					return
-				}
-				content, _ := m["content"].(string)
-				if content == "" {
-					return
-				}
-				id, _ := m["id"].(string)
-				if id == "" {
-					log.Printf("[bridge] warning: message without id, dedup disabled for it")
-				}
-				if deduper.seen(id) {
-					log.Printf("[bridge] skipping duplicate message id=%s", id)
-					return
-				}
+			var m map[string]interface{}
+			if err := json.Unmarshal(msg.Payload, &m); err != nil {
+				log.Printf("payload unmarshal error: %v", err)
+				continue
+			}
+			content, _ := m["content"].(string)
+			if content == "" {
+				continue
+			}
+			id, _ := m["id"].(string)
+			if id == "" {
+				log.Printf("[bridge] warning: message without id, dedup disabled for it")
+			}
+			if deduper.seen(id) {
+				log.Printf("[bridge] skipping duplicate message id=%s", id)
+				continue
+			}
+			queue.activeTurns.Add(1)
+			go func() {
+				defer queue.activeTurns.Add(-1)
 				if !gwSession.IsReady() {
 					log.Printf("[bridge] gateway not ready, queuing message for later")
 					queue.pushInput(id, content)
@@ -5557,7 +5797,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					log.Printf("[bridge] hub write failed, queuing completed reply for redelivery: %v", writeErr)
 					queue.pushReply(reply)
 				}
-			}(msg.Payload)
+			}()
 
 		case "model_auth_credential":
 			var credential managedModelAuthCredential

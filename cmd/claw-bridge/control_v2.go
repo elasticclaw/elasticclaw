@@ -291,6 +291,7 @@ type controlSupervisor struct {
 	connected   bool
 	snapshot    *typesv2.WorkflowSnapshot
 	gateway     *gatewaySession
+	activity    func(agentActivity)
 	activeTasks map[string]*activeTaskCancellation
 	recovered   map[workflowControlBinding]bool
 }
@@ -306,6 +307,23 @@ func (s *controlSupervisor) setGatewaySession(session *gatewaySession) {
 	s.mu.Lock()
 	s.gateway = session
 	s.mu.Unlock()
+}
+
+// setActivitySink routes task activity to the current hub connection so the
+// UI shows what the agent is doing while a workflow task runs.
+func (s *controlSupervisor) setActivitySink(sink func(agentActivity)) {
+	s.mu.Lock()
+	s.activity = sink
+	s.mu.Unlock()
+}
+
+func (s *controlSupervisor) reportActivity(activity agentActivity) {
+	s.mu.RLock()
+	sink := s.activity
+	s.mu.RUnlock()
+	if sink != nil {
+		sink(activity)
+	}
 }
 
 func (s *controlSupervisor) updateBinding(binding *workflowControlBinding) {
@@ -548,7 +566,12 @@ func (s *controlSupervisor) acceptHubEnvelope(ctx context.Context, binding workf
 		s.cancelAllTasks()
 	}
 	if envelope.Kind == typesv2.MessageExecRunAssign || envelope.Kind == typesv2.MessageDependencyUpdateAssign {
-		s.startCommandTask(ctx, binding, envelope.MessageID, envelope.Kind, envelope.TaskID, envelope.Payload)
+		// Hub-side transitions (webhooks, auto-promoted PRs) are not pushed to
+		// the bridge; the assignment carries the version its completion must match.
+		if envelope.ExpectedStateVersion != nil {
+			s.observeStateVersion(binding, *envelope.ExpectedStateVersion)
+		}
+		s.startCommandTask(ctx, binding, envelope)
 	}
 	return typesv2.ControlReceipt{MessageID: envelope.MessageID,
 		Disposition: typesv2.DispositionAccepted, StateVersion: s.stateVersion(binding)}, task, nil
@@ -620,7 +643,9 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 		}
 	}()
 	prompt := workflowV2TaskPrompt(task)
-	response, sendErr := gateway.SendMessage(taskCtx, prompt, assignmentMessageID, func(string) {}, func(agentActivity) {})
+	// A turn OpenClaw ends without a deliverable answer fails the task, so the
+	// workflow does not advance as if the agent had done the work.
+	response, sendErr := gateway.SendMessage(requireDeliverableTurn(taskCtx), prompt, assignmentMessageID, func(string) {}, s.reportActivity)
 	close(heartbeatDone)
 	<-heartbeatStopped
 	if sendErr != nil {
@@ -782,6 +807,22 @@ func (s *controlSupervisor) updateReceiptVersion(binding workflowControlBinding,
 		s.snapshot.StateVersion = receipt.StateVersion
 		snapshot := *s.snapshot
 		_ = s.store.saveSnapshot(snapshot)
+	}
+}
+
+// observeStateVersion advances the local snapshot to a newer hub version.
+func (s *controlSupervisor) observeStateVersion(binding workflowControlBinding, version uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.binding == nil || !s.binding.equal(binding) {
+		return
+	}
+	if s.snapshot == nil {
+		s.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID}
+	}
+	if version > s.snapshot.StateVersion {
+		s.snapshot.StateVersion = version
+		_ = s.store.saveSnapshot(*s.snapshot)
 	}
 }
 

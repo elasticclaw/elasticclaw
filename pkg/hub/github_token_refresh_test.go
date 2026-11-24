@@ -29,7 +29,7 @@ func TestGitHubTokenProfileScriptUsesCredentialHelperWithoutStaticToken(t *testi
 }
 
 func TestGitHubCLIWrapperRefreshesTokenForEachInvocation(t *testing.T) {
-	script := buildGitHubCLIWrapperInstallScript()
+	script := buildGitHubCLIWrapperInstallScript("https://hub.example.com", "claw-123", "claw-token")
 
 	assertContains(t, script, "sudo tee /usr/local/bin/gh", "wrapper shadows gh on PATH")
 	assertContains(t, script, "/usr/local/bin/elasticclaw-git-credentials", "wrapper fetches token from credential helper")
@@ -44,7 +44,7 @@ func TestGitHubCLIWrapperRefreshesTokenForEachInvocation(t *testing.T) {
 }
 
 func TestGitHubCLIWrapperHandlesRealGhInUsrLocalBin(t *testing.T) {
-	script := buildGitHubCLIWrapperInstallScript()
+	script := buildGitHubCLIWrapperInstallScript("https://hub.example.com", "claw-123", "claw-token")
 
 	assertContains(t, script, "/usr/local/bin/gh.elasticclaw-real", "wrapper preserves real gh when gh already lives in /usr/local/bin")
 	assertContains(t, script, "sudo mv /usr/local/bin/gh /usr/local/bin/gh.elasticclaw-real", "wrapper moves real gh out of wrapper path")
@@ -53,14 +53,14 @@ func TestGitHubCLIWrapperHandlesRealGhInUsrLocalBin(t *testing.T) {
 }
 
 func TestGitHubCLIWrapperInstallEnsuresLocalBinIsFirstInPath(t *testing.T) {
-	script := buildGitHubCLIWrapperInstallScript()
+	script := buildGitHubCLIWrapperInstallScript("https://hub.example.com", "claw-123", "claw-token")
 
 	assertContains(t, script, "sudo tee /etc/profile.d/elasticclaw-path.sh", "wrapper installs PATH profile to ensure /usr/local/bin is first")
 	assertContains(t, script, `export PATH="/usr/local/bin:$PATH"`, "wrapper prepends /usr/local/bin to PATH")
 }
 
 func TestGitHubCLIWrapperEscapesRealGhPathForSed(t *testing.T) {
-	script := buildGitHubCLIWrapperInstallScript()
+	script := buildGitHubCLIWrapperInstallScript("https://hub.example.com", "claw-123", "claw-token")
 
 	assertContains(t, script, "REAL_GH_ESCAPED=", "wrapper escapes real gh path before sed replacement")
 	assertContains(t, script, `sed 's/[&\\|]/\\&/g'`, "wrapper escapes sed replacement metacharacters")

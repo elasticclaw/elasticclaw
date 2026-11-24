@@ -2,7 +2,14 @@ package replicated
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -214,4 +221,303 @@ func TestSSHUserFromPublicKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateVMRetries(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		status      int
+		body        string
+		failures    int
+		wantPosts   int32
+		wantLists   int32
+		wantError   bool
+		wantCredits bool
+	}{
+		{"502 then success", 502, "bad gateway", 1, 2, 1, false, false},
+		{"bounded retries", 503, "unavailable", 3, 3, 3, true, false},
+		{"credits", 400, "Request exceeds available credits", 1, 1, 0, true, true},
+		{"other bad request", 400, "invalid name", 1, 1, 0, true, false},
+		{"unauthorized", 401, "unauthorized", 1, 1, 0, true, false},
+		{"rate limited", 429, "too many requests", 1, 1, 0, true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var posts, lists atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/vendor/v3/vm":
+					if int(posts.Add(1)) <= tt.failures {
+						http.Error(w, tt.body, tt.status)
+						return
+					}
+					w.WriteHeader(http.StatusCreated)
+					w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw"}]}`))
+				case r.Method == http.MethodGet && r.URL.Path == "/vendor/v3/vms":
+					lists.Add(1)
+					w.Write([]byte(`{"vms":[]}`))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			p, err := New(Config{Token: "test-token", APIURL: server.URL + "/vendor/v3"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.createBackoff = [2]time.Duration{}
+			p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
+			id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+			if (err != nil) != tt.wantError || errors.Is(err, ErrInsufficientCredits) != tt.wantCredits {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.wantError && id != "vm-created" {
+				t.Errorf("VM ID = %q", id)
+			}
+			if posts.Load() != tt.wantPosts || lists.Load() != tt.wantLists {
+				t.Errorf("POSTs = %d, lists = %d, want %d, %d", posts.Load(), lists.Load(), tt.wantPosts, tt.wantLists)
+			}
+		})
+	}
+}
+
+func TestVMTerminated(t *testing.T) {
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, body          string
+		status              int
+		terminated, wantErr bool
+	}{
+		{"not found", ``, 404, true, false},
+		{"terminated", `{"vm":{"status":"terminated"}}`, 200, true, false},
+		{"deleted", `{"vm":{"status":"deleted"}}`, 200, true, false},
+		{"expired", `{"vm":{"status":"expired"}}`, 200, true, false},
+		{"past expiry", `{"vm":{"status":"running","expires_at":"2026-11-02T11:59:59Z"}}`, 200, true, false},
+		{"future expiry", `{"vm":{"status":"running","expires_at":"2026-11-04T12:00:00Z"}}`, 200, false, false},
+		{"running", `{"vm":{"status":"running"}}`, 200, false, false},
+		{"provisioning", `{"vm":{"status":"provisioning"}}`, 200, false, false},
+		{"unauthorized", ``, 401, false, true},
+		{"server error", `HTTP 404`, 500, false, true},
+		{"missing VM", `{}`, 200, false, true},
+		{"invalid response", `{`, 200, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := New(Config{Token: "test-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.http.Transport = vmLookupTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodGet || r.URL.Path != "/vendor/v3/vm/vm-abc123" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+			got, err := p.VMTerminated(context.Background(), "vm-abc123", at)
+			if got != tc.terminated || (err != nil) != tc.wantErr {
+				t.Fatalf("VMTerminated = %v, %v; want %v, error=%v", got, err, tc.terminated, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCreateVMReconcilesGatewayError(t *testing.T) {
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var posts, lists atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/vm":
+					// CMX created the VM, but the gateway returned an error.
+					posts.Add(1)
+					http.Error(w, "gateway error", status)
+				case r.Method == http.MethodGet && r.URL.Path == "/vms":
+					lists.Add(1)
+					w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"}]}`))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			p, err := New(Config{Token: "test-token", APIURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.createBackoff = [2]time.Duration{}
+			p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
+			id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+			if err != nil || id != "vm-created" {
+				t.Fatalf("CreateVM = %q, %v", id, err)
+			}
+			if posts.Load() != 1 || lists.Load() != 1 {
+				t.Errorf("POSTs = %d, lists = %d", posts.Load(), lists.Load())
+			}
+		})
+	}
+}
+
+func TestCreateVMReconcilesTimeout(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		listBody   string
+		listStatus int
+		wantPosts  int32
+		wantLists  int32
+		wantError  bool
+	}{
+		{"existing VM", `{"vms":[{"id":"other","name":"other"},{"id":"vm-created","name":"test-claw","created_at":"2026-11-02T11:00:00Z"}]}`, 200, 1, 1, false},
+		{"missing VM", `{"vms":[]}`, 200, 2, 1, false},
+		{"list failed", "unavailable", 503, 1, 3, true},
+		{"invalid list", "{", 200, 1, 3, true},
+		{"skips terminated predecessor", `{"vms":[{"id":"old","name":"test-claw","status":"terminated","created_at":"2026-11-02T10:00:00Z"}]}`, 200, 2, 1, false},
+		{"skips VM created before the request", `{"vms":[{"id":"unrelated","name":"test-claw","status":"running","created_at":"2026-11-02T09:00:00Z"}]}`, 200, 2, 1, false},
+		{"prefers newest live VM", `{"vms":[{"id":"older","name":"test-claw","status":"running","created_at":"2026-11-02T10:58:00Z"},{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"},{"id":"expired","name":"test-claw","status":"expired","created_at":"2026-11-02T12:00:00Z"}]}`, 200, 1, 1, false},
+		{"missing created_at is inconclusive", `{"vms":[{"id":"unknown","name":"test-claw","status":"running"}]}`, 200, 1, 3, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var posts, lists atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/vm":
+					if posts.Add(1) == 1 {
+						io.Copy(io.Discard, r.Body)
+						<-r.Context().Done()
+						return
+					}
+					w.WriteHeader(http.StatusCreated)
+					w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw"}]}`))
+				case r.Method == http.MethodGet && r.URL.Path == "/vms":
+					lists.Add(1)
+					w.WriteHeader(tt.listStatus)
+					w.Write([]byte(tt.listBody))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			p, err := New(Config{Token: "test-token", APIURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.createBackoff = [2]time.Duration{}
+			p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
+			p.http.Timeout = 100 * time.Millisecond
+			id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+			if (err != nil) != tt.wantError {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.wantError && id != "vm-created" {
+				t.Errorf("VM ID = %q", id)
+			}
+			if posts.Load() != tt.wantPosts || lists.Load() != tt.wantLists {
+				t.Errorf("POSTs = %d, lists = %d", posts.Load(), lists.Load())
+			}
+		})
+	}
+}
+
+func TestCreateVMRetryCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+	p, err := New(Config{Token: "test-token", APIURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.createBackoff = [2]time.Duration{time.Hour, time.Hour}
+	time.AfterFunc(100*time.Millisecond, cancel)
+	_, err = p.CreateVM(ctx, VMCreateRequest{Name: "test-claw"})
+	if !errors.Is(err, context.Canceled) || posts.Load() != 1 {
+		t.Fatalf("error = %v, POSTs = %d", err, posts.Load())
+	}
+}
+
+func TestCreateVMReconcilesTimeoutOnLastAttempt(t *testing.T) {
+	var posts, lists atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/vm":
+			if posts.Add(1) <= 2 {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			// The third POST creates the VM but its response is lost.
+			io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+		case r.Method == http.MethodGet && r.URL.Path == "/vms":
+			lists.Add(1)
+			if posts.Load() < 3 {
+				w.Write([]byte(`{"vms":[]}`))
+				return
+			}
+			w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"}]}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	p, err := New(Config{Token: "test-token", APIURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.createBackoff = [2]time.Duration{}
+	p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
+	p.http.Timeout = 100 * time.Millisecond
+	id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+	if err != nil || id != "vm-created" {
+		t.Fatalf("CreateVM = %q, %v", id, err)
+	}
+	if posts.Load() != 3 || lists.Load() != 3 {
+		t.Errorf("POSTs = %d, lists = %d", posts.Load(), lists.Load())
+	}
+}
+
+func TestCreateVMRetriesTransientReconcileFailure(t *testing.T) {
+	var posts, lists atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/vm":
+			// The VM is created, but the response is lost.
+			posts.Add(1)
+			io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+		case r.Method == http.MethodGet && r.URL.Path == "/vms":
+			if lists.Add(1) == 1 {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			w.Write([]byte(`{"vms":[{"id":"vm-created","name":"test-claw","status":"queued","created_at":"2026-11-02T11:00:00Z"}]}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	p, err := New(Config{Token: "test-token", APIURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.createBackoff = [2]time.Duration{}
+	p.now = func() time.Time { return time.Date(2026, 11, 2, 11, 2, 0, 0, time.UTC) }
+	p.http.Timeout = 100 * time.Millisecond
+	id, err := p.CreateVM(context.Background(), VMCreateRequest{Name: "test-claw"})
+	if err != nil || id != "vm-created" {
+		t.Fatalf("CreateVM = %q, %v", id, err)
+	}
+	if posts.Load() != 1 || lists.Load() != 2 {
+		t.Errorf("POSTs = %d, lists = %d", posts.Load(), lists.Load())
+	}
+}
+
+type vmLookupTransport func(*http.Request) (*http.Response, error)
+
+func (f vmLookupTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }

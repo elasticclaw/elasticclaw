@@ -46,6 +46,9 @@ func (s *Server) rebriefAfterRestoreIfNeeded(cc *clawConn, clawID string) bool {
 
 	var b strings.Builder
 	b.WriteString("[hub] Your sandbox was replaced after an infrastructure failure and this is a fresh session — your previous conversation is gone. Re-read the task context below and continue from the current state of the workspace and PR; do not start over and do not ask which ticket this is.")
+	if s.clawPushesToGitHub(clawID) {
+		b.WriteString(" The repositories were cloned fresh: in each one, if your ticket branch is not checked out, run git fetch and check it out from origin before doing anything else.")
+	}
 	b.WriteString(renderResumeStageContext(stageID, label, instructions))
 	for _, pr := range s.checkpointPRs(clawID) {
 		b.WriteString(fmt.Sprintf("\nOpen PR: %s (%s, #%d)", pr.URL, pr.Repo, pr.Number))

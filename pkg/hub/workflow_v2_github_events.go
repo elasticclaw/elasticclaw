@@ -3,8 +3,10 @@ package hub
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path"
@@ -40,17 +42,53 @@ func (s *Server) processWorkflowV2GitHubPREvent(payload githubPRPayload) {
 		verified.ID = target.PRID
 		verified.Provenance.Principal = payload.Sender.Login
 		kind := workflowV2PullRequestEventKind(payload.Action, verified.State, verified.HeadSHA != target.HeadSHA)
-		if kind == "" {
+		if kind != "" {
+			eventID := workflowV2GitHubEventID(target.RunID, "pull_request", payload.Action,
+				verified.Repository, strconv.Itoa(verified.Number), verified.HeadSHA, verified.State,
+				payload.PullRequest.UpdatedAt)
+			if err := s.reconcileWorkflowV2PullRequest(context.Background(), workflowv2.NewStore(s.db), target, eventID, kind, verified); err != nil {
+				log.Printf("[workflow-v2 github] reconcile %s#%d for run %s: %v",
+					payload.Repository.FullName, payload.Number, target.RunID, err)
+				continue
+			}
+		} else if verified.HeadSHA != target.HeadSHA || verified.State != target.State {
+			// The stored head is stale and this action does not reconcile it;
+			// the periodic reconciler updates the PR before mergeability.
 			continue
 		}
-		eventID := workflowV2GitHubEventID(target.RunID, "pull_request", payload.Action,
-			verified.Repository, strconv.Itoa(verified.Number), verified.HeadSHA, verified.State,
-			payload.PullRequest.UpdatedAt)
-		if _, err := workflowv2.NewStore(s.db).ReconcilePullRequest(context.Background(), target, eventID, kind, verified); err != nil {
-			log.Printf("[workflow-v2 github] reconcile %s#%d for run %s: %v",
-				payload.Repository.FullName, payload.Number, target.RunID, err)
+		target.HeadSHA, target.State = verified.HeadSHA, verified.State
+		if _, err := workflowv2.NewStore(s.db).ReconcileMergeability(context.Background(), target, verified); err != nil {
+			log.Printf("[workflow-v2 github] reconcile mergeability for run %s: %v", target.RunID, err)
 		}
 	}
+}
+
+// reconcileWorkflowV2PullRequest applies a verified PR observation to its v2
+// run. A merge or close is first mirrored into the parent task run's PR rows:
+// adopted PRs have no claw_prs row and the v1 webhook update only runs for
+// factories, so otherwise the summary materialized at the run's terminal state
+// would still count the PR as open until the dead-claw sweep.
+func (s *Server) reconcileWorkflowV2PullRequest(ctx context.Context, store *workflowv2.Store,
+	target workflowv2.DeliveryTarget, eventID, kind string, verified typesv2.VerifiedPullRequest) error {
+	if verified.State == "merged" || verified.State == "closed" {
+		var taskRunID string
+		err := s.db.QueryRowContext(ctx, `SELECT task_run_id FROM workflow_v2_runs WHERE id=?`, target.RunID).Scan(&taskRunID)
+		if err == nil && taskRunID != "" {
+			err = s.associateTaskRunPR(TaskRunPR{RunID: taskRunID, Repo: verified.Repository, PRNumber: verified.Number,
+				URL: verified.URL, State: taskRunPRStateClosed, Merged: verified.State == "merged",
+				OccurredAt: verified.Provenance.ObservedAt})
+		}
+		// Apply the event only once the mirror is written: a terminal run is
+		// no longer a delivery target, so nothing would retry the mirror.
+		// The caller logs the error and the reconciler retries next pass. A
+		// missing parent task run has nothing to mirror.
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("record %s#%d %s in task run PRs: %w",
+				verified.Repository, verified.Number, verified.State, err)
+		}
+	}
+	_, err := store.ReconcilePullRequest(ctx, target, eventID, kind, verified)
+	return err
 }
 
 func workflowV2PullRequestEventKind(action, state string, headChanged bool) string {
@@ -106,7 +144,7 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 			return
 		}
 		for _, target := range matched {
-			if !seen[target.RunID+"\x00"+target.PRID] {
+			if target.Repository == payload.Repository.FullName && !seen[target.RunID+"\x00"+target.PRID] {
 				seen[target.RunID+"\x00"+target.PRID] = true
 				targets = append(targets, target)
 			}
@@ -136,6 +174,31 @@ func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *wor
 			ID int64 `json:"id"`
 		} `json:"check_suite"`
 	}
+	type commitStatus struct {
+		ID        int64  `json:"id"`
+		Context   string `json:"context"`
+		State     string `json:"state"`
+		TargetURL string `json:"target_url"`
+		UpdatedAt string `json:"updated_at"`
+	}
+	statusesByRepository := map[string][]commitStatus{}
+	needsWorkflow, needsStatuses := map[string]bool{}, map[string]bool{}
+	for _, target := range targets {
+		workspace, err := typesv2.ParseAndValidateWorkspace([]byte(target.WorkspaceYAML))
+		if err != nil || workspace.Workspace.CI == nil {
+			continue
+		}
+		for _, pipeline := range workspace.Workspace.CI.Pipelines {
+			if pipeline.Repository != target.RepositoryName {
+				continue
+			}
+			if pipeline.CheckName != "" {
+				needsStatuses[target.Repository] = needsStatuses[target.Repository] || pipeline.AppSlug == ""
+			} else if strings.EqualFold(workspace.Workspace.CI.Connections[pipeline.Connection].Provider, "github_actions") {
+				needsWorkflow[target.Repository] = true
+			}
+		}
+	}
 	checksByRepository := map[string][]githubCheck{}
 	workflowRunsByRepository := map[string]map[int64]struct{ name, path string }{}
 	for _, target := range targets {
@@ -162,37 +225,49 @@ func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *wor
 				continue
 			}
 			checksByRepository[target.Repository] = checks
-			rawRuns, err = githubAPICollectionWithBaseContext(ctx, s.ghBaseURL(),
-				fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", target.Repository, headSHA),
-				token, "workflow_runs")
-			if err != nil {
-				log.Printf("[workflow-v2 github] reconcile workflow runs for %s@%s: %v", target.Repository, headSHA, err)
-				delete(checksByRepository, target.Repository)
-				continue
-			}
-			rawWorkflowRuns, _ := json.Marshal(rawRuns)
-			var workflowRuns []struct {
-				Name         string `json:"name"`
-				Path         string `json:"path"`
-				CheckSuiteID int64  `json:"check_suite_id"`
-			}
-			if err := json.Unmarshal(rawWorkflowRuns, &workflowRuns); err != nil {
-				log.Printf("[workflow-v2 github] decode workflow runs for %s: %v", target.Repository, err)
-				delete(checksByRepository, target.Repository)
-				continue
-			}
-			bySuite := map[int64]struct{ name, path string }{}
-			for _, run := range workflowRuns {
-				if run.CheckSuiteID > 0 {
-					bySuite[run.CheckSuiteID] = struct{ name, path string }{name: run.Name, path: run.Path}
+			if needsStatuses[target.Repository] {
+				rawStatuses, statusErr := githubAPICollectionWithBaseContext(ctx, s.ghBaseURL(),
+					fmt.Sprintf("repos/%s/commits/%s/status?per_page=100", target.Repository, headSHA), token, "statuses")
+				if statusErr != nil {
+					log.Printf("[workflow-v2 github] reconcile commit statuses for %s: %v", target.Repository, statusErr)
+				} else {
+					encoded, _ := json.Marshal(rawStatuses)
+					var statuses []commitStatus
+					if err := json.Unmarshal(encoded, &statuses); err != nil {
+						log.Printf("[workflow-v2 github] decode commit statuses for %s: %v", target.Repository, err)
+					} else {
+						statusesByRepository[target.Repository] = statuses
+					}
 				}
 			}
-			workflowRunsByRepository[target.Repository] = bySuite
+			if needsWorkflow[target.Repository] {
+				rawRuns, err = githubAPICollectionWithBaseContext(ctx, s.ghBaseURL(),
+					fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", target.Repository, headSHA), token, "workflow_runs")
+				if err != nil {
+					log.Printf("[workflow-v2 github] reconcile workflow runs for %s@%s: %v", target.Repository, headSHA, err)
+				} else {
+					encoded, _ := json.Marshal(rawRuns)
+					var runs []struct {
+						Name         string `json:"name"`
+						Path         string `json:"path"`
+						CheckSuiteID int64  `json:"check_suite_id"`
+					}
+					if err := json.Unmarshal(encoded, &runs); err != nil {
+						log.Printf("[workflow-v2 github] decode workflow runs for %s: %v", target.Repository, err)
+					} else {
+						bySuite := map[int64]struct{ name, path string }{}
+						for _, run := range runs {
+							if run.CheckSuiteID > 0 {
+								bySuite[run.CheckSuiteID] = struct{ name, path string }{run.Name, run.Path}
+							}
+						}
+						workflowRunsByRepository[target.Repository] = bySuite
+					}
+				}
+			}
 		}
-		workflowRuns, loaded := workflowRunsByRepository[target.Repository]
-		if !loaded {
-			continue
-		}
+		workflowRuns, workflowsLoaded := workflowRunsByRepository[target.Repository]
+		statuses, statusesLoaded := statusesByRepository[target.Repository]
 		workspace, err := typesv2.ParseAndValidateWorkspace([]byte(target.WorkspaceYAML))
 		if err != nil || workspace.Workspace.CI == nil {
 			continue
@@ -204,17 +279,28 @@ func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *wor
 				continue
 			}
 			connection := workspace.Workspace.CI.Connections[pipeline.Connection]
-			if !strings.EqualFold(connection.Provider, "github_actions") {
+			if pipeline.CheckName == "" {
+				if !strings.EqualFold(connection.Provider, "github_actions") || !workflowsLoaded {
+					continue
+				}
+			} else if pipeline.AppSlug == "" && !statusesLoaded {
+				// A partial snapshot must not supersede previously observed statuses.
 				continue
 			}
 			evidenceScopes = append(evidenceScopes, workflowv2.EvidenceScope{RunID: target.RunID,
 				PRID: target.PRID, HeadSHA: headSHA, Domain: "ci", Connection: pipeline.Connection,
 				Pipeline: pipelineName})
 			for _, check := range checks {
-				workflowRun, ok := workflowRuns[check.CheckSuite.ID]
-				if !strings.EqualFold(check.App.Slug, "github-actions") || !ok ||
-					!workflowV2GitHubWorkflowMatches(pipeline.Workflow, workflowRun.name, workflowRun.path) {
-					continue
+				if pipeline.CheckName != "" {
+					if !workflowV2GitHubCheckNameMatches(pipeline, check.Name, check.App.Slug) {
+						continue
+					}
+				} else {
+					workflowRun, ok := workflowRuns[check.CheckSuite.ID]
+					if !strings.EqualFold(check.App.Slug, "github-actions") || !ok ||
+						!workflowV2GitHubWorkflowMatches(pipeline.Workflow, workflowRun.name, workflowRun.path) {
+						continue
+					}
 				}
 				observed := parseGitHubTime(check.CompletedAt)
 				rawExternalID := strconv.FormatInt(check.ID, 10)
@@ -232,6 +318,26 @@ func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *wor
 						Connection: pipeline.Connection, ExternalID: rawExternalID, ObservedAt: observed, Reconciled: true},
 				})
 			}
+			// Commit statuses expose no authoritative App slug. They can only
+			// satisfy name-only pipelines, never an app-scoped pipeline.
+			if pipeline.CheckName != "" && pipeline.AppSlug == "" {
+				for _, status := range statuses {
+					if !workflowV2GitHubCheckNameMatches(pipeline, status.Context, "") {
+						continue
+					}
+					observed := parseGitHubTime(status.UpdatedAt)
+					rawID := strconv.FormatInt(status.ID, 10)
+					evidenceInputs = append(evidenceInputs, workflowv2.EvidenceInput{
+						RunID: target.RunID, PRID: target.PRID, HeadSHA: headSHA, Domain: "ci",
+						Connection: pipeline.Connection, ExternalID: pipelineName + ":status:" + status.Context,
+						Kind: status.Context, Status: status.State, ObservedAt: observed,
+						Payload: map[string]interface{}{"pipeline": pipelineName, "details_url": status.TargetURL,
+							"github_status": status.State},
+						Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerCI),
+							Connection: pipeline.Connection, ExternalID: rawID, ObservedAt: observed, Reconciled: true},
+					})
+				}
+			}
 		}
 		if len(evidenceScopes) > 0 {
 			if _, err := store.ReconcileEvidenceSnapshot(ctx, evidenceScopes, evidenceInputs,
@@ -241,6 +347,11 @@ func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *wor
 		}
 	}
 	return nil
+}
+
+func workflowV2GitHubCheckNameMatches(pipeline typesv2.Pipeline, name, appSlug string) bool {
+	matched, err := typesv2.MatchCheckName(pipeline.CheckName, name)
+	return err == nil && matched && (pipeline.AppSlug == "" || strings.EqualFold(pipeline.AppSlug, appSlug))
 }
 
 func workflowV2GitHubWorkflowMatches(configured, name, workflowPath string) bool {

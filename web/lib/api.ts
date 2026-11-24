@@ -155,11 +155,12 @@ export async function fetchMessageTimeline(clawId: string, opts?: { before?: str
   return apiFetch<ApiMessage[]>(`/api/messages/${clawId}/timeline${qs}`)
 }
 
-export async function fetchActivityMessages(clawId: string, opts: { from?: string; to?: string; before?: string; limit?: number; order?: "asc" | "desc" }): Promise<ApiMessage[]> {
+export async function fetchActivityMessages(clawId: string, opts: { from?: string; to?: string; before?: string; beforeId?: string; limit?: number; order?: "asc" | "desc" }): Promise<ApiMessage[]> {
   const params = new URLSearchParams()
   if (opts.from) params.set('from', opts.from)
   if (opts.to) params.set('to', opts.to)
   if (opts.before) params.set('before', opts.before)
+  if (opts.beforeId) params.set('before_id', opts.beforeId)
   if (opts.limit) params.set('limit', String(opts.limit))
   if (opts.order) params.set('order', opts.order)
   const qs = params.toString() ? '?' + params.toString() : ''
@@ -378,8 +379,17 @@ export async function updateWorkflowControls(
   )
 }
 
-export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
-  return apiFetch<{ claw_id: string; status: string }>(
+// A started run returns run_id and claw_id; a signal-policy trigger that
+// ticked an open run returns status "signaled" and target_run_ids instead.
+export type TriggerWorkflowResponse = {
+  status: string
+  run_id?: string
+  claw_id?: string
+  target_run_ids?: string[]
+}
+
+export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<TriggerWorkflowResponse> {
+  return apiFetch<TriggerWorkflowResponse>(
     `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}/trigger`,
     {
       method: "POST",
@@ -404,15 +414,17 @@ export async function fetchV2WorkflowRunAttempts(runId: string): Promise<{ attem
   return apiFetch<{ attempts: WorkflowV2RunAttempt[]; count: number }>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts`)
 }
 
-export async function fetchV2WorkflowRunLogs(runId: string, before?: string): Promise<ApiMessage[]> {
+export async function fetchV2WorkflowRunLogs(runId: string, before?: string, beforeId?: string): Promise<ApiMessage[]> {
   const qs = new URLSearchParams({ limit: "100", order: "desc" })
   if (before) qs.set("before", before)
+  if (beforeId) qs.set("before_id", beforeId)
   return apiFetch<ApiMessage[]>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/logs?${qs.toString()}`)
 }
 
-export async function fetchV2WorkflowAttemptLogs(runId: string, attemptId: string, before?: string): Promise<ApiMessage[]> {
+export async function fetchV2WorkflowAttemptLogs(runId: string, attemptId: string, before?: string, beforeId?: string): Promise<ApiMessage[]> {
   const qs = new URLSearchParams({ limit: "100", order: "desc" })
   if (before) qs.set("before", before)
+  if (beforeId) qs.set("before_id", beforeId)
   return apiFetch<ApiMessage[]>(
     `/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts/${encodeURIComponent(attemptId)}/logs?${qs.toString()}`
   )
@@ -428,6 +440,7 @@ function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
   if (!filters) return ""
   const entries: Array<[string, string | number | boolean | undefined]> = [
     ["status", filters.status],
+    ["run_kind", filters.runKind],
     ["ownerType", filters.ownerType],
     ["workspace", filters.workspace],
     ["workflow", filters.workflow],
@@ -794,4 +807,32 @@ export function fetchAIChatArtifacts(signal?: AbortSignal): Promise<AIChatArtifa
 }
 export function deleteAIChatArtifact(slug: string): Promise<void> {
   return apiFetch(`/api/ai-chat/artifacts/${encodeURIComponent(slug)}`, { method: "DELETE" })
+}
+
+export interface PersonalApiToken {
+  id: string
+  name: string
+  prefix: string
+  created_at: string
+  expires_at: string | null
+  last_used_at: string | null
+  revoked_at: string | null
+  status: "active" | "expired" | "revoked"
+}
+
+export type ApiTokenExpirationDays = 7 | 30 | 90 | 180 | null
+
+export function fetchApiTokens(): Promise<{ tokens: PersonalApiToken[] }> {
+  return apiFetch("/api/settings/api-tokens")
+}
+
+export function createApiToken(name: string, expiresInDays: ApiTokenExpirationDays): Promise<PersonalApiToken & { token: string }> {
+  return apiFetch("/api/settings/api-tokens", {
+    method: "POST",
+    body: JSON.stringify({ name, expires_in_days: expiresInDays }),
+  })
+}
+
+export function revokeApiToken(id: string): Promise<void> {
+  return apiFetch(`/api/settings/api-tokens/${encodeURIComponent(id)}`, { method: "DELETE" })
 }

@@ -269,10 +269,7 @@ type e2eEnv struct {
 	GitHubAppURL        string
 	GitHubInstallation  string
 	GitHubAppPrivateKey string
-	LinearAPIKey        string
-	LinearTeamKey       string
-	LinearTriggerState  string
-	LinearInitialState  string
+	LinearAPIURL        string
 	JiraBaseURL         string
 	JiraUsername        string
 	JiraToken           string
@@ -315,10 +312,6 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 		GitHubAppURL:        os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_URL"),
 		GitHubInstallation:  os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_INSTALLATION"),
 		GitHubAppPrivateKey: os.Getenv("ELASTICCLAW_E2E_GITHUB_APP_PRIVATE_KEY"),
-		LinearAPIKey:        os.Getenv("ELASTICCLAW_E2E_LINEAR_API_KEY"),
-		LinearTeamKey:       os.Getenv("ELASTICCLAW_E2E_LINEAR_TEAM_KEY"),
-		LinearTriggerState:  envOrDefault("ELASTICCLAW_E2E_LINEAR_TRIGGER_STATE", "Todo"),
-		LinearInitialState:  os.Getenv("ELASTICCLAW_E2E_LINEAR_INITIAL_STATE"),
 		JiraBaseURL:         strings.TrimRight(os.Getenv("ELASTICCLAW_E2E_JIRA_BASE_URL"), "/"),
 		JiraUsername:        os.Getenv("ELASTICCLAW_E2E_JIRA_USERNAME"),
 		JiraToken:           os.Getenv("ELASTICCLAW_E2E_JIRA_TOKEN"),
@@ -512,6 +505,7 @@ llm_keys:
 		"ELASTICCLAW_E2E_BRIDGE_BINARY="+env.BridgeBinary,
 		"ELASTICCLAW_E2E_BRIDGE_TOKEN="+env.BridgeToken,
 		"ELASTICCLAW_PROVIDER_NAME_PREFIX="+env.ProviderPrefix,
+		"ELASTICCLAW_E2E_LINEAR_API_URL="+env.LinearAPIURL,
 		"HOME="+dir,
 	)
 	cmd.Stdout = logFile

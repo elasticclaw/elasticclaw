@@ -25,6 +25,11 @@ const (
 func (s *Server) runWorkflowV2GitHubReconciler(ctx context.Context) {
 	reconcile := func() {
 		if !defaultGitHubClient.allowLowPriority() {
+			// Replaying persisted deferrals needs no GitHub calls, so an
+			// exhausted budget must not stall recovered runs.
+			if err := workflowv2.NewStore(s.db).ReplayDeferredEvents(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("[workflow-v2 github] replay deferred events: %v", err)
+			}
 			return
 		}
 		if err := s.reconcileWorkflowV2GitHub(ctx); err != nil && ctx.Err() == nil {
@@ -46,11 +51,19 @@ func (s *Server) runWorkflowV2GitHubReconciler(ctx context.Context) {
 
 func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 	store := workflowv2.NewStore(s.db)
+	if err := store.ReplayDeferredEvents(ctx); err != nil {
+		log.Printf("[workflow-v2 github] replay deferred events: %v", err)
+	}
 	targets, err := store.ActiveDeliveryTargetsAll(ctx)
 	if err != nil {
 		return fmt.Errorf("list active deliveries: %w", err)
 	}
 	current := make([]workflowv2.DeliveryTarget, 0, len(targets))
+	type prObservation struct {
+		pr  typesv2.VerifiedPullRequest
+		err error
+	}
+	observations := map[string]prObservation{}
 	for _, target := range targets {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -65,8 +78,23 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 			log.Printf("[workflow-v2 github] parse workspace for run %s: %v", target.RunID, parseErr)
 			continue
 		}
-		verified, verifyErr := s.verifyWorkflowV2PullRequest(targetCtx, workflowv2.Run{}, workspace.Workspace,
-			typesv2.PullRequestClaim{URL: target.URL})
+		key := target.Repository + "#" + strconv.Itoa(target.Number)
+		observation, loaded := observations[key]
+		if !loaded {
+			observation.pr, observation.err = s.verifyWorkflowV2PullRequest(targetCtx, workflowv2.Run{}, workspace.Workspace,
+				typesv2.PullRequestClaim{URL: target.URL})
+			// Verification errors can depend on the target's workspace, so
+			// only successful observations are shared with other runs.
+			if observation.err == nil {
+				observations[key] = observation
+			}
+		}
+		verified, verifyErr := observation.pr, observation.err
+		verified.RepositoryName = target.RepositoryName
+		verified.Provenance.Connection = strings.TrimSpace(workspace.Workspace.Repositories[target.RepositoryName].SourceControl)
+		if verified.Provenance.Connection == "" {
+			verified.Provenance.Connection = "github"
+		}
 		cancel()
 		if verifyErr != nil {
 			log.Printf("[workflow-v2 github] verify %s#%d for run %s: %v",
@@ -80,7 +108,7 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 				strconv.Itoa(target.Number), verified.HeadSHA, verified.State,
 				verified.Provenance.ObservedAt.UTC().Format(time.RFC3339Nano))
 			targetCtx, cancel = context.WithTimeout(ctx, workflowV2GitHubReconcileTimeout)
-			_, reconcileErr := store.ReconcilePullRequest(targetCtx, target, eventID, kind, verified)
+			reconcileErr := s.reconcileWorkflowV2PullRequest(targetCtx, store, target, eventID, kind, verified)
 			cancel()
 			if reconcileErr != nil {
 				log.Printf("[workflow-v2 github] reconcile %s#%d for run %s: %v",
@@ -93,6 +121,12 @@ func (s *Server) reconcileWorkflowV2GitHub(ctx context.Context) error {
 		}
 		target.HeadSHA = verified.HeadSHA
 		target.State = verified.State
+		targetCtx, cancel = context.WithTimeout(ctx, workflowV2GitHubReconcileTimeout)
+		_, mergeabilityErr := store.ReconcileMergeability(targetCtx, target, verified)
+		cancel()
+		if mergeabilityErr != nil {
+			log.Printf("[workflow-v2 github] reconcile mergeability for run %s: %v", target.RunID, mergeabilityErr)
+		}
 		if verified.State == "open" {
 			current = append(current, target)
 		}
