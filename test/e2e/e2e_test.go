@@ -228,6 +228,8 @@ func runGitHubIssuesWorkflowE2E(t *testing.T, sandboxProvider string) {
 		}
 		_ = hub.deleteWorkspace(cleanupCtx, workspaceName)
 	})
+	// Registered last so it runs first, while the sandbox still exists.
+	t.Cleanup(func() { collectDaytonaDiagnosticsOnFailure(t, env, hub, agentID) })
 
 	gh.cleanupGitHubE2EResources(ctx, t, workspaceName, env.RunID, labelName)
 	runCLI(ctx, t, root, env, "workspace", "push", workspaceName)

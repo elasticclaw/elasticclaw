@@ -18,6 +18,13 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+// Tails of the in-sandbox OpenClaw gateway and claw-bridge logs. The hub
+// captures them before destroying a sandbox and the E2E harness on failure.
+const (
+	GatewayLogTailCommand = "tail -c 262144 /home/daytona/.openclaw/gateway.log 2>/dev/null"
+	BridgeLogTailCommand  = "tail -c 262144 /home/daytona/claw-bridge.log 2>/dev/null"
+)
+
 // Provider implements the Daytona provider using the official SDK
 type Provider struct {
 	client *daytona.Client
