@@ -7,6 +7,7 @@ on:
       - 'Makefile'
       - 'cmd/claw-bridge/**'
       - 'pkg/hub/bootstrap.go'
+      - 'pkg/hub/daytona_gateway.go'
       - 'pkg/hub/github.go'
       - 'pkg/hub/github_issues.go'
       - 'pkg/hub/integration_poller.go'
