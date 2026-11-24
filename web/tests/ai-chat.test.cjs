@@ -2305,9 +2305,12 @@ test("picker ignores aborted results, tolerates unavailable previews and support
   assert.equal(prevented, true)
   assert.deepEqual(focused, [3])
   assert.deepEqual(fixture.selected, [])
-  const focusedRadio = findElements(fixture.render(), "button")[3]
-  assert.equal(focusedRadio.props["aria-checked"], true)
+  // Arrow keys move focus only; the announced selection stays the committed value.
+  const afterArrow = findElements(fixture.render(), "button")
+  const focusedRadio = afterArrow[3]
+  assert.equal(focusedRadio.props["aria-checked"], false)
   assert.equal(focusedRadio.props.tabIndex, 0)
+  assert.equal(afterArrow.filter((radio) => radio.props["aria-checked"]).length, 1)
   focusedRadio.props.onClick()
   assert.deepEqual(fixture.selected, ["status-report"])
   assert.deepEqual(fixture.opened, [false])

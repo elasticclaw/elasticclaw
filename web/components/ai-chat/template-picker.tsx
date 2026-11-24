@@ -31,7 +31,7 @@ export function TemplatePicker({ open, onOpenChange, title, description, ...prop
 // Mount on each open so previews always get fresh capabilities and aborted
 // requests cannot replace a later workspace's options.
 function TemplateOptions({ workspace, kit, value, includeAuto, title, onSelect }: Omit<PickerProps, "open" | "onOpenChange" | "description">) {
-  const [choice, setChoice] = useState(value)
+  const [focused, setFocused] = useState(value)
   const [fresh, setFresh] = useState<AIChatArtifactKit>()
   const [failed, setFailed] = useState(false)
   useEffect(() => {
@@ -49,7 +49,10 @@ function TemplateOptions({ workspace, kit, value, includeAuto, title, onSelect }
     { id: "free", name: "Free", description: "No template. The design system still applies.", icon: FileCode2 },
     ...kitTemplates(kit).map((template) => ({ ...template, icon: undefined })),
   ]
-  const selected = options.some((option) => option.id === choice) ? choice : options[0].id
+  // Arrow keys only move focus; aria-checked reflects the committed value, which
+  // changes on click, Enter or Space.
+  const checked = options.some((option) => option.id === value) ? value : options[0].id
+  const tabStop = options.some((option) => option.id === focused) ? focused : checked
   return <div role="radiogroup" aria-label={title} onKeyDown={(event) => {
     if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(event.key)) return
     const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]'))
@@ -58,14 +61,14 @@ function TemplateOptions({ workspace, kit, value, includeAuto, title, onSelect }
     event.preventDefault()
     const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length
     buttons[next].focus()
-    setChoice(options[next].id)
+    setFocused(options[next].id)
   }} className="grid max-h-[65vh] gap-3 overflow-y-auto p-1 sm:grid-cols-2">
     {options.map((option) => {
       const Icon = option.icon
       const preview = fresh?.templates.find((template) => template.id === option.id)?.previewUrl
-      return <button key={option.id} type="button" role="radio" aria-checked={choice === option.id} tabIndex={selected === option.id ? 0 : -1} onClick={() => onSelect(option.id)} className={`flex flex-col justify-start rounded-xl border bg-card p-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${choice === option.id ? "border-foreground/60 ring-1 ring-foreground/20" : ""}`}>
+      return <button key={option.id} type="button" role="radio" aria-checked={checked === option.id} tabIndex={tabStop === option.id ? 0 : -1} onFocus={() => setFocused(option.id)} onClick={() => onSelect(option.id)} className={`flex flex-col justify-start rounded-xl border bg-card p-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${checked === option.id ? "border-foreground/60 ring-1 ring-foreground/20" : ""}`}>
         {Icon ? <div className="flex aspect-[16/10] items-center justify-center rounded-lg border bg-muted/40"><Icon className="size-8 text-muted-foreground" /></div> : preview && !templatePreviewExpired(preview) ? <TemplateThumbnail src={preview} title={option.name} /> : <div className="flex aspect-[16/10] items-center justify-center rounded-lg border bg-muted/40">{loading ? <Loader2 className="size-5 animate-spin text-muted-foreground" /> : <FileCode2 className="size-8 text-muted-foreground" />}</div>}
-        <div className="mt-2 flex items-center justify-between gap-2"><span className="text-sm font-semibold">{option.name}</span>{choice === option.id && <Check className="size-3.5 shrink-0" aria-hidden="true" />}</div>
+        <div className="mt-2 flex items-center justify-between gap-2"><span className="text-sm font-semibold">{option.name}</span>{checked === option.id && <Check className="size-3.5 shrink-0" aria-hidden="true" />}</div>
         <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{option.description}</p>
       </button>
     })}
