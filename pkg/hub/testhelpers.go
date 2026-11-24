@@ -31,18 +31,22 @@ func NewTestServerWithConfig(t interface {
 	}
 
 	// Provision a default tenant for the test server
-	_, _ = db.Exec(
+	if _, err := db.Exec(
 		`INSERT OR IGNORE INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,datetime('now'))`,
 		"test-tenant-id", "test", "test-token", cfg.ClawToken,
-	)
+	); err != nil {
+		panic("NewTestServerWithConfig: seed tenant: " + err.Error())
+	}
 
 	// Push an empty "elasticclaw" template so resolveTemplateFiles doesn't fail
 	for _, factory := range cfg.Factories {
 		if factory.Template != "" {
-			_, _ = db.Exec(
+			if _, err := db.Exec(
 				`INSERT OR IGNORE INTO hub_templates(name,files,created_at,updated_at) VALUES(?,?,datetime('now'),datetime('now'))`,
 				factory.Template, `{}`,
-			)
+			); err != nil {
+				panic("NewTestServerWithConfig: seed template: " + err.Error())
+			}
 		}
 	}
 	artifacts, err := artifact.NewLocalStore(tTempDir(t))

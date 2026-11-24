@@ -2814,7 +2814,8 @@ func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
 	s.sendNextQueuedMessage(cc)
-	assertMessagesDelivered(t, db, clawID, 1)
+	// The frame read above is written before delivered_at is stored.
+	waitForMessagesDelivered(t, db, clawID, 1)
 	cc.mu.RLock()
 	reserved := cc.awaitingResponse
 	cc.mu.RUnlock()

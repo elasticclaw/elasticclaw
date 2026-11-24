@@ -1001,8 +1001,10 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 	if err != nil {
 		t.Fatalf("insert task run attempt %s: %v", fixture.AttemptID, err)
 	}
+	// OR REPLACE: a hub event recorded for this run (agent_started on bridge
+	// registration, for one) materializes the summary row before the fixture.
 	_, err = db.Exec(`
-		INSERT INTO task_run_summaries(
+		INSERT OR REPLACE INTO task_run_summaries(
 			id, tenant_id, run_id, initial_attempt_id, current_attempt_id, status, phase, attempt_count,
 			owner_type, workspace_name, workflow_name, factory_name, owner_display_name, run_kind,
 			integration, issue_id, issue_created_at, claw_id, model, repo, primary_pr_url, pr_count, open_pr_count,

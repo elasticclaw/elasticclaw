@@ -39,7 +39,9 @@ func newSessionLossFixture(t *testing.T, max *int) sessionLossFixture {
 func (f sessionLossFixture) output(t *testing.T, content string, at time.Time) {
 	t.Helper()
 	f.s.recordSessionLossCompletedTurn(f.clawID, content)
-	if _, err := f.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), f.clawID, "test-tenant-id", "claw", content, at); err != nil {
+	// The hub always stores claw output as delivered. Left NULL, the row would
+	// be picked up by the pending-queue drain and sent back to the claw.
+	if _, err := f.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)`, uuid.NewString(), f.clawID, "test-tenant-id", "claw", content, at, at); err != nil {
 		t.Fatal(err)
 	}
 }
