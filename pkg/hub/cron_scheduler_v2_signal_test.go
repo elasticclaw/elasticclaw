@@ -164,7 +164,7 @@ func TestCronSchedulerV2StopWaitsForAdmittedSignalAndRefusesNew(t *testing.T) {
 		cs.stop()
 		close(stopped)
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		cs.inflightMu.Lock()
 		stopping := cs.stopping
@@ -188,7 +188,7 @@ func TestCronSchedulerV2StopWaitsForAdmittedSignalAndRefusesNew(t *testing.T) {
 	cs.inflight.Done()
 	select {
 	case <-stopped:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("stop did not return after admitted work finished")
 	}
 	var events, ticks int

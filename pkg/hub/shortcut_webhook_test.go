@@ -264,7 +264,7 @@ func saveShortcutTerminateExcludedWorkflowFixture(t *testing.T, workspace string
 
 func waitForShortcutClawTagsContain(t *testing.T, db *sql.DB, storyID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var tags string
 		err := db.QueryRow(`SELECT tags FROM claws WHERE shortcut_story_id=? LIMIT 1`, storyID).Scan(&tags)
@@ -280,7 +280,7 @@ func waitForShortcutClawTagsContain(t *testing.T, db *sql.DB, storyID, want stri
 
 func waitForShortcutClawStatus(t *testing.T, db *sql.DB, storyID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var status string
 		err := db.QueryRow(`SELECT status FROM claws WHERE shortcut_story_id=? LIMIT 1`, storyID).Scan(&status)

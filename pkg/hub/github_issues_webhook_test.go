@@ -329,7 +329,7 @@ func TestGitHubIssuesWorkspaceWebhookIsIdempotentForSameIssue(t *testing.T) {
 	wg.Wait()
 
 	var count int
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE github_issue_id='testorg/testrepo/42'`).Scan(&count); err != nil {
 			t.Fatalf("count claws: %v", err)
@@ -648,7 +648,7 @@ func TestGitHubIssuesWorkflowCreateFailureIgnoresErrorLabelWebhook(t *testing.T)
 func waitForGitHubIssueContext(t *testing.T, db *sql.DB, issueID string) string {
 	t.Helper()
 	var filesJSON string
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		err := db.QueryRow(`SELECT template_files FROM claws WHERE github_issue_id=? LIMIT 1`, issueID).Scan(&filesJSON)
 		if err == nil {
@@ -674,7 +674,7 @@ func waitForGitHubIssuePostedComment(t *testing.T, ghi *factorytest.MockGitHubIs
 
 func waitForGitHubIssuePostedComments(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number, wantAtLeast int) []string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		comments := ghi.PostedComments(repo, number)
 		if len(comments) >= wantAtLeast {
@@ -701,7 +701,7 @@ func assertGitHubIssueCommentCountStable(t *testing.T, ghi *factorytest.MockGitH
 
 func waitForGitHubIssueAssignee(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number int, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if got := ghi.Issue(repo, number).Assignee; got == want {
 			return
@@ -715,7 +715,7 @@ func waitForGitHubIssueAssignee(t *testing.T, ghi *factorytest.MockGitHubIssues,
 
 func waitForGitHubIssueLabel(t *testing.T, ghi *factorytest.MockGitHubIssues, repo string, number int, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if containsString(ghi.Issue(repo, number).Labels, want) {
 			return

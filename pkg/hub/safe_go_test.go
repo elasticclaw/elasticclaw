@@ -40,10 +40,10 @@ func TestSafeGoRecoversAndLogsPanic(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("safeGo function did not run")
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for !strings.Contains(logs.String(), "panic in test worker: malformed payload") && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}

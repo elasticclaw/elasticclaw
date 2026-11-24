@@ -27,7 +27,7 @@ func TestRunShutsDownCleanly(t *testing.T) {
 	result := make(chan error, 1)
 	go func() { result <- s.run(ctx, RunOptions{NoWebUI: true}) }()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	var conn net.Conn
 	for time.Now().Before(deadline) {
 		conn, err = net.DialTimeout("tcp", addr, 100*time.Millisecond)
@@ -48,7 +48,7 @@ func TestRunShutsDownCleanly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run returned %v, want clean exit", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("Run did not return after shutdown")
 	}
 }

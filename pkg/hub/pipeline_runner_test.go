@@ -838,7 +838,7 @@ stages:
 		t.Fatalf("expected delivered proceed notice, got %d", noticeCount)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for s.getPipelineStage(clawID) != "implement" && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -849,7 +849,7 @@ stages:
 	// The stage is recorded before its on_enter actions run, so wait for the
 	// asynchronously routed inject rather than assuming the stage update means
 	// the inject has already been persisted.
-	deadline = time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		if err := db.QueryRow(
 			`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
@@ -2610,7 +2610,7 @@ stages:
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for s.getPipelineStage(clawID) != "ci_passed" && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

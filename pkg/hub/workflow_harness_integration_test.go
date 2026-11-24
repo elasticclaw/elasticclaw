@@ -145,7 +145,7 @@ func useTestExecProvider(t *testing.T, ts *factorytest.TestServer, clawID string
 
 func assertGateVerdict(t *testing.T, ts *factorytest.TestServer, clawID, stageID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		var verdict string
 		err := ts.DB.QueryRow(`SELECT verdict FROM pipeline_gate_results WHERE claw_id=? AND stage_id=?`, clawID, stageID).Scan(&verdict)

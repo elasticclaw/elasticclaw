@@ -246,7 +246,7 @@ func TestManagedProviderReadyRegistrationPromotesAfterBootstrapOK(t *testing.T) 
 		t.Fatalf("write heartbeat: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
 			t.Fatal(err)

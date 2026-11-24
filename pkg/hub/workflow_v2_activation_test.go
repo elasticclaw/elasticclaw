@@ -118,7 +118,7 @@ transitions:
 
 func waitForWorkflowV2TestClaw(t *testing.T, db *sql.DB, clawID string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		var status string
 		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {

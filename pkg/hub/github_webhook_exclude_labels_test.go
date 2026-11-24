@@ -373,7 +373,7 @@ func githubPRWebhookBody(action, repo string, number int, author, baseBranch str
 
 func waitForGitHubPRClaw(t *testing.T, db *sql.DB, prURL string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE pr_url=?`, prURL).Scan(&count); err != nil {
@@ -406,7 +406,7 @@ func assertNoGitHubPRClaw(t *testing.T, db *sql.DB, prURL string) {
 
 func waitForGitHubIssueClaw(t *testing.T, db *sql.DB, issueID string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE github_issue_id=?`, issueID).Scan(&count); err != nil {

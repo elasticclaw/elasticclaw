@@ -63,14 +63,7 @@ func watchdogClaw(t *testing.T, s *Server, clawID string) *websocket.Conn {
 
 func eventuallyWatchdog(t *testing.T, check func() bool, description string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if check() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", description)
+	eventually(t, description, check)
 }
 
 func watchdogClawConn(t *testing.T, s *Server, clawID string) *clawConn {

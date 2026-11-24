@@ -109,7 +109,7 @@ func TestUserWSClearsClientSuppliedLoginForTokenAuth(t *testing.T) {
 		t.Fatalf("write websocket message: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var login *string
 		err := db.QueryRow(`SELECT user_login FROM messages WHERE claw_id=?`, clawID).Scan(&login)
@@ -155,7 +155,7 @@ func TestWSMessageFrameIncludesUserLogin(t *testing.T) {
 	// the WS handshake, which races with this goroutine under load — wait for
 	// registration so the broadcast below isn't sent before anyone is
 	// listening (which would otherwise hang the read below forever).
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		s.mu.RLock()
 		registered := len(s.users) > 0
@@ -489,7 +489,7 @@ func TestClawStatusCarriesContextUsage(t *testing.T) {
 		t.Fatalf("write heartbeat: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		s.mu.RLock()
 		usage := 0

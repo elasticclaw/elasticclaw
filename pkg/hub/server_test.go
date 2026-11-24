@@ -2084,7 +2084,7 @@ stages:
 
 	var stage string
 	var analyticsCount int
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		_ = db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage)
 		_ = db.QueryRow(`SELECT COUNT(*) FROM factory_analytics WHERE claw_id=? AND issue_id=? AND factory_name=? AND action='done_signal'`, clawID, "NEXT-257", "factory:faster_apps").Scan(&analyticsCount)
@@ -2951,7 +2951,7 @@ func insertPendingMessage(t *testing.T, db *sql.DB, clawID, content string, crea
 
 func connectTestClaw(t *testing.T, ts *httptest.Server, clawID string) *websocket.Conn {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
 	if err != nil {
@@ -3132,7 +3132,7 @@ func assertMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int) 
 
 func waitForMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		var got int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user' AND delivered_at IS NOT NULL`, clawID).Scan(&got); err != nil {
@@ -3148,7 +3148,7 @@ func waitForMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int)
 
 func waitForTestClawDisconnect(t *testing.T, s *Server, clawID string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		s.mu.RLock()
 		_, connected := s.claws[clawID]

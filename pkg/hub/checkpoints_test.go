@@ -309,7 +309,7 @@ func TestSSHWriteSessionHonorsContextDeadline(t *testing.T) {
 	}
 	select {
 	case <-sess.closeStarted:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("session close was not started after context expiry")
 	}
 }
@@ -331,12 +331,12 @@ func TestSSHWriteSessionWithNewSessionHonorsContextDeadline(t *testing.T) {
 	}
 	select {
 	case <-newSessionStarted:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("new session was not started")
 	}
 	select {
 	case <-clientClosed:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("client was not closed after context expiry")
 	}
 }

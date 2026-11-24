@@ -426,7 +426,7 @@ func signGitHubWebhookForReviewFeedback(body []byte, secret string) string {
 
 func waitForMessageContains(t *testing.T, db querier, clawID, role string, parts []string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if messageContains(t, db, clawID, role, parts) {
 			return

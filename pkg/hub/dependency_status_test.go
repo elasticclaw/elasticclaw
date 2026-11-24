@@ -175,7 +175,7 @@ func TestDependencyStatusCoalescesConcurrentRefreshes(t *testing.T) {
 	close(start)
 	select {
 	case <-checker.started:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("checker was not called")
 	}
 	time.Sleep(25 * time.Millisecond)
@@ -213,7 +213,7 @@ func TestDependencyStatusRefreshIgnoresRequestCancellation(t *testing.T) {
 
 	select {
 	case <-checker.started:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("checker was not called")
 	}
 	select {
@@ -231,7 +231,7 @@ func TestDependencyStatusRefreshIgnoresRequestCancellation(t *testing.T) {
 		if len(resp.Dependencies) != 1 || resp.Dependencies[0].Status != dependencyStatusDowntime {
 			t.Fatalf("dependencies = %#v, want one downtime dependency", resp.Dependencies)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("snapshot did not complete")
 	}
 }

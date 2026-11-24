@@ -210,7 +210,7 @@ func TestWorkflowV2CronAdoptionFinishingRunSkipsProvisioning(t *testing.T) {
 	}
 	// The parent claw is finished in the background, never provisioned (noop
 	// would connect it).
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var clawStatus, providerID string
 		if err := db.QueryRow(`SELECT status,provider_id FROM claws WHERE id=?`, clawID).Scan(&clawStatus, &providerID); err != nil {
@@ -497,7 +497,7 @@ func testWorkflowV2ManualAdoptionFinishingRun(t *testing.T, terminalState, want 
 		t.Fatalf("calls=%d response=%v run=%s", calls, created, runStatus)
 	}
 	// The parent claw is finished in the background.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var clawStatus string
 		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, created["claw_id"]).Scan(&clawStatus); err != nil {
