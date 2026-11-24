@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/install"
 	"github.com/spf13/cobra"
 )
 
@@ -54,6 +55,20 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	checksumsBase, err := install.ChecksumsBaseURL(downloadURL)
+	if err != nil {
+		return err
+	}
+	checksums, err := install.FetchReleaseChecksums(cmd.Context(), nil, checksumsBase)
+	if err != nil {
+		return fmt.Errorf("fetch release checksums: %w", err)
+	}
+	asset := filepath.Base(downloadURL)
+	digest, ok := checksums[asset]
+	if !ok {
+		return fmt.Errorf("missing checksum for %s", asset)
+	}
+
 	// Determine current binary path
 	self, err := os.Executable()
 	if err != nil {
@@ -91,7 +106,13 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		tmp.Close()
 		return fmt.Errorf("write failed: %w", err)
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close download: %w", err)
+	}
+
+	if err := install.VerifyFileSHA256(tmpPath, digest); err != nil {
+		return fmt.Errorf("verify %s: %w", asset, err)
+	}
 
 	// Make executable
 	if err := os.Chmod(tmpPath, 0755); err != nil {

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -142,12 +143,28 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var installBinaryScript string
+	// Verify checksums here so the remote host needs no signature tooling.
+	binaryURL := install.HubBinaryURL(version)
+	fetchChecksums := install.FetchReleaseChecksums
 	if installHubBinaryURL != "" {
-		installBinaryScript = install.ScriptInstallBinaryFromURL(installHubBinaryURL, useSudo)
-	} else {
-		installBinaryScript = install.ScriptInstallBinary(version, useSudo)
+		// Custom builds (e.g. previews) publish checksums.txt but no release signature.
+		binaryURL = installHubBinaryURL
+		fetchChecksums = install.FetchUnsignedChecksums
+		fmt.Println("Warning: --hub-binary-url checksums are not signature-verified")
 	}
+	checksumsBase, err := install.ChecksumsBaseURL(binaryURL)
+	if err != nil {
+		return fmt.Errorf("--hub-binary-url: %w", err)
+	}
+	checksums, err := fetchChecksums(cmd.Context(), nil, checksumsBase)
+	if err != nil {
+		return fmt.Errorf("fetch hub binary checksums: %w", err)
+	}
+	digest, ok := checksums[path.Base(binaryURL)]
+	if !ok {
+		return fmt.Errorf("missing checksum for %s", path.Base(binaryURL))
+	}
+	installBinaryScript := install.ScriptInstallBinaryFromURL(binaryURL, digest, useSudo)
 	steps := []struct {
 		name   string
 		script string

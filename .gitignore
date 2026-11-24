@@ -22,7 +22,6 @@ coverage.out
 web/node_modules/
 web/.next/
 web/tsconfig.tsbuildinfo
-web/package-lock.json
 web/pnpm-lock.yaml
 
 # build artifacts (root-level binaries only, not cmd/claw-bridge/ source)

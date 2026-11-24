@@ -73,16 +73,20 @@ func TestCaddyfile(t *testing.T) {
 // ── Script generation ─────────────────────────────────────────────────────────
 
 func TestScriptInstallBinary(t *testing.T) {
-	s := install.ScriptInstallBinary("v0.0.3", true)
+	s := install.ScriptInstallBinary("v0.0.3", strings.Repeat("a", 64), true)
 	assertContains(t, s, "set -e", "fail fast")
 	assertContains(t, s, "curl -fsSL", "curl download")
 	assertContains(t, s, "v0.0.3", "version in URL")
 	assertContains(t, s, "/usr/local/bin/elasticclaw", "install path")
 	assertContains(t, s, "elasticclaw-bin", "binary download")
+	assertContains(t, s, "digest='"+strings.Repeat("a", 64)+"'", "verified digest embedded")
+	if strings.Contains(s, "minisign") {
+		t.Error("signature must be verified by the CLI, not the target host")
+	}
 }
 
 func TestScriptInstallBinaryFromURL(t *testing.T) {
-	s := install.ScriptInstallBinaryFromURL("https://preview.elasticclaw.ai/pr/123/latest/elasticclaw-linux-amd64", true)
+	s := install.ScriptInstallBinaryFromURL("https://preview.elasticclaw.ai/pr/123/latest/elasticclaw-linux-amd64", strings.Repeat("a", 64), true)
 	assertContains(t, s, "https://preview.elasticclaw.ai/pr/123/latest/elasticclaw-linux-amd64", "custom binary URL")
 	assertContains(t, s, "/usr/local/bin/elasticclaw", "install path")
 	assertContains(t, s, "sudo ", "sudo prefix")
@@ -123,10 +127,10 @@ func TestScriptWriteCaddyfile(t *testing.T) {
 }
 
 func TestScriptHelpers_SudoPrefix(t *testing.T) {
-	if s := install.ScriptInstallBinary("v0.0.3", false); strings.Contains(s, "sudo") {
+	if s := install.ScriptInstallBinary("v0.0.3", strings.Repeat("a", 64), false); strings.Contains(s, "sudo") {
 		t.Error("did not expect sudo for root install path")
 	}
-	if s := install.ScriptInstallBinary("v0.0.3", true); !strings.Contains(s, "sudo ") {
+	if s := install.ScriptInstallBinary("v0.0.3", strings.Repeat("a", 64), true); !strings.Contains(s, "sudo ") {
 		t.Error("expected sudo for non-root install path")
 	}
 }
@@ -137,10 +141,10 @@ func TestScriptInstallCaddy_SupportsAptAndRpmDistros(t *testing.T) {
 	assertContains(t, s, "command -v dnf", "dnf detection")
 	assertContains(t, s, "command -v yum", "yum detection")
 	assertContains(t, s, "apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gpg 2>/dev/null || true", "non-fatal apt prereq install")
-	assertContains(t, s, "https://api.github.com/repos/caddyserver/caddy/releases/latest", "latest caddy release lookup")
+	assertContains(t, s, "CADDY_VERSION=2.11.9", "pinned caddy version")
 	assertContains(t, s, "https://github.com/caddyserver/caddy/releases/download/", "versioned caddy asset download")
-	assertContains(t, s, "caddy_'\"${CADDY_VERSION#v}\"'_linux_", "versioned caddy asset filename")
-	assertContains(t, s, "install -m 0755 /tmp/caddy /usr/local/bin/caddy", "static caddy binary install")
+	assertContains(t, s, "caddy_${CADDY_VERSION}_linux_", "versioned caddy asset filename")
+	assertContains(t, s, `install -m 0755 "$CADDY_TMP/caddy" /usr/local/bin/caddy`, "static caddy binary install")
 	assertContains(t, s, "SUDO=\"sudo \"", "sudo mode wiring")
 	assertContains(t, s, "systemctl enable caddy", "caddy service enable")
 	assertContains(t, s, "unsupported Linux distribution", "unsupported distro message")
@@ -154,7 +158,7 @@ func TestScripts_Shellcheck(t *testing.T) {
 	}
 
 	scripts := map[string]string{
-		"install_binary":  install.ScriptInstallBinary("v0.0.3", true),
+		"install_binary":  install.ScriptInstallBinary("v0.0.3", strings.Repeat("a", 64), true),
 		"write_config":    install.ScriptWriteConfig(testParams, true),
 		"install_systemd": install.ScriptInstallSystemd(true),
 		"install_caddy":   install.ScriptInstallCaddy(true),
@@ -190,5 +194,22 @@ func assertContains(t *testing.T, s, substr, desc string) {
 	t.Helper()
 	if !strings.Contains(s, substr) {
 		t.Errorf("expected %s to contain %s\nwanted: %q", desc, desc, substr)
+	}
+}
+
+func TestScriptInstallCaddy_VerifiesDownloads(t *testing.T) {
+	for _, sudo := range []bool{false, true} {
+		s := install.ScriptInstallCaddy(sudo)
+		for _, want := range []string{install.CaddyAMD64SHA512, install.CaddyARM64SHA512, "sha512sum -c -", "fpr:::::::::65760C51EDEA2017CEA2CA15155B6D79CA56EA34:", "gpg --batch --show-keys --with-colons"} {
+			assertContains(t, s, want, "verified download")
+		}
+		if strings.Contains(s, "releases/latest") {
+			t.Fatal("unpinned Caddy download")
+		}
+		cmd := exec.Command("bash", "-n")
+		cmd.Stdin = strings.NewReader(s)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
 	}
 }

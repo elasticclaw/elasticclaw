@@ -81,7 +81,7 @@ Inside `nix develop` (repo root):
 
 ```bash
 cd web
-npm install
+npm ci --ignore-scripts
 NEXT_PUBLIC_HUB_URL=http://localhost:8080 npm run dev  # dev server :3000
 
 # Full static build (embeds in binary):
@@ -104,7 +104,7 @@ cd web
 cp .env.example .env.local
 # Ensure .env.local contains:
 # NEXT_PUBLIC_HUB_URL=http://localhost:8080
-npm install
+npm ci --ignore-scripts
 npm run dev
 ```
 

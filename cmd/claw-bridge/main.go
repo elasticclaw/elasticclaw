@@ -3507,9 +3507,7 @@ NIX_INIT_MODE="none"
 if command -v systemctl &>/dev/null && systemctl is-system-running --quiet 2>/dev/null; then
   NIX_INIT_MODE="systemd"
 fi
-curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | \
-  sh -s -- install linux --no-confirm --init "$NIX_INIT_MODE" >> /tmp/nix-install.log 2>&1
-`
+` + cliversion.NixInstallerScript
 		err := runShell(script)
 		if err != nil {
 			log.Printf("[bootstrap] Nix install failed: %v", err)
@@ -3551,7 +3549,7 @@ fi
 sudo apt-get update -qq
 sudo apt-get install -y --fix-broken ca-certificates curl gnupg
 sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL "$DOCKER_GPG" | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+` + cliversion.VerifiedAPTKeyScript("$DOCKER_GPG", "/etc/apt/keyrings/docker.gpg", cliversion.DockerKeyFingerprint, "sudo ") + `
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
 # Add the repository to Apt sources
 echo "$DOCKER_REPO" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
@@ -3644,7 +3642,11 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 	hasFlakeLock := false
 	if _, err := os.Stat(flakeLockPath); err == nil {
 		hasFlakeLock = true
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to stat flake.lock: %w", err)
 	}
+
+	flakeFlags := workspaceFlakeFlags(hasFlakeLock)
 
 	// Create a dedicated flake directory
 	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
@@ -3663,11 +3665,14 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 
 	if hasFlakeLock {
 		flakeLockData, err := os.ReadFile(flakeLockPath)
-		if err == nil {
-			if err := os.WriteFile(filepath.Join(flakeDir, "flake.lock"), flakeLockData, 0644); err != nil {
-				return fmt.Errorf("failed to write flake.lock: %w", err)
-			}
+		if err != nil {
+			return fmt.Errorf("failed to read flake.lock: %w", err)
 		}
+		if err := os.WriteFile(filepath.Join(flakeDir, "flake.lock"), flakeLockData, 0644); err != nil {
+			return fmt.Errorf("failed to write flake.lock: %w", err)
+		}
+	} else if err := os.Remove(filepath.Join(flakeDir, "flake.lock")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove stale flake.lock: %w", err)
 	}
 
 	// Create the provider-neutral flake-run wrapper that enters devShells.default.
@@ -3682,8 +3687,8 @@ set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
 cd %q
-exec nix develop --accept-flake-config -c bash -c 'export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"; exec "$@"' bash "$@"
-`, flakeDir)
+exec nix develop %s -c bash -c 'export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"; exec "$@"' bash "$@"
+`, flakeDir, flakeFlags)
 	wrapperPath := filepath.Join(home, ".elasticclaw", "flake-run")
 	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0755); err != nil {
 		return fmt.Errorf("failed to write flake wrapper: %w", err)
@@ -3693,11 +3698,22 @@ exec nix develop --accept-flake-config -c bash -c 'export PATH="$PATH:/usr/local
 	// environment from the pinned flake.lock and fails fast on bad flakes.
 	log.Printf("[bootstrap] pre-evaluating workspace devShell via flake-run...")
 	if err := runShell(`~/.elasticclaw/flake-run true`); err != nil {
-		return fmt.Errorf("workspace flake devShell evaluation failed (try 'nix develop --accept-flake-config' locally to debug): %w", err)
+		return fmt.Errorf("workspace flake devShell evaluation failed (try 'nix develop' locally to debug): %w", err)
 	}
 
 	log.Printf("[bootstrap] flake environment ready at %s (devShell pre-evaluated)", flakeDir)
 	return nil
+}
+
+// workspaceFlakeFlags keeps locked inputs as recorded without rewriting
+// flake.lock. A lock that is stale against flake.nix still evaluates (Nix
+// resolves the missing inputs in memory and warns) instead of failing bootstrap.
+func workspaceFlakeFlags(hasLock bool) string {
+	if hasLock {
+		return "--no-write-lock-file"
+	}
+	log.Printf("[supply-chain] WARNING workspace flake.lock is missing; flake inputs are unpinned")
+	return ""
 }
 
 // startGatewayWithFlake starts the gateway, optionally inside the flake environment.
@@ -3776,8 +3792,7 @@ sudo apt-get install -y --fix-broken curl ca-certificates git gnupg
 if ! command -v npm >/dev/null 2>&1 || ! node_compatible; then
   if [ ! -f /etc/apt/sources.list.d/nodesource.sources ] && [ ! -f /etc/apt/sources.list.d/nodesource.list ]; then
     sudo mkdir -p /etc/apt/keyrings
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | \
-      sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    %s
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | \
       sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
   fi
@@ -3790,7 +3805,7 @@ if ! node_compatible; then
 fi
 echo "Node: $(node --version)"
 echo "Git: $(git --version)"
-`, cliversion.NodeCompatibleCheck, cliversion.NodeCompatibleRange)
+`, cliversion.NodeCompatibleCheck, cliversion.VerifiedAPTKeyScript("https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key", "/etc/apt/keyrings/nodesource.gpg", cliversion.NodeSourceKeyFingerprint, "sudo "), cliversion.NodeCompatibleRange)
 
 const openClawVersion = cliversion.OpenClawVersion
 const codexPluginVersion = cliversion.CodexPluginVersion
@@ -3812,10 +3827,8 @@ func ensureUserNPMBinOnPath() (string, error) {
 	prefix := filepath.Join(home, ".local")
 	binDir := filepath.Join(prefix, "bin")
 	pathEntries := filepath.SplitList(os.Getenv("PATH"))
-	for _, entry := range pathEntries {
-		if entry == binDir {
-			return prefix, nil
-		}
+	if len(pathEntries) > 0 && pathEntries[0] == binDir {
+		return prefix, nil
 	}
 	pathEntries = append([]string{binDir}, pathEntries...)
 	if err := os.Setenv("PATH", strings.Join(pathEntries, string(os.PathListSeparator))); err != nil {
@@ -3829,12 +3842,6 @@ func installUserNPMPackage(spec string, opts ...string) error {
 	if err != nil {
 		return err
 	}
-	// Base flags. OpenClaw installs must NOT pass --ignore-scripts: since
-	// 2026.9.x the package ships a lifecycle-pending marker that its pre/post
-	// install scripts clear, and the launcher refuses to run ("package
-	// lifecycle is incomplete") when it cannot write the lifecycle lock inside
-	// the install dir — which is exactly what happens for an unprivileged
-	// runtime user after a scripts-disabled install.
 	flags := ""
 	if len(opts) > 0 {
 		flags = " " + strings.Join(opts, " ")
@@ -3847,29 +3854,111 @@ func installUserNPMPackage(spec string, opts ...string) error {
 	))
 }
 
-// installOpenClaw installs the pinned OpenClaw CLI via npm.
+// installedOpenClawVersion reads the package behind the executable on PATH.
+func installedOpenClawVersion() (string, error) {
+	_, version, err := installedOpenClawPackage()
+	return version, err
+}
+
+// installedOpenClawPackage returns the package directory and version behind
+// the openclaw executable on PATH.
+func installedOpenClawPackage() (string, string, error) {
+	binary, err := exec.LookPath("openclaw")
+	if err != nil {
+		return "", "", err
+	}
+	binary, err = filepath.EvalSymlinks(binary)
+	if err != nil {
+		return "", "", err
+	}
+	for dir := filepath.Dir(binary); ; dir = filepath.Dir(dir) {
+		data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+		if err == nil {
+			var pkg struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			}
+			if err := json.Unmarshal(data, &pkg); err != nil {
+				return "", "", err
+			}
+			if pkg.Name == "openclaw" {
+				return dir, pkg.Version, nil
+			}
+		}
+		if filepath.Dir(dir) == dir {
+			return "", "", fmt.Errorf("openclaw package.json not found")
+		}
+	}
+}
+
+// openClawInstalledFromLock reports whether the runtime holding pkgDir
+// (<runtime>/node_modules/openclaw) finished `npm ci` from the embedded lock.
+func openClawInstalledFromLock(pkgDir string) bool {
+	runtimeDir := filepath.Dir(filepath.Dir(pkgDir))
+	marker, err := os.ReadFile(filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker))
+	if err != nil || strings.TrimSpace(string(marker)) != cliversion.OpenClawLockSHA256() {
+		return false
+	}
+	lock, err := os.ReadFile(filepath.Join(runtimeDir, "package-lock.json"))
+	return err == nil && bytes.Equal(lock, cliversion.OpenClawPackageLock)
+}
+
+// installOpenClaw installs the pinned OpenClaw CLI from the embedded lockfile.
 func installOpenClaw() error {
-	if _, err := ensureUserNPMBinOnPath(); err != nil {
+	prefix, err := ensureUserNPMBinOnPath()
+	if err != nil {
 		return err
 	}
-	if out, err := exec.Command("openclaw", "--version").CombinedOutput(); err == nil {
-		version := strings.TrimSpace(string(out))
-		if strings.Contains(version, openClawVersion) {
+	if pkgDir, version, err := installedOpenClawPackage(); err == nil {
+		if version == openClawVersion && openClawInstalledFromLock(pkgDir) {
 			log.Printf("[bootstrap] OpenClaw already installed: %s", version)
 			return nil
 		}
-		log.Printf("[bootstrap] OpenClaw version %s found, installing pinned %s", version, openClawVersion)
+		log.Printf("[bootstrap] OpenClaw %s at %s is not a complete locked install, installing pinned %s", version, pkgDir, openClawVersion)
 	}
 	log.Printf("[bootstrap] installing openclaw@%s...", openClawVersion)
-	if err := installUserNPMPackage("openclaw@" + openClawVersion); err != nil {
-		return fmt.Errorf("npm install openclaw: %w", err)
+	runtimeDir := filepath.Join(prefix, "lib", "openclaw-runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		return fmt.Errorf("prepare openclaw runtime: %w", err)
 	}
-	out, err := exec.Command("openclaw", "--version").CombinedOutput()
+	markerPath := filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker)
+	if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove openclaw install marker: %w", err)
+	}
+	for name, data := range map[string][]byte{
+		"package.json":      cliversion.OpenClawPackageJSON,
+		"package-lock.json": cliversion.OpenClawPackageLock,
+	} {
+		if err := os.WriteFile(filepath.Join(runtimeDir, name), data, 0644); err != nil {
+			return fmt.Errorf("write openclaw %s: %w", name, err)
+		}
+	}
+	// No --ignore-scripts: npm 11 runs the lifecycle scripts, while npm 12
+	// blocks them unless allowScripts covers them. The install works either
+	// way: the scripts only prune stale dist files on upgrades and build native
+	// addons that already ship prebuilds.
+	if err := runShell("cd " + shellQuote(runtimeDir) + " && npm ci --no-audit --no-fund"); err != nil {
+		return fmt.Errorf("npm ci openclaw: %w", err)
+	}
+	if err := os.WriteFile(markerPath, []byte(cliversion.OpenClawLockSHA256()+"\n"), 0644); err != nil {
+		return fmt.Errorf("write openclaw install marker: %w", err)
+	}
+	binDir := filepath.Join(prefix, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return fmt.Errorf("prepare openclaw bin: %w", err)
+	}
+	binPath := filepath.Join(binDir, "openclaw")
+	if err := os.Remove(binPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove old openclaw bin: %w", err)
+	}
+	if err := os.Symlink(filepath.Join(runtimeDir, "node_modules", ".bin", "openclaw"), binPath); err != nil {
+		return fmt.Errorf("link openclaw bin: %w", err)
+	}
+	version, err := installedOpenClawVersion()
 	if err != nil {
-		return fmt.Errorf("verify openclaw install: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("verify openclaw install: %w", err)
 	}
-	version := strings.TrimSpace(string(out))
-	if !strings.Contains(version, openClawVersion) {
+	if version != openClawVersion {
 		return fmt.Errorf("verify openclaw install: got %q, want version %s", version, openClawVersion)
 	}
 	log.Printf("[bootstrap] OpenClaw: %s", version)
@@ -4047,34 +4136,139 @@ func installSelectedCodingModelCLI() error {
 	model := envOr("OPENCLAW_DEFAULT_MODEL", "")
 	switch cliCodingProviderForModel(model) {
 	case "codex":
-		return installNPMCLI("@openai/codex", cliversion.FromEnv("ELASTICCLAW_CODEX_CLI_VERSION", codexCLIVersion), "codex")
+		return installNPMCLI("@openai/codex", codexCLIVersion, "codex")
 	case "grok":
-		return installNPMCLI("@xai-official/grok", cliversion.FromEnv("ELASTICCLAW_GROK_CLI_VERSION", grokCLIVersion), "grok")
+		return installNPMCLI("@xai-official/grok", grokCLIVersion, "grok")
 	default:
 		return nil
 	}
+}
+
+// codexPluginInfo is what OpenClaw reports for the installed codex plugin.
+// Only origin "global" (a registry install) may register the Codex agent
+// harness and the reserved /codex command.
+type codexPluginInfo struct {
+	Version string `json:"version"`
+	Origin  string `json:"origin"`
+	RootDir string `json:"rootDir"`
+}
+
+func installedCodexPlugin() (codexPluginInfo, error) {
+	out, err := exec.Command("openclaw", "plugins", "info", "codex", "--json").Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return codexPluginInfo{}, fmt.Errorf("openclaw plugins info codex: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return codexPluginInfo{}, fmt.Errorf("openclaw plugins info codex: %w", err)
+	}
+	var info struct {
+		codexPluginInfo
+		Plugin codexPluginInfo `json:"plugin"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return codexPluginInfo{}, err
+	}
+	// Current OpenClaw nests the record under "plugin"; older output is flat.
+	if info.Plugin.Version != "" {
+		return info.Plugin, nil
+	}
+	return info.codexPluginInfo, nil
+}
+
+// verifyCodexPluginDeps checks the managed npm root OpenClaw installed the
+// plugin into against the embedded lock: every locked package must be in the
+// root's package-lock.json with the same version and integrity, and installed
+// at that version. Optional packages for other platforms may be absent.
+func verifyCodexPluginDeps(pluginRootDir string) error {
+	const pluginSuffix = "/node_modules/@openclaw/codex"
+	rootDir := filepath.ToSlash(filepath.Clean(pluginRootDir))
+	if !strings.HasSuffix(rootDir, pluginSuffix) {
+		return fmt.Errorf("Codex plugin root %q is not inside an npm root", pluginRootDir)
+	}
+	root := filepath.FromSlash(strings.TrimSuffix(rootDir, pluginSuffix))
+	type lockEntry struct {
+		Version   string `json:"version"`
+		Integrity string `json:"integrity"`
+		Optional  bool   `json:"optional"`
+	}
+	type lockFile struct {
+		Packages map[string]lockEntry `json:"packages"`
+	}
+	var want, got lockFile
+	if err := json.Unmarshal(cliversion.CodexPluginPackageLock, &want); err != nil {
+		return fmt.Errorf("parse embedded Codex plugin lock: %w", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "package-lock.json"))
+	if err != nil {
+		return fmt.Errorf("read Codex plugin lock: %w", err)
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		return fmt.Errorf("parse Codex plugin lock %s: %w", filepath.Join(root, "package-lock.json"), err)
+	}
+	names := make([]string, 0, len(want.Packages))
+	for name := range want.Packages {
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		w := want.Packages[name]
+		g, ok := got.Packages[name]
+		if !ok {
+			return fmt.Errorf("Codex plugin dependency %s missing from %s", name, root)
+		}
+		if g.Version != w.Version || g.Integrity != w.Integrity {
+			return fmt.Errorf("Codex plugin dependency %s locked as %s (%s), want %s (%s)", name, g.Version, g.Integrity, w.Version, w.Integrity)
+		}
+		manifest, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name), "package.json"))
+		if os.IsNotExist(err) && w.Optional {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("Codex plugin dependency %s not installed: %w", name, err)
+		}
+		var installed struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(manifest, &installed); err != nil || installed.Version != w.Version {
+			return fmt.Errorf("Codex plugin dependency %s installed as %q, want %s", name, installed.Version, w.Version)
+		}
+	}
+	return nil
 }
 
 func installSelectedModelPlugin() error {
 	if strings.TrimSpace(os.Getenv("ELASTICCLAW_LLM_PROVIDER")) != "codex" {
 		return nil
 	}
-	if err := exec.Command("openclaw", "plugins", "info", "codex", "--json").Run(); err == nil {
-		log.Printf("[bootstrap] Codex plugin already installed")
-		return nil
-	}
-	version := cliversion.FromEnv("ELASTICCLAW_CODEX_PLUGIN_VERSION", codexPluginVersion)
+	version := codexPluginVersion
 	if strings.TrimSpace(version) == "" {
 		return fmt.Errorf("empty version for @openclaw/codex")
 	}
+	if info, err := installedCodexPlugin(); err == nil && info.Version == version && info.Origin == "global" {
+		if err := verifyCodexPluginDeps(info.RootDir); err != nil {
+			return fmt.Errorf("verify installed Codex plugin: %w", err)
+		}
+		log.Printf("[bootstrap] Codex plugin already installed: %s", version)
+		return nil
+	}
 	spec := "npm:@openclaw/codex@" + version
 	log.Printf("[bootstrap] installing %s...", spec)
-	out, err := exec.Command("openclaw", "plugins", "install", spec).CombinedOutput()
-	if err != nil {
+	// --force replaces an installed plugin of another version.
+	if out, err := exec.Command("openclaw", "plugins", "install", spec, "--pin", "--force").CombinedOutput(); err != nil {
 		return fmt.Errorf("install %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.Command("openclaw", "plugins", "info", "codex", "--json").CombinedOutput(); err != nil {
-		return fmt.Errorf("verify Codex plugin install: %w: %s", err, strings.TrimSpace(string(out)))
+	info, err := installedCodexPlugin()
+	if err != nil {
+		return fmt.Errorf("verify Codex plugin install: %w", err)
+	}
+	if info.Version != version || info.Origin != "global" {
+		return fmt.Errorf("verify Codex plugin install: got version %q origin %q, want %s from the registry (origin global)", info.Version, info.Origin, version)
+	}
+	if err := verifyCodexPluginDeps(info.RootDir); err != nil {
+		return fmt.Errorf("verify Codex plugin install: %w", err)
 	}
 	log.Printf("[bootstrap] Codex plugin: %s", version)
 	return nil
@@ -5089,7 +5283,7 @@ func runBootstrap() error {
 // ─── Local HTTP proxy ───────────────────────────────────────────────────────
 // The bridge listens on 127.0.0.1:18790 and forwards requests to the hub
 // via the existing WS connection. This allows tools inside the sandbox
-// (e.g. git credential helper) to reach hub APIs without a public hub URL.
+// to reach explicitly allowed hub APIs without a public hub URL.
 
 type httpProxyReq struct {
 	ReqID  string            `json:"req_id"`
@@ -5121,7 +5315,7 @@ func newHTTPProxy(send func(hubMsg) error) *httpProxy {
 }
 
 func (p *httpProxy) deliver(res httpProxyRes) {
-	log.Printf("[bridge-proxy] deliver req_id=%s status=%d body_len=%d", res.ReqID, res.Status, len(res.Body))
+	log.Printf("[bridge-proxy] deliver status=%d", res.Status)
 	p.mu.Lock()
 	ch, ok := p.pending[res.ReqID]
 	if ok {
@@ -5131,7 +5325,7 @@ func (p *httpProxy) deliver(res httpProxyRes) {
 	if ok {
 		ch <- res
 	} else {
-		log.Printf("[bridge-proxy] deliver dropped req_id=%s (no pending waiter)", res.ReqID)
+		log.Printf("[bridge-proxy] deliver dropped status=%d (no pending waiter)", res.Status)
 	}
 }
 
@@ -5142,7 +5336,7 @@ func (p *httpProxy) ready() bool {
 }
 
 func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[bridge-proxy] incoming %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+	log.Printf("[bridge-proxy] incoming method=%q path=%q", r.Method, r.URL.Path)
 	// Wait up to 30s for the bridge to connect to the hub
 	for i := 0; i < 30; i++ {
 		if p.ready() {
@@ -5151,7 +5345,7 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(1 * time.Second)
 	}
 	if !p.ready() {
-		log.Printf("[bridge-proxy] not ready for %s %s", r.Method, r.URL.Path)
+		log.Printf("[bridge-proxy] not ready method=%q path=%q status=%d", r.Method, r.URL.Path, http.StatusServiceUnavailable)
 		http.Error(w, "bridge not connected to hub", http.StatusServiceUnavailable)
 		return
 	}
@@ -5184,13 +5378,13 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sendFn := p.send
 	p.mu.Unlock()
 	if sendFn == nil {
-		log.Printf("[bridge-proxy] sendFn nil req_id=%s", reqID)
+		log.Printf("[bridge-proxy] sendFn nil method=%q path=%q status=%d", req.Method, req.Path, http.StatusServiceUnavailable)
 		http.Error(w, "bridge not connected", http.StatusServiceUnavailable)
 		return
 	}
-	log.Printf("[bridge-proxy] forwarding req_id=%s method=%s path=%s query=%s headers=%v body_len=%d", reqID, req.Method, req.Path, req.Query, req.Header, len(req.Body))
+	log.Printf("[bridge-proxy] forwarding method=%q path=%q", req.Method, req.Path)
 	if err := sendFn(hubMsg{Type: "http_proxy_req", Payload: mustJSON(req)}); err != nil {
-		log.Printf("[bridge-proxy] send error req_id=%s err=%v", reqID, err)
+		log.Printf("[bridge-proxy] send error method=%q path=%q status=%d", req.Method, req.Path, http.StatusBadGateway)
 		p.mu.Lock()
 		delete(p.pending, reqID)
 		p.mu.Unlock()
@@ -5200,11 +5394,11 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case res := <-ch:
-		log.Printf("[bridge-proxy] response req_id=%s status=%d body_len=%d", reqID, res.Status, len(res.Body))
+		log.Printf("[bridge-proxy] response method=%q path=%q status=%d", req.Method, req.Path, res.Status)
 		w.WriteHeader(res.Status)
 		_, _ = w.Write([]byte(res.Body))
 	case <-time.After(10 * time.Second):
-		log.Printf("[bridge-proxy] timeout req_id=%s path=%s", reqID, req.Path)
+		log.Printf("[bridge-proxy] timeout method=%q path=%q status=%d", req.Method, req.Path, http.StatusGatewayTimeout)
 		p.mu.Lock()
 		delete(p.pending, reqID)
 		p.mu.Unlock()

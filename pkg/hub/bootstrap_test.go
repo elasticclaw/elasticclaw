@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,30 +113,220 @@ func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
 }
 
 func TestDaytonaOpenClawInstallCommands_AreAsyncAndPollable(t *testing.T) {
-	start := daytonaStartOpenClawInstallCommand("2026.7.1-2")
-	status := daytonaOpenClawInstallStatusCommand("2026.7.1-2")
+	start := daytonaStartOpenClawInstallCommand(cliversion.OpenClawVersion)
+	status := daytonaOpenClawInstallStatusCommand()
 
+	check := exec.Command("bash", "-n")
+	check.Stdin = strings.NewReader(start)
+	if out, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("install script syntax: %v: %s", err, out)
+	}
+	assertContains(t, daytonaAsyncBridgeCommand("hub", "id", "token", "auth", "name", "template", ""), `export PATH="$HOME/.local/bin:`, "bridge uses the user-owned binary")
 	assertContains(t, start, "setsid nohup bash -c", "install starts in a detached process")
 	assertContains(t, start, "openclaw-install.log", "install writes a log for diagnostics")
 	assertContains(t, start, "openclaw-install.status", "install writes a status marker")
-	assertContains(t, start, "openclaw@2026.7.1-2", "install pins the expected openclaw version")
+	assertContains(t, start, "ci --no-audit --no-fund", "install uses npm ci")
+	assertNotContains(t, start, "sudo", "install runs as daytona without sudo")
+	assertNotContains(t, start, "--ignore-scripts", "lifecycle scripts remain enabled")
+	assertContains(t, start, base64.StdEncoding.EncodeToString(cliversion.OpenClawPackageJSON), "embeds the pinned manifest")
+	assertContains(t, start, "gzip -df --", "decompresses the embedded integrity lock")
+	if len(start) >= 128*1024 {
+		t.Fatalf("install command exceeds Linux argument limit: %d bytes", len(start))
+	}
+	lockDir := t.TempDir()
+	if out, err := exec.Command("bash", "-c", daytonaOpenClawLockCommand(lockDir)).CombinedOutput(); err != nil {
+		t.Fatalf("write lock: %v: %s", err, out)
+	}
+	lock, err := os.ReadFile(filepath.Join(lockDir, "package-lock.json"))
+	if err != nil || string(lock) != string(cliversion.OpenClawPackageLock) {
+		t.Fatalf("remote lock differs from embedded bytes: %v", err)
+	}
+	assertContains(t, start, "$(id -un)", "checks the runtime user")
 	assertContains(t, start, "openclaw-install-status=started", "start command returns quickly after launching")
 
 	assertContains(t, status, "openclaw-install-status=ok", "status reports completion")
 	assertContains(t, status, "openclaw-install-status=pending", "status reports in-progress install")
 	assertContains(t, status, "openclaw-install-status=failed", "status reports failed install")
 	assertContains(t, status, "tail -n 120", "status includes install diagnostics")
-	assertContains(t, status, "openclaw@2026.7.1-2", "status checks the pinned install process")
+	assertContains(t, status, "[o]penclaw-runtime", "status checks the locked install process")
 }
 
 func TestDaytonaInstallModelPluginCommandPinsCodexPlugin(t *testing.T) {
 	cmd := daytonaInstallModelPluginCommand("codex")
 
 	assertContains(t, cmd, "plugins info codex --json", "checks for an existing Codex plugin")
-	assertContains(t, cmd, "npm:@openclaw/codex@"+cliversion.CodexPluginVersion, "pins the Codex plugin version")
-	assertContains(t, cmd, "plugins install", "installs the missing Codex plugin")
+	assertContains(t, cmd, "plugins install 'npm:@openclaw/codex@"+cliversion.CodexPluginVersion+"' --pin --force", "installs the pinned Codex plugin from the registry")
+	assertContains(t, cmd, base64.StdEncoding.EncodeToString(cliversion.CodexPluginPackageLock), "ships the embedded dependency lock")
+	assertContains(t, cmd, daytonaCodexPluginDepsVerifier, "verifies the managed root against the lock")
+	for _, forbidden := range []string{"plugins install -l", "deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
+		assertNotContains(t, cmd, forbidden, "installs only the registry-owned plugin")
+	}
+	check := exec.Command("bash", "-n")
+	check.Stdin = strings.NewReader(cmd)
+	if out, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("plugin script syntax: %v: %s", err, out)
+	}
+	server, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
+		assertNotContains(t, string(server), forbidden, "bootstrap does not use removed dependency staging")
+	}
 	if got := daytonaInstallModelPluginCommand("openai"); got != "" {
 		t.Fatalf("OpenAI plugin install command = %q, want empty", got)
+	}
+}
+
+// writeDaytonaCodexManagedRoot lays out an npm root matching the embedded
+// Codex plugin lock, as npm leaves it on a platform without the optional
+// binaries. tamper, if set, edits the decoded lock before it is written.
+func writeDaytonaCodexManagedRoot(t *testing.T, root string, tamper func(packages map[string]any)) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(cliversion.CodexPluginPackageLock, &doc); err != nil {
+		t.Fatal(err)
+	}
+	packages := doc["packages"].(map[string]any)
+	for name, raw := range packages {
+		entry := raw.(map[string]any)
+		if name == "" || entry["optional"] == true {
+			continue
+		}
+		version, ok := entry["version"].(string)
+		if !ok {
+			t.Fatalf("embedded Codex plugin lock entry %s has no string version", name)
+		}
+		dir := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"version":"`+version+`"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tamper != nil {
+		tamper(packages)
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDaytonaCodexPluginRegistryInstall(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH")
+	}
+	nodePath, err := exec.Command("node", "-p", "process.execPath").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := cliversion.CodexPluginVersion
+	tamperIntegrity := func(packages map[string]any) {
+		packages["node_modules/semver"].(map[string]any)["integrity"] = "sha512-tampered"
+	}
+	tamperVersion := func(packages map[string]any) { packages["node_modules/zod"].(map[string]any)["version"] = "4.0.0" }
+	dropPackage := func(packages map[string]any) { delete(packages, "node_modules/ws") }
+	for _, tc := range []struct {
+		name, initial, installState, installExit, infoExit string
+		flat                                               bool
+		tamper                                             func(map[string]any)
+		wantInstall, wantError                             bool
+		wantOutput                                         string
+	}{
+		{name: "missing", wantInstall: true},
+		{name: "outdated", initial: "2026.1.0 global", wantInstall: true},
+		{name: "linked", initial: pinned + " config", wantInstall: true},
+		{name: "installed", initial: pinned + " global"},
+		{name: "installed flat output", initial: pinned + " global", flat: true},
+		{name: "install failure", installExit: "1", wantInstall: true, wantError: true},
+		{name: "linked origin after install", installState: pinned + " config", wantInstall: true, wantError: true},
+		{name: "wrong version after install", installState: "2026.1.0 global", wantInstall: true, wantError: true},
+		{name: "info failure", initial: pinned + " global", infoExit: "1", wantInstall: true, wantError: true},
+		{name: "tampered integrity after install", tamper: tamperIntegrity, wantInstall: true, wantError: true, wantOutput: "node_modules/semver locked as"},
+		{name: "wrong locked version after install", tamper: tamperVersion, wantInstall: true, wantError: true, wantOutput: "node_modules/zod locked as 4.0.0"},
+		{name: "package missing after install", tamper: dropPackage, wantInstall: true, wantError: true, wantOutput: "node_modules/ws missing from"},
+		{name: "tampered reused install", initial: pinned + " global", tamper: tamperIntegrity, wantError: true, wantOutput: "node_modules/semver locked as"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := filepath.Join(home, "nvm", "current", "bin")
+			if err := os.MkdirAll(bin, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(strings.TrimSpace(string(nodePath)), filepath.Join(bin, "node")); err != nil {
+				t.Fatal(err)
+			}
+			write := func(path, content string, mode os.FileMode) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeDaytonaCodexManagedRoot(t, filepath.Join(home, "managed"), tc.tamper)
+			if tc.initial != "" {
+				write(filepath.Join(home, "plugin-state"), tc.initial+"\n", 0600)
+			}
+			installState := tc.installState
+			if installState == "" {
+				installState = pinned + " global"
+			}
+			or0 := func(v string) string {
+				if v == "" {
+					return "0"
+				}
+				return v
+			}
+			infoFormat := `{"plugin":{"version":"%s","origin":"%s","rootDir":"%s"}}`
+			if tc.flat {
+				infoFormat = `{"version":"%s","origin":"%s","rootDir":"%s"}`
+			}
+			write(filepath.Join(bin, "openclaw"), `#!/bin/sh
+set -eu
+if [ "$*" = "plugins info codex --json" ]; then
+  [ `+or0(tc.infoExit)+` = 0 ] && [ -f "$HOME/plugin-state" ] || { echo 'Plugin not found: codex' >&2; exit 1; }
+  read -r version origin < "$HOME/plugin-state"
+  printf '`+infoFormat+`\n' "$version" "$origin" "$HOME/managed/node_modules/@openclaw/codex"
+  exit 0
+fi
+printf '%s\n' "$*" >> "$HOME/install-args"
+[ `+or0(tc.installExit)+` = 0 ] || exit 1
+printf '%s\n' '`+installState+`' > "$HOME/plugin-state"
+`, 0755)
+			script := strings.NewReplacer(
+				"/home/daytona", home,
+				"/usr/local/share/nvm", filepath.Join(home, "nvm"),
+			).Replace(daytonaInstallModelPluginCommand("codex"))
+			for i := 0; i < 2; i++ {
+				out, err := exec.Command("bash", "-c", script).CombinedOutput()
+				if (err != nil) != tc.wantError {
+					t.Fatalf("install: %v: %s", err, out)
+				}
+				if !strings.Contains(string(out), tc.wantOutput) {
+					t.Fatalf("install output = %s, want %q", out, tc.wantOutput)
+				}
+				if tc.wantError {
+					break
+				}
+			}
+			args, err := os.ReadFile(filepath.Join(home, "install-args"))
+			if !tc.wantInstall {
+				if !os.IsNotExist(err) {
+					t.Fatalf("installed plugin must skip install: %q, %v", args, err)
+				}
+				return
+			}
+			if err != nil || string(args) != "plugins install npm:@openclaw/codex@"+pinned+" --pin --force\n" {
+				t.Fatalf("install invocation: %q, %v", args, err)
+			}
+		})
 	}
 }
 
@@ -1702,5 +1893,123 @@ func assertNotContains(t *testing.T, s, substr, desc string) {
 	t.Helper()
 	if strings.Contains(s, substr) {
 		t.Errorf("expected script NOT to contain %s\nfound: %q", desc, substr)
+	}
+}
+
+func TestDaytonaVerifyOpenClawExactVersion(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	for _, version := range []string{cliversion.OpenClawVersion, "2026.9.40", "", "OpenClaw " + cliversion.OpenClawVersion} {
+		t.Run(version, func(t *testing.T) {
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "node"), []byte("#!/bin/sh\nprintf '%s' \"$PACKAGE_TEST_VERSION\"\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			// Replace the fixed runtime PATH so this test needs no sandbox filesystem or ports.
+			script := daytonaVerifyOpenClawCommand(cliversion.OpenClawVersion)
+			script = strings.Replace(script, `export PATH="$HOME/.local/bin:/usr/local/share/nvm/current/bin:$PATH"`, "", 1)
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin", "PACKAGE_TEST_VERSION="+version)
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != (version == cliversion.OpenClawVersion) {
+				t.Fatalf("version %q: %v: %s", version, err, out)
+			}
+		})
+	}
+}
+
+func TestDaytonaOpenClawLockedInstall(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH")
+	}
+	// Resolve the executable because a version-manager shim may depend on HOME or PATH.
+	nodePath, err := exec.Command("node", "-p", "process.execPath").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := strings.TrimSpace(string(nodePath))
+	for _, tc := range []struct {
+		version string
+		marker  bool
+	}{{"", false}, {cliversion.OpenClawVersion, true}, {cliversion.OpenClawVersion, false}, {"2026.9.40", true}} {
+		version := tc.version
+		t.Run(fmt.Sprintf("installed-%s-marker=%v", version, tc.marker), func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := filepath.Join(home, "nvm", "current", "bin")
+			runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-runtime")
+			pkgDir := filepath.Join(runtimeDir, "node_modules", "openclaw")
+			for _, dir := range []string{bin, pkgDir} {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write := func(path, content string, mode os.FileMode) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version != "" {
+				write(filepath.Join(pkgDir, "package.json"), `{"version":"`+version+`"}`, 0644)
+			}
+			marker := filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker)
+			if tc.marker {
+				write(marker, cliversion.OpenClawLockSHA256()+"\n", 0644)
+			}
+			if err := os.Symlink(node, filepath.Join(bin, "node")); err != nil {
+				t.Fatal(err)
+			}
+			write(filepath.Join(bin, "id"), "#!/bin/sh\necho daytona\n", 0755)
+			write(filepath.Join(bin, "npm"), `#!/bin/sh
+set -eu
+printf '%s\n' "$*" "$PWD" > "$HOME/npm-args"
+mkdir -p node_modules/openclaw node_modules/.bin
+printf '{"version":"`+cliversion.OpenClawVersion+`"}' > node_modules/openclaw/package.json
+touch node_modules/openclaw/openclaw.mjs
+ln -sf ../openclaw/openclaw.mjs node_modules/.bin/openclaw
+`, 0755)
+			// Run the same generated installer synchronously under a temporary sandbox home.
+			script := daytonaStartOpenClawInstallCommand(cliversion.OpenClawVersion)
+			script = strings.NewReplacer(
+				"/home/daytona", home,
+				"/usr/local/share/nvm", filepath.Join(home, "nvm"),
+				"/tmp/openclaw-install", filepath.Join(home, "openclaw-install"),
+				"setsid nohup bash -c", "bash -c",
+				`> "$LOG" 2>&1 </dev/null &`, `> "$LOG" 2>&1 </dev/null`,
+			).Replace(script)
+			out, err := exec.Command("bash", "-c", script).CombinedOutput()
+			status, _ := os.ReadFile(filepath.Join(home, "openclaw-install.status"))
+			if err != nil || string(status) != "ok\n" {
+				log, _ := os.ReadFile(filepath.Join(home, "openclaw-install.log"))
+				t.Fatalf("install: %v, status %q: %s\n%s", err, status, out, log)
+			}
+			args, err := os.ReadFile(filepath.Join(home, "npm-args"))
+			if version == cliversion.OpenClawVersion && tc.marker {
+				if !os.IsNotExist(err) {
+					t.Fatalf("exact version with install marker must skip npm: %s, %v", args, err)
+				}
+				return
+			}
+			// A matching package.json without the marker is a partial install and must be redone.
+			if got, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(got)) != cliversion.OpenClawLockSHA256() {
+				t.Fatalf("install marker = %q, %v", got, err)
+			}
+			if err != nil || string(args) != "ci --no-audit --no-fund\n"+runtimeDir+"\n" {
+				t.Fatalf("npm invocation: %q, %v", args, err)
+			}
+			for name, want := range map[string][]byte{"package.json": cliversion.OpenClawPackageJSON, "package-lock.json": cliversion.OpenClawPackageLock} {
+				got, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil || string(got) != string(want) {
+					t.Fatalf("%s differs from embedded file: %v", name, err)
+				}
+			}
+			if target, err := filepath.EvalSymlinks(filepath.Join(home, ".local", "bin", "openclaw")); err != nil || target != filepath.Join(pkgDir, "openclaw.mjs") {
+				t.Fatalf("openclaw link target = %q, %v", target, err)
+			}
+		})
 	}
 }

@@ -67,7 +67,10 @@ func newReplicatedProvider(cfg types.ProviderConfig) (*replicated.Provider, erro
 }
 
 var createDockerContainer = (*dockerpkg.Provider).Create
+var createDaytonaSandbox = createAndConfigureDaytonaSandbox
 
+// Callers filter user env before merging it with hub-managed values; the
+// combined env passed here must preserve those trusted values for every provider.
 func (s *Server) provisionWithProvider(ctx context.Context, provider, clawID string, req types.CreateClawRequest, cfg types.ProviderConfig, files map[string][]byte, env map[string]string) error {
 	switch provider {
 	case "replicated":

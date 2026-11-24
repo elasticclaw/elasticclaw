@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 
 	"nhooyr.io/websocket"
@@ -1214,116 +1215,340 @@ func TestInstallOpenClawWithoutSudoInstallsAndRunsPinnedVersion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake npm executable uses POSIX shell")
 	}
-
-	home := t.TempDir()
-	fakeBin := t.TempDir()
-	npmLog := filepath.Join(t.TempDir(), "npm-args")
-	t.Setenv("HOME", home)
-	t.Setenv("FAKE_NPM_LOG", npmLog)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	writeExecutable := func(path, content string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(content), 0755); err != nil {
-			t.Fatalf("write executable %s: %v", path, err)
-		}
-	}
-	writeExecutable(filepath.Join(fakeBin, "openclaw"), "#!/bin/sh\necho 'OpenClaw 0.0.0'\n")
-	writeExecutable(filepath.Join(fakeBin, "npm"), fmt.Sprintf(`#!/bin/sh
+	for _, tc := range []struct {
+		version string
+		locked  bool
+	}{{"", false}, {openClawVersion, true}, {openClawVersion, false}, {"2026.9.40", true}, {"0.0.0", false}} {
+		version := tc.version
+		t.Run(fmt.Sprintf("installed-%s-locked=%v", version, tc.locked), func(t *testing.T) {
+			home := t.TempDir()
+			fakeBin := t.TempDir()
+			npmLog := filepath.Join(t.TempDir(), "npm-args")
+			t.Setenv("HOME", home)
+			t.Setenv("FAKE_NPM_LOG", npmLog)
+			runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-runtime")
+			pkgDir := filepath.Join(runtimeDir, "node_modules", "openclaw")
+			binDir := filepath.Join(home, ".local", "bin")
+			// The user binary must take precedence even if its directory is already on PATH.
+			t.Setenv("PATH", strings.Join([]string{fakeBin, os.Getenv("PATH"), binDir}, string(os.PathListSeparator)))
+			for _, dir := range []string{pkgDir, binDir} {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write := func(path, content string, mode os.FileMode) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(content), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(filepath.Join(fakeBin, "openclaw"), "#!/bin/sh\nexit 1\n", 0755)
+			if version != "" {
+				write(filepath.Join(pkgDir, "package.json"), fmt.Sprintf(`{"name":"openclaw","version":%q}`, version), 0644)
+				// CLI output deliberately claims the pinned version even when the package differs.
+				write(filepath.Join(pkgDir, "openclaw.mjs"), "#!/bin/sh\necho 'OpenClaw "+openClawVersion+"'\n", 0755)
+				if err := os.Symlink(filepath.Join(pkgDir, "openclaw.mjs"), filepath.Join(binDir, "openclaw")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.locked {
+				// A Docker image or earlier bootstrap that completed npm ci from the embedded lock.
+				write(filepath.Join(runtimeDir, "package-lock.json"), string(cliversion.OpenClawPackageLock), 0644)
+				write(filepath.Join(runtimeDir, cliversion.OpenClawInstallMarker), cliversion.OpenClawLockSHA256()+"\n", 0644)
+			}
+			write(filepath.Join(fakeBin, "npm"), fmt.Sprintf(`#!/bin/sh
 set -eu
-printf '%%s\n' "$*" > "$FAKE_NPM_LOG"
-mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/openclaw" <<'EOF'
+printf '%%s\n' "$*" "$PWD" > "$FAKE_NPM_LOG"
+mkdir -p node_modules/openclaw node_modules/.bin
+printf '{"name":"openclaw","version":"%s"}' > node_modules/openclaw/package.json
+cat > node_modules/openclaw/openclaw.mjs <<'EOF'
 #!/bin/sh
 echo 'OpenClaw %s'
 EOF
-chmod +x "$HOME/.local/bin/openclaw"
-`, openClawVersion))
+chmod +x node_modules/openclaw/openclaw.mjs
+ln -sf ../openclaw/openclaw.mjs node_modules/.bin/openclaw
+`, openClawVersion, openClawVersion), 0755)
+			if err := installOpenClaw(); err != nil {
+				t.Fatal(err)
+			}
+			args, err := os.ReadFile(npmLog)
+			if version == openClawVersion && tc.locked {
+				if !os.IsNotExist(err) {
+					t.Fatalf("exact locked version must skip npm: %s, %v", args, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(args), "ci --no-audit --no-fund\n"+runtimeDir+"\n"; got != want {
+				t.Fatalf("npm invocation = %q, want %q", got, want)
+			}
+			for name, want := range map[string][]byte{"package.json": cliversion.OpenClawPackageJSON, "package-lock.json": cliversion.OpenClawPackageLock} {
+				got, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil || string(got) != string(want) {
+					t.Fatalf("%s differs from embedded file: %v", name, err)
+				}
+			}
+			if got, err := installedOpenClawVersion(); err != nil || got != openClawVersion {
+				t.Fatalf("installed version = %q: %v", got, err)
+			}
+			if !openClawInstalledFromLock(pkgDir) {
+				t.Fatal("install marker missing after npm ci")
+			}
+			out, err := exec.Command("openclaw", "--version").CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != "OpenClaw "+openClawVersion {
+				t.Fatalf("run installed openclaw: %v: %s", err, out)
+			}
+		})
+	}
+}
 
-	if err := installOpenClaw(); err != nil {
-		t.Fatalf("installOpenClaw(): %v", err)
+// writeFakeCodexPluginOpenClaw installs a fake openclaw whose codex plugin
+// state ("<version> <origin>") lives in $CODEX_PLUGIN_STATE. A plugins install
+// logs its args to $OPENCLAW_INVOCATIONS, then exits $FAKE_INSTALL_EXIT or
+// records $FAKE_INSTALL_STATE.
+func writeFakeCodexPluginOpenClaw(t *testing.T) (state, invocations string) {
+	t.Helper()
+	fakeBin := t.TempDir()
+	dir := t.TempDir()
+	state = filepath.Join(dir, "state")
+	invocations = filepath.Join(dir, "args")
+	script := `#!/bin/sh
+set -eu
+if [ "$*" = "plugins info codex --json" ]; then
+  if [ "${FAKE_INFO_EXIT:-0}" != 0 ] || [ ! -f "$CODEX_PLUGIN_STATE" ]; then
+    echo 'Plugin not found: codex' >&2
+    exit 1
+  fi
+  read -r version origin < "$CODEX_PLUGIN_STATE"
+  printf '{"plugin":{"id":"codex","version":"%s","origin":"%s","rootDir":"%s/node_modules/@openclaw/codex"}}\n' "$version" "$origin" "$CODEX_MANAGED_ROOT"
+  exit 0
+fi
+printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
+[ "${FAKE_INSTALL_EXIT:-0}" = 0 ] || { echo 'registry unreachable'; exit 1; }
+printf '%s\n' "$FAKE_INSTALL_STATE" > "$CODEX_PLUGIN_STATE"
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "openclaw"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
 	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ELASTICCLAW_LLM_PROVIDER", "codex")
+	t.Setenv("CODEX_PLUGIN_STATE", state)
+	t.Setenv("OPENCLAW_INVOCATIONS", invocations)
+	t.Setenv("FAKE_INSTALL_STATE", codexPluginVersion+" global")
+	t.Setenv("CODEX_MANAGED_ROOT", writeCodexManagedRoot(t))
+	return state, invocations
+}
 
-	args, err := os.ReadFile(npmLog)
-	if err != nil {
-		t.Fatalf("read npm arguments: %v", err)
+// writeCodexManagedRoot lays out an npm root matching the embedded Codex
+// plugin lock: its package-lock.json plus a package.json per non-optional
+// package, as npm leaves it on a platform without the optional binaries.
+func writeCodexManagedRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), cliversion.CodexPluginPackageLock, 0644); err != nil {
+		t.Fatal(err)
 	}
-	gotArgs := strings.TrimSpace(string(args))
-	if strings.Contains(gotArgs, "sudo") {
-		t.Fatalf("npm install unexpectedly requires sudo: %s", gotArgs)
+	var lock struct {
+		Packages map[string]struct {
+			Version  string `json:"version"`
+			Optional bool   `json:"optional"`
+		} `json:"packages"`
 	}
-	if !strings.Contains(gotArgs, "--prefix "+filepath.Join(home, ".local")) {
-		t.Fatalf("npm install does not use the user prefix: %s", gotArgs)
+	if err := json.Unmarshal(cliversion.CodexPluginPackageLock, &lock); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(gotArgs, "openclaw@"+openClawVersion) {
-		t.Fatalf("npm install does not pin OpenClaw: %s", gotArgs)
+	for name, entry := range lock.Packages {
+		if name == "" || entry.Optional {
+			continue
+		}
+		dir := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"version":"`+entry.Version+`"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
+	return root
+}
 
-	path, err := exec.LookPath("openclaw")
+// editJSONFile rewrites a JSON file through edit.
+func editJSONFile(t *testing.T, path string, edit func(map[string]any)) {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("find installed openclaw: %v", err)
+		t.Fatal(err)
 	}
-	wantPath := filepath.Join(home, ".local", "bin", "openclaw")
-	if path != wantPath {
-		t.Fatalf("openclaw path = %q, want %q", path, wantPath)
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
 	}
-	out, err := exec.Command("openclaw", "--version").CombinedOutput()
-	if err != nil {
-		t.Fatalf("run installed openclaw: %v: %s", err, out)
+	edit(doc)
+	if data, err = json.Marshal(doc); err != nil {
+		t.Fatal(err)
 	}
-	if got, want := strings.TrimSpace(string(out)), "OpenClaw "+openClawVersion; got != want {
-		t.Fatalf("openclaw --version = %q, want %q", got, want)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyCodexPluginDeps(t *testing.T) {
+	lockPackages := func(doc map[string]any) map[string]any { return doc["packages"].(map[string]any) }
+	for _, tc := range []struct {
+		name      string
+		tamper    func(t *testing.T, root string)
+		wantError string
+	}{
+		{name: "matching lock"},
+		{name: "tampered integrity", wantError: "node_modules/semver locked as", tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "package-lock.json"), func(doc map[string]any) {
+				lockPackages(doc)["node_modules/semver"].(map[string]any)["integrity"] = "sha512-tampered"
+			})
+		}},
+		{name: "wrong locked version", wantError: "node_modules/zod locked as 4.0.0", tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "package-lock.json"), func(doc map[string]any) {
+				lockPackages(doc)["node_modules/zod"].(map[string]any)["version"] = "4.0.0"
+			})
+		}},
+		{name: "package missing from lock", wantError: "node_modules/ws missing from", tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "package-lock.json"), func(doc map[string]any) {
+				delete(lockPackages(doc), "node_modules/ws")
+			})
+		}},
+		{name: "wrong installed version", wantError: `node_modules/typebox installed as "0.0.1"`, tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "node_modules", "typebox", "package.json"), func(doc map[string]any) {
+				doc["version"] = "0.0.1"
+			})
+		}},
+		{name: "required package not installed", wantError: "node_modules/smol-toml not installed", tamper: func(t *testing.T, root string) {
+			if err := os.RemoveAll(filepath.Join(root, "node_modules", "smol-toml")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "extra unrelated package", tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "package-lock.json"), func(doc map[string]any) {
+				lockPackages(doc)["node_modules/unrelated"] = map[string]any{"version": "1.0.0"}
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeCodexManagedRoot(t)
+			if tc.tamper != nil {
+				tc.tamper(t, root)
+			}
+			err := verifyCodexPluginDeps(filepath.Join(root, "node_modules", "@openclaw", "codex"))
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("verifyCodexPluginDeps: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("verifyCodexPluginDeps error = %v, want %s", err, tc.wantError)
+			}
+		})
+	}
+	if err := verifyCodexPluginDeps(t.TempDir()); err == nil || !strings.Contains(err.Error(), "not inside an npm root") {
+		t.Fatalf("plugin outside an npm root: %v", err)
+	}
+}
+
+func TestInstallSelectedModelPluginVerifiesReusedInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake executables use POSIX shell")
+	}
+	state, invocations := writeFakeCodexPluginOpenClaw(t)
+	if err := os.WriteFile(state, []byte(codexPluginVersion+" global\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	editJSONFile(t, filepath.Join(os.Getenv("CODEX_MANAGED_ROOT"), "package-lock.json"), func(doc map[string]any) {
+		doc["packages"].(map[string]any)["node_modules/semver"].(map[string]any)["integrity"] = "sha512-tampered"
+	})
+	err := installSelectedModelPlugin()
+	if err == nil || !strings.Contains(err.Error(), "verify installed Codex plugin") || !strings.Contains(err.Error(), "node_modules/semver") {
+		t.Fatalf("installSelectedModelPlugin error = %v, want reused install rejected", err)
+	}
+	if _, err := os.Stat(invocations); !os.IsNotExist(err) {
+		t.Fatalf("tampered reused install must not be reinstalled silently: %v", err)
 	}
 }
 
 func TestInstallSelectedModelPluginInstallsPinnedCodexPluginOnce(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("fake openclaw executable uses POSIX shell")
+		t.Skip("fake executables use POSIX shell")
 	}
+	for _, tc := range []struct {
+		name, initial string
+		wantInstalls  int
+	}{
+		{name: "missing", wantInstalls: 1},
+		{name: "outdated", initial: "2026.1.0 global", wantInstalls: 1},
+		{name: "linked", initial: codexPluginVersion + " config", wantInstalls: 1},
+		{name: "installed", initial: codexPluginVersion + " global", wantInstalls: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, invocations := writeFakeCodexPluginOpenClaw(t)
+			t.Setenv("ELASTICCLAW_CODEX_PLUGIN_VERSION", "untrusted-version")
+			if tc.initial != "" {
+				if err := os.WriteFile(state, []byte(tc.initial+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < 2; i++ {
+				if err := installSelectedModelPlugin(); err != nil {
+					t.Fatalf("installSelectedModelPlugin(): %v", err)
+				}
+			}
+			logData, err := os.ReadFile(invocations)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			logText := string(logData)
+			install := "plugins install npm:@openclaw/codex@" + codexPluginVersion + " --pin --force\n"
+			if got := strings.Count(logText, install); got != tc.wantInstalls || len(logText) != tc.wantInstalls*len(install) {
+				t.Fatalf("install commands = %q, want %d x %q", logText, tc.wantInstalls, install)
+			}
+		})
+	}
+}
 
-	home := t.TempDir()
-	fakeBin := t.TempDir()
-	invocations := filepath.Join(t.TempDir(), "openclaw-args")
-	installedMarker := filepath.Join(t.TempDir(), "codex-installed")
-	t.Setenv("HOME", home)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("ELASTICCLAW_LLM_PROVIDER", "codex")
-	t.Setenv("OPENCLAW_INVOCATIONS", invocations)
-	t.Setenv("CODEX_INSTALLED_MARKER", installedMarker)
-
-	fakeOpenClaw := `#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
-if [ "$*" = "plugins info codex --json" ]; then
-  test -f "$CODEX_INSTALLED_MARKER"
-  exit $?
-fi
-case "$*" in
-  "plugins install "*) touch "$CODEX_INSTALLED_MARKER" ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(fakeBin, "openclaw"), []byte(fakeOpenClaw), 0755); err != nil {
-		t.Fatalf("write fake openclaw: %v", err)
+func TestInstallSelectedModelPluginFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake executables use POSIX shell")
 	}
-
-	if err := installSelectedModelPlugin(); err != nil {
-		t.Fatalf("installSelectedModelPlugin(): %v", err)
-	}
-	if err := installSelectedModelPlugin(); err != nil {
-		t.Fatalf("second installSelectedModelPlugin(): %v", err)
-	}
-
-	logData, err := os.ReadFile(invocations)
-	if err != nil {
-		t.Fatalf("read OpenClaw invocations: %v", err)
-	}
-	logText := string(logData)
-	wantInstall := "plugins install npm:@openclaw/codex@" + codexPluginVersion
-	if strings.Count(logText, wantInstall) != 1 {
-		t.Fatalf("Codex plugin install count = %d, want 1\n%s", strings.Count(logText, wantInstall), logText)
-	}
-	if strings.Count(logText, "plugins info codex --json") != 3 {
-		t.Fatalf("Codex plugin verification count = %d, want 3\n%s", strings.Count(logText, "plugins info codex --json"), logText)
+	for _, tc := range []struct {
+		name, installExit, installState, infoExit, wantError string
+		tamperLock                                           bool
+	}{
+		{name: "install failure", installExit: "1", wantError: "registry unreachable"},
+		{name: "linked origin after install", installState: codexPluginVersion + " config", wantError: `origin "config"`},
+		{name: "wrong version after install", installState: "2026.1.0 global", wantError: `version "2026.1.0"`},
+		{name: "info failure after install", infoExit: "1", wantError: "Plugin not found: codex"},
+		{name: "lock mismatch after install", tamperLock: true, wantError: "node_modules/ws locked as"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeFakeCodexPluginOpenClaw(t)
+			if tc.tamperLock {
+				editJSONFile(t, filepath.Join(os.Getenv("CODEX_MANAGED_ROOT"), "package-lock.json"), func(doc map[string]any) {
+					doc["packages"].(map[string]any)["node_modules/ws"].(map[string]any)["integrity"] = "sha512-tampered"
+				})
+			}
+			if tc.installExit != "" {
+				t.Setenv("FAKE_INSTALL_EXIT", tc.installExit)
+			}
+			if tc.installState != "" {
+				t.Setenv("FAKE_INSTALL_STATE", tc.installState)
+			}
+			if tc.infoExit != "" {
+				t.Setenv("FAKE_INFO_EXIT", tc.infoExit)
+			}
+			if err := installSelectedModelPlugin(); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("install error = %v, want %s", err, tc.wantError)
+			}
+		})
 	}
 }
 
@@ -4839,5 +5064,45 @@ func TestMaxIntPtr(t *testing.T) {
 	}
 	if maxIntPtr(nil, nil) != nil {
 		t.Fatal("max(nil,nil) must stay nil")
+	}
+}
+
+func TestInstalledCodexPluginIncludesStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake")
+	}
+	fakeBin := t.TempDir()
+	script := "#!/bin/sh\necho 'plugin codex not found' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "openclaw"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err := installedCodexPlugin()
+	if err == nil || !strings.Contains(err.Error(), "plugin codex not found") {
+		t.Fatalf("installedCodexPlugin error = %v, want stderr included", err)
+	}
+}
+
+func TestInstalledCodexPluginReadsNestedAndFlatOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake")
+	}
+	for name, output := range map[string]string{
+		"nested":                 `{"plugin":{"id":"codex","version":"1.2.3","origin":"global","rootDir":"/r"}}`,
+		"flat":                   `{"id":"codex","version":"1.2.3","origin":"global","rootDir":"/r"}`,
+		"nested without version": `{"plugin":{"id":"codex","origin":"config"},"version":"1.2.3","origin":"global","rootDir":"/r"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			script := "#!/bin/sh\nprintf '%s\\n' '" + output + "'\n"
+			if err := os.WriteFile(filepath.Join(fakeBin, "openclaw"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			info, err := installedCodexPlugin()
+			if err != nil || info != (codexPluginInfo{Version: "1.2.3", Origin: "global", RootDir: "/r"}) {
+				t.Fatalf("installedCodexPlugin() = %+v, %v", info, err)
+			}
+		})
 	}
 }

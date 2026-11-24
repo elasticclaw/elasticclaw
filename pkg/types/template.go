@@ -508,6 +508,13 @@ type S3ArtifactStorageConfig struct {
 	PathStyle       bool   `yaml:"path_style,omitempty" json:"pathStyle,omitempty"`
 }
 
+// SecurityConfig controls supply-chain enforcement.
+type SecurityConfig struct {
+	// StrictSupplyChain is off by default. When off, supply-chain checks that
+	// cannot be satisfied log a warning and continue; when on, they fail closed.
+	StrictSupplyChain bool `yaml:"strict_supply_chain"`
+}
+
 type HubConfig struct {
 	// SchemaVersion is the schema version of this hub config file.
 	// Defaults to "v1" if not specified for backward compatibility.
@@ -525,9 +532,13 @@ type HubConfig struct {
 	Providers map[string]ProviderConfig `yaml:"providers,omitempty"`
 	// SSHPublicKeys are extra keys added to every provisioned VM for debug access.
 	SSHPublicKeys []string `yaml:"ssh_public_keys,omitempty"`
-	// BridgeImage is the OCI artifact reference for the claw-bridge binary.
-	// Defaults to ghcr.io/elasticclaw/claw-bridge:latest if not set.
+	// BridgeImage is an HTTPS URL or OCI artifact reference for claw-bridge.
+	// Defaults to the hub version's GitHub release asset if not set.
 	BridgeImage string `yaml:"bridge_image,omitempty"`
+	// BridgeSHA256 is the expected SHA256 for a custom bridge_image download URL.
+	BridgeSHA256 string `yaml:"bridge_sha256,omitempty"`
+	// Security holds supply-chain enforcement settings.
+	Security SecurityConfig `yaml:"security,omitempty"`
 	// DefaultModel is the model used by all claws unless overridden in the template.
 	// Format: provider/model, e.g. anthropic/claude-sonnet-4-6
 	DefaultModel string `yaml:"default_model,omitempty"`

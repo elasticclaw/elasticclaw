@@ -7,9 +7,14 @@ on:
       - '20[0-9][0-9].[0-9]+.[0-9]+'
       - '20[0-9][0-9].[0-9]+.[0-9]+.[0-9]+'
 
+permissions:
+  contents: read
+
 jobs:
   generate-release-notes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     if: ${{ !contains(github.ref_name, '-') }}  # skip prereleases
     outputs:
       title: ${{ steps.parsed.outputs.title }}
@@ -36,7 +41,7 @@ jobs:
           fi
 
       - name: Checkout elasticclaw
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0  # need full history for changelog
 
@@ -213,7 +218,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout elasticclaw.ai
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: elasticclaw/elasticclaw.ai
           token: ${{ secrets.DOCS_REPO_TOKEN }}
@@ -324,7 +329,7 @@ jobs:
           python3 /tmp/update_detail.py "$TAG" "$DATE" "src/app/docs/release-notes/[version]/page.tsx"
 
       - name: Create PR
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6
         with:
           token: ${{ secrets.DOCS_REPO_TOKEN }}
           path: docs-repo
@@ -349,7 +354,7 @@ jobs:
     env:
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Wait for the GitHub Release
         if: env.DISCORD_WEBHOOK != ''

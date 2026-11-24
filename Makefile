@@ -21,7 +21,7 @@ build-dev:
 # Build the Next.js static export and copy into internal/webui/out/ for embedding.
 build-web:
 	@command -v npm >/dev/null 2>&1 || (echo "❌ npm not found in PATH — install Node.js" && exit 1)
-	cd web && npm install && npm run build
+	cd web && npm ci --ignore-scripts && npm run build
 	cd web && ./scripts/check-static-export.sh out
 	mkdir -p internal/webui/out
 	rm -rf internal/webui/out && cp -r web/out internal/webui/out
@@ -38,7 +38,7 @@ build-bridge:
 
 build-bridge-linux:
 	mkdir -p bin
-	GONOSUMDB=* CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)" -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)" -o bin/claw-bridge-linux-amd64 ./cmd/claw-bridge/
 
 
 install:

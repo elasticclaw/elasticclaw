@@ -91,7 +91,7 @@ Terminal 2 (Next.js UI on `:3000`) — still inside `nix develop` (cwd is repo r
 cd web
 cp .env.example .env.local
 # set NEXT_PUBLIC_HUB_URL=http://localhost:8080
-npm install
+npm ci --ignore-scripts
 npm run dev
 ```
 

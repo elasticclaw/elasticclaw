@@ -8,6 +8,9 @@ on:
       - '.elasticclaw/**'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   publish:
     name: Publish workspace and workflows
@@ -16,17 +19,17 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Publish workspace (elasticclaw)
-        uses: elasticclaw/actions/publish-workspace@main
+        uses: elasticclaw/actions/publish-workspace@ffc3edc12e913325aa53f45e4b9922e1eb77a91d # main
         with:
           hub-endpoint: https://factory.elasticclaw.ai
           token: ${{ secrets.ELASTICCLAW_TOKEN }}
           path: .elasticclaw/workspaces/elasticclaw
 
       - name: Publish workflow (github-issue)
-        uses: elasticclaw/actions/publish-workflow@main
+        uses: elasticclaw/actions/publish-workflow@ffc3edc12e913325aa53f45e4b9922e1eb77a91d # main
         with:
           hub-endpoint: https://factory.elasticclaw.ai
           token: ${{ secrets.ELASTICCLAW_TOKEN }}

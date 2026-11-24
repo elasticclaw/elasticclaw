@@ -74,7 +74,7 @@ jobs:
           node-version: "22.23.4"
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci --ignore-scripts
         working-directory: web
 
       - name: Lint (smoke check — tolerates rule violations, still fails on tool/config errors)
@@ -140,7 +140,7 @@ jobs:
         with:
           node-version: '22.23.4'
           cache: 'npm'
-          cache-dependency-path: 'web/package.json'
+          cache-dependency-path: 'web/package-lock.json'
 
       - name: Verify AWS CLI
         if: ${{ steps.preview_config.outputs.enabled == 'true' }}

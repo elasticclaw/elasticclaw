@@ -1106,6 +1106,8 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	s.mu.RLock()
 	clawToken := s.hubCfg.ClawToken
 	s.mu.RUnlock()
+	envFilter := sandboxEnvFilter{}
+	defer envFilter.log(clawID)
 	env := map[string]string{
 		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
 		"ELASTICCLAW_CLAW_TOKEN": clawToken,
@@ -1151,6 +1153,9 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		for _, ref := range tmplCfg.Secrets {
 			secretVal, envName, ok := s.resolveSecretRef(ref, factory)
 			if ok {
+				if !envFilter.allow(envName) {
+					continue
+				}
 				env[envName] = secretVal
 				log.Printf("[factory] injected template secret %s as %s into pending claw %s env", ref.Type, envName, clawID[:8])
 			} else {
@@ -1163,6 +1168,9 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	if tmplCfg != nil && len(tmplCfg.SecretRefs) > 0 {
 		for envName, secretRef := range tmplCfg.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				if !envFilter.allow(envName) {
+					continue
+				}
 				env[envName] = val
 				log.Printf("[factory] injected template secret_ref %s as %s into pending claw %s env", secretRef, envName, clawID[:8])
 			} else {
@@ -1175,6 +1183,9 @@ func (s *Server) provisionPendingClaw(clawID string) {
 	if factory != nil && len(factory.SecretRefs) > 0 {
 		for envName, secretRef := range factory.SecretRefs {
 			if val, ok := s.hubCfg.Secrets[secretRef]; ok {
+				if !envFilter.allow(envName) {
+					continue
+				}
 				env[envName] = val
 				log.Printf("[factory] injected factory secret_ref %s as %s into pending claw %s env", secretRef, envName, clawID[:8])
 			} else {
