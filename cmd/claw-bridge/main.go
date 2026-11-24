@@ -759,6 +759,9 @@ type inFlightToolCall struct {
 
 // inFlightState tracks a single in-progress agent turn.
 type inFlightState struct {
+	// conn is the gateway connection the turn's sessions.send goes out on. A
+	// disconnect only fails the turn when it happened on this connection.
+	conn                *websocket.Conn
 	onChunk             func(string)
 	onActivity          func(agentActivity)
 	slashCommand        bool
@@ -1453,6 +1456,12 @@ func (gs *gatewaySession) isCurrentConn(conn *websocket.Conn) bool {
 
 // sendReq sends a gateway request and waits for the corresponding response.
 func (gs *gatewaySession) sendReq(ctx context.Context, method string, params interface{}) (gwFrame, error) {
+	return gs.sendReqVia(ctx, nil, method, params)
+}
+
+// sendReqVia is sendReq pinned to conn; a nil conn means the current one,
+// resolved after the request is registered as pending.
+func (gs *gatewaySession) sendReqVia(ctx context.Context, conn *websocket.Conn, method string, params interface{}) (gwFrame, error) {
 	paramsJSON, _ := json.Marshal(params)
 	reqID := randomID()
 	ch := make(chan gwFrame, 1)
@@ -1461,9 +1470,9 @@ func (gs *gatewaySession) sendReq(ctx context.Context, method string, params int
 	gs.pending[reqID] = ch
 	gs.pendMu.Unlock()
 
-	gs.connMu.Lock()
-	conn := gs.conn
-	gs.connMu.Unlock()
+	if conn == nil {
+		conn = gs.currentConn()
+	}
 
 	if err := wsjson.Write(ctx, conn, gwFrame{
 		Type:   "req",
@@ -1807,7 +1816,10 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			inf := gs.inFlight
 			gs.infMu.RUnlock()
 			gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
-			if inf != nil {
+			// Only a turn bound to the failed connection was interrupted. One
+			// registered before a reconnect but sent after it goes out on its
+			// own (now closed) connection and is retried by SendMessage.
+			if inf != nil && inf.conn == conn {
 				// A lifecycle error that already arrived owns the turn's result
 				// (NEXT-1294): its transcript lookup fails fast on this
 				// disconnect and delivers the original error, so a needs-human
@@ -3022,6 +3034,11 @@ var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, tim
 // inside that otherwise-unhittable-by-timing window. A no-op in production.
 var sessionMismatchCheckHook = func() {}
 
+// beforeSessionSendHook is a test seam invoked after sendMessageOnce registers
+// the in-flight turn and before it writes sessions.send, so tests can land a
+// gateway reconnect inside that window. A no-op in production.
+var beforeSessionSendHook = func() {}
+
 // isSessionRotatedError reports whether SendMessage recovered from a session
 // lock conflict by rotating to a fresh session. In that case the original turn
 // cannot be completed, but the next hub message can continue. The bridge should
@@ -3342,7 +3359,11 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message, messageID st
 }
 
 func (gs *gatewaySession) sendMessageOnce(ctx context.Context, turnKey, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
+	// Bind the turn to one connection: a disconnect of an older connection
+	// must not fail a turn that a newer one went on to accept.
+	conn := gs.currentConn()
 	inf := &inFlightState{
+		conn:         conn,
 		onChunk:      onChunk,
 		onActivity:   onActivity,
 		slashCommand: strings.HasPrefix(strings.TrimSpace(message), "/"),
@@ -3357,8 +3378,10 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, turnKey, message 
 		gs.infMu.Unlock()
 	}()
 
+	beforeSessionSendHook()
+
 	// Send the message
-	_, err := gs.sendReq(ctx, "sessions.send", map[string]string{
+	_, err := gs.sendReqVia(ctx, conn, "sessions.send", map[string]string{
 		"key":     turnKey,
 		"message": message,
 	})

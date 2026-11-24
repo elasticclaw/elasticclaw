@@ -4155,6 +4155,140 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 	}
 }
 
+// A turn registered in flight before a gateway reconnect, but whose
+// sessions.send is only written after it, must not inherit the old
+// connection's disconnect: the new connection accepts the turn exactly once
+// and its reply is the result.
+func TestGatewaySessionSendStalledAcrossReconnectIsNotFailedByOldDisconnect(t *testing.T) {
+	var connections atomic.Int32
+	var acceptedSends atomic.Int32
+	dropFirst := make(chan struct{})
+	testDone := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		connID := connections.Add(1)
+		bg := context.Background()
+		write := func(frame gwFrame) bool {
+			if err := wsjson.Write(bg, conn, frame); err != nil {
+				t.Errorf("gateway %d write %s%s: %v", connID, frame.Type, frame.Event, err)
+				return false
+			}
+			return true
+		}
+		read := func(method string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil || req.Method != method {
+				t.Errorf("gateway %d read %s: method=%q err=%v", connID, method, req.Method, err)
+				return req, false
+			}
+			return req, true
+		}
+
+		if !write(gwFrame{Type: "event", Event: "connect.challenge", Payload: mustJSON(map[string]string{"nonce": "nonce"})}) {
+			return
+		}
+		connectReq, ok := read("connect")
+		if !ok || !write(gwFrame{Type: "res", ID: connectReq.ID, OK: true}) {
+			return
+		}
+		if connID == 1 {
+			<-dropFirst
+			return
+		}
+
+		subReq, ok := read("sessions.subscribe")
+		if !ok || !write(gwFrame{Type: "res", ID: subReq.ID, OK: true}) {
+			return
+		}
+		sendReq, ok := read("sessions.send")
+		if !ok {
+			return
+		}
+		acceptedSends.Add(1)
+		if !write(gwFrame{Type: "res", ID: sendReq.ID, OK: true}) {
+			return
+		}
+		if !write(gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
+			"stream": "assistant", "sessionKey": "session-1", "data": map[string]string{"delta": "hello"},
+		})}) {
+			return
+		}
+		if !write(gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "end"},
+		})}) {
+			return
+		}
+		<-testDone
+	}))
+	defer srv.Close()
+	defer close(testDone)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := &gatewayClient{
+		addr:  strings.TrimPrefix(srv.URL, "http://"),
+		token: "token",
+		device: &deviceIdentity{
+			DeviceID:      "device-1",
+			PublicKeyPem:  testPEM("PUBLIC KEY"),
+			PrivateKeyPem: testPEM("PRIVATE KEY"),
+		},
+		home: t.TempDir(),
+	}
+	firstConn, err := client.connectToGateway(ctx)
+	if err != nil {
+		t.Fatalf("connect to gateway: %v", err)
+	}
+	gs := &gatewaySession{
+		client:     client,
+		sessionKey: "session-1",
+		conn:       firstConn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	go gs.readLoop(ctx)
+
+	// Stall the first send, with its turn already in flight, until readLoop has
+	// seen the first gateway drop and installed the second connection.
+	var stalled atomic.Bool
+	oldHook := beforeSessionSendHook
+	t.Cleanup(func() { beforeSessionSendHook = oldHook })
+	beforeSessionSendHook = func() {
+		if !stalled.CompareAndSwap(false, true) {
+			return
+		}
+		close(dropFirst)
+		for gs.isCurrentConn(firstConn) {
+			if ctx.Err() != nil {
+				t.Error("readLoop did not reconnect after the first gateway dropped")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	reply, err := gs.SendMessage(ctx, "hi", "", nil, nil)
+	if err != nil {
+		t.Fatalf("SendMessage returned error for a turn the gateway accepted: %v", err)
+	}
+	if reply != "hello" {
+		t.Fatalf("reply = %q, want hello", reply)
+	}
+	if got := acceptedSends.Load(); got != 1 {
+		t.Fatalf("accepted sends = %d, want 1", got)
+	}
+	if got := connections.Load(); got != 2 {
+		t.Fatalf("connections = %d, want 2", got)
+	}
+}
+
 // TestSendMessageAnnouncesSessionReplacementOnReconnect covers the
 // SendMessage call site specifically: a retryable send-write failure forces
 // a reconnect, and when that reconnect finds the session gone it must still
