@@ -277,6 +277,7 @@ type e2eEnv struct {
 	JiraToken           string
 	JiraProjectKey      string
 	DaytonaAPIKey       string
+	DaytonaSnapshot     string
 	ReplicatedToken     string
 	ReplicatedAPIURL    string
 	ReplicatedType      string
@@ -333,6 +334,7 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	switch sandboxProvider {
 	case "daytona":
 		env.DaytonaAPIKey = requiredEnv(t, "DAYTONA_API_KEY")
+		env.DaytonaSnapshot = os.Getenv("ELASTICCLAW_E2E_DAYTONA_SNAPSHOT")
 		env.ProviderPrefix = e2eProviderPrefix(daytonaPrefix, runID)
 	case "replicated":
 		env.ReplicatedToken = requiredEnv(t, "REPLICATED_API_TOKEN")
@@ -448,6 +450,9 @@ func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
     type: daytona
     api_key: %q
 `, env.DaytonaAPIKey)
+		if env.DaytonaSnapshot != "" {
+			providerConfig += fmt.Sprintf("    default_snapshot: %q\n", env.DaytonaSnapshot)
+		}
 	case "replicated":
 		providerConfig = fmt.Sprintf(`  replicated:
     type: replicated

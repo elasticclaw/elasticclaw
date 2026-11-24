@@ -120,11 +120,14 @@ ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE=r1.small
 ELASTICCLAW_E2E_REPLICATED_TTL=1h
 ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH=~/.ssh/id_ed25519
 ELASTICCLAW_E2E_DIAGNOSTICS_DIR=./e2e-diagnostics
+ELASTICCLAW_E2E_DAYTONA_SNAPSHOT=daytona-medium
 ```
 
 When a Daytona run fails, the gateway, bridge and install logs plus memory
 state are copied out of the sandbox before cleanup, into
 `ELASTICCLAW_E2E_DIAGNOSTICS_DIR` (or the test log when it is unset).
+`ELASTICCLAW_E2E_DAYTONA_SNAPSHOT` sets the hub's `default_snapshot` for
+Daytona sandboxes; CI uses `daytona-medium` for its extra memory.
 
 The GitHub token needs access to the fixture repo with:
 

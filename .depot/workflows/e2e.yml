@@ -104,6 +104,9 @@ jobs:
       ELASTICCLAW_E2E_EXEDEV_VM_ID_FILE: ${{ github.workspace }}/e2e-exedev-vm-ids
       ELASTICCLAW_E2E_DIAGNOSTICS_DIR: ${{ github.workspace }}/e2e-diagnostics
       ELASTICCLAW_E2E_HUB_ADDR: 127.0.0.1:8080
+      # The default Daytona snapshot is small enough that npm install of openclaw
+      # gets OOM-killed; run the E2E sandboxes on the larger default snapshot.
+      ELASTICCLAW_E2E_DAYTONA_SNAPSHOT: daytona-medium
       ELASTICCLAW_E2E_GITHUB_TOKEN: ${{ secrets.ELASTICCLAW_E2E_GITHUB_TOKEN }}
       ELASTICCLAW_E2E_GITHUB_REPO: ${{ secrets.ELASTICCLAW_E2E_GITHUB_REPO }}
       ELASTICCLAW_E2E_GITHUB_APP_ID: ${{ secrets.ELASTICCLAW_E2E_GITHUB_APP_ID }}
