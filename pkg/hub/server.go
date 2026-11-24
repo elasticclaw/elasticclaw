@@ -133,6 +133,11 @@ type Server struct {
 	agentIdleBaselineAt      time.Time
 	agentIdleBaselineCleared bool
 
+	// stageCommandsRunning holds the claw IDs whose stage on_enter command is
+	// executing right now (claw_id -> struct{}). While it runs the agent is
+	// waiting on the hub by design, so the idle alert and auto-resume skip it.
+	stageCommandsRunning sync.Map
+
 	stageProgressBaselineMu      sync.Mutex
 	stageProgressBaselineAt      time.Time
 	stageProgressBaselineCleared bool

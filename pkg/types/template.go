@@ -734,6 +734,9 @@ type LifecycleNotificationsConfig struct {
 	// running, none finished recently) before an agent_idle notification
 	// fires. Default "5m", minimum "1m". Detection rides the 2-minute status
 	// watchdog tick, so the alert lands between IdleAfter and IdleAfter+2m.
+	// While liveness.idle_resume can still unstick the agent, the alert waits
+	// for it: it fires only after idle_resume_after + IdleAfter, or as soon as
+	// the resume is paused by the no-progress watchdog or out of attempts.
 	IdleAfter string `yaml:"idle_after,omitempty" json:"idleAfter,omitempty"`
 	// StageProgressAfter alerts when a pipeline stage receives no meaningful
 	// progress for this duration. Empty disables this opt-in alert.
