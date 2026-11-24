@@ -152,7 +152,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fetchChecksums = install.FetchUnsignedChecksums
 		fmt.Println("Warning: --hub-binary-url checksums are not signature-verified")
 	}
-	checksums, err := fetchChecksums(cmd.Context(), nil, binaryURL[:strings.LastIndex(binaryURL, "/")])
+	checksumsBase, err := install.ChecksumsBaseURL(binaryURL)
+	if err != nil {
+		return fmt.Errorf("--hub-binary-url: %w", err)
+	}
+	checksums, err := fetchChecksums(cmd.Context(), nil, checksumsBase)
 	if err != nil {
 		return fmt.Errorf("fetch hub binary checksums: %w", err)
 	}

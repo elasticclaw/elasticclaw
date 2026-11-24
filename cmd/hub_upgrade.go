@@ -125,7 +125,11 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 		targetVer,
 	)
 
-	checksums, err := install.FetchReleaseChecksums(cmd.Context(), nil, downloadURL[:strings.LastIndex(downloadURL, "/")])
+	checksumsBase, err := install.ChecksumsBaseURL(downloadURL)
+	if err != nil {
+		return err
+	}
+	checksums, err := install.FetchReleaseChecksums(cmd.Context(), nil, checksumsBase)
 	if err != nil {
 		return fmt.Errorf("fetch release checksums: %w", err)
 	}

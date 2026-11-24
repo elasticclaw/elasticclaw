@@ -159,3 +159,12 @@ func VerifyFileSHA256(path, want string) error {
 	defer f.Close()
 	return VerifySHA256(f, want)
 }
+
+// ChecksumsBaseURL returns the directory URL that holds checksums.txt for a binary URL.
+func ChecksumsBaseURL(binaryURL string) (string, error) {
+	i := strings.LastIndex(binaryURL, "/")
+	if i <= 0 || i == len(binaryURL)-1 {
+		return "", fmt.Errorf("binary URL must include a path to a file: %q", binaryURL)
+	}
+	return binaryURL[:i], nil
+}

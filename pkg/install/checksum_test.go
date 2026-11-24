@@ -91,3 +91,15 @@ type checksumTransport func(*http.Request) (*http.Response, error)
 func (f checksumTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
+
+func TestChecksumsBaseURL(t *testing.T) {
+	got, err := ChecksumsBaseURL("https://example.com/releases/v1/elasticclaw-linux-amd64")
+	if err != nil || got != "https://example.com/releases/v1" {
+		t.Fatalf("ChecksumsBaseURL = %q, %v", got, err)
+	}
+	for _, bad := range []string{"", "elasticclaw-linux-amd64", "/binary", "https://example.com/releases/"} {
+		if _, err := ChecksumsBaseURL(bad); err == nil {
+			t.Errorf("ChecksumsBaseURL(%q) returned no error", bad)
+		}
+	}
+}
