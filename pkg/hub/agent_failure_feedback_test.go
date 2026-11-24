@@ -218,7 +218,7 @@ type failureFeedbackTracker struct {
 // comment and move calls; feedback delivery runs on its own goroutine.
 func (m *failureFeedbackTracker) waitForCounts(t *testing.T, wantComments, wantMoves int64) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		c, mv := m.comments.Load(), m.moves.Load()
 		if c == wantComments && mv == wantMoves {
@@ -449,7 +449,7 @@ func (m *stopFeedbackGitHubMock) setIssue(_ string, _ int) {}
 
 func waitForMockGitHubIssueComment(t *testing.T, ghi *stopFeedbackGitHubMock, repo string, number int) string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		comments := ghi.commentsFor(repo, number)
 		if len(comments) > 0 {
@@ -464,7 +464,7 @@ func waitForMockGitHubIssueComment(t *testing.T, ghi *stopFeedbackGitHubMock, re
 
 func waitForMockGitHubIssueAssignee(t *testing.T, ghi *stopFeedbackGitHubMock, repo string, number int, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if got := ghi.assigneeFor(repo, number); got == want {
 			return
@@ -478,7 +478,7 @@ func waitForMockGitHubIssueAssignee(t *testing.T, ghi *stopFeedbackGitHubMock, r
 
 func waitForMockGitHubIssueLabel(t *testing.T, ghi *stopFeedbackGitHubMock, repo string, number int, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if containsMockString(ghi.labelsFor(repo, number), want) {
 			return

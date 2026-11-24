@@ -1805,6 +1805,7 @@ func TestClawRegistrationPreservesTemplateWhenBridgeOmitsIt(t *testing.T) {
 	if err := wsjson.Read(ctx, conn, &registered); err != nil {
 		t.Fatalf("read registration ack: %v", err)
 	}
+	waitForRegistrationSettled(t, s, clawID)
 
 	var templateName string
 	if err := db.QueryRow(`SELECT template FROM claws WHERE id=?`, clawID).Scan(&templateName); err != nil {
@@ -1845,6 +1846,7 @@ func TestClawRegistrationAlreadyConnectedRecordsAgentStartedOnce(t *testing.T) {
 		if err := wsjson.Read(ctx, conn, &ack); err != nil || ack.Type != "registered" {
 			t.Fatalf("registration ack = %#v, err = %v", ack, err)
 		}
+		waitForRegistrationSettled(t, s, clawID)
 	}
 
 	register()
@@ -1923,6 +1925,7 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 	if registered.Type != "registered" {
 		t.Fatalf("registration ack type = %q, want registered", registered.Type)
 	}
+	waitForRegistrationSettled(t, s, clawID)
 
 	if err := wsjson.Write(clawCtx, clawWS, types.WSMessage{
 		Type:    "chunk",
@@ -2073,6 +2076,7 @@ stages:
 	if registered.Type != "registered" {
 		t.Fatalf("registration ack type = %q, want registered", registered.Type)
 	}
+	waitForRegistrationSettled(t, s, clawID)
 	if err := wsjson.Write(ctx, clawWS, types.WSMessage{
 		Type: "message",
 		Payload: types.HubMessage{
@@ -2084,7 +2088,7 @@ stages:
 
 	var stage string
 	var analyticsCount int
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		_ = db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage)
 		_ = db.QueryRow(`SELECT COUNT(*) FROM factory_analytics WHERE claw_id=? AND issue_id=? AND factory_name=? AND action='done_signal'`, clawID, "NEXT-257", "factory:faster_apps").Scan(&analyticsCount)
@@ -2774,7 +2778,7 @@ func TestReconnectDeliversQueuedMessagesInOrder(t *testing.T) {
 
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	clawWS := connectTestClaw(t, ts, clawID)
+	clawWS := connectTestClaw(t, s, ts, clawID)
 	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
 
 	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
@@ -2800,7 +2804,7 @@ func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
 
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	clawWS := connectTestClaw(t, ts, clawID)
+	clawWS := connectTestClaw(t, s, ts, clawID)
 	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
 	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
 		t.Fatalf("first delivered content = %q, want first", got)
@@ -2810,7 +2814,8 @@ func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
 	s.sendNextQueuedMessage(cc)
-	assertMessagesDelivered(t, db, clawID, 1)
+	// The frame read above is written before delivered_at is stored.
+	waitForMessagesDelivered(t, db, clawID, 1)
 	cc.mu.RLock()
 	reserved := cc.awaitingResponse
 	cc.mu.RUnlock()
@@ -2828,7 +2833,7 @@ func TestSendNextQueuedMessageDeliversImmediatelyAfterTurnEnd(t *testing.T) {
 
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	clawWS := connectTestClaw(t, ts, clawID)
+	clawWS := connectTestClaw(t, s, ts, clawID)
 	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
 	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
 		t.Fatalf("first delivered content = %q, want first", got)
@@ -2874,7 +2879,7 @@ func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
 
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	firstWS := connectTestClaw(t, ts, clawID)
+	firstWS := connectTestClaw(t, s, ts, clawID)
 	if got := readTestHubMessage(t, firstWS).Content; got != "deliver me again" {
 		t.Fatalf("initial delivered content = %q", got)
 	}
@@ -2890,7 +2895,7 @@ func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
 	_ = firstWS.Close(websocket.StatusNormalClosure, "restart hub")
 	waitForTestClawDisconnect(t, s, clawID)
 
-	clawWS := connectTestClaw(t, ts, clawID)
+	clawWS := connectTestClaw(t, s, ts, clawID)
 	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
 	if got := readTestHubMessage(t, clawWS).Content; got != "deliver me again" {
 		t.Fatalf("redelivered content = %q", got)
@@ -2904,7 +2909,7 @@ func TestSendNextQueuedMessageKeepsPendingAfterWriteFailure(t *testing.T) {
 
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	failedWS := connectTestClaw(t, ts, clawID)
+	failedWS := connectTestClaw(t, s, ts, clawID)
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
@@ -2931,7 +2936,7 @@ func TestSendNextQueuedMessageKeepsPendingAfterWriteFailure(t *testing.T) {
 	s.sendNextQueuedMessage(cc)
 	assertMessagesDelivered(t, db, clawID, 0)
 
-	retryWS := connectTestClaw(t, ts, clawID)
+	retryWS := connectTestClaw(t, s, ts, clawID)
 	t.Cleanup(func() { _ = retryWS.Close(websocket.StatusNormalClosure, "done") })
 	if got := readTestHubMessage(t, retryWS).Content; got != "retry me" {
 		t.Fatalf("retried content = %q", got)
@@ -2949,9 +2954,13 @@ func insertPendingMessage(t *testing.T, db *sql.DB, clawID, content string, crea
 	}
 }
 
-func connectTestClaw(t *testing.T, ts *httptest.Server, clawID string) *websocket.Conn {
+// connectTestClaw registers clawID over the claw WebSocket and returns once the
+// hub has settled the registration. The "registered" ack alone is not a sync
+// point: after writing it the handler still records agent_started, drains the
+// pending queue and kicks off the workflow start.
+func connectTestClaw(t *testing.T, s *Server, ts *httptest.Server, clawID string) *websocket.Conn {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
 	if err != nil {
@@ -2968,7 +2977,26 @@ func connectTestClaw(t *testing.T, ts *httptest.Server, clawID string) *websocke
 	if registered.Type != "registered" {
 		t.Fatalf("registration ack type = %q, want registered", registered.Type)
 	}
+	waitForRegistrationSettled(t, s, clawID)
 	return conn
+}
+
+// waitForRegistrationSettled blocks until the claw's current connection has
+// finished its post-registration work, and returns that connection.
+func waitForRegistrationSettled(t *testing.T, s *Server, clawID string) *clawConn {
+	t.Helper()
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		t.Fatalf("claw %s has no registered connection", clawID)
+	}
+	select {
+	case <-cc.registrationSettled:
+	case <-time.After(testWaitTimeout):
+		t.Fatalf("claw %s registration never settled", clawID)
+	}
+	return cc
 }
 
 func TestClawSupersededDisconnectKeepsLiveConnectionConnected(t *testing.T) {
@@ -2979,11 +3007,11 @@ func TestClawSupersededDisconnectKeepsLiveConnectionConnected(t *testing.T) {
 	}
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	connA := connectTestClaw(t, ts, clawID)
+	connA := connectTestClaw(t, s, ts, clawID)
 	s.mu.RLock()
 	old := s.claws[clawID]
 	s.mu.RUnlock()
-	connB := connectTestClaw(t, ts, clawID)
+	connB := connectTestClaw(t, s, ts, clawID)
 	t.Cleanup(func() { _ = connB.Close(websocket.StatusNormalClosure, "done") })
 
 	s.mu.RLock()
@@ -3026,7 +3054,7 @@ func TestClawDisconnectSetsOffline(t *testing.T) {
 	}
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	conn := connectTestClaw(t, ts, clawID)
+	conn := connectTestClaw(t, s, ts, clawID)
 	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
 		t.Fatal(err)
 	}
@@ -3044,7 +3072,7 @@ func TestClawHeartbeatRevivesOnlyOffline(t *testing.T) {
 	}
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	conn := connectTestClaw(t, ts, clawID)
+	conn := connectTestClaw(t, s, ts, clawID)
 	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "done") })
 
 	// Sends a heartbeat and returns only once the hub has processed it. The
@@ -3132,7 +3160,7 @@ func assertMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int) 
 
 func waitForMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		var got int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user' AND delivered_at IS NOT NULL`, clawID).Scan(&got); err != nil {
@@ -3148,7 +3176,7 @@ func waitForMessagesDelivered(t *testing.T, db *sql.DB, clawID string, want int)
 
 func waitForTestClawDisconnect(t *testing.T, s *Server, clawID string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		s.mu.RLock()
 		_, connected := s.claws[clawID]

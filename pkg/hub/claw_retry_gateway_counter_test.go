@@ -23,13 +23,15 @@ func newRetryCounterTestServer(t *testing.T) *Server {
 		"claw", "tenant", "claw", "template", "error", now()); err != nil {
 		t.Fatalf("seed claw: %v", err)
 	}
-	return &Server{
+	s := &Server{
 		db:                     db,
 		hubCfg:                 &types.HubConfig{},
 		claws:                  map[string]*clawConn{},
 		gatewayUnhealthyCounts: map[string]int{},
 		gatewayEscalatedAt:     map[string]time.Time{},
 	}
+	stopBackgroundOnCleanup(t, s)
+	return s
 }
 
 // A retry replaces the sandbox but reuses the claw ID, so the gateway health

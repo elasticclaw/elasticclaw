@@ -90,7 +90,7 @@ func (s *Server) notifyWorkflowCreateFailure(workspace *types.WorkspaceConfig, w
 	// Feedback delivery retries status moves with backoff; run it off the
 	// caller's goroutine so webhook and poll handlers are never blocked on a
 	// slow or failing tracker.
-	go s.handleAgentFailureFeedback(f, token)
+	s.goBG("handleAgentFailureFeedback", func() { s.handleAgentFailureFeedback(f, token) })
 }
 
 type linearGraphQLError struct {

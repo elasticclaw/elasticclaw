@@ -528,13 +528,16 @@ func (s *Server) nextPollDelay() time.Duration {
 
 // startPRWatcher launches the background poller.
 func (s *Server) startPRWatcher() {
-	go func() {
+	stopped := s.bgContext().Done()
+	s.goBG("pr watcher", func() {
 		timer := time.NewTimer(prWatcherBaseInterval)
 		defer timer.Stop()
 		reconcileTicker := time.NewTicker(5 * time.Minute)
 		defer reconcileTicker.Stop()
 		for {
 			select {
+			case <-stopped:
+				return
 			case <-timer.C:
 				s.pollAllPRs()
 				timer.Reset(s.nextPollDelay())
@@ -543,7 +546,7 @@ func (s *Server) startPRWatcher() {
 				s.reconcileDeadClawPRs()
 			}
 		}
-	}()
+	})
 }
 
 // reconcileDeadClawPRs closes out task_run_prs rows left open because their
@@ -1000,7 +1003,9 @@ func (s *Server) pollAllPRs() {
 				// errors keep the run alive.
 				maxWait := s.livenessSettings().prConditionsMaxWait
 				if created, err := time.Parse(time.RFC3339, r.pr.createdAt); err == nil && time.Since(created) > maxWait {
-					go s.stopAgentWithReason(r.pr.clawID, fmt.Sprintf("pr_conditions on PR %s not satisfied within %s — CI stuck or no check runs", r.pr.prURL, maxWait), false)
+					s.goBG("stopAgentWithReason", func() {
+						s.stopAgentWithReason(r.pr.clawID, fmt.Sprintf("pr_conditions on PR %s not satisfied within %s — CI stuck or no check runs", r.pr.prURL, maxWait), false)
+					})
 					terminatedClaws[r.pr.clawID] = true
 				}
 			}
@@ -2343,7 +2348,7 @@ func (s *Server) closeUnreachablePR(pr clawPR, cause string) (resolved, terminat
 		}
 		return true, false
 	}
-	go s.stopAgentWithReason(pr.clawID, fmt.Sprintf("PR %s has been %s", pr.prURL, cause), false)
+	s.goBG("stopAgentWithReason", func() { s.stopAgentWithReason(pr.clawID, fmt.Sprintf("PR %s has been %s", pr.prURL, cause), false) })
 	return true, true
 }
 
@@ -2516,7 +2521,9 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 			// permanently suppress the agent-idle stuck alert for the retried
 			// claw (its consumers read "row exists" as "awaiting humans").
 			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
-			go s.stopAgentWithReason(clawID, fmt.Sprintf("PR %s was closed without being merged", pr.prURL), false)
+			s.goBG("stopAgentWithReason", func() {
+				s.stopAgentWithReason(clawID, fmt.Sprintf("PR %s was closed without being merged", pr.prURL), false)
+			})
 		}
 		return true, true
 	}
@@ -2677,11 +2684,11 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 	})
 
 	if providerID != "" {
-		go s.terminateVM(provider, providerID)
+		s.goBG("terminateVM", func() { s.terminateVM(provider, providerID) })
 	}
 
 	// Promote any pending claws now that a slot is free
-	go s.promotePendingClaws()
+	s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 
 	return true, true
 }

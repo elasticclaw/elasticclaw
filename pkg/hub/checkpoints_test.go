@@ -50,12 +50,14 @@ func newCheckpointCompletionTestServer(t *testing.T) *Server {
 		"tenant", "tenant", "token", "claw-token", now())
 	_, _ = db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
 		"claw", "tenant", "claw", "template", "connected", now())
-	return &Server{
+	s := &Server{
 		db:                db,
 		hubCfg:            &types.HubConfig{},
 		claws:             map[string]*clawConn{},
 		checkpointWaiters: map[string]chan error{},
 	}
+	stopBackgroundOnCleanup(t, s)
+	return s
 }
 
 func seedCheckpointCompletionState(t *testing.T, s *Server) {
@@ -309,7 +311,7 @@ func TestSSHWriteSessionHonorsContextDeadline(t *testing.T) {
 	}
 	select {
 	case <-sess.closeStarted:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("session close was not started after context expiry")
 	}
 }
@@ -331,12 +333,12 @@ func TestSSHWriteSessionWithNewSessionHonorsContextDeadline(t *testing.T) {
 	}
 	select {
 	case <-newSessionStarted:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("new session was not started")
 	}
 	select {
 	case <-clientClosed:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("client was not closed after context expiry")
 	}
 }

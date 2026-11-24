@@ -342,7 +342,7 @@ func (s *Server) reapOnce() {
 			seen[key] = true
 			if n.Sub(s.firstSeen(key, true, n)) > redriveGrace && take() {
 				log.Printf("[reaper] re-driving VM terminate for claw %s", v.id)
-				go s.terminateVMForClaw(v.id, v.provider, v.providerID)
+				s.goBG("terminateVMForClaw", func() { s.terminateVMForClaw(v.id, v.provider, v.providerID) })
 			}
 		}
 	}
@@ -411,7 +411,7 @@ func (s *Server) reapOnce() {
 				var provider, providerID string
 				_ = s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=?`, c.id).Scan(&provider, &providerID)
 				if providerID != "" {
-					go s.terminateVMForClaw(c.id, provider, providerID)
+					s.goBG("terminateVMForClaw", func() { s.terminateVMForClaw(c.id, provider, providerID) })
 				}
 			}
 		}

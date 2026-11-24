@@ -1041,7 +1041,7 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 		<-s.ticketMetadataEnrichment
 		return
 	}
-	go func() {
+	s.goBG("ticket metadata enrichment", func() {
 		defer s.ticketMetadataInflight.Delete(key)
 		defer func() { <-s.ticketMetadataEnrichment }()
 		metadata := taskRunAnalyticsTicketView{IssueID: ticket.IssueID, IssueTitle: ticket.IssueTitle, Source: ticket.Source, ReportedAt: ticket.ReportedAt}
@@ -1059,7 +1059,7 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,integration,integration_workspace,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at,last_attempt_at,consecutive_failures) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,integration,integration_workspace,issue_id) DO UPDATE SET requester=CASE WHEN excluded.requester != '' THEN excluded.requester ELSE ticket_metadata.requester END, requester_role=CASE WHEN excluded.requester_role != '' THEN excluded.requester_role ELSE ticket_metadata.requester_role END, team=CASE WHEN excluded.team != '' THEN excluded.team ELSE ticket_metadata.team END, priority=CASE WHEN excluded.priority != '' THEN excluded.priority ELSE ticket_metadata.priority END, ask=CASE WHEN excluded.ask != '' THEN excluded.ask ELSE ticket_metadata.ask END, reported_at=CASE WHEN excluded.reported_at != 0 THEN excluded.reported_at ELSE ticket_metadata.reported_at END, updated_at=CASE WHEN excluded.updated_at != 0 THEN excluded.updated_at ELSE ticket_metadata.updated_at END, last_attempt_at=excluded.last_attempt_at, consecutive_failures=CASE WHEN excluded.updated_at != 0 THEN 0 ELSE ticket_metadata.consecutive_failures+1 END`, tenantID, run.Integration, run.IntegrationWorkspace, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, updatedAt, attemptedAt, consecutiveFailures); err != nil {
 			log.Printf("[task-run-analytics] write ticket metadata %s: %v", metadata.IssueID, err)
 		}
-	}()
+	})
 }
 
 func (s *Server) allowTaskRunAnalyticsTicketMetadataColdEnrichment() bool {

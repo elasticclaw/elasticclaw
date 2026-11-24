@@ -1946,7 +1946,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	// If the concurrency limit was raised or removed, try to promote pending claws.
 	// This must run AFTER s.hubCfg is updated so promotePendingClaws reads the new limit.
 	if patch.MaxConcurrentClaws != nil {
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 	}
 
 	jsonOK(w, map[string]bool{"ok": true})

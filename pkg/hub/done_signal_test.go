@@ -26,6 +26,7 @@ func newDoneTestServer(t *testing.T, githubBase string) *Server {
 		users:         map[string]*userConn{},
 		githubBaseURL: githubBase,
 	}
+	stopBackgroundOnCleanup(t, s)
 	return s
 }
 

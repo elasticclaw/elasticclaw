@@ -223,6 +223,7 @@ func TestManagedProviderReadyRegistrationPromotesAfterBootstrapOK(t *testing.T) 
 	if registered.Type != "registered" {
 		t.Fatalf("registration ack type = %q, want registered", registered.Type)
 	}
+	waitForRegistrationSettled(t, s, clawID)
 
 	var status string
 	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
@@ -246,7 +247,7 @@ func TestManagedProviderReadyRegistrationPromotesAfterBootstrapOK(t *testing.T) 
 		t.Fatalf("write heartbeat: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for time.Now().Before(deadline) {
 		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
 			t.Fatal(err)
@@ -299,6 +300,7 @@ func TestMarkBootstrapReadyPromotesAndWakesConnectedManagedProvider(t *testing.T
 	if registered.Type != "registered" {
 		t.Fatalf("registration ack type = %q, want registered", registered.Type)
 	}
+	waitForRegistrationSettled(t, s, clawID)
 
 	var status string
 	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {

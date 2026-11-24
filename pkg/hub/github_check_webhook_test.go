@@ -91,7 +91,7 @@ func checkWebhookBody(event, action, headSHA string, prNumbers ...int) map[strin
 // The webhook handler runs under safeGo, so HTTP 200 returns before the work.
 func waitForGHCalls(t *testing.T, calls *atomic.Int32, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for calls.Load() < want {
 		if time.Now().After(deadline) {
 			t.Fatalf("GitHub calls = %d, want >= %d", calls.Load(), want)

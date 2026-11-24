@@ -375,7 +375,7 @@ func TestClawBranchesEndpointQueuesRegistration(t *testing.T) {
 			t.Fatalf("report %d: %d %s", i, rec.Code, rec.Body.String())
 		}
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var prURL string
 		if err := db.QueryRow(`SELECT pr_url FROM claw_branches WHERE claw_id=?`, clawID).Scan(&prURL); err != nil {

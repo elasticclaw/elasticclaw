@@ -30,7 +30,7 @@ func queueTestStatus(t *testing.T, db *sql.DB, id string) string {
 
 func waitForQueueTestPromotion(t *testing.T, db *sql.DB, id string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		status := queueTestStatus(t, db, id)
 		// Wait for the noop provider to finish as well, so no provisioning
@@ -177,7 +177,7 @@ func TestWorkflowCreationHoldsPendingClawDuringActivation(t *testing.T) {
 				t.Fatalf("finished claw status=%q, want it out of the pending queue", got)
 			}
 			s.promotePendingClaws()
-			deadline := time.Now().Add(3 * time.Second)
+			deadline := time.Now().Add(testWaitTimeout)
 			for {
 				var status, providerID string
 				if err := db.QueryRow(`SELECT status, COALESCE(provider_id,'') FROM claws WHERE id=?`, id).Scan(&status, &providerID); err != nil {

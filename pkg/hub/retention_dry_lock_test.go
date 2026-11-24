@@ -21,6 +21,7 @@ func TestRetentionDryRunHoldsNoWriteLock(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 	s := &Server{db: db, hubCfg: &types.HubConfig{}, claws: map[string]*clawConn{}}
+	stopBackgroundOnCleanup(t, s)
 	retentionExec(t, s, `INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant','tenant','token','claw-token',?)`, now())
 	retentionExec(t, s, `INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES('claw','tenant','claw','template','error',?)`, now())
 

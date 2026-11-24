@@ -103,7 +103,7 @@ func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus,
 				reason += ": " + diagnostic
 			}
 			s.cancelWorkflowV2RunForClaw(context.Background(), clawID, reason)
-			go s.promotePendingClaws()
+			s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 			return true, nil
 		}
 		last = err

@@ -31,18 +31,22 @@ func NewTestServerWithConfig(t interface {
 	}
 
 	// Provision a default tenant for the test server
-	_, _ = db.Exec(
+	if _, err := db.Exec(
 		`INSERT OR IGNORE INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,datetime('now'))`,
 		"test-tenant-id", "test", "test-token", cfg.ClawToken,
-	)
+	); err != nil {
+		panic("NewTestServerWithConfig: seed tenant: " + err.Error())
+	}
 
 	// Push an empty "elasticclaw" template so resolveTemplateFiles doesn't fail
 	for _, factory := range cfg.Factories {
 		if factory.Template != "" {
-			_, _ = db.Exec(
+			if _, err := db.Exec(
 				`INSERT OR IGNORE INTO hub_templates(name,files,created_at,updated_at) VALUES(?,?,datetime('now'),datetime('now'))`,
 				factory.Template, `{}`,
-			)
+			); err != nil {
+				panic("NewTestServerWithConfig: seed template: " + err.Error())
+			}
 		}
 	}
 	artifacts, err := artifact.NewLocalStore(tTempDir(t))
@@ -76,7 +80,26 @@ func NewTestServerWithConfig(t interface {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	s.mux = mux
+	stopBackgroundOnCleanup(t, s)
 	return s, db
+}
+
+// testBackgroundStopTimeout bounds how long a test waits for the goroutines its
+// server started; whatever is still running by then is logged by name.
+const testBackgroundStopTimeout = 10 * time.Second
+
+// stopBackgroundOnCleanup stops the server's goroutines when the test ends.
+// Call it after registering the cleanup that closes the database: cleanups run
+// last-in first-out, so the goroutines are gone before the DB closes.
+func stopBackgroundOnCleanup(t interface {
+	Helper()
+	Cleanup(func())
+}, s *Server) {
+	t.Helper()
+	// t.TempDir registers its RemoveAll on first use. Force that now so the
+	// directory is removed after the goroutines that may still write to it.
+	tTempDir(t)
+	t.Cleanup(func() { s.stopBackground(testBackgroundStopTimeout) })
 }
 
 func tTempDir(t interface {

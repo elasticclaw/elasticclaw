@@ -111,7 +111,7 @@ func TestParity_WebhookPollDedup(t *testing.T) {
 			ts.Server.PollIntegrationsForTest()
 
 			if td.Name != "github-issues" {
-				deadline := time.Now().Add(5 * time.Second)
+				deadline := time.Now().Add(testWaitTimeout)
 				for time.Now().Before(deadline) {
 					var sawPoll bool
 					switch td.Name {

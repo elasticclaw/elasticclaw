@@ -132,7 +132,7 @@ func TestGitHubPRWrapperCommands(t *testing.T) {
 				}
 			}
 			// Completion is observable from temp-file cleanup, even with no report.
-			deadline := time.Now().Add(3 * time.Second)
+			deadline := time.Now().Add(testWaitTimeout)
 			for {
 				files, _ := filepath.Glob(filepath.Join(dir, "tmp.*"))
 				_, reportErr := os.Stat(filepath.Join(dir, "report"))
@@ -264,7 +264,7 @@ print(json.dumps({"status": p.returncode, "stdout": stdout.decode(), "stderr": s
 		// The reporter runs detached; give it time to (wrongly) fire.
 		time.Sleep(500 * time.Millisecond)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for wantReport != "" {
 		reported, err := os.ReadFile(filepath.Join(dir, "reported"))
 		if err == nil && string(reported) == wantReport {

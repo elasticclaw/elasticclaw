@@ -37,7 +37,9 @@ func newUsageTestServer(t *testing.T) (*Server, *sql.DB, string) {
 	if _, err := db.Exec(`INSERT INTO task_run_summaries(id,tenant_id,run_id,status,phase,started_at,last_event_at,materialized_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, uuid.NewString(), "tenant", runID, "running", "claimed", 0, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	return &Server{db: db}, db, clawID
+	s := &Server{db: db}
+	stopBackgroundOnCleanup(t, s)
+	return s, db, clawID
 }
 
 func ptr[T any](v T) *T { return &v }

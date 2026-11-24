@@ -8,14 +8,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const (
 	gatewayLogCaptureLimit   = 256 * 1024
 	gatewayLogCaptureTimeout = 20 * time.Second
-	gatewayLogCaptureCommand = "tail -c 262144 /home/daytona/.openclaw/gateway.log 2>/dev/null"
-	bridgeLogCaptureCommand  = "tail -c 262144 /home/daytona/claw-bridge.log 2>/dev/null"
+	gatewayLogCaptureCommand = daytona.GatewayLogTailCommand
+	bridgeLogCaptureCommand  = daytona.BridgeLogTailCommand
 )
 
 // gatewayLogExecutor is deliberately limited to the operation needed for

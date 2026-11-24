@@ -271,7 +271,7 @@ func waitForLinearClawCount(t *testing.T, db interface {
 	QueryRow(string, ...interface{}) *sql.Row
 }, issueID string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM claws WHERE linear_issue_id=?`, issueID).Scan(&count); err != nil {
@@ -386,7 +386,7 @@ func postLinearWebhook(t *testing.T, serverURL, workspace string, payload []byte
 
 func waitForLinearIssuePostedComment(t *testing.T, linear *factorytest.MockLinear, issueID string) string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		comments := linear.Comments(issueID)
 		if len(comments) > 0 {
@@ -413,7 +413,7 @@ func assertLinearIssueCommentCountStable(t *testing.T, linear *factorytest.MockL
 
 func waitForLinearIssueState(t *testing.T, linear *factorytest.MockLinear, issueID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if got := linear.IssueStateName(issueID); got == want {
 			return
@@ -427,7 +427,7 @@ func waitForLinearIssueState(t *testing.T, linear *factorytest.MockLinear, issue
 
 func waitForLinearIssueAssignee(t *testing.T, linear *factorytest.MockLinear, issueID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if got := linear.IssueAssigneeID(issueID); got == want {
 			return

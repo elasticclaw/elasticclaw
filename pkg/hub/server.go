@@ -138,6 +138,9 @@ type Server struct {
 	// waiting on the hub by design, so the idle alert and auto-resume skip it.
 	stageCommandsRunning sync.Map
 
+	// bg tracks the goroutines owned by this Server (see goBG).
+	bg backgroundTasks
+
 	stageProgressBaselineMu      sync.Mutex
 	stageProgressBaselineAt      time.Time
 	stageProgressBaselineCleared bool
@@ -370,6 +373,11 @@ func (s *Server) gatewayUnhealthyCount(clawID string) int {
 
 type clawConn struct {
 	mu sync.RWMutex // protects mutable fields below
+
+	// registrationSettled is closed once the handler has finished the work it
+	// does right after the "registered" ack (agent-started record, pending
+	// queue drain, workflow start kickoff). The ack alone is not a sync point.
+	registrationSettled chan struct{}
 
 	id                     string
 	tenantID               string
@@ -766,14 +774,14 @@ type RunOptions struct {
 
 // safeGo contains panics in goroutines that own agent or workflow progress.
 func (s *Server) safeGo(name string, fn func()) {
-	go func() {
+	s.goBG(name, func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[hub] panic in %s: %v\n%s", name, r, debug.Stack())
 			}
 		}()
 		fn()
-	}()
+	})
 }
 
 func (s *Server) Run(opts ...RunOptions) error {
@@ -783,8 +791,8 @@ func (s *Server) Run(opts ...RunOptions) error {
 }
 
 func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
-	go s.runWorkflowV2Worker(ctx)
-	go s.runWorkflowV2GitHubReconciler(ctx)
+	s.goBG("workflow v2 worker", func() { s.runWorkflowV2Worker(ctx) })
+	s.goBG("workflow v2 github reconciler", func() { s.runWorkflowV2GitHubReconciler(ctx) })
 	noWebUI := len(opts) > 0 && opts[0].NoWebUI
 	mux := http.NewServeMux()
 	s.mux = mux
@@ -840,6 +848,8 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		s.stopScheduledNotifier(10 * time.Second)
 		s.stopInfraNotifier(10 * time.Second)
 		s.stopDependencyWatcher(10 * time.Second)
+		// Webhook, provisioning, and teardown goroutines write to the same DB.
+		s.stopBackground(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}
@@ -1986,7 +1996,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		providerNamePrefix = "ec-"
 	}
 	req.ProviderName = providerNamePrefix + clawID[:8]
-	go func() {
+	s.goBG("provision claw", func() {
 		log.Printf("Provisioning claw %s (%s) via %s (provider name: %s)...", req.Name, clawID, req.Provider, req.ProviderName)
 		ctx := context.Background()
 		provErr := s.provisionWithProvider(ctx, req.Provider, clawID, req, provCfg, templateFiles, env)
@@ -1995,7 +2005,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 			log.Printf("provisioning failed for claw %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Provisioning failed: %v", provErr), false)
 		}
-	}()
+	})
 
 	claw := types.Claw{
 		ID: clawID, TenantID: tenantID, Name: req.Name,
@@ -2205,16 +2215,16 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		delete(s.gatewayEscalatedAt, clawID)
 		delete(s.gatewayGraceGrantedAt, clawID)
 		s.mu.Unlock()
-		go func() {
+		s.goBG("terminate killed claw", func() {
 			s.checkpointBeforeTermination(clawID, "manual-kill")
 			if providerID != "" {
 				s.terminateVM(provider, providerID)
 			}
 			// Keep messages (including agent activity logs) for post-mortem diagnosis.
 			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
-		}()
+		})
 		// Promote any pending claws now that a slot is free
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -2921,6 +2931,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	var bootstrapOK int
 	var provider string
 	var currentStatus string
+	var agentStarted bool
 	_ = s.db.QueryRow(`SELECT COALESCE(bootstrap_ok,0), COALESCE(provider,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&bootstrapOK, &provider)
 
 	if !isStatusChannel {
@@ -2946,9 +2957,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		// Bootstrap commonly completes before the bridge registers, so the
 		// upsert reaches connected directly and the promotion UPDATE never
 		// records agent_started. The event key makes reconnects harmless.
-		if currentStatus == "connected" {
-			go s.recordClawAgentStarted(clawID)
-		}
+		agentStarted = currentStatus == "connected"
 	} else {
 		// For status channel, just read current status from DB
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&currentStatus)
@@ -3017,7 +3026,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	if !noProgressPaused {
 		bridgeErrorPauseKind = ""
 	}
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
+	cc := &clawConn{registrationSettled: make(chan struct{}), id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -3080,6 +3089,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
 
+	if agentStarted {
+		s.recordClawAgentStarted(clawID)
+	}
+
 	// This is synchronous so reconnect delivery is ordered with new user messages.
 	s.sendNextQueuedMessage(cc)
 
@@ -3090,8 +3103,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		s.startWorkflowAfterVolumes(ctx, cc, clawID)
 	}
 	if !workflowV2Controlled && allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
-		go s.requestBootstrapCheckpoint(clawID)
+		s.goBG("requestBootstrapCheckpoint", func() { s.requestBootstrapCheckpoint(clawID) })
 	}
+	close(cc.registrationSettled)
 
 	// Read loop — claw sends messages back to users
 	defer func() {
@@ -3333,7 +3347,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							log.Printf("[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], unhealthyCount)
 						}
 						if unhealthyCount == 4 && !activeCC.streamingStartedAt.IsZero() {
-							go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
+							s.goBG("injectHubMessageByID", func() {
+								s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
+							})
 						}
 						// Retry the escalation every gatewayUnhealthyMax checks rather than
 						// only on the first crossing. escalateClawHealthFailure declines
@@ -3410,7 +3426,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 						})
 						log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
-						go s.recordClawAgentStarted(clawID)
+						s.goBG("recordClawAgentStarted", func() { s.recordClawAgentStarted(clawID) })
 						shouldWake = true
 						wakeConn = cc
 					}
@@ -3423,19 +3439,21 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// Re-read the claw state before escalating: idle/completed claws
 					// remain connected intentionally, and bootstrapping claws are
 					// handled by the bootstrap watchdog.
-					go s.escalateClawHealthFailure(clawID, fmt.Sprintf("agent process unhealthy for %d consecutive heartbeats", gatewayUnhealthyMax))
+					s.goBG("escalateClawHealthFailure", func() {
+						s.escalateClawHealthFailure(clawID, fmt.Sprintf("agent process unhealthy for %d consecutive heartbeats", gatewayUnhealthyMax))
+					})
 				}
 				if shouldWarnContext {
 					s.mu.RLock()
 					warnCC := s.claws[clawID]
 					s.mu.RUnlock()
 					if warnCC != nil {
-						go s.sendStreamingNudge(warnCC, contextNearlyFullNudge)
+						s.goBG("sendStreamingNudge", func() { s.sendStreamingNudge(warnCC, contextNearlyFullNudge) })
 					}
 				}
 				if shouldWake {
 					if !s.workflowV2OwnsExecution(wakeConn) {
-						go s.requestBootstrapCheckpoint(clawID)
+						s.goBG("requestBootstrapCheckpoint", func() { s.requestBootstrapCheckpoint(clawID) })
 						s.startWorkflowAfterVolumes(ctx, wakeConn, clawID)
 					}
 				}
@@ -3450,7 +3468,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						time.Since(cc.streamingStartedAt) > 12*time.Minute {
 						cc.streamingTimeoutSent = true
 						cc.mu.Unlock()
-						go s.sendStreamingNudge(cc, streamingTimeoutNudge)
+						s.goBG("sendStreamingNudge", func() { s.sendStreamingNudge(cc, streamingTimeoutNudge) })
 					} else {
 						cc.mu.Unlock()
 					}
@@ -3700,7 +3718,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// blast radius: under substring matching an agent writing "I will
 			// not send [TERMINATE] yet" tore down its own claw.
 			if !workflowV2Controlled && turnMaySignal(turnContent, terminateSignalToken, bridgeErrTurn) {
-				go s.handleClawTerminateSignal(clawID, turnContent)
+				s.goBG("handleClawTerminateSignal", func() { s.handleClawTerminateSignal(clawID, turnContent) })
 			}
 			// Detect and store PR URLs mentioned mid-work. [DONE] turns are
 			// intentionally excluded: registerDonePRURLs (pipeline path or
@@ -3719,7 +3737,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// A transport error can quote a repository URL (git and CI
 					// failures routinely do). Arming the PR watcher on text the
 					// agent never wrote would watch a PR nobody opened.
-					go s.scanMessageForPRs(clawID, turnContent, true, "mention")
+					s.goBG("scanMessageForPRs", func() { s.scanMessageForPRs(clawID, turnContent, true, "mention") })
 				}
 			}
 			// Detect tool error loops and inject a corrective message
@@ -3728,7 +3746,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				loopCC := s.claws[clawID]
 				s.mu.RUnlock()
 				if loopCC != nil {
-					go s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
+					s.goBG("injectHubMessage", func() {
+						s.injectHubMessage(ctx, loopCC, "[hub] You've hit the same tool error 3+ times in a row. Stop retrying. Take a completely different approach or ask for help.")
+					})
 				}
 			}
 			// Check for queued messages and send the next one.
@@ -3808,7 +3828,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			if !modelAuthAuthorized {
 				continue
 			}
-			go func() {
+			s.goBG("model auth sync", func() {
 				credential, err := s.managedGrokCredential(context.WithValue(ctx, ctxTenantKey{}, tenantID), clawID)
 				if err != nil {
 					if !errors.Is(err, errManagedGrokNotConfigured) {
@@ -3817,11 +3837,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "model_auth_credential", Payload: credential})
-			}()
+			})
 		} else if msg.Type == "http_proxy_req" {
 			// Proxy an HTTP request from the bridge to the hub's internal API.
 			// This allows tools in the sandbox to reach hub APIs without a public URL.
-			go func(rawPayload json.RawMessage, conn *websocket.Conn) {
+			rawPayload := mustJSONRaw(msg.Payload)
+			s.goBG("hub http proxy", func() {
 				var req struct {
 					ReqID  string            `json:"req_id"`
 					Method string            `json:"method"`
@@ -3862,7 +3883,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[hub-proxy] res req_id=%s status=%d body_len=%d", req.ReqID, w.status, len(w.body))
 				s.sendHTTPProxyRes(ctx, conn, req.ReqID, w.status, string(w.body))
-			}(mustJSONRaw(msg.Payload), conn)
+			})
 		}
 	}
 }
@@ -4271,7 +4292,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 
 	// Bootstrap: install OpenClaw + claw-bridge via exec (retry up to 3x for transient Daytona API timeouts)
 	clawName := req.Name
-	go func() {
+	s.goBG("daytona bootstrap", func() {
 		// Each step inside bootstrapDaytona retries 3x internally.
 		// Outer retries here handle the rare case of total step failure.
 		const maxBootstrapAttempts = 3
@@ -4297,7 +4318,7 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		log.Printf("[daytona] bootstrap failed for claw %s: %v", clawName, lastErr)
 		s.stopAgentIfInstance(clawID, instance.ID, fmt.Sprintf("Daytona bootstrap failed: %v", lastErr), false)
 		// stopAgentWithReason already terminates the VM; no need to destroy again
-	}()
+	})
 	return nil
 }
 
@@ -4614,48 +4635,10 @@ openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with 
 		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
 	}
 
-	// Step 2c: Configure gateway bind/port and start it.
+	// Step 2c: Configure gateway bind/port and start it under a supervisor:
+	// on Daytona no claw-bridge bootstrap restarts a dead gateway.
 	// Use token auth (what onboard sets up) — don't override auth mode.
-	gatewaySetup := `
-python3 - <<'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-with open(path) as f: cfg = json.load(f)
-cfg.setdefault('gateway', {})['bind'] = 'loopback'
-cfg['gateway']['port'] = 18789
-# Keep token auth that onboard generated - don't change auth mode
-with open(path, 'w') as f: json.dump(cfg, f, indent=2)
-print('gateway config updated')
-PYEOF
-export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
-export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
-# Phase 1: wait for HTTP server to be listening (quick)
-for i in $(seq 1 30); do
-  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
-  sleep 1
-done
-curl -sf http://localhost:18789/healthz >/dev/null || { echo 'gateway failed to listen'; tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true; exit 1; }
-# Phase 2: wait for gateway startup to complete. Do not use openclaw health
-# here: it pairs the CLI device with read-only scopes before claw-bridge can
-# connect, then claw-bridge is rejected as a scope-upgrade.
-for i in $(seq 1 30); do
-  if grep -q 'gateway ready' ~/.openclaw/gateway.log 2>/dev/null; then
-    echo "gateway ready"
-    exit 0
-  fi
-  curl -sf http://localhost:18789/healthz >/dev/null || break
-  sleep 1
-done
-# Fallback: if the readiness log line is unavailable but the gateway is still
-# listening and healthy, don't fail the bootstrap.
-if curl -sf http://localhost:18789/healthz >/dev/null; then
-  echo "gateway ready (healthz)"
-  exit 0
-fi
-echo 'gateway not ready'
-tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
-exit 1`
-	gatewaySetup = withDaytonaLLMKeyEnv(llmKeyEnvDaytona, gatewaySetup)
+	gatewaySetup := withDaytonaLLMKeyEnv(llmKeyEnvDaytona, daytonaStartGatewayCommand())
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
 		return err
 	}
@@ -5576,10 +5559,10 @@ func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 	})
-	go s.recordClawAgentStarted(clawID)
+	s.goBG("recordClawAgentStarted", func() { s.recordClawAgentStarted(clawID) })
 	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
 	if !s.workflowV2OwnsExecution(cc) {
-		go s.requestBootstrapCheckpoint(clawID)
+		s.goBG("requestBootstrapCheckpoint", func() { s.requestBootstrapCheckpoint(clawID) })
 		s.startWorkflowAfterVolumes(context.Background(), cc, clawID)
 	}
 	return true
@@ -5597,14 +5580,14 @@ func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, cl
 	cc.workflowStartPending = true
 	cc.mu.Unlock()
 
-	go func() {
+	s.goBG("workflow start after volumes", func() {
 		if err := s.attachWorkflowVolumes(ctx, cc, clawID); err != nil {
 			cc.mu.Lock()
 			cc.workflowStartPending = false
 			cc.mu.Unlock()
 			log.Printf("[volume] attach workflow volumes for %s failed: %v", clawID[:8], err)
 			s.releaseWorkflowVolumeLeases(clawID)
-			go s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow volume attach failed: %v", err), false)
+			s.goBG("stopAgentWithReason", func() { s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow volume attach failed: %v", err), false) })
 			return
 		}
 
@@ -5632,7 +5615,7 @@ func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, cl
 		} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 			s.sendWakeMessage(cc, clawID)
 		}
-	}()
+	})
 }
 
 func daytonaRepoReadinessSnippet(repoFullName string) string {
@@ -5867,12 +5850,12 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='exedev', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap asynchronously
-	go func() {
+	s.goBG("exedev bootstrap", func() {
 		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files, env); err != nil {
 			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
 			s.stopAgentIfInstance(clawID, instance.ID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
-	}()
+	})
 
 	return nil
 }
@@ -6711,7 +6694,7 @@ func (s *Server) checkClawStatus() {
 			// The idle drain below delivers the next pending message; calling
 			// sendNextQueuedMessage here as well would send two back-to-back.
 			if escalate {
-				go s.stopAgentWithReason(id, "agent repeatedly stuck mid-turn", false)
+				s.goBG("stopAgentWithReason", func() { s.stopAgentWithReason(id, "agent repeatedly stuck mid-turn", false) })
 			}
 		}
 		cc.mu.RLock()
@@ -6785,7 +6768,9 @@ func (s *Server) checkClawStatus() {
 			cc.unresponsiveWarnedAt = now
 			cc.mu.Unlock()
 			minutes := int(now.Sub(lastStatusAt).Minutes())
-			go s.stopAgentWithReason(id, fmt.Sprintf("no status updates for %d minutes, agent presumed dead", minutes), false)
+			s.goBG("stopAgentWithReason", func() {
+				s.stopAgentWithReason(id, fmt.Sprintf("no status updates for %d minutes, agent presumed dead", minutes), false)
+			})
 		}
 
 		// Context usage warning (>90%) — skip if a streaming turn is in progress
@@ -6819,7 +6804,7 @@ func (s *Server) goVMSync(f func()) {
 		s.vmSyncGo(f)
 		return
 	}
-	go f()
+	s.goBG("vm sync", f)
 }
 
 func (s *Server) syncReplicatedVMs() {
@@ -6906,7 +6891,7 @@ func (s *Server) syncReplicatedVMs() {
 					s.goVMSync(func() { s.stopAgentIfInstance(c.id, c.providerID, reason, false) })
 					continue
 				}
-				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg, env)
+				s.goBG("bootstrapReplicated", func() { s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg, env) })
 			}
 		case "terminated", "error":
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)

@@ -394,7 +394,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		if _, cleanupErr := s.db.Exec(`DELETE FROM claws WHERE id=?`, clawID); cleanupErr != nil {
 			log.Printf("[factory] WARNING: failed to delete orphaned claw %s after task-run creation failure: %v", clawID[:8], cleanupErr)
 		}
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return "", false, fmt.Errorf("task run analytics: %w", err)
 	}
 
@@ -405,13 +405,13 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	})
 
 	if isPending {
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return clawID, true, nil
 	}
 
 	// Provision asynchronously
 	provCfg, _ := s.hubCfg.Providers[provider]
-	go func() {
+	s.goBG("provision factory claw", func() {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
@@ -438,7 +438,7 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
-	}()
+	})
 
 	return clawID, false, nil
 }

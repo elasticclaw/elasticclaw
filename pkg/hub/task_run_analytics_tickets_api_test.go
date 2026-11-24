@@ -585,7 +585,7 @@ func TestApplyOrScheduleTaskRunAnalyticsTicketMetadataKeepsCachedValuesAfterEnri
 	// The enrichment worker is asynchronous; give it a chance to publish its
 	// inflight marker before observing completion.
 	time.Sleep(time.Millisecond)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		if _, inflight := s.ticketMetadataInflight.Load(key); !inflight {
 			break
