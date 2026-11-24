@@ -193,11 +193,15 @@ func writeDaytonaCodexManagedRoot(t *testing.T, root string, tamper func(package
 		if name == "" || entry["optional"] == true {
 			continue
 		}
+		version, ok := entry["version"].(string)
+		if !ok {
+			t.Fatalf("embedded Codex plugin lock entry %s has no string version", name)
+		}
 		dir := filepath.Join(root, filepath.FromSlash(name))
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"version":"`+entry["version"].(string)+`"}`), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"version":"`+version+`"}`), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
