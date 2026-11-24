@@ -5332,6 +5332,12 @@ func main() {
 	} else {
 		defer controlStore.close()
 		control = newControlSupervisor(ctx, controlWSURL, clawID, token, bridgeRegistration(true), controlStore)
+		// Deferred after the store's close so tasks stop writing to it first.
+		defer func() {
+			if !control.close(controlShutdownGrace) {
+				log.Printf("[control-v2] tasks still running after %s; closing store anyway", controlShutdownGrace)
+			}
+		}()
 		controlHandler = control
 	}
 	protocolRegistration := bridgeRegistration(control != nil)

@@ -277,8 +277,12 @@ func (w *controlSocketWriter) write(ctx context.Context, frame typesv2.ControlFr
 	return wsjson.Write(writeCtx, w.conn, frame)
 }
 
+// controlShutdownGrace bounds how long shutdown waits for cancelled tasks.
+const controlShutdownGrace = 5 * time.Second
+
 type controlSupervisor struct {
 	ctx    context.Context
+	stop   context.CancelFunc
 	wsURL  string
 	clawID string
 	token  string
@@ -294,13 +298,57 @@ type controlSupervisor struct {
 	activity    func(agentActivity)
 	activeTasks map[string]*activeTaskCancellation
 	recovered   map[workflowControlBinding]bool
+	// tasks joins the task goroutines; closed (under mu) stops new ones.
+	tasks  sync.WaitGroup
+	closed bool
 }
 
 func newControlSupervisor(ctx context.Context, wsURL, clawID, token string,
 	bridge typesv2.BridgeRegistration, store *bridgeControlStore) *controlSupervisor {
-	return &controlSupervisor{ctx: ctx, wsURL: wsURL, clawID: clawID, token: token,
+	ctx, stop := context.WithCancel(ctx)
+	return &controlSupervisor{ctx: ctx, stop: stop, wsURL: wsURL, clawID: clawID, token: token,
 		bridge: bridge, store: store, activeTasks: map[string]*activeTaskCancellation{},
 		recovered: map[workflowControlBinding]bool{}}
+}
+
+// goTask runs fn as a task goroutine that close waits for. It reports false,
+// without running fn, once the supervisor is closed.
+func (s *controlSupervisor) goTask(fn func()) bool {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	s.tasks.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.tasks.Done()
+		fn()
+	}()
+	return true
+}
+
+// close cancels the supervisor and its tasks, then waits up to grace for the
+// task goroutines to return. They keep writing to the store after emitting
+// their terminal event, so the store must only be closed afterwards. It
+// reports whether every task returned in time.
+func (s *controlSupervisor) close(grace time.Duration) bool {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	s.stop()
+	s.cancelAllTasks()
+	done := make(chan struct{})
+	go func() {
+		s.tasks.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(grace):
+		return false
+	}
 }
 
 func (s *controlSupervisor) setGatewaySession(session *gatewaySession) {
@@ -583,7 +631,12 @@ func (s *controlSupervisor) acceptHubEnvelope(ctx context.Context, binding workf
 func (s *controlSupervisor) startTask(ctx context.Context, binding workflowControlBinding,
 	assignmentMessageID string, task typesv2.AgentTask) {
 	taskCtx, cancel, activeCancellation := s.prepareTaskExecution(ctx, task)
-	go s.executeTask(taskCtx, binding, assignmentMessageID, task, cancel, activeCancellation)
+	if !s.goTask(func() {
+		s.executeTask(taskCtx, binding, assignmentMessageID, task, cancel, activeCancellation)
+	}) {
+		cancel()
+		s.unregisterTaskCancellation(task.ID, activeCancellation)
+	}
 }
 
 func (s *controlSupervisor) prepareTaskExecution(ctx context.Context,

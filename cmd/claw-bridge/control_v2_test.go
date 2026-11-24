@@ -24,6 +24,41 @@ func openTestBridgeControlStore(t *testing.T) *bridgeControlStore {
 	return store
 }
 
+// newTestControlSupervisor joins the supervisor's task goroutines before the
+// store closes: they keep writing to it after the terminal event a test waits
+// for. Its cleanup is registered after the store's, so it runs first.
+func newTestControlSupervisor(t *testing.T, store *bridgeControlStore) *controlSupervisor {
+	t.Helper()
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	t.Cleanup(func() {
+		if !supervisor.close(30 * time.Second) {
+			t.Error("control supervisor tasks still running at cleanup")
+		}
+	})
+	return supervisor
+}
+
+func TestControlSupervisorCloseJoinsTasksAndRefusesNewOnes(t *testing.T) {
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token",
+		bridgeRegistration(true), openTestBridgeControlStore(t))
+	finished := false
+	if !supervisor.goTask(func() {
+		<-supervisor.ctx.Done()
+		finished = true
+	}) {
+		t.Fatal("open supervisor refused a task")
+	}
+	if !supervisor.close(5 * time.Second) {
+		t.Fatal("close did not join the cancelled task")
+	}
+	if !finished {
+		t.Fatal("close returned before the task goroutine finished")
+	}
+	if supervisor.goTask(func() { t.Error("task ran after close") }) {
+		t.Fatal("closed supervisor accepted a task")
+	}
+}
+
 func TestBridgeControlStoreDurablyDeduplicatesInboxAndReplaysOutbox(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-1", AttemptID: "attempt-1"}
@@ -66,8 +101,7 @@ func TestBridgeControlStoreDurablyDeduplicatesInboxAndReplaysOutbox(t *testing.T
 func TestLocalControlEndpointBuildsBoundTypedEnvelope(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-local", AttemptID: "attempt-local"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw-local", "token",
-		bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	// A disconnected control socket still journals commands and returns pending
 	// immediately; connected commands are covered by TestLocalControlEndpointWaitsForReceipt.
@@ -107,7 +141,7 @@ func TestLocalControlEndpointBuildsBoundTypedEnvelope(t *testing.T) {
 func TestLocalControlEndpointWaitsForReceipt(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-receipt", AttemptID: "attempt-receipt"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	supervisor.connected = true
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 2}
@@ -168,8 +202,7 @@ func TestTaskLifecyclePayloadUsesAgentOwnedNamespace(t *testing.T) {
 }
 
 func TestOldTaskCleanupCannotRemoveReplacementCancellation(t *testing.T) {
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token",
-		bridgeRegistration(true), openTestBridgeControlStore(t))
+	supervisor := newTestControlSupervisor(t, openTestBridgeControlStore(t))
 	oldCancelled := make(chan struct{})
 	oldCancellation := supervisor.registerTaskCancellation("task-reused", func() { close(oldCancelled) })
 	newCancelled := make(chan struct{})
@@ -192,8 +225,7 @@ func TestOldTaskCleanupCannotRemoveReplacementCancellation(t *testing.T) {
 }
 
 func TestTaskCancellationIsRegisteredBeforeExecutionStarts(t *testing.T) {
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token",
-		bridgeRegistration(true), openTestBridgeControlStore(t))
+	supervisor := newTestControlSupervisor(t, openTestBridgeControlStore(t))
 	task := typesv2.AgentTask{ID: "task-immediate-cancel", Deadline: time.Now().Add(time.Minute)}
 	taskCtx, cancel, activeCancellation := supervisor.prepareTaskExecution(context.Background(), task)
 	defer cancel()
@@ -212,7 +244,7 @@ func TestTaskCancellationIsRegisteredBeforeExecutionStarts(t *testing.T) {
 func TestTerminalTaskClearsBridgeSnapshotIdentity(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-terminal", AttemptID: "attempt-terminal"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID,
 		State: "building", StateVersion: 3, CurrentTask: &typesv2.AgentTask{ID: "task-terminal"}}
@@ -230,7 +262,7 @@ func TestTerminalTaskClearsBridgeSnapshotIdentity(t *testing.T) {
 func TestBridgeRejectsTaskAssignmentOlderThanAuthoritativeSnapshot(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-stale-task", AttemptID: "attempt-stale-task"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 7}
 	task := typesv2.AgentTask{ID: "task-stale", RunID: binding.RunID, AttemptID: binding.AttemptID,
@@ -310,7 +342,7 @@ func TestBridgeControlOutboxRetryUsesStableMessageIdentity(t *testing.T) {
 func TestAgentTaskWithUndeliverableTurnReportsFailed(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-undeliverable", AttemptID: "attempt-undeliverable"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 4}
 	gs := startLifecycleEndGateway(t, map[string]interface{}{"phase": "end", "livenessState": "abandoned", "replayInvalid": true})
@@ -362,7 +394,7 @@ func TestAgentTaskWithUndeliverableTurnReportsFailed(t *testing.T) {
 func TestAgentTaskForwardsActivityToHub(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-activity", AttemptID: "attempt-activity"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 4}
 	gs := startLifecycleEndGateway(t, map[string]interface{}{"phase": "end", "livenessState": "working", "stopReason": "stop"})
@@ -393,7 +425,8 @@ func TestAgentTaskForwardsActivityToHub(t *testing.T) {
 		t.Fatal("task activity never reached the hub sink")
 	}
 
-	// Let the task goroutine finish writing to the store before TempDir cleanup.
+	// Wait for the terminal event. The task goroutine still writes to the store
+	// after emitting it; newTestControlSupervisor joins it before the store closes.
 	for deadline := time.Now().Add(5 * time.Second); ; {
 		ready, err := store.ready(binding, 10)
 		if err != nil {
