@@ -295,8 +295,8 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 
 	stretchStart := stretchStartAt.UnixMilli()
 	var status, taskRunID, pipelineStage string
-	var idleSince, createdAtSec int64
-	err := s.db.QueryRow(`SELECT status, COALESCE(task_run_id,''), COALESCE(pipeline_stage,''), idle_since, CAST(strftime('%s', created_at) AS INTEGER) FROM claws WHERE id=?`, clawID).Scan(&status, &taskRunID, &pipelineStage, &idleSince, &createdAtSec)
+	var idleSince, resumeCount, createdAtSec int64
+	err := s.db.QueryRow(`SELECT status, COALESCE(task_run_id,''), COALESCE(pipeline_stage,''), idle_since, idle_resume_count, CAST(strftime('%s', created_at) AS INTEGER) FROM claws WHERE id=?`, clawID).Scan(&status, &taskRunID, &pipelineStage, &idleSince, &resumeCount, &createdAtSec)
 	if err != nil {
 		if err != sql.ErrNoRows {
 			log.Printf("[agent-idle] read claw %s: %v", shortID(clawID), err)
@@ -330,6 +330,11 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 	}
 	autoDriven := s.agentIdleAutoDriven(clawID, taskRunID, pipelineStage)
 	if !agentIdleEligible(status, taskRunID, s.agentIdleRunPhase(taskRunID), s.agentIdleHasClawPRs(clawID), autoDriven) {
+		return
+	}
+	if agentIdleAlertDeferredToResume(s.livenessSettings(), snap, nowAt, idleFor, lifecycleIdleAfter(cfg.Lifecycle), resumeCount) {
+		// The auto-resume still owns this stretch. Nothing is latched, so the
+		// alert fires on a later tick if the resume does not move the claw.
 		return
 	}
 	if stretchStartAt.Before(baseline) {
@@ -636,6 +641,31 @@ func (s *Server) parkAgentIdleResumeStretch(clawID string, stretchStart int64) {
 // enqueueSessionLostResume so a resumed agent never starts over.
 func agentIdleResumeMessage(idleFor time.Duration) string {
 	return fmt.Sprintf("%s %d minutes. If you are blocked waiting on background or spawned work that has not reported back, stop waiting for it and follow your task's degradation path instead of waiting longer. Otherwise, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes. Then resume the current stage from where the workspace shows it stopped. Do not start over and do not discard existing work.", agentIdleResumePrefix, int(idleFor.Minutes()))
+}
+
+// agentIdleAlertDeferredToResume reports whether the idle alert should wait
+// for the auto-resume. In production, 70% of agent_idle alerts were sent on the
+// same tick as a resume the agent answered within seconds, and a claw that
+// finished its stage without the signal re-alerted every six minutes until a
+// human stepped in. The alert now fires only when the resume cannot or did not
+// help:
+//
+//   - the resume is disabled, blind to the turn (agentIdleResumeBlindGrace),
+//     out of attempts, or stopped by the no-progress watchdog (that pause is
+//     the "repeated resumes went nowhere" signal, and it alerts at once);
+//   - or the stretch outlived resume + idle_after, so the resume prompt itself
+//     went unanswered.
+//
+// A resume the agent answers ends the stretch, so the loop of
+// resume-reply-idle never alerts until the watchdog pauses it.
+func agentIdleAlertDeferredToResume(liveness livenessSettings, snap agentIdleSnapshot, nowAt time.Time, idleFor, idleAfter time.Duration, resumeCount int64) bool {
+	if !liveness.idleResumeEnabled || snap.noProgressPaused || resumeCount >= agentIdleResumeMaxAttempts {
+		return false
+	}
+	if !snap.turnBoundarySeen && nowAt.Sub(snap.connectedAt) < agentIdleResumeBlindGrace {
+		return false
+	}
+	return idleFor < liveness.idleResumeAfter+idleAfter
 }
 
 // agentIdleEligible is the exclusion rule: an idle agent only alerts when it
