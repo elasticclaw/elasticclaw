@@ -15,23 +15,19 @@ import (
 	"nhooyr.io/websocket/wsjson"
 )
 
+// watchdogClaw is connectTestClaw on a server of its own, for a claw that must
+// not be woken by the registration.
 func watchdogClaw(t *testing.T, s *Server, clawID string) *websocket.Conn {
 	t.Helper()
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Cleanup(cancel)
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
-	if err != nil {
-		t.Fatalf("dial claw websocket: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "done") })
 	// Registration with gateway_ready triggers an async post-registration
 	// sendWakeMessage/sendInitialPlanInstruction turn reservation (real hub
 	// behavior, unrelated to most watchdog tests). It only fires when the
 	// claw has no messages yet (clawHasMessages), so seed an already-delivered
-	// row BEFORE registering — inserting after the ack races the async check
-	// and lets the wake reserve the turn and write a stray message frame.
+	// row BEFORE registering — the workflow start is only kicked off by the
+	// time the registration settles, so a row inserted afterwards races its
+	// check and lets the wake reserve the turn and write a stray message frame.
 	// messages.claw_id has a foreign key on claws(id), so the claws row must
 	// exist first; registration upserts it, so pre-creating is safe.
 	// delivered_at is set so the seed can never be drained as a pending
@@ -48,16 +44,8 @@ func watchdogClaw(t *testing.T, s *Server, clawID string) *websocket.Conn {
 	); err != nil {
 		t.Fatalf("seed wake-suppression message: %v", err)
 	}
-	ready := true
-	if err := wsjson.Write(ctx, conn, types.WSMessage{Type: "register", Payload: types.RegisterPayload{
-		ClawID: clawID, Name: "watchdog claw", Template: "elasticclaw", Token: "claw-token", GatewayReady: &ready,
-	}}); err != nil {
-		t.Fatalf("register claw: %v", err)
-	}
-	var ack types.WSMessage
-	if err := wsjson.Read(ctx, conn, &ack); err != nil || ack.Type != "registered" {
-		t.Fatalf("read registration ack: type=%q err=%v", ack.Type, err)
-	}
+	conn := connectTestClaw(t, s, ts, clawID)
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "done") })
 	return conn
 }
 

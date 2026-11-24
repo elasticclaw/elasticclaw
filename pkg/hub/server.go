@@ -374,6 +374,11 @@ func (s *Server) gatewayUnhealthyCount(clawID string) int {
 type clawConn struct {
 	mu sync.RWMutex // protects mutable fields below
 
+	// registrationSettled is closed once the handler has finished the work it
+	// does right after the "registered" ack (agent-started record, pending
+	// queue drain, workflow start kickoff). The ack alone is not a sync point.
+	registrationSettled chan struct{}
+
 	id                     string
 	tenantID               string
 	conn                   *websocket.Conn
@@ -2926,6 +2931,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	var bootstrapOK int
 	var provider string
 	var currentStatus string
+	var agentStarted bool
 	_ = s.db.QueryRow(`SELECT COALESCE(bootstrap_ok,0), COALESCE(provider,'') FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&bootstrapOK, &provider)
 
 	if !isStatusChannel {
@@ -2951,9 +2957,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		// Bootstrap commonly completes before the bridge registers, so the
 		// upsert reaches connected directly and the promotion UPDATE never
 		// records agent_started. The event key makes reconnects harmless.
-		if currentStatus == "connected" {
-			go s.recordClawAgentStarted(clawID)
-		}
+		agentStarted = currentStatus == "connected"
 	} else {
 		// For status channel, just read current status from DB
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&currentStatus)
@@ -3022,7 +3026,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	if !noProgressPaused {
 		bridgeErrorPauseKind = ""
 	}
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
+	cc := &clawConn{registrationSettled: make(chan struct{}), id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, bridgeErrorPauseKind: bridgeErrorPauseKind, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -3085,6 +3089,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
 
+	if agentStarted {
+		s.recordClawAgentStarted(clawID)
+	}
+
 	// This is synchronous so reconnect delivery is ordered with new user messages.
 	s.sendNextQueuedMessage(cc)
 
@@ -3097,6 +3105,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	if !workflowV2Controlled && allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
 		s.goBG("requestBootstrapCheckpoint", func() { s.requestBootstrapCheckpoint(clawID) })
 	}
+	close(cc.registrationSettled)
 
 	// Read loop — claw sends messages back to users
 	defer func() {

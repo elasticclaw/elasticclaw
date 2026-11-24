@@ -481,6 +481,7 @@ func TestClawStatusCarriesContextUsage(t *testing.T) {
 	if err := wsjson.Read(ctx, conn, &registered); err != nil {
 		t.Fatalf("read registration ack: %v", err)
 	}
+	waitForRegistrationSettled(t, s, clawID)
 
 	if err := wsjson.Write(ctx, conn, types.WSMessage{
 		Type:    "heartbeat",
