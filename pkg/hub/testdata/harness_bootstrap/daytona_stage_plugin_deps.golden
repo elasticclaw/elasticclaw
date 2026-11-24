@@ -1,0 +1,3 @@
+export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; \
+export OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS=1; \
+openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with warnings"

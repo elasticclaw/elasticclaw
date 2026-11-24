@@ -290,7 +290,8 @@ type controlSupervisor struct {
 	bindingStop context.CancelFunc
 	connected   bool
 	snapshot    *typesv2.WorkflowSnapshot
-	gateway     *gatewaySession
+	gateway     Harness
+	branches    *branchReporter
 	activity    func(agentActivity)
 	activeTasks map[string]*activeTaskCancellation
 	recovered   map[workflowControlBinding]bool
@@ -303,9 +304,15 @@ func newControlSupervisor(ctx context.Context, wsURL, clawID, token string,
 		recovered: map[workflowControlBinding]bool{}}
 }
 
-func (s *controlSupervisor) setGatewaySession(session *gatewaySession) {
+func (s *controlSupervisor) setGatewaySession(session Harness) {
 	s.mu.Lock()
 	s.gateway = session
+	s.mu.Unlock()
+}
+
+func (s *controlSupervisor) setBranchReporter(reporter *branchReporter) {
+	s.mu.Lock()
+	s.branches = reporter
 	s.mu.Unlock()
 }
 
@@ -645,7 +652,7 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 	prompt := workflowV2TaskPrompt(task)
 	// A turn OpenClaw ends without a deliverable answer fails the task, so the
 	// workflow does not advance as if the agent had done the work.
-	response, sendErr := gateway.SendMessage(requireDeliverableTurn(taskCtx), prompt, assignmentMessageID, func(string) {}, s.reportActivity)
+	response, sendErr := gateway.RunTurn(requireDeliverableTurn(taskCtx), prompt, assignmentMessageID, EventSink{OnChunk: func(string) {}, OnActivity: s.reportActivity})
 	close(heartbeatDone)
 	<-heartbeatStopped
 	if sendErr != nil {

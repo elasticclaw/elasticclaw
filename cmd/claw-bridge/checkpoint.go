@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -147,7 +148,7 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 		base  string
 		label string
 	}{
-		{filepath.Join(home, ".openclaw", "workspace"), "workspace"},
+		{harness.WorkspacePath(home), "workspace"},
 		{filepath.Join(home, ".openclaw", "openclaw.json"), ".openclaw/openclaw.json"},
 		{filepath.Join(home, ".openclaw", "identity"), ".openclaw/identity"},
 		{filepath.Join(home, ".openclaw", "agents"), ".openclaw/agents"},

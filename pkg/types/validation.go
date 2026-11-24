@@ -339,6 +339,7 @@ func validateWorkflowVolume(workflowName string, index int, volume WorkflowVolum
 	if strings.Contains(mount, "..") {
 		return fmt.Errorf("workflow %q: volumes[%d].mount must not contain path traversal", workflowName, index)
 	}
+	// Keep this path in sync with harness.WorkspaceDir without importing harness.
 	if mount == "/" || strings.HasPrefix(mount, "/home/daytona/.openclaw/workspace") || strings.HasPrefix(mount, "/workspace") {
 		return fmt.Errorf("workflow %q: volumes[%d].mount must be outside the repository workspace", workflowName, index)
 	}

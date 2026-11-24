@@ -225,7 +225,7 @@ func TestConsecutiveBridgeErrorsPauseOnceAndSurfaceTheError(t *testing.T) {
 	cc := bridgeErrorClaw(t, s, clawID)
 
 	errText, _ := types.BridgeTransportError(incidentENOSPCTurn)
-	if s.observeBridgeErrorTurn(cc, clawID, errText, true) {
+	if s.observeBridgeErrorTurn(cc, clawID, errText, true, "") {
 		t.Fatal("a single bridge error paused the claw; one error is transient")
 	}
 	if clawPaused(t, s, clawID) {
@@ -236,7 +236,7 @@ func TestConsecutiveBridgeErrorsPauseOnceAndSurfaceTheError(t *testing.T) {
 	}
 
 	recoveryErr, _ := types.BridgeTransportError(incidentRecoveryTurn)
-	if !s.observeBridgeErrorTurn(cc, clawID, recoveryErr, true) {
+	if !s.observeBridgeErrorTurn(cc, clawID, recoveryErr, true, "") {
 		t.Fatalf("%d consecutive bridge errors did not pause the claw", bridgeErrorPauseThreshold)
 	}
 	if !clawPaused(t, s, clawID) {
@@ -251,7 +251,7 @@ func TestConsecutiveBridgeErrorsPauseOnceAndSurfaceTheError(t *testing.T) {
 	}
 
 	// A third error must not notify again: the claw is already stopped.
-	if !s.observeBridgeErrorTurn(cc, clawID, recoveryErr, true) {
+	if !s.observeBridgeErrorTurn(cc, clawID, recoveryErr, true, "") {
 		t.Fatal("a further bridge error unpaused the claw")
 	}
 	if got := len(pauseNotices(t, s, clawID)); got != 1 {
@@ -264,7 +264,7 @@ func TestConsecutiveBridgeErrorsPauseOnceAndSurfaceTheError(t *testing.T) {
 	if clawPaused(t, s, clawID) {
 		t.Fatal("resume did not lift the bridge-error pause")
 	}
-	if s.observeBridgeErrorTurn(cc, clawID, errText, true) {
+	if s.observeBridgeErrorTurn(cc, clawID, errText, true, "") {
 		t.Fatal("the streak was not reset by the resume")
 	}
 }
@@ -276,13 +276,13 @@ func TestRealTurnResetsBridgeErrorStreak(t *testing.T) {
 	const clawID = "claw-bridge-reset"
 	cc := bridgeErrorClaw(t, s, clawID)
 
-	if paused, bridgeErr := s.observeTurnOutcome(cc, clawID, "turn-1", incidentENOSPCTurn); paused || !bridgeErr {
+	if paused, bridgeErr := s.observeTurnOutcome(cc, clawID, "turn-1", incidentENOSPCTurn, ""); paused || !bridgeErr {
 		t.Fatalf("first bridge error: paused=%v bridgeErr=%v", paused, bridgeErr)
 	}
-	if paused, bridgeErr := s.observeTurnOutcome(cc, clawID, "turn-2", "I fixed the matcher and pushed the commit."); paused || bridgeErr {
+	if paused, bridgeErr := s.observeTurnOutcome(cc, clawID, "turn-2", "I fixed the matcher and pushed the commit.", ""); paused || bridgeErr {
 		t.Fatalf("real turn: paused=%v bridgeErr=%v", paused, bridgeErr)
 	}
-	if paused, _ := s.observeTurnOutcome(cc, clawID, "turn-3", incidentRecoveryTurn); paused {
+	if paused, _ := s.observeTurnOutcome(cc, clawID, "turn-3", incidentRecoveryTurn, ""); paused {
 		t.Fatal("a bridge error after a real turn paused the claw on its own")
 	}
 	if clawPaused(t, s, clawID) {
@@ -347,7 +347,7 @@ func TestBridgeErrorPauseNotifiesOperator(t *testing.T) {
 
 	errText, _ := types.BridgeTransportError(incidentENOSPCTurn)
 	for i := 0; i < bridgeErrorPauseThreshold; i++ {
-		s.observeBridgeErrorTurn(cc, clawID, errText, true)
+		s.observeBridgeErrorTurn(cc, clawID, errText, true, "")
 	}
 
 	var detail string
@@ -441,7 +441,7 @@ func TestFirstBridgeErrorNotifiesWithoutPausing(t *testing.T) {
 	s.mu.Unlock()
 
 	errText, _ := types.BridgeTransportError(incidentENOSPCTurn)
-	if s.observeBridgeErrorTurn(cc, clawID, errText, true) {
+	if s.observeBridgeErrorTurn(cc, clawID, errText, true, "") {
 		t.Fatal("the first error paused the claw; one error is transient")
 	}
 	if clawPaused(t, s, clawID) {
@@ -479,7 +479,7 @@ func TestGenericErrorPrefixDoesNotCountTowardThePause(t *testing.T) {
 		t.Fatal("the generic prefix must not be treated as the bridge's own label")
 	}
 	for i := 0; i < bridgeErrorPauseThreshold+2; i++ {
-		if s.observeBridgeErrorTurn(cc, clawID, errText, definite) {
+		if s.observeBridgeErrorTurn(cc, clawID, errText, definite, "") {
 			t.Fatalf("generic-prefix turn %d paused the claw", i+1)
 		}
 	}
@@ -496,7 +496,7 @@ func gatewayPauseClaw(t *testing.T, s *Server, clawID, errText string) *clawConn
 	cc.awaitingResponse = true
 	cc.mu.Unlock()
 	for i := 0; i < bridgeErrorPauseThreshold; i++ {
-		s.observeBridgeErrorTurn(cc, clawID, errText, true)
+		s.observeBridgeErrorTurn(cc, clawID, errText, true, "")
 	}
 	if !clawPaused(t, s, clawID) {
 		t.Fatalf("claw %s not paused", clawID)
@@ -626,12 +626,12 @@ func TestMalformedJSONBridgeErrorPauseAutoLiftsWithOwnCap(t *testing.T) {
 		t.Fatal("malformed JSON provider failure was classified as gateway connectivity")
 	}
 
-	if s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, false) {
+	if s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, false, "") {
 		t.Fatal("a generic replay error paused the claw without a definite failure")
 	}
 
 	for episode := 1; episode <= bridgeErrorProviderAutoResumeMax; episode++ {
-		if !s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true) {
+		if !s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true, "") {
 			t.Fatal("a single definite malformed-JSON failure did not pause for recovery")
 		}
 		if clawPaused(t, s, id) {
@@ -645,7 +645,7 @@ func TestMalformedJSONBridgeErrorPauseAutoLiftsWithOwnCap(t *testing.T) {
 		t.Fatalf("provider recovery messages = %d, want %d", got, bridgeErrorProviderAutoResumeMax)
 	}
 
-	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true, "")
 	if !clawPaused(t, s, id) {
 		t.Fatal("provider-transient pause beyond its per-work-unit cap was auto-lifted")
 	}
@@ -670,10 +670,10 @@ func TestOtherBridgeErrorKindsStillNeedTwoFailures(t *testing.T) {
 	} {
 		id := "claw-threshold-" + string(rune('a'+i))
 		cc := bridgeErrorClaw(t, s, id)
-		if s.observeBridgeErrorTurn(cc, id, errText, true) || clawPaused(t, s, id) {
+		if s.observeBridgeErrorTurn(cc, id, errText, true, "") || clawPaused(t, s, id) {
 			t.Fatalf("%q paused after a single failure", errText)
 		}
-		if !s.observeBridgeErrorTurn(cc, id, errText, true) || !clawPaused(t, s, id) {
+		if !s.observeBridgeErrorTurn(cc, id, errText, true, "") || !clawPaused(t, s, id) {
 			t.Fatalf("%q did not pause after %d failures", errText, bridgeErrorPauseThreshold)
 		}
 	}
@@ -708,7 +708,7 @@ func TestMalformedJSONPauseAlarmsOnlyWhenBudgetIsSpent(t *testing.T) {
 		return n
 	}
 
-	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true, "")
 	if clawPaused(t, s, id) {
 		t.Fatal("provider-transient pause was not lifted")
 	}
@@ -719,7 +719,7 @@ func TestMalformedJSONPauseAlarmsOnlyWhenBudgetIsSpent(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET bridge_error_auto_resumes=? WHERE id=?`, bridgeErrorProviderAutoResumeMax, id); err != nil {
 		t.Fatal(err)
 	}
-	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true)
+	s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true, "")
 	if !clawPaused(t, s, id) {
 		t.Fatal("pause beyond the budget was lifted")
 	}
@@ -755,7 +755,7 @@ func TestBridgeErrorAutoLiftKindsShareOneCounter(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	providerEpisode := func(cc *clawConn, id string) {
 		t.Helper()
-		if !s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true) {
+		if !s.observeBridgeErrorTurn(cc, id, providerMalformedJSONErr, true, "") {
 			t.Fatal("a single definite malformed-JSON failure did not pause for recovery")
 		}
 	}
@@ -774,7 +774,7 @@ func TestBridgeErrorAutoLiftKindsShareOneCounter(t *testing.T) {
 		t.Fatalf("after provider lifts: paused=%v kind=%q resumes=%d", clawPaused(t, s, first), k, n)
 	}
 	for i := 0; i < bridgeErrorPauseThreshold; i++ {
-		s.observeBridgeErrorTurn(cc, first, gatewayDownErr, true)
+		s.observeBridgeErrorTurn(cc, first, gatewayDownErr, true, "")
 	}
 	healthyFor(cc, time.Hour)
 	s.maybeLiftBridgeErrorPause(first)
@@ -793,7 +793,7 @@ func TestBridgeErrorAutoLiftKindsShareOneCounter(t *testing.T) {
 		}
 		if i < bridgeErrorAutoResumeMax {
 			for j := 0; j < bridgeErrorPauseThreshold; j++ {
-				s.observeBridgeErrorTurn(cc, second, gatewayDownErr, true)
+				s.observeBridgeErrorTurn(cc, second, gatewayDownErr, true, "")
 			}
 		}
 	}
@@ -865,7 +865,7 @@ func TestBridgeErrorAutoLiftIsCappedPerUnitOfWork(t *testing.T) {
 			t.Fatalf("lift %d did not happen", i)
 		}
 		for j := 0; j < bridgeErrorPauseThreshold; j++ {
-			s.observeBridgeErrorTurn(cc, id, gatewayDownErr, true)
+			s.observeBridgeErrorTurn(cc, id, gatewayDownErr, true, "")
 		}
 		if !clawPaused(t, s, id) {
 			t.Fatalf("re-pause %d failed", i)
@@ -925,7 +925,7 @@ func TestGatewayPauseLiftsFromHeartbeatsAndSessionLossKeepsTheCap(t *testing.T) 
 	cc.mu.Unlock()
 	const incidentErr = "sessions.send write: use of closed network connection; gateway reconnect failed: dial gateway: failed to WebSocket dial: context deadline exceeded"
 	for i := 0; i < bridgeErrorPauseThreshold; i++ {
-		s.observeBridgeErrorTurn(cc, id, incidentErr, true)
+		s.observeBridgeErrorTurn(cc, id, incidentErr, true, "")
 	}
 	if k, _ := bridgeErrorRow(t, s, id); !clawPaused(t, s, id) || k != bridgeErrorPauseKindGateway {
 		t.Fatalf("not paused as gateway (kind=%q)", k)
@@ -1024,8 +1024,8 @@ func TestModelTransportRecoveryBackoffAndCap(t *testing.T) {
 	cc.deliveryInFlight = true
 	for attempt, delay := range bridgeErrorModelRetryDelays {
 		// Reproduce NEXT-1500's two different consecutive failures.
-		s.observeBridgeErrorTurn(cc, id, modelIdleTimeoutErr, true)
-		s.observeBridgeErrorTurn(cc, id, modelNetworkInterruptedErr, true)
+		s.observeBridgeErrorTurn(cc, id, modelIdleTimeoutErr, true, "")
+		s.observeBridgeErrorTurn(cc, id, modelNetworkInterruptedErr, true, "")
 		if kind, n := bridgeErrorRow(t, s, id); kind != bridgeErrorPauseKindModelTransport || n != attempt {
 			t.Fatalf("before attempt %d: kind=%q count=%d", attempt+1, kind, n)
 		}
@@ -1047,8 +1047,8 @@ func TestModelTransportRecoveryBackoffAndCap(t *testing.T) {
 			t.Fatalf("after attempt %d: kind=%q count=%d", attempt+1, kind, n)
 		}
 	}
-	s.observeBridgeErrorTurn(cc, id, modelIdleTimeoutErr, true)
-	s.observeBridgeErrorTurn(cc, id, modelNetworkInterruptedErr, true)
+	s.observeBridgeErrorTurn(cc, id, modelIdleTimeoutErr, true, "")
+	s.observeBridgeErrorTurn(cc, id, modelNetworkInterruptedErr, true, "")
 	healthyFor(cc, time.Hour)
 	if s.maybeLiftBridgeErrorPause(id) || !clawPaused(t, s, id) {
 		t.Fatal("retry cap did not stop recovery")

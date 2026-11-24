@@ -31,7 +31,7 @@ func TestBridgeExecRunCommandEmitsCompleted(t *testing.T) {
 	binding := workflowControlBinding{RunID: "run-exec", AttemptID: "attempt-exec"}
 	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
 	reporter := &branchReporter{wake: make(chan struct{}, 1)}
-	supervisor.setGatewaySession(&gatewaySession{branches: reporter})
+	supervisor.setBranchReporter(reporter)
 	supervisor.binding = &binding
 	version := uint64(1)
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: version}
@@ -419,7 +419,7 @@ func TestCommandTaskCompletionReportsBranches(t *testing.T) {
 			binding := workflowControlBinding{RunID: "run", AttemptID: "attempt"}
 			supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
 			reporter := &branchReporter{wake: make(chan struct{}, 1)}
-			supervisor.setGatewaySession(&gatewaySession{branches: reporter})
+			supervisor.setBranchReporter(reporter)
 			envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "assign", Kind: tc.kind, RunID: binding.RunID, AttemptID: binding.AttemptID, TaskID: "task", Payload: json.RawMessage(tc.payload)}
 			if _, err := store.recordIncoming(envelope); err != nil {
 				t.Fatal(err)

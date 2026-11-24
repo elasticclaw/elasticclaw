@@ -411,6 +411,11 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_cache_read_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_cache_write_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN run_cache_estimated INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cum_epoch TEXT`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cum_input_tokens INTEGER`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cum_output_tokens INTEGER`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cum_cost_usd REAL`)
+	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cum_run_base_cost_usd REAL`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN cost_approximate INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE usage_daily ADD COLUMN approx_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN cost_approximate INTEGER NOT NULL DEFAULT 0`)
@@ -808,6 +813,8 @@ func migrate(db *sql.DB) error {
 		run_cache_read_cost_usd REAL NOT NULL DEFAULT 0,
 		run_cache_write_cost_usd REAL NOT NULL DEFAULT 0,
 		run_cache_estimated INTEGER NOT NULL DEFAULT 0,
+		cum_epoch TEXT, cum_input_tokens INTEGER, cum_output_tokens INTEGER,
+		cum_cost_usd REAL, cum_run_base_cost_usd REAL,
 		cost_approximate INTEGER NOT NULL DEFAULT 0,
 		first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tenant_id, run_id, session_key)
 	);

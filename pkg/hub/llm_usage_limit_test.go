@@ -71,7 +71,7 @@ func TestLLMUsageLimitParksEveryClawSharingTheKey(t *testing.T) {
 	sibling := limitClaw(t, s, "claw-limit-sibling", "faster", true)
 	stranger := limitClaw(t, s, "claw-limit-stranger", "other-key", true)
 
-	paused, bridgeErrTurn := s.observeTurnOutcome(discoverer, "claw-limit-discoverer", "msg-1", incidentUsageLimitTurn)
+	paused, bridgeErrTurn := s.observeTurnOutcome(discoverer, "claw-limit-discoverer", "msg-1", incidentUsageLimitTurn, "")
 	if !paused || !bridgeErrTurn {
 		t.Fatalf("observeTurnOutcome() = (%v, %v), want (true, true)", paused, bridgeErrTurn)
 	}
@@ -123,7 +123,7 @@ func TestLLMUsageLimitIsNotABridgeTransportError(t *testing.T) {
 	cc.bridgeErrorStreak = 1
 	cc.mu.Unlock()
 
-	s.observeTurnOutcome(cc, "claw-limit-not-transport", "msg-1", incidentUsageLimitTurn)
+	s.observeTurnOutcome(cc, "claw-limit-not-transport", "msg-1", incidentUsageLimitTurn, "")
 
 	cc.mu.Lock()
 	streak := cc.bridgeErrorStreak
@@ -141,7 +141,7 @@ func TestLLMUsageLimitIsNotABridgeTransportError(t *testing.T) {
 func TestLLMUsageLimitSurvivesUserInput(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	cc := limitClaw(t, s, "claw-limit-user-input", "faster", true)
-	s.observeTurnOutcome(cc, "claw-limit-user-input", "msg-1", incidentUsageLimitTurn)
+	s.observeTurnOutcome(cc, "claw-limit-user-input", "msg-1", incidentUsageLimitTurn, "")
 
 	s.resumeNoProgressAfterUserInput("claw-limit-user-input")
 
@@ -175,7 +175,7 @@ func TestLLMUsageLimitSurvivesUserInput(t *testing.T) {
 func TestLLMUsageLimitOutlivesReconnect(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	cc := limitClaw(t, s, "claw-limit-reconnect", "faster", true)
-	s.observeTurnOutcome(cc, "claw-limit-reconnect", "msg-1", incidentUsageLimitTurn)
+	s.observeTurnOutcome(cc, "claw-limit-reconnect", "msg-1", incidentUsageLimitTurn, "")
 
 	until, limited := s.clawLLMLimitBlock("claw-limit-reconnect")
 	if !limited {
@@ -596,7 +596,7 @@ func TestLLMUsageLimitIgnoresTheGenericReplayPrefix(t *testing.T) {
 	cc := limitClaw(t, s, "claw-agent-quoting", "faster", true)
 
 	s.observeTurnOutcome(cc, "claw-agent-quoting", "msg-1",
-		types.BridgeReplayErrorPrefix+" the provider told me: You have reached your specified API usage limits. You will regain access on 2026-09-02 at 00:00 UTC.")
+		types.BridgeReplayErrorPrefix+" the provider told me: You have reached your specified API usage limits. You will regain access on 2026-09-02 at 00:00 UTC.", "")
 
 	if got := limitedUntil(t, s, "claw-agent-quoting"); got != 0 {
 		t.Errorf("a turn opening with the generic error prefix parked the key (until %d)", got)
@@ -667,12 +667,12 @@ func TestLLMUsageLimitAuthoredTurnConfirmsTheLift(t *testing.T) {
 		t.Fatalf("events after a scheduled release = %s, want the release to stay unannounced", got)
 	}
 
-	s.observeTurnOutcome(nil, "claw-limit-other-key", "msg-other", "Working on the other key.")
+	s.observeTurnOutcome(nil, "claw-limit-other-key", "msg-other", "Working on the other key.", "")
 	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened" {
 		t.Fatalf("a turn on an unrelated key confirmed the lift: %s", got)
 	}
-	s.observeTurnOutcome(nil, "claw-limit-proof", "msg-1", "Back to work.")
-	s.observeTurnOutcome(nil, "claw-limit-proof", "msg-2", "Still working.")
+	s.observeTurnOutcome(nil, "claw-limit-proof", "msg-1", "Back to work.", "")
+	s.observeTurnOutcome(nil, "claw-limit-proof", "msg-2", "Still working.", "")
 	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
 		t.Fatalf("events = %s, want exactly one released after the proving turn", got)
 	}
@@ -735,13 +735,13 @@ func TestLLMUsageLimitProbeSurvivesRestart(t *testing.T) {
 	s.llmLimitMu.Lock()
 	s.llmLimitProbing = nil
 	s.llmLimitMu.Unlock()
-	s.observeTurnOutcome(nil, "claw-limit-reboot", "msg-0", "Nobody re-armed me.")
+	s.observeTurnOutcome(nil, "claw-limit-reboot", "msg-0", "Nobody re-armed me.", "")
 	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened" {
 		t.Fatalf("events without a reseed = %s, want the lift still pending", got)
 	}
 
 	s.seedLLMLimitProbes()
-	s.observeTurnOutcome(nil, "claw-limit-reboot", "msg-1", "Back to work.")
+	s.observeTurnOutcome(nil, "claw-limit-reboot", "msg-1", "Back to work.", "")
 	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
 		t.Fatalf("events after reseed = %s, want exactly one released", got)
 	}
@@ -790,7 +790,10 @@ func TestLLMUsageLimitLiftConfirmationIsAtomicWithRelatch(t *testing.T) {
 		s.releaseLLMUsageLimit("faster", "test release", false)
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); s.observeTurnOutcome(nil, "claw-limit-race-a", "msg-proof", "Back to work.") }()
+		go func() {
+			defer wg.Done()
+			s.observeTurnOutcome(nil, "claw-limit-race-a", "msg-proof", "Back to work.", "")
+		}()
 		go func() { defer wg.Done(); s.handleLLMUsageLimit(nil, "claw-limit-race-b", limit) }()
 		wg.Wait()
 		relatched := false
@@ -831,7 +834,7 @@ func TestLLMUsageLimitUnprovenReleaseOutlivesEpisodeMemory(t *testing.T) {
 	s.llmLimitMu.Unlock()
 	s.seedLLMLimitProbes()
 	s.releaseDueLLMUsageLimits()
-	s.observeTurnOutcome(nil, "claw-limit-late", "msg-1", "Back to work.")
+	s.observeTurnOutcome(nil, "claw-limit-late", "msg-1", "Back to work.", "")
 	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
 		t.Fatalf("events after the late proving turn = %s, want the lift announced", got)
 	}

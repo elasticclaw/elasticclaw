@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 )
 
 type workspaceBranch struct {
@@ -39,7 +41,7 @@ func newBranchReporter(ctx context.Context, hubURL, clawID, token string) *branc
 	}
 	hubURL = strings.Replace(strings.Replace(hubURL, "wss://", "https://", 1), "ws://", "http://", 1)
 	r := &branchReporter{
-		wake: make(chan struct{}, 1), workspace: filepath.Join(home, ".openclaw", "workspace"),
+		wake: make(chan struct{}, 1), workspace: harness.WorkspacePath(home),
 		endpoint: strings.TrimRight(hubURL, "/") + "/api/claws/" + url.PathEscape(clawID) + "/branches",
 		token:    token, client: &http.Client{Timeout: 10 * time.Second},
 	}

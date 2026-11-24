@@ -1,0 +1,293 @@
+#!/bin/bash
+set -euo pipefail
+
+# ── Custom env vars (workflow/factory secret_refs, template env) ───────────────
+export A_CUSTOM='value with '"'"'quotes'"'"''
+export Z_CUSTOM='last'
+# ── Identity + credentials ────────────────────────────────────────────────────
+export ELASTICCLAW_HUB_URL='https://hub.example.com'
+export ELASTICCLAW_CLAW_ID='test-claw-id-1234'
+export ELASTICCLAW_CLAW_TOKEN='test-token'
+export ELASTICCLAW_MODEL_AUTH_TOKEN='test-model-auth-token'
+export ELASTICCLAW_CLAW_NAME='test-claw'
+export ELASTICCLAW_TEMPLATE='adversarylabs'
+export ELASTICCLAW_GATEWAY_PASSWORD='test-gw-password'
+export OPENCLAW_GATEWAY_PASSWORD="$ELASTICCLAW_GATEWAY_PASSWORD"
+export OPENCLAW_DEFAULT_MODEL='anthropic/claude-sonnet-4-6'
+export ELASTICCLAW_LLM_PROVIDER='anthropic'
+export ELASTICCLAW_NIX='true'
+export ELASTICCLAW_DOCKER='true'
+export ANTHROPIC_API_KEY="test-key"
+
+# Linear not configured
+export ELASTICCLAW_API_KEY_AUTH_SYNC='if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  python3 - <<'"'"'PYEOF'"'"'
+import json, os
+path = os.path.expanduser('"'"'~/.openclaw/agents/main/agent/auth-profiles.json'"'"')
+try:
+    with open(path) as f:
+        auth = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    auth = None
+if isinstance(auth, dict):
+    profiles = auth.get('"'"'profiles'"'"') or {}
+    for name in [n for n, p in profiles.items() if isinstance(p, dict) and p.get('"'"'provider'"'"') == '"'"'anthropic'"'"']:
+        profiles.pop(name)
+    (auth.get('"'"'order'"'"') or {}).pop('"'"'anthropic'"'"', None)
+    if profiles:
+        with open(path, '"'"'w'"'"') as f:
+            json.dump(auth, f, indent=2)
+    else:
+        os.remove(path)
+PYEOF
+  printf '"'"'%s\n'"'"' "${ANTHROPIC_API_KEY}" | openclaw models auth paste-api-key --provider anthropic --profile-id anthropic:default
+fi'
+# No OAuth auth sync
+export ELASTICCLAW_ONBOARD_FLAGS='--auth-choice apiKey --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"'
+export ELASTICCLAW_PROVIDER_CONFIG='python3 << '"'"'PYEOF'"'"'
+import json, os
+path = os.path.expanduser('"'"'~/.openclaw/openclaw.json'"'"')
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path) as f:
+        config = json.load(f)
+except FileNotFoundError:
+    config = {}
+except Exception:
+    config = {}
+model = os.environ.get('"'"'OPENCLAW_DEFAULT_MODEL'"'"', '"'"'anthropic/claude-sonnet-4-6'"'"')
+if False and model.startswith('"'"'grok/'"'"'):
+    model = '"'"'xai/'"'"' + model.split('"'"'/'"'"', 1)[1]
+if False and model.startswith('"'"'codex/'"'"'):
+    model = '"'"'openai/'"'"' + model.split('"'"'/'"'"', 1)[1]
+agent_defaults = config.setdefault('"'"'agents'"'"', {}).setdefault('"'"'defaults'"'"', {})
+agent_defaults['"'"'model'"'"'] = model
+agent_models = agent_defaults.get('"'"'models'"'"')
+if isinstance(agent_models, dict):
+    for key in list(agent_models.keys()):
+        if '"'"'kimi-k2p5'"'"' in key:
+            agent_models.pop(key, None)
+if False:
+    agent_defaults['"'"'thinkingDefault'"'"'] = '"'"'medium'"'"'
+    if not isinstance(agent_models, dict):
+        agent_models = {}
+        agent_defaults['"'"'models'"'"'] = agent_models
+    model_config = agent_models.setdefault(model, {})
+    if not isinstance(model_config, dict):
+        model_config = {}
+        agent_models[model] = model_config
+    model_config['"'"'agentRuntime'"'"'] = {'"'"'id'"'"': '"'"'codex'"'"'}
+    config.setdefault('"'"'plugins'"'"', {}).setdefault('"'"'entries'"'"', {}).setdefault('"'"'codex'"'"', {})['"'"'enabled'"'"'] = True
+if False:
+    if not isinstance(agent_models, dict):
+        agent_models = {}
+        agent_defaults['"'"'models'"'"'] = agent_models
+    model_config = agent_models.setdefault(model, {})
+    if not isinstance(model_config, dict):
+        model_config = {}
+        agent_models[model] = model_config
+    model_config['"'"'agentRuntime'"'"'] = {'"'"'id'"'"': '"'"'openclaw'"'"'}
+# OpenClaw rejects the legacy top-level models provider catalog shape we used
+# to write. Onboard handles provider auth; keep only agent default.
+models = config.get('"'"'models'"'"')
+if isinstance(models, dict) and any(k in models for k in ('"'"'providers'"'"', '"'"'routers'"'"', '"'"'mode'"'"')):
+    config.pop('"'"'models'"'"', None)
+if model.startswith('"'"'ollama/'"'"'):
+    model_id = model.split('"'"'/'"'"', 1)[1]
+    agent_defaults.setdefault('"'"'experimental'"'"', {})['"'"'localModelLean'"'"'] = True
+    config.setdefault('"'"'models'"'"', {})['"'"'mode'"'"'] = '"'"'merge'"'"'
+    providers = config['"'"'models'"'"'].setdefault('"'"'providers'"'"', {})
+    providers['"'"'ollama'"'"'] = {
+        '"'"'baseUrl'"'"': '"'"'http://ollama:11434'"'"',
+        '"'"'api'"'"': '"'"'ollama'"'"',
+        '"'"'apiKey'"'"': '"'"'OLLAMA_API_KEY'"'"',
+        '"'"'models'"'"': [{
+            '"'"'id'"'"': model_id,
+            '"'"'name'"'"': model_id,
+            '"'"'reasoning'"'"': False,
+            '"'"'input'"'"': ['"'"'text'"'"'],
+            '"'"'cost'"'"': {'"'"'input'"'"': 0, '"'"'output'"'"': 0, '"'"'cacheRead'"'"': 0, '"'"'cacheWrite'"'"': 0},
+            '"'"'contextWindow'"'"': 32768,
+            '"'"'maxTokens'"'"': 1024,
+            '"'"'params'"'"': {'"'"'num_ctx'"'"': 32768, '"'"'thinking'"'"': False, '"'"'keep_alive'"'"': '"'"'15m'"'"'},
+            '"'"'compat'"'"': {'"'"'supportsTools'"'"': True, '"'"'supportsUsageInStreaming'"'"': True},
+        }],
+    }
+if model.startswith('"'"'grok/'"'"'):
+    model_id = model.split('"'"'/'"'"', 1)[1]
+    config.setdefault('"'"'models'"'"', {})['"'"'mode'"'"'] = '"'"'merge'"'"'
+    providers = config['"'"'models'"'"'].setdefault('"'"'providers'"'"', {})
+    providers['"'"'grok'"'"'] = {
+        '"'"'baseUrl'"'"': '"'"'https://api.x.ai/v1'"'"',
+        '"'"'api'"'"': '"'"'openai'"'"',
+        '"'"'apiKey'"'"': '"'"'XAI_API_KEY'"'"',
+        '"'"'models'"'"': [{
+            '"'"'id'"'"': model_id,
+            '"'"'name'"'"': model_id,
+            '"'"'reasoning'"'"': True,
+            '"'"'input'"'"': ['"'"'text'"'"', '"'"'image'"'"'],
+            '"'"'cost'"'"': {'"'"'input'"'"': 0, '"'"'output'"'"': 0, '"'"'cacheRead'"'"': 0, '"'"'cacheWrite'"'"': 0},
+            '"'"'contextWindow'"'"': 256000,
+            '"'"'maxTokens'"'"': 32768,
+            '"'"'compat'"'"': {'"'"'supportsTools'"'"': True, '"'"'supportsUsageInStreaming'"'"': True},
+        }],
+    }
+if model.startswith('"'"'fireworks/'"'"'):
+    # OpenClaw 2026.9.x dropped the built-in Fireworks catalog (full-path
+    # accounts/fireworks/models/* ids); register it as a custom provider so
+    # the pinned model still resolves. The suffix is the native Fireworks
+    # API model name. maxTokens covers reasoning plus the answer: at 8192
+    # glm-5p3 spent the whole budget reasoning and never emitted a tool call.
+    model_id = model.split('"'"'/'"'"', 1)[1]
+    config.setdefault('"'"'models'"'"', {})['"'"'mode'"'"'] = '"'"'merge'"'"'
+    providers = config['"'"'models'"'"'].setdefault('"'"'providers'"'"', {})
+    providers['"'"'fireworks'"'"'] = {
+        '"'"'baseUrl'"'"': '"'"'https://api.fireworks.ai/inference/v1'"'"',
+        '"'"'api'"'"': '"'"'openai-completions'"'"',
+        '"'"'apiKey'"'"': '"'"'${FIREWORKS_API_KEY}'"'"',
+        '"'"'models'"'"': [{
+            '"'"'id'"'"': model_id,
+            '"'"'name'"'"': model_id,
+            '"'"'reasoning'"'"': True,
+            '"'"'input'"'"': ['"'"'text'"'"'],
+            '"'"'cost'"'"': {'"'"'input'"'"': 0, '"'"'output'"'"': 0, '"'"'cacheRead'"'"': 0, '"'"'cacheWrite'"'"': 0},
+            '"'"'contextWindow'"'"': 256000,
+            '"'"'maxTokens'"'"': 32768,
+            '"'"'compat'"'"': {'"'"'supportsTools'"'"': True, '"'"'supportsUsageInStreaming'"'"': True},
+        }],
+    }
+config.setdefault('"'"'gateway'"'"', {})['"'"'bind'"'"'] = '"'"'loopback'"'"'
+config['"'"'gateway'"'"']['"'"'port'"'"'] = 18789
+gw_password = os.environ.get('"'"'ELASTICCLAW_GATEWAY_PASSWORD'"'"', '"'"''"'"')
+if gw_password:
+    config['"'"'gateway'"'"']['"'"'auth'"'"'] = {'"'"'mode'"'"': '"'"'password'"'"', '"'"'password'"'"': gw_password}
+    config['"'"'gateway'"'"']['"'"'remote'"'"'] = {'"'"'password'"'"': gw_password}
+with open(path, '"'"'w'"'"') as f:
+    json.dump(config, f, indent=2)
+print('"'"'OpenClaw config patched'"'"')
+PYEOF'
+# ── Install claw-bridge ───────────────────────────────────────────────────────
+BRIDGE_SRC='https://github.com/elasticclaw/elasticclaw/releases/download/v0.0.3/claw-bridge-linux-amd64'
+download_connector_once() {
+  rm -f /tmp/claw-bridge
+  if echo "$BRIDGE_SRC" | grep -qE '^https?://'; then
+    curl -fsSL "$BRIDGE_SRC" -o /tmp/claw-bridge
+  else
+    # OCI ref — use oras
+    if ! command -v oras &>/dev/null; then
+      echo "Installing oras..."
+      curl -sL https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz | tar xz -C /tmp
+      sudo mv /tmp/oras /usr/local/bin/oras
+    fi
+    sudo apt-get install -y curl ca-certificates 2>/dev/null || true
+    rm -rf /tmp/claw-bridge-dl
+    mkdir -p /tmp/claw-bridge-dl && cd /tmp/claw-bridge-dl
+    oras pull "$BRIDGE_SRC"
+    BINARY=$(find /tmp/claw-bridge-dl -name 'claw-bridge*' -type f | head -1)
+    if [ -z "$BINARY" ]; then
+      echo "ERROR: ElasticClaw connector binary not found after oras pull"
+      ls -la /tmp/claw-bridge-dl/
+      return 1
+    fi
+    cp "$BINARY" /tmp/claw-bridge
+    cd -
+  fi
+}
+
+CONNECTOR_DELAYS=(5 10 20 40 60)
+CONNECTOR_ATTEMPTS=6
+for attempt in $(seq 1 "$CONNECTOR_ATTEMPTS"); do
+  echo "Downloading ElasticClaw connector (attempt $attempt/$CONNECTOR_ATTEMPTS)..."
+  if download_connector_once; then
+    break
+  fi
+  if [ "$attempt" -eq "$CONNECTOR_ATTEMPTS" ]; then
+    echo "ERROR: could not download ElasticClaw connector after $CONNECTOR_ATTEMPTS attempts"
+    exit 1
+  fi
+  delay="${CONNECTOR_DELAYS[$((attempt-1))]}"
+  echo "Retrying connector download in ${delay}s..."
+  sleep "$delay"
+done
+chmod +x /tmp/claw-bridge
+sudo mv /tmp/claw-bridge /usr/local/bin/claw-bridge
+echo "ElasticClaw connector installed"
+
+# ── Bootstrap + run ───────────────────────────────────────────────────────────
+# claw-bridge --bootstrap installs Node.js, OpenClaw, configures the gateway,
+# then transitions directly into the normal bridge connect loop.
+# Persist env vars so bridge can be restarted later.
+{
+  printf 'export A_CUSTOM=%q\n' "$A_CUSTOM"
+  printf 'export Z_CUSTOM=%q\n' "$Z_CUSTOM"
+  printf 'export ELASTICCLAW_HUB_URL=%q\n' "$ELASTICCLAW_HUB_URL"
+  printf 'export ELASTICCLAW_CLAW_ID=%q\n' "$ELASTICCLAW_CLAW_ID"
+  printf 'export ELASTICCLAW_CLAW_TOKEN=%q\n' "$ELASTICCLAW_CLAW_TOKEN"
+  printf 'export ELASTICCLAW_MODEL_AUTH_TOKEN=%q\n' "$ELASTICCLAW_MODEL_AUTH_TOKEN"
+  printf 'export ELASTICCLAW_CLAW_NAME=%q\n' "$ELASTICCLAW_CLAW_NAME"
+  printf 'export ELASTICCLAW_TEMPLATE=%q\n' "$ELASTICCLAW_TEMPLATE"
+  printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"
+  printf 'export OPENCLAW_GATEWAY_PASSWORD=%q\n' "$OPENCLAW_GATEWAY_PASSWORD"
+} > "$HOME/.claw-bridge.env"
+chmod 600 "$HOME/.claw-bridge.env"
+
+# Run claw-bridge in bootstrap mode in the background, then wait until the
+# bootstrap phase completes so the SSH session can exit and the hub can write
+# template files.
+export ELASTICCLAW_BOOTSTRAP=1
+export ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE="$HOME/.claw-bridge.bootstrap.ready"
+rm -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"
+cat > "$HOME/.claw-bridge-supervisor.sh" <<'EOF'
+#!/bin/bash
+. "$HOME/.claw-bridge.env"
+export ELASTICCLAW_BOOTSTRAP ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE
+restarts=0
+total_restarts=0
+backoff=5
+child=""
+trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; fi; exit 0' TERM INT
+while :; do
+  started_at=$(date +%s)
+  export ELASTICCLAW_BRIDGE_RESTARTS="$total_restarts"
+  /usr/local/bin/claw-bridge >> "$HOME/claw-bridge.log" 2>&1 &
+  child=$!
+  wait "$child"
+  rc=$?
+  child=""
+  if [ "$rc" -eq 0 ]; then
+    echo "[supervisor] claw-bridge exited cleanly"
+    exit 0
+  fi
+  now=$(date +%s)
+  if [ $((now - started_at)) -ge 300 ]; then
+    restarts=0
+    backoff=5
+  fi
+  if [ "$restarts" -ge 3 ]; then
+    echo "[supervisor] claw-bridge restart budget exhausted after 3 attempts"
+    exit 1
+  fi
+  restarts=$((restarts + 1))
+  total_restarts=$((total_restarts + 1))
+  echo "[supervisor] claw-bridge exited (code=$rc); restarting (attempt $restarts/3) in ${backoff}s"
+  unset ELASTICCLAW_BOOTSTRAP ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE
+  sleep "$backoff"
+  backoff=$((backoff * 2))
+done
+EOF
+chmod 700 "$HOME/.claw-bridge-supervisor.sh"
+nohup "$HOME/.claw-bridge-supervisor.sh" >> "$HOME/claw-bridge.log" 2>&1 </dev/null &
+BRIDGE_PID=$!
+for _ in {1..1800}; do
+  if [ -f "$ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE" ]; then
+    echo "claw-bridge bootstrap complete; bridge running in background"
+    exit 0
+  fi
+  if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    wait "$BRIDGE_PID"
+    exit $?
+  fi
+  sleep 1
+done
+echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
+exit 1

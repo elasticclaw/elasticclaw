@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -1339,7 +1340,7 @@ func (s *Server) restoreCheckpointToDaytona(ctx context.Context, clawID, instanc
 		return err
 	}
 	if err := s.restoreCheckpointFilesTo(ctx, clawID, checkpointID, files, func(path string) string {
-		return restoreRemotePath(path, "/home/daytona", "/home/daytona/.openclaw/workspace")
+		return restoreRemotePath(path, "/home/daytona", "/home/daytona/"+harness.WorkspaceDir)
 	}, defaultCheckpointRestoreParallelism, func(ctx context.Context, remote string, data []byte) error {
 		return p.WriteFile(ctx, instanceID, remote, data)
 	}); err != nil {
@@ -1360,7 +1361,7 @@ func (s *Server) restoreCheckpointToExedev(ctx context.Context, clawID, vmName s
 		return err
 	}
 	if err := s.restoreCheckpointFilesTo(ctx, clawID, checkpointID, files, func(path string) string {
-		return restoreRemotePath(path, ".", ".openclaw/workspace")
+		return restoreRemotePath(path, ".", harness.WorkspaceDir)
 	}, 1, func(ctx context.Context, remote string, data []byte) error {
 		return p.WriteFile(ctx, vmName, remote, data)
 	}); err != nil {
@@ -1392,7 +1393,7 @@ func (s *Server) restoreCheckpointToSSH(clawID, user, host string) error {
 	}
 	defer client.Close()
 	if err := s.restoreCheckpointFilesTo(context.Background(), clawID, checkpointID, files, func(path string) string {
-		return restoreRemotePath(path, ".", ".openclaw/workspace")
+		return restoreRemotePath(path, ".", harness.WorkspaceDir)
 	}, 1, func(ctx context.Context, remote string, data []byte) error {
 		return sshWriteBytes(ctx, client, remote, data)
 	}); err != nil {

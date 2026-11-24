@@ -17,6 +17,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
@@ -894,7 +895,7 @@ Do not include any markdown formatting, code fences, or explanatory text outside
 			}
 		case pipeline.JudgeInputGitDiff:
 			diff, err := s.executePipelineRunAction(clawID, pipeline.RunAction{
-				Command: `cd "$HOME/.openclaw/workspace" && git diff --stat && echo "---" && git diff`,
+				Command: `cd "$HOME/` + harness.WorkspaceDir + `" && git diff --stat && echo "---" && git diff`,
 				Timeout: "30s",
 			})
 			if err == nil && diff != nil {
@@ -921,7 +922,7 @@ Do not include any markdown formatting, code fences, or explanatory text outside
 		case pipeline.JudgeInputFiles:
 			// List changed files
 			filesResult, err := s.executePipelineRunAction(clawID, pipeline.RunAction{
-				Command: `cd "$HOME/.openclaw/workspace" && git diff --name-only`,
+				Command: `cd "$HOME/` + harness.WorkspaceDir + `" && git diff --name-only`,
 				Timeout: "10s",
 			})
 			if err == nil && filesResult != nil {
@@ -3067,9 +3068,9 @@ func (s *Server) buildWorkspaceRunCommand(clawID, command string) (string, error
 	hasWorkspaceFlake := tmplFiles["flake.nix"] != ""
 
 	if hasWorkspaceFlake {
-		inner := `cd "$HOME/.openclaw/workspace" && ` + command
+		inner := `cd "$HOME/` + harness.WorkspaceDir + `" && ` + command
 		quoted := shellQuote(inner)
 		return `~/.elasticclaw/flake-run bash -lc ` + quoted, nil
 	}
-	return `cd "$HOME/.openclaw/workspace" && ` + command, nil
+	return `cd "$HOME/` + harness.WorkspaceDir + `" && ` + command, nil
 }

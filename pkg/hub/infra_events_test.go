@@ -211,7 +211,7 @@ func TestLLMUsageLimitInfraEventsArePerKeyAndSecretSafe(t *testing.T) {
 	if got := infraEventTypes(t, s); strings.Join(got, ",") != "provider_limit_opened" {
 		t.Fatalf("events after an unproven release = %v", got)
 	}
-	s.observeTurnOutcome(nil, "shared-key-0", "msg-proof", "Back to work.")
+	s.observeTurnOutcome(nil, "shared-key-0", "msg-proof", "Back to work.", "")
 	if got := infraEventTypes(t, s); strings.Join(got, ",") != "provider_limit_opened,provider_limit_released" {
 		t.Fatalf("events after the proving turn = %v", got)
 	}

@@ -1,0 +1,1 @@
+export ANTHROPIC_API_KEY='test-key'; export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; openclaw onboard --non-interactive --accept-risk --skip-daemon --skip-health --auth-choice anthropic-api-key --anthropic-api-key "$ANTHROPIC_API_KEY" 2>&1

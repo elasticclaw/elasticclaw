@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"log"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness/openclaw"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -74,14 +74,8 @@ const (
 	bridgeErrorProviderAutoResumeMax      = 5
 )
 
-// bridgeErrorIsProviderTransient identifies NEXT-1294's intermittent provider
-// failure. The provider completed a tool call with invalid argument JSON, so
-// OpenClaw never ran the tool and the intact session can safely continue. Keep
-// this deliberately narrow: every other "Agent run failed" cause (auth,
-// credits, schema rejection, and unknown provider failures) remains human-only
-// under the NEXT-725 guarantee.
 func bridgeErrorIsProviderTransient(errText string) bool {
-	return strings.Contains(strings.ToLower(errText), "malformed json arguments")
+	return openclaw.BridgeErrorIsProviderTransient(errText)
 }
 
 // Model transport failures may leave completed tools in the workspace. Resume
@@ -91,38 +85,11 @@ func bridgeErrorIsProviderTransient(errText string) bool {
 var bridgeErrorModelRetryDelays = [...]time.Duration{time.Minute, 3 * time.Minute, 10 * time.Minute}
 
 func bridgeErrorIsModelTransport(errText string) bool {
-	lower := strings.ToLower(errText)
-	for _, marker := range []string{"unauthorized", "forbidden", "auth", "credential", "usage limit", "credit", "billing", "schema", "no space left", "enospc"} {
-		if strings.Contains(lower, marker) {
-			return false
-		}
-	}
-	return strings.Contains(lower, "llm request failed: network connection was interrupted") ||
-		strings.Contains(lower, "the model did not produce a response before the model idle timeout")
+	return openclaw.BridgeErrorIsModelTransport(errText)
 }
 
-// bridgeErrorIsGatewayConnectivity matches the claw-bridge strings that mean
-// "could not talk to the local gateway" (cmd/claw-bridge/main.go). The
-// reconnect wrapper ("...; gateway reconnect failed: <cause>") also carries
-// causes that are not a hang: the gateway answering the handshake with a
-// rejection, or a credential/disk failure. Those need a human, so any
-// non-transient marker anywhere in the text wins over a connectivity marker.
 func bridgeErrorIsGatewayConnectivity(errText string) bool {
-	lower := strings.ToLower(errText)
-	for _, marker := range []string{
-		"connect rejected", "unauthorized", "forbidden", "auth", "credential",
-		"no space left", "enospc", "agent run failed", "usage limit",
-	} {
-		if strings.Contains(lower, marker) {
-			return false
-		}
-	}
-	for _, marker := range []string{"gateway disconnected", "dial gateway", "gateway reconnect failed"} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+	return openclaw.BridgeErrorIsGatewayConnectivity(errText)
 }
 
 // observeGatewayHealthLocked extends or breaks the healthy+ready run. Caller
@@ -279,7 +246,7 @@ const bridgeErrorNoticeLimit = 400
 // agent outcome, and letting it into claw_turn_observations would let a single
 // transport blip reset the repeated-outcome chain the no-progress watchdog is
 // counting.
-func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, definite bool) bool {
+func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, definite bool, class types.TurnErrorClass) bool {
 	streak := 0
 	alreadyPaused := false
 	if cc != nil {
@@ -303,7 +270,16 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 		return true
 	}
 	short := truncateRunes(errText, bridgeErrorNoticeLimit)
-	providerTransient := bridgeErrorIsProviderTransient(errText)
+	if class == "" {
+		class = openclaw.ClassifyErrorText(errText, definite)
+	}
+	providerTransient := class == types.TurnErrorTransient
+	// The class carries one kind per error, but a model-transport error that
+	// also names malformed tool-call JSON has always been both: model-transport
+	// pause kind with the provider-transient pause threshold. Keep that.
+	if class == types.TurnErrorModelTransport && bridgeErrorIsProviderTransient(errText) {
+		providerTransient = true
+	}
 	// The WARNING is deliberately not gated on the pause threshold. For other
 	// error kinds it needs a SECOND turn, and nothing guarantees one: with the
 	// plan gate no longer answering, the next turn only exists if the idle
@@ -325,11 +301,12 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 		return false
 	}
 	kind := ""
-	if bridgeErrorIsModelTransport(errText) {
+	switch class {
+	case types.TurnErrorModelTransport:
 		kind = bridgeErrorPauseKindModelTransport
-	} else if providerTransient {
+	case types.TurnErrorTransient:
 		kind = bridgeErrorPauseKindProviderTransient
-	} else if bridgeErrorIsGatewayConnectivity(errText) {
+	case types.TurnErrorHarnessConnectivity:
 		kind = bridgeErrorPauseKindGateway
 	}
 	notice := fmt.Sprintf("[hub] Automatic continuation paused: the last %d turns never reached the agent — claw-bridge returned a transport error instead. Last error: %s. This is the sandbox or the gateway failing, not the agent's output; fix it and send a message to resume.", streak, short)
@@ -430,9 +407,14 @@ func (s *Server) recordBridgeErrorEvent(clawID string, streak int, errText strin
 // would then need three MORE look-alike turns, at up to an hour each.
 // Conversely, any turn the agent actually authored proves the transport works,
 // so it clears the bridge-error streak.
-func (s *Server) observeTurnOutcome(cc *clawConn, clawID, messageID, content string) (paused bool, bridgeErrTurn bool) {
+func (s *Server) observeTurnOutcome(cc *clawConn, clawID, messageID, content string, class types.TurnErrorClass) (paused bool, bridgeErrTurn bool) {
 	errText, definite, bridgeErrTurn := types.BridgeTransportErrorIsDefinite(content)
 	if bridgeErrTurn {
+		// Bridges older than this release send no error_class; classify their
+		// text the same way the bridge does. Remove after one release.
+		if class == "" {
+			class = openclaw.ClassifyErrorText(errText, definite)
+		}
 		// A provider usage limit arrives on this path but is not this path's
 		// problem. The transport worked — it delivered the rejection — and the
 		// bridge-error response (pause, then tell the operator the sandbox or
@@ -445,11 +427,13 @@ func (s *Server) observeTurnOutcome(cc *clawConn, clawID, messageID, content str
 		// is short enough for an agent to open a turn with while REPORTING a
 		// provider message it saw, and this branch parks every claw on the key.
 		// A claw talking about a cap must not be able to declare one.
-		if limit, ok := types.ParseLLMUsageLimit(errText); ok && definite {
-			s.handleLLMUsageLimit(cc, clawID, limit)
-			return true, true
+		if class == types.TurnErrorQuota {
+			if limit, ok := types.ParseLLMUsageLimit(errText); ok && definite {
+				s.handleLLMUsageLimit(cc, clawID, limit)
+				return true, true
+			}
 		}
-		return s.observeBridgeErrorTurn(cc, clawID, errText, definite), true
+		return s.observeBridgeErrorTurn(cc, clawID, errText, definite, class), true
 	}
 	if cc != nil {
 		cc.mu.Lock()
