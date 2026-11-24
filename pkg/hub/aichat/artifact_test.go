@@ -878,14 +878,20 @@ func TestArtifactVersionKeepsPersistedWorkspace(t *testing.T) {
 	s := testStore(t)
 	thread := testThread(t, s)
 	dir := t.TempDir()
-	m, _ := s.beginAction(ctx, thread, "fake", "", "artifact")
+	m, err := s.beginAction(ctx, thread, "fake", "", "artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
 	a, err := s.publishArtifact(ctx, dir, thread, &m, tools.ArtifactRequest{Title: "Meal"}, testHTML)
 	if err != nil {
 		t.Fatal(err)
 	}
 	moved := thread
 	moved.Workspace = "other"
-	next, _ := s.beginAction(ctx, moved, "fake", "", "artifact")
+	next, err := s.beginAction(ctx, moved, "fake", "", "artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
 	v, err := s.publishArtifact(ctx, dir, moved, &next, tools.ArtifactRequest{ArtifactID: a.ID, Title: a.Title}, testHTML)
 	if err != nil || v.Version != 2 || v.Workspace != thread.Workspace {
 		t.Fatal(v.Version, v.Workspace, err)
