@@ -4883,3 +4883,19 @@ func TestMaxIntPtr(t *testing.T) {
 		t.Fatal("max(nil,nil) must stay nil")
 	}
 }
+
+func TestInstalledCodexPluginVersionIncludesStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake")
+	}
+	fakeBin := t.TempDir()
+	script := "#!/bin/sh\necho 'plugin codex not found' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "openclaw"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err := installedCodexPluginVersion()
+	if err == nil || !strings.Contains(err.Error(), "plugin codex not found") {
+		t.Fatalf("installedCodexPluginVersion error = %v, want stderr included", err)
+	}
+}

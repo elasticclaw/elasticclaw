@@ -4110,7 +4110,11 @@ func installSelectedCodingModelCLI() error {
 func installedCodexPluginVersion() (string, error) {
 	out, err := exec.Command("openclaw", "plugins", "info", "codex", "--json").Output()
 	if err != nil {
-		return "", err
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return "", fmt.Errorf("openclaw plugins info codex: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return "", fmt.Errorf("openclaw plugins info codex: %w", err)
 	}
 	var info struct {
 		Version string `json:"version"`
