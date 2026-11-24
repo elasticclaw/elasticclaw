@@ -23,6 +23,15 @@ function loadComponent(file, mocks) {
   return module.exports
 }
 
+const kitHelpers = loadComponent("components/ai-chat/artifact-kit.ts", {
+  "./sources": loadComponent("components/ai-chat/sources.ts", {}),
+  "@/lib/ai-chat-artifacts": loadComponent("lib/ai-chat-artifacts.ts", {}),
+})
+const artifactKit = {
+  designSystem: { status: "ok" }, warnings: [],
+  templates: [{ id: "one-pager", name: "One-pager", description: "A concise proposal." }, { id: "status-report", name: "Status report", description: "Progress and next steps." }],
+}
+
 function createHooks() {
   const states = []
   const effects = []
@@ -105,6 +114,7 @@ function chatFixture(options = {}) {
     react: hooks.react,
     "next/navigation": { useRouter: () => ({ replace(url) { query = url.split("?")[1] ?? "" } }), useSearchParams: () => new URLSearchParams(query) },
     "@/lib/api": api,
+    "./artifact-kit": kitHelpers,
   }
   // The screen's own hooks and helpers run for real, sharing the mocks.
   const local = (file, mocks = {}) => loadComponent(`components/ai-chat/${file}`, { ...shared, ...mocks })
@@ -119,6 +129,7 @@ function chatFixture(options = {}) {
     "./header": { ChatHeader: "ChatHeader" },
     "./sources": local("sources.ts"),
     "./composer": { ChatComposer: "ChatComposer" },
+    "./template-chip": { TemplateChip: "TemplateChip" },
     "./message-list": { MessageList: "MessageList" },
   })
   const component = hooks.render(ChatScreen).props.children.type
@@ -281,6 +292,24 @@ test("Back to new chat while an existing thread loads discards the stale load", 
   const tree = fixture.render()
   assert.equal(findElement(tree, "h2").props.children, "What are we working on?")
   assert.equal(findElement(tree, "MessageList"), undefined)
+})
+
+test("composer template pin is kept per thread", async () => {
+  const fixture = chatFixture({ thread: "t1", api: { fetchAIChatThread: async (id) => ({ thread: thread(id), messages: [] }) } })
+  const chip = () => findElement(fixture.render(), "ChatComposer").props.toolbar
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"], { artifactKit }))
+  await flush()
+  chip().props.onChange("one-pager")
+  assert.equal(chip().props.value, "one-pager")
+  fixture.navigate("t2")
+  fixture.render()
+  await flush()
+  assert.equal(chip().props.value, "")
+  fixture.navigate("t1")
+  fixture.render()
+  await flush()
+  assert.equal(chip().props.value, "one-pager")
 })
 
 function captureWindowListeners() {
@@ -722,6 +751,7 @@ test("sources popover renders grouped details, read badges, errors, workspace, a
     "@/components/ui/popover": { Popover: "Popover", PopoverContent: "PopoverContent", PopoverTrigger: "PopoverTrigger" },
     "./mode-cards": { chatModes: [] },
     "./sources": sourceHelpers,
+    "./artifact-kit": kitHelpers,
   })
   let refreshed = 0
   const props = { mode: null, onNewChat() {}, onRefreshSources() { refreshed++ }, data: sources("fasterway", ["fasterway"], { sources: [
@@ -1035,7 +1065,9 @@ for (const lostStart of [false, true]) {
 
 const artifactHelpers = loadComponent("lib/ai-chat-artifacts.ts", { "./hub-url": { getHubUrl: () => "" } })
 const artifactCardMocks = {
-  react: {},
+  react: createHooks().react,
+  "./artifact-kit": kitHelpers,
+  "./template-picker": { TemplatePicker: "TemplatePicker" },
   "lucide-react": Object.fromEntries(["Check", "Copy", "ExternalLink", "FileCode2", "Loader2", "RotateCcw", "TriangleAlert", "X"].map((name) => [name, name])),
   "@/components/ui/button": { Button: "Button" },
   "@/lib/ai-chat-artifacts": { artifactShareURL: (slug, url) => url || `https://hub.test/artifacts/${slug}` },
@@ -1401,7 +1433,7 @@ test("ticket action reaches the action stream with the retry draft unchanged", a
 test("tracker source badge reflects create-ticket access from the API", () => {
   const { ChatHeader } = loadComponent("components/ai-chat/header.tsx", {
     "lucide-react": {}, "@/components/ui/button": { Button: "Button" }, "@/components/ui/popover": { Popover: "Popover", PopoverContent: "PopoverContent", PopoverTrigger: "PopoverTrigger" },
-    "./mode-cards": { chatModes: [] }, "./sources": loadComponent("components/ai-chat/sources.ts", {}),
+    "./mode-cards": { chatModes: [] }, "./sources": loadComponent("components/ai-chat/sources.ts", {}), "./artifact-kit": kitHelpers,
   })
   for (const available of [false, true]) {
     const tree = ChatHeader({ mode: null, data: { workspace: "A", ticket: available ? ticketTarget : undefined, sources: [{ kind: "issue_tracker", name: "Linear", status: "connected", access: available ? "read_create_ticket" : "read" }] } })
@@ -1956,4 +1988,381 @@ test("deleted artifact cards are neutral and expose no links or ticket actions",
   assert.equal(elementText(tree), "This artifact was deleted.")
   assert.equal(findElement(tree, "Button"), undefined)
   assert.equal(findElement(tree, "a"), undefined)
+})
+
+test("artifact kit helpers validate pins, preserve card labels and order warnings", () => {
+  const { kitTemplates, effectivePin, pinLabel, templateLabel, kitWarnings, designSystemLabel, templatePreviewExpired } = kitHelpers
+  assert.deepEqual(kitTemplates(), [])
+  for (const pin of ["", "auto", "missing", "one-pager"]) assert.equal(effectivePin(pin), "")
+  assert.equal(effectivePin("free"), "free")
+  assert.equal(effectivePin("one-pager", artifactKit), "one-pager")
+  assert.equal(effectivePin("missing", artifactKit), "")
+  assert.equal(pinLabel("one-pager", artifactKit), "One-pager")
+  assert.equal(pinLabel("free", artifactKit), "Free")
+  assert.equal(pinLabel("missing", artifactKit), "Auto")
+  assert.equal(templateLabel({}), "")
+  assert.equal(templateLabel({}, artifactKit), "No template")
+  assert.equal(templateLabel({ template: "removed" }, artifactKit), "removed")
+  assert.equal(templateLabel({ template: "one-pager", templateName: "Original name" }, artifactKit), "Original name")
+  assert.deepEqual(kitWarnings(), [])
+  assert.deepEqual(kitWarnings({ ...artifactKit, designSystem: { status: "invalid", error: "Unsafe URL." }, warnings: ["Skipped bad template."] }), ["Design system: Unsafe URL. Artifacts are built without it.", "Skipped bad template."])
+  for (const [status, label, dotClass] of [["ok", "Applied", "bg-green-500"], ["invalid", "Invalid", "bg-destructive"], ["absent", "Not set", "bg-muted-foreground"]]) {
+    assert.equal(designSystemLabel(status).label, label)
+    assert.equal(designSystemLabel(status).dotClass, dotClass)
+  }
+  assert.equal(templatePreviewExpired("/preview?exp=1"), true)
+  assert.equal(templatePreviewExpired(`/preview?exp=${Math.floor(Date.now() / 1000) + 900}`), false)
+})
+
+test("composer toolbar preserves Enter, Shift+Enter and IME behavior", () => {
+  const { ChatComposer } = loadComponent("components/ai-chat/composer.tsx", { "lucide-react": {} })
+  let sent = 0
+  const toolbar = { type: "template-toolbar", props: {} }
+  const tree = ChatComposer({ value: "Build a page", toolbar, onSend: () => sent++, streaming: false })
+  assert.equal(findElement(tree, "template-toolbar"), toolbar)
+  const field = findElement(tree, "textarea")
+  for (const [shiftKey, isComposing] of [[false, false], [true, false], [false, true]]) field.props.onKeyDown({ key: "Enter", shiftKey, nativeEvent: { isComposing }, preventDefault() {} })
+  assert.equal(sent, 1)
+})
+
+test("template chip is hidden without templates and opens with the effective pin", () => {
+  const hooks = createHooks()
+  const { TemplateChip } = loadComponent("components/ai-chat/template-chip.tsx", { ...artifactCardMocks, react: hooks.react })
+  let value = "one-pager"
+  const props = { workspace: "A", kit: artifactKit, onChange: (next) => { value = next } }
+  const render = (extra = {}) => hooks.render(() => TemplateChip({ ...props, value, ...extra }))
+  assert.equal(render({ kit: undefined }), null)
+  assert.equal(render({ kit: { ...artifactKit, templates: [] } }), null)
+  let tree = render()
+  assert.equal(findElement(tree, "Button").props["aria-label"], "Artifact template: One-pager")
+  assert.match(elementText(tree), /Template: One-pager/)
+  assert.ok(findElements(tree, "span").some((span) => span.props.className === "text-foreground" && elementText(span) === "One-pager"))
+  findElement(tree, "Button").props.onClick()
+  tree = render()
+  const picker = findElement(tree, "TemplatePicker")
+  assert.equal(picker.props.open, true)
+  assert.equal(picker.props.includeAuto, true)
+  picker.props.onSelect("free")
+  assert.equal(findElement(render(), "Button").props["aria-label"], "Artifact template: Free")
+  assert.equal(findElement(render({ disabled: true }), "Button").props.disabled, true)
+  assert.equal(findElement(render({ disabled: true }), "TemplatePicker").props.open, false)
+})
+
+function composerChip(fixture) {
+  return findElement(fixture.render(), "ChatComposer").props.toolbar
+}
+
+test("message pin survives creation, sends on turns and resets on new chat", async () => {
+  const attempts = []
+  const fixture = chatFixture({ api: {
+    createAIChatThread: async () => thread("created"),
+    fetchAIChatThread: async () => ({ thread: thread("created"), messages: [] }),
+    streamAIChatTurn: async (...args) => attempts.push(args),
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"], { artifactKit }))
+  await flush()
+  composerChip(fixture).props.onChange("one-pager")
+  findElement(fixture.render(), "ChatComposer").props.onChange("Build a page")
+  findElement(fixture.render(), "ChatComposer").props.onSend()
+  await flush()
+  assert.equal(attempts[0][8], "one-pager")
+  assert.equal(composerChip(fixture).props.value, "one-pager")
+  composerChip(fixture).props.onChange("")
+  findElement(fixture.render(), "ChatComposer").props.onSend()
+  await flush()
+  assert.equal(attempts[1][8], undefined)
+  composerChip(fixture).props.onChange("missing")
+  assert.equal(composerChip(fixture).props.value, "")
+  findElement(fixture.render(), "ChatComposer").props.onSend()
+  await flush()
+  assert.equal(attempts[2][8], undefined)
+  composerChip(fixture).props.onChange("free")
+  findElement(fixture.render(), "ChatHeader").props.onNewChat()
+  fixture.render()
+  fixture.requests.at(-1).resolve(sources("A", ["A"], { artifactKit }))
+  await flush()
+  assert.equal(composerChip(fixture).props.value, "")
+})
+
+test("pins reset on workspace or thread switches", async () => {
+  const fixture = chatFixture({ api: { fetchAIChatThread: async (id) => ({ thread: thread(id), messages: [] }) } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A", "B"], { artifactKit }))
+  await flush()
+  composerChip(fixture).props.onChange("free")
+  findElement(fixture.render(), "select").props.onChange({ target: { value: "B" } })
+  fixture.render()
+  fixture.requests[1].resolve(sources("B", ["A", "B"], { artifactKit }))
+  await flush()
+  assert.equal(composerChip(fixture).props.value, "")
+  composerChip(fixture).props.onChange("free")
+  fixture.navigate("other")
+  fixture.render()
+  await flush()
+  assert.equal(composerChip(fixture).props.value, "")
+})
+
+test("artifact actions merge the pin, explicit choices win and retries retain the merged action", async () => {
+  const actions = []
+  const fixture = chatFixture({ thread: "t", api: {
+    fetchAIChatThread: async () => ({ thread: thread("t"), messages: [] }),
+    streamAIChatAction: async (_id, action) => { actions.push(action); throw new ApiError("Too many turns", 429) },
+  } })
+  fixture.render()
+  fixture.requests[0].resolve(sources("A", ["A"], { artifactKit, actions: ["artifact", "ticket"] }))
+  await flush()
+  composerChip(fixture).props.onChange("one-pager")
+  const action = { kind: "artifact", title: "Proposal" }
+  findElement(fixture.render(), "MessageList").props.onArtifact(action)
+  await flush()
+  assert.deepEqual(actions[0], { ...action, template: "one-pager" })
+  composerChip(fixture).props.onChange("status-report")
+  const alert = findElement(fixture.render(), "section").props.children.find((child) => child?.props?.role === "alert")
+  alert.props.children[1].props.onClick()
+  await flush()
+  assert.deepEqual(actions[1], actions[0])
+  findElement(fixture.render(), "MessageList").props.onChangeTemplate("artifact-id", "Proposal", "free")
+  await flush()
+  assert.deepEqual(actions[2], { kind: "artifact", artifactId: "artifact-id", title: "Proposal", template: "free" })
+  findElement(fixture.render(), "MessageList").props.onArtifact({ ...action, template: "" })
+  await flush()
+  assert.equal(actions[3].template, "")
+  findElement(fixture.render(), "MessageList").props.onTicket({ kind: "ticket" })
+  await flush()
+  assert.equal(actions[4].kind, "ticket")
+  assert.equal(Object.hasOwn(actions[4], "template"), false)
+})
+
+test("artifact cards show template metadata and notices and revise only a changed selection", () => {
+  const hooks = createHooks()
+  const { ArtifactActionCard } = loadComponent("components/ai-chat/artifact-card.tsx", { ...artifactCardMocks, react: hooks.react })
+  const card = { title: "Proposal", artifactId: "a", slug: "proposal-abcdef", template: "one-pager", templateName: "One-pager", version: 2, notices: ["The design system is invalid."] }
+  const changes = []
+  const props = { block: { kind: "artifact", state: "created", card }, workspace: "A", kit: artifactKit, onChangeTemplate: (...args) => changes.push(args) }
+  const render = (extra = {}) => hooks.render(() => ArtifactActionCard({ ...props, ...extra }))
+  let tree = render()
+  assert.match(elementText(tree), /One-pager/)
+  assert.match(elementText(tree), /The design system is invalid\./)
+  findElements(tree, "Button").find((button) => elementText(button) === "Change template").props.onClick()
+  tree = render()
+  const picker = findElement(tree, "TemplatePicker")
+  assert.equal(picker.props.open, true)
+  assert.equal(picker.props.includeAuto, false)
+  assert.equal(picker.props.value, "one-pager")
+  picker.props.onSelect("one-pager")
+  assert.deepEqual(changes, [])
+  picker.props.onSelect("free")
+  assert.deepEqual(changes, [["a", "Proposal", "free"]])
+  // An older card compares against the latest version, which the change revises.
+  changes.length = 0
+  render({ currentTemplate: "status-report" })
+  tree = render({ currentTemplate: "status-report" })
+  assert.equal(findElement(tree, "TemplatePicker").props.value, "status-report")
+  findElement(tree, "TemplatePicker").props.onSelect("one-pager")
+  assert.deepEqual(changes, [["a", "Proposal", "one-pager"]])
+  for (const extra of [{ onChangeTemplate: undefined }, { kit: undefined }, { kit: { ...artifactKit, templates: [] } }, { block: { ...props.block, card: { ...card, artifactId: undefined } } }]) assert.doesNotMatch(elementText(render(extra)), /Change template/)
+  assert.match(elementText(render({ block: { ...props.block, state: "working" } })), /One-pager template/)
+  let retry
+  tree = render({ block: { ...props.block, state: "failed" }, onRetry: (action) => { retry = action } })
+  assert.match(elementText(tree), /The design system is invalid\./)
+  findElement(tree, "Button").props.onClick()
+  assert.equal(retry.template, "one-pager")
+})
+
+test("every created artifact can change template unless streaming or archived", () => {
+  const hooks = createHooks()
+  const { MessageList } = loadComponent("components/ai-chat/message-list.tsx", {
+    react: hooks.react, "react-markdown": {}, "remark-gfm": {}, "lucide-react": {},
+    "./blocks": blockHelpers, "./artifact-card": { ArtifactActionCard: "ArtifactActionCard" },
+  })
+  const messages = ["a", "b"].map((id) => ({ id, role: "assistant", content: "", createdAt: 0, status: "completed", blocks: [{ id, at: 0, type: "action", kind: "artifact", state: "created", card: { title: id, artifactId: id } }] }))
+  const onChangeTemplate = () => {}
+  const render = (extra = {}) => hooks.render(() => MessageList({ messages, reading: "", workspace: "A", artifactKit, onChangeTemplate, ...extra }))
+  for (const card of findElements(render(), "ArtifactActionCard")) {
+    assert.equal(card.props.onChangeTemplate, onChangeTemplate)
+    assert.equal(card.props.kit, artifactKit)
+    assert.equal(card.props.workspace, "A")
+  }
+  for (const extra of [{ streaming: true }, { interviewDisabled: true }]) for (const card of findElements(render(extra), "ArtifactActionCard")) assert.equal(card.props.onChangeTemplate, undefined)
+  const versions = [["v1", "one-pager"], ["v2", "status-report"], ["v3", undefined]].map(([id, template], index) => ({ id, role: "assistant", content: "", createdAt: 0, status: "completed", blocks: [{ id, at: 0, type: "action", kind: "artifact", state: index === 2 ? "failed" : "created", card: { title: "Same", artifactId: "a", template } }] }))
+  for (const card of findElements(hooks.render(() => MessageList({ messages: versions, reading: "", workspace: "A", artifactKit, onChangeTemplate })), "ArtifactActionCard")) assert.equal(card.props.currentTemplate, "status-report")
+})
+
+test("sources popover lists artifact status and warnings without changing the source count", () => {
+  const { ChatHeader } = loadComponent("components/ai-chat/header.tsx", {
+    "lucide-react": {}, "@/components/ui/button": { Button: "Button" }, "./mode-cards": { chatModes: [] }, "./sources": sourceHelpers, "./artifact-kit": kitHelpers,
+  })
+  const render = (kit) => ChatHeader({ mode: null, data: sources("A", ["A"], { sources: [source("posthog")], artifactKit: kit }) })
+  for (const kit of [undefined, { designSystem: { status: "absent" }, templates: [], warnings: [] }]) assert.doesNotMatch(elementText(render(kit)), /Artifacts/)
+  assert.match(elementText(render(artifactKit)), /ArtifactsDesign systemApplied to every artifact\.AppliedTemplates2 templates: One-pager, Status report2 available/)
+  const tree = render({ ...artifactKit, designSystem: { status: "invalid", error: "Bad CSS." }, warnings: ["Skipped invalid template."] })
+  assert.match(elementText(tree), /Design system: Bad CSS\. Artifacts are built without it\./)
+  assert.match(elementText(tree), /Skipped invalid template\./)
+  const summary = findElement(tree, "Button")
+  assert.equal(summary.props["aria-label"], "1 sources · read-only")
+  assert.match(findElement(summary, "span").props.className, /bg-amber-500/)
+  assert.equal(sourceHelpers.sourceSummary([], false, true).dotClass, "bg-amber-500")
+})
+
+test("artifact kit fetch encodes workspace, carries auth and forwards cancellation", async () => {
+  const { fetchAIChatArtifactKit } = loadComponent("lib/api.ts", {
+    "./hub-url": { getHubUrl: () => "https://hub.test" }, "./auth-storage": { getAuthToken: () => "test-token" },
+  })
+  const previous = global.fetch
+  let request
+  global.fetch = async (url, options) => { request = { url, options }; return { ok: true, status: 200, json: async () => artifactKit } }
+  try {
+    const controller = new AbortController()
+    assert.deepEqual(await fetchAIChatArtifactKit("A & B", controller.signal), artifactKit)
+    assert.equal(request.url, "https://hub.test/api/ai-chat/artifact-kit?workspace=A+%26+B")
+    assert.equal(request.options.signal, controller.signal)
+    assert.equal(request.options.headers.Authorization, "Bearer test-token")
+  } finally { global.fetch = previous }
+})
+
+test("message request includes artifactTemplate only when set for plain, answers and retry variants", async () => {
+  const { streamAIChatTurn } = loadComponent("lib/api.ts", {
+    "./hub-url": { getHubUrl: () => "" }, "./auth-storage": { getAuthToken: () => "test-token" }, "./ai-chat-stream": { readAIChatEvents },
+  })
+  const previous = global.fetch
+  let request
+  global.fetch = async (url, options) => { request = { url, options }; return { ok: true, status: 200, body: byteStream('event: done\ndata: {"status":"completed"}\n\n') } }
+  try {
+    for (const pin of [undefined, "", "free", "one-pager"]) for (const variant of ["plain", "answers", "retry"]) {
+      const answers = variant === "answers" ? answersFixture() : undefined
+      const retryOf = variant === "retry" ? "failed-id" : undefined
+      await streamAIChatTurn("t", "Build", !!retryOf, new AbortController().signal, () => {}, answers, undefined, retryOf, pin)
+      const expected = answers ? { answers } : retryOf ? { text: "Build", retry: true, retryOf } : { text: "Build", retry: false }
+      assert.deepEqual(JSON.parse(request.options.body), { ...expected, ...(pin ? { artifactTemplate: pin } : {}) })
+    }
+  } finally { global.fetch = previous }
+})
+
+function pickerFixture(fetchKit) {
+  const hooks = createHooks()
+  const { TemplatePicker, TemplateThumbnail } = loadComponent("components/ai-chat/template-picker.tsx", {
+    react: hooks.react, "lucide-react": { Loader2: "Loader2", Check: "Check", Sparkles: "Sparkles", FileCode2: "FileCode2" },
+    "@/components/ui/dialog": Object.fromEntries(["Dialog", "DialogContent", "DialogHeader", "DialogTitle", "DialogDescription"].map((name) => [name, name])),
+    "@/lib/api": { fetchAIChatArtifactKit: fetchKit }, "@/lib/hub-url": { getHubUrl: () => "https://hub.test" }, "./artifact-kit": kitHelpers,
+  })
+  const selected = [], opened = []
+  const props = { open: true, onOpenChange: (value) => opened.push(value), workspace: "A", kit: artifactKit, value: "one-pager", includeAuto: true, title: "Artifact template", description: "Choose a template.", onSelect: (value) => selected.push(value) }
+  const dialog = TemplatePicker(props)
+  const options = findAll(dialog, (node) => typeof node.type === "function")[0]
+  return { hooks, TemplatePicker, TemplateThumbnail, props, selected, opened, dialog, render: (extra = {}) => hooks.render(() => options.type({ ...options.props, ...extra })) }
+}
+
+test("picker loads signed previews without blocking selection and refreshes on each opening", async () => {
+  const requests = []
+  const fixture = pickerFixture((workspace, signal) => new Promise((resolve) => requests.push({ workspace, signal, resolve })))
+  let tree = fixture.render()
+  assert.equal(tree.props.role, "radiogroup")
+  assert.equal(tree.props["aria-label"], "Artifact template")
+  assert.equal(findElements(tree, "Loader2").length, 2)
+  const radios = findElements(tree, "button")
+  assert.deepEqual(radios.map((radio) => radio.props["aria-checked"]), [false, false, true, false])
+  assert.deepEqual(radios.map((radio) => radio.props.tabIndex), [-1, -1, 0, -1])
+  assert.equal(requests[0].workspace, "A")
+  const previewUrl = `/artifact-templates/one-pager/preview?exp=${Math.floor(Date.now() / 1000) + 900}`
+  requests[0].resolve({ ...artifactKit, templates: [{ ...artifactKit.templates[0], previewUrl }, artifactKit.templates[1], { id: "new", name: "New", description: "Added after sources loaded." }] })
+  await flush()
+  tree = fixture.render()
+  assert.equal(findElements(tree, "Loader2").length, 0)
+  assert.equal(findElements(tree, fixture.TemplateThumbnail).length, 1)
+  assert.equal(findElement(tree, fixture.TemplateThumbnail).props.src, previewUrl)
+  // Only the sources catalog is selectable, so the conversation can validate every pin.
+  assert.equal(findElements(tree, "button").length, 4)
+  findElements(tree, "button")[2].props.onClick()
+  assert.deepEqual(fixture.selected, ["one-pager"])
+  assert.deepEqual(fixture.opened, [false])
+  const closed = fixture.TemplatePicker({ ...fixture.props, open: false })
+  assert.equal(findAll(closed, (node) => typeof node.type === "function").length, 0)
+  // A reopened options component mounts with a fresh state and fetches again.
+  const reopened = pickerFixture((workspace, signal) => { requests.push({ workspace, signal }); return Promise.resolve(artifactKit) })
+  reopened.render()
+  assert.equal(requests.length, 2)
+  assert.equal(findElements(reopened.render({ includeAuto: false }), "button").length, 3)
+})
+
+test("picker ignores aborted results, tolerates unavailable previews and supports radio keys", async () => {
+  const requests = []
+  const fixture = pickerFixture((_workspace, signal) => new Promise((resolve, reject) => requests.push({ signal, resolve, reject })))
+  fixture.render()
+  fixture.hooks.restartEffects()
+  assert.equal(requests[0].signal.aborted, true)
+  requests[0].resolve({ ...artifactKit, templates: [{ ...artifactKit.templates[0], previewUrl: "/old?exp=99999999999" }] })
+  requests[1].reject(new Error("Offline"))
+  await flush()
+  let tree = fixture.render()
+  assert.equal(findElements(tree, "Loader2").length, 0)
+  assert.equal(findElements(tree, fixture.TemplateThumbnail).length, 0)
+  const radios = findElements(tree, "button")
+  const focused = []
+  const buttons = radios.map((radio, index) => ({ focus: () => focused.push(index), click: () => radio.props.onClick() }))
+  let prevented = false
+  tree.props.onKeyDown({ key: "ArrowRight", target: buttons[2], currentTarget: { querySelectorAll: () => buttons }, preventDefault: () => { prevented = true } })
+  assert.equal(prevented, true)
+  assert.deepEqual(focused, [3])
+  assert.deepEqual(fixture.selected, [])
+  // Arrow keys move focus only; the announced selection stays the committed value.
+  const afterArrow = findElements(fixture.render(), "button")
+  const focusedRadio = afterArrow[3]
+  assert.equal(focusedRadio.props["aria-checked"], false)
+  assert.equal(focusedRadio.props.tabIndex, 0)
+  assert.equal(afterArrow.filter((radio) => radio.props["aria-checked"]).length, 1)
+  focusedRadio.props.onClick()
+  assert.deepEqual(fixture.selected, ["status-report"])
+  assert.deepEqual(fixture.opened, [false])
+  // Closing via Escape/overlay does not choose a template.
+  fixture.dialog.props.onOpenChange(false)
+  assert.deepEqual(fixture.selected, ["status-report"])
+  tree = fixture.render({ kit: { ...artifactKit, templates: [] }, includeAuto: false })
+  assert.equal(findElements(tree, "button")[0].props.tabIndex, 0)
+})
+
+test("expired previews use a fallback tile and are refreshed after reopening", async () => {
+  for (const previewUrl of [undefined, "/preview?exp=1"]) {
+    const fixture = pickerFixture(async () => ({ ...artifactKit, templates: [{ ...artifactKit.templates[0], previewUrl }] }))
+    fixture.render()
+    await flush()
+    const tree = fixture.render()
+    assert.equal(findElements(tree, fixture.TemplateThumbnail).length, 0)
+    assert.equal(findElements(tree, "Loader2").length, 0)
+    findElements(tree, "button")[2].props.onClick()
+    assert.deepEqual(fixture.selected, ["one-pager"])
+  }
+})
+
+test("template thumbnail isolates HTML, scales with its wrapper and disconnects the observer", () => {
+  const hooks = createHooks()
+  let resize, observed, disconnected = 0
+  const previous = global.ResizeObserver
+  global.ResizeObserver = class {
+    constructor(callback) { resize = callback }
+    observe(node) { observed = node }
+    disconnect() { disconnected++ }
+  }
+  try {
+    const { TemplateThumbnail } = loadComponent("components/ai-chat/template-picker.tsx", { react: hooks.react, "lucide-react": {}, "@/lib/hub-url": { getHubUrl: () => "https://hub.test" } })
+    const render = () => hooks.render(() => {
+      const tree = TemplateThumbnail({ src: "/preview?sig=s", title: "One-pager" })
+      tree.props.ref.current = "wrapper"
+      return tree
+    })
+    let frame = findElement(render(), "iframe")
+    assert.equal(frame.props.src, "https://hub.test/preview?sig=s")
+    assert.equal(frame.props.sandbox, "allow-scripts")
+    assert.equal(frame.props.referrerPolicy, "no-referrer")
+    assert.equal(frame.props.loading, "lazy")
+    assert.equal(frame.props.tabIndex, -1)
+    assert.equal(frame.props["aria-hidden"], "true")
+    assert.equal(frame.props.style.transform, "scale(0.25)")
+    assert.equal(observed, "wrapper")
+    resize([{ contentRect: { width: 256 } }])
+    frame = findElement(render(), "iframe")
+    assert.equal(frame.props.style.transform, "scale(0.2)")
+    hooks.restartEffects()
+    assert.equal(disconnected, 1)
+  } finally { global.ResizeObserver = previous }
 })

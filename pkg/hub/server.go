@@ -871,6 +871,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/me", s.withWebAuth(s.handleWebMe))
 	mux.Handle("/api/ai-chat/", aichat.Routes(s.aiChatDeps()))
 	mux.Handle("GET /artifacts/{slug}/raw", aichat.RawArtifactRoutes(s.aiChatDeps()))
+	mux.Handle("GET /artifact-templates/{id}/preview", aichat.RawArtifactRoutes(s.aiChatDeps()))
 	mux.HandleFunc("/api/auth/config", s.handleAuthConfig)               // public — no auth required
 	mux.HandleFunc("/api/auth/github/client-id", s.handleGitHubClientID) // public
 	mux.HandleFunc("/api/auth/github/exchange", s.handleGitHubOAuthExchange)

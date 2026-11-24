@@ -62,6 +62,12 @@ func (a *api) getArtifact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Artifact signing is unavailable.", 503)
 		return
 	}
+	if v.TemplateID != "" {
+		v.TemplateName = v.TemplateID
+		if tpl, ok := a.runner.kit(v.Workspace).Template(v.TemplateID); ok {
+			v.TemplateName = tpl.Name
+		}
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	jsonResponse(w, 200, struct {
 		Artifact
@@ -78,6 +84,7 @@ func RawArtifactRoutes(deps Deps) http.Handler {
 	a := &api{deps: deps, store: &Store{DB: deps.DB}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /artifacts/{slug}/raw", a.rawArtifact)
+	mux.HandleFunc("GET /artifact-templates/{id}/preview", a.templatePreview)
 	return mux
 }
 func (a *api) rawArtifact(w http.ResponseWriter, r *http.Request) {
@@ -120,13 +127,7 @@ func (a *api) rawArtifact(w http.ResponseWriter, r *http.Request) {
 	if download == "1" {
 		disposition = "attachment"
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", artifactCSP)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s-v%d.html"`, disposition, slug, version))
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Write(body)
+	writeArtifactHTML(w, body, disposition, fmt.Sprintf("%s-v%d.html", slug, version))
 }
 
 // ArtifactStaticPath maps only public factory page shapes to the static export.
@@ -175,6 +176,11 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid action", 400)
 			return
 		}
+	}
+	body.Template = normalizeTemplateRef(body.Template)
+	if body.Kind == "ticket" && body.Template != "" {
+		http.Error(w, "invalid action", 400)
+		return
 	}
 	if body.Kind == "ticket" && body.ActionKey != "" && !ticketActionKey.MatchString(body.ActionKey) {
 		http.Error(w, "invalid actionKey", 400)
@@ -313,4 +319,76 @@ func (s *Store) beginAction(ctx context.Context, t Thread, model, artifactID, ki
 		return Message{}, err
 	}
 	return m, tx.Commit()
+}
+
+func writeArtifactHTML(w http.ResponseWriter, body []byte, disposition, filename string) {
+	for _, header := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods"} {
+		w.Header().Del(header)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", artifactCSP)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, filename))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(body)
+}
+
+func templatePreviewSignature(secret, tenant, workspace, id string, exp int64) string {
+	key := hmac.New(sha256.New, []byte(secret))
+	key.Write([]byte("ai-chat-template-preview-v1"))
+	mac := hmac.New(sha256.New, key.Sum(nil))
+	fmt.Fprintf(mac, "%s|%s|%s|%d", tenant, workspace, id, exp)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+func (a *api) signedTemplatePreviewURL(tenant, workspace, id string) string {
+	if a.deps.ArtifactKey == nil || a.deps.ArtifactKey() == "" {
+		return ""
+	}
+	exp := time.Now().Add(artifactURLLifetime).Unix()
+	q := url.Values{"tenant": {tenant}, "workspace": {workspace}, "exp": {strconv.FormatInt(exp, 10)}}
+	q.Set("sig", templatePreviewSignature(a.deps.ArtifactKey(), tenant, workspace, id, exp))
+	return "/artifact-templates/" + id + "/preview?" + q.Encode()
+}
+func (a *api) artifactKit(w http.ResponseWriter, r *http.Request) {
+	workspace := r.URL.Query().Get("workspace")
+	if _, err := a.loadConfig(workspace); err != nil {
+		http.Error(w, "Not configured for this workspace", 404)
+		return
+	}
+	info := a.deps.artifactKit(workspace).Info()
+	tenant, _ := a.identity(r)
+	for i := range info.Templates {
+		info.Templates[i].PreviewURL = a.signedTemplatePreviewURL(tenant, workspace, info.Templates[i].ID)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jsonResponse(w, 200, info)
+}
+func (a *api) templatePreview(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	id, tenant, workspace := r.PathValue("id"), q.Get("tenant"), q.Get("workspace")
+	exp, e1 := strconv.ParseInt(q.Get("exp"), 10, 64)
+	signature, e2 := hex.DecodeString(q.Get("sig"))
+	now := time.Now()
+	if e1 != nil || e2 != nil || !templateIDPattern.MatchString(id) || !artifactComponent.MatchString(tenant) || exp <= now.Unix() || exp > now.Add(artifactURLLifetime).Unix() || a.deps.ArtifactKey == nil || a.deps.ArtifactKey() == "" || a.deps.FeatureStage == nil {
+		http.NotFound(w, r)
+		return
+	}
+	want, _ := hex.DecodeString(templatePreviewSignature(a.deps.ArtifactKey(), tenant, workspace, id, exp))
+	if !hmac.Equal(signature, want) {
+		http.NotFound(w, r)
+		return
+	}
+	stage := a.deps.FeatureStage(r.Context(), "ai-chat")
+	if stage != "on" && stage != "beta" {
+		http.NotFound(w, r)
+		return
+	}
+	kit := a.deps.artifactKit(workspace)
+	tpl, ok := kit.Template(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeArtifactHTML(w, []byte(injectDesignSystem(tpl.HTML, kit.DesignSystem)), "inline", id+".html")
 }

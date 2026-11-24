@@ -619,7 +619,27 @@ export interface AIChatSource {
   access?: "read" | "read_create_ticket"
 }
 
+export interface AIChatTemplate {
+  id: string
+  name: string
+  description: string
+  when?: string
+  previewUrl?: string
+}
+export type AIChatDesignSystemStatus = "ok" | "invalid" | "absent"
+export interface AIChatArtifactKit {
+  designSystem: { status: AIChatDesignSystemStatus; error?: string }
+  templates: AIChatTemplate[]
+  warnings: string[]
+}
+
+export function fetchAIChatArtifactKit(workspace: string, signal?: AbortSignal): Promise<AIChatArtifactKit> {
+  const query = new URLSearchParams({ workspace })
+  return apiFetch(`/api/ai-chat/artifact-kit?${query}`, { signal })
+}
+
 export interface AIChatSources {
+  artifactKit?: AIChatArtifactKit
   actions?: AIChatAction[]
   ticket?: AIChatTicketTarget
   configured: boolean
@@ -681,8 +701,11 @@ export interface AIChatTicketCard extends AIChatTicketTarget {
   artifactDeleted?: boolean
   error?: string
 }
-export interface AIChatArtifactRequest { kind: "artifact"; artifactId?: string; title?: string; brief?: string }
+export interface AIChatArtifactRequest { kind: "artifact"; artifactId?: string; title?: string; brief?: string; template?: string }
 export interface AIChatArtifactCard {
+  template?: string
+  templateName?: string
+  notices?: string[]
   deleted?: boolean
   artifactId?: string
   title: string
@@ -695,6 +718,8 @@ export interface AIChatArtifactCard {
   shareUrl?: string
 }
 export interface AIChatArtifact {
+  template?: string
+  templateName?: string
   slug: string
   title: string
   ownerLogin: string
@@ -775,12 +800,12 @@ function turnQuery(turnKey?: string) {
 export function cancelAIChatTurn(id: string, turnKey?: string): Promise<void> {
   return apiFetch(`/api/ai-chat/threads/${encodeURIComponent(id)}/cancel${turnQuery(turnKey)}`, { method: "POST" })
 }
-export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, answers?: AIChatAnswers, turnKey?: string, retryOf?: string): Promise<void> {
+export async function streamAIChatTurn(id: string, text: string, retry: boolean, signal: AbortSignal, onEvent: (event: string, data: Record<string, unknown>) => void, answers?: AIChatAnswers, turnKey?: string, retryOf?: string, artifactTemplate?: string): Promise<void> {
   const token = await resolveToken()
   const response = await fetch(`${getHubUrl()}/api/ai-chat/threads/${encodeURIComponent(id)}/messages${turnQuery(turnKey)}`, {
     method: "POST", signal,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(answers ? { answers } : retryOf ? { text, retry, retryOf } : { text, retry }),
+    body: JSON.stringify({ ...(answers ? { answers } : retryOf ? { text, retry, retryOf } : { text, retry }), ...(artifactTemplate ? { artifactTemplate } : {}) }),
   })
   if (response.status === 401) return handleSessionExpired<void>()
   if (!response.ok) throw new ApiError((await response.text()).trim() || "Unable to send message.", response.status)

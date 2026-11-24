@@ -1,9 +1,11 @@
 "use client"
 
+import type { ReactNode } from "react"
 import { ArrowUp, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
-export function ChatComposer({ value, onChange, onSend, onCancel, streaming, disabled, placeholder = "Ask anything..." }: {
+export function ChatComposer({ value, onChange, onSend, onCancel, streaming, disabled, toolbar, placeholder = "Ask anything..." }: {
+  toolbar?: ReactNode
   placeholder?: string
   value: string
   onChange: (value: string) => void
@@ -21,10 +23,13 @@ export function ChatComposer({ value, onChange, onSend, onCancel, streaming, dis
             if (value.trim() && !disabled && !streaming) onSend()
           }
         }} className="min-h-24 w-full resize-none bg-transparent text-sm outline-none disabled:opacity-60" />
-      <div className="flex items-center justify-end gap-3">
-        <span className="text-xs text-muted-foreground">Enter to send · Shift+Enter for a new line</span>
-        {streaming ? <Button size="icon" variant="outline" onClick={onCancel} className="size-8 rounded-full" aria-label="Cancel response"><Square className="size-3" /></Button> :
-          <Button disabled={disabled || !value.trim()} onClick={onSend} size="icon" className="size-8 rounded-full" aria-label="Send message"><ArrowUp className="size-4" /></Button>}
+      <div className="flex items-center gap-3">
+        {toolbar}
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-xs text-muted-foreground">Enter to send · Shift+Enter for a new line</span>
+          {streaming ? <Button size="icon" variant="outline" onClick={onCancel} className="size-8 rounded-full" aria-label="Cancel response"><Square className="size-3" /></Button> :
+            <Button disabled={disabled || !value.trim()} onClick={onSend} size="icon" className="size-8 rounded-full" aria-label="Send message"><ArrowUp className="size-4" /></Button>}
+        </div>
       </div>
     </div>
   )

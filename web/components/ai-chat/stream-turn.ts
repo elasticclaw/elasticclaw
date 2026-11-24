@@ -2,6 +2,7 @@ import type { AIChatMessage, AIChatAnswers, AIChatAnswersSummary, AIChatIntervie
 
 // Progress of one streamed turn, updated in place as SSE events arrive.
 export type StreamTurn = {
+  artifactTemplate?: string
   action?: AIChatActionRequest
   answers?: AIChatAnswers
   answersSummary?: AIChatAnswersSummary

@@ -1,9 +1,10 @@
 "use client"
 
-import { Activity, BarChart3, Book, ChevronDown, Database, GitBranch, Plus, RefreshCw, Ticket, TriangleAlert } from "lucide-react"
+import { Activity, BarChart3, Book, ChevronDown, Database, GitBranch, LayoutTemplate, Palette, Plus, RefreshCw, Ticket, TriangleAlert } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import type { AIChatSource, AIChatSources } from "@/lib/api"
+import type { AIChatArtifactKit, AIChatSource, AIChatSources } from "@/lib/api"
+import { designSystemLabel, kitTemplates, kitWarnings } from "./artifact-kit"
 import { HistoryPopover } from "./history-popover"
 import { chatModes, type ChatMode } from "./mode-cards"
 import { groupSources, repositoryNames, sourceMessage, sourceStatus, sourceSummary } from "./sources"
@@ -18,7 +19,7 @@ export function ChatHeader({ threadId, mode, title, data, loading = !data, onNew
   onRefreshSources: () => void
 }) {
   const sources = data?.sources ?? []
-  const summary = sourceSummary(sources, loading)
+  const summary = sourceSummary(sources, loading, kitWarnings(data?.artifactKit).length > 0)
   const modeName = chatModes.find((item) => item.id === mode)?.name
   // py-2.5 around h-8 controls matches the sidebar and board headers so the hairlines line up.
   return (
@@ -47,6 +48,7 @@ export function ChatHeader({ threadId, mode, title, data, loading = !data, onNew
                 <div className="space-y-5">{group.sources.map((source, index) => renderSource(source, index))}</div>
               </section>
             ))}
+            {renderArtifactKit(data?.artifactKit)}
             <div className="-mx-3 mt-5 flex items-center gap-2 border-t px-3 pt-3">
               <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-muted-foreground">Set in the workspace configuration, the same for everyone in this workspace.</p>
               <Button variant="ghost" size="icon" className="size-6 shrink-0 text-muted-foreground" aria-label="Refresh sources" title="Refresh sources" disabled={loading} onClick={onRefreshSources}>
@@ -87,4 +89,27 @@ function renderSource(source: AIChatSource, index: number) {
       </span>
     </div>
   )
+}
+
+function renderArtifactKit(kit?: AIChatArtifactKit) {
+  if (!kit) return null
+  const templates = kitTemplates(kit)
+  const warnings = kitWarnings(kit)
+  if (kit.designSystem.status === "absent" && !templates.length && !warnings.length) return null
+  const status = designSystemLabel(kit.designSystem.status)
+  const rows = [
+    { name: "Design system", Icon: Palette, detail: kit.designSystem.status === "ok" ? "Applied to every artifact." : "Artifacts are built without it.", status },
+    { name: "Templates", Icon: LayoutTemplate, detail: templates.length ? `${templates.length} templates: ${templates.map((template) => template.name).join(", ")}` : "No templates configured.", status: { ...sourceStatus(templates.length ? "connected" : "unknown"), label: `${templates.length} available` } },
+  ]
+  return <section className="mt-5">
+    <h3 className="mb-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Artifacts</h3>
+    <div className="space-y-5">{rows.map(({ name, Icon, detail, status }) => <div key={name} className="flex items-start gap-2.5">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-muted"><Icon className="size-3.5" aria-hidden="true" /></span>
+      <div className="min-w-0 flex-1"><span className="text-[13px] font-semibold">{name}</span><p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">{detail}</p></div>
+      <span className={`mt-0.5 flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] ${status.textClass}`}>
+        {status.warning ? <TriangleAlert className="size-3" aria-hidden="true" /> : <span className={`size-1.5 rounded-full ${status.dotClass}`} aria-hidden="true" />}{status.label}
+      </span>
+    </div>)}</div>
+    {warnings.map((warning, index) => <p key={index} className="mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-amber-600 dark:text-amber-500"><TriangleAlert className="mt-0.5 size-3 shrink-0" />{warning}</p>)}
+  </section>
 }

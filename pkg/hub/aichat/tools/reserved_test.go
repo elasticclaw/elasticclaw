@@ -181,3 +181,40 @@ func TestReservedTicketValidation(t *testing.T) {
 		t.Fatal("ticket must not enter the read registry")
 	}
 }
+
+func TestArtifactTemplateDefinitions(t *testing.T) {
+	definitions := ReservedDefinitions(TemplateOption{ID: "one-pager", Name: "One-pager", When: "Use for proposals"}, TemplateOption{ID: "status-report", Name: "Status report"})
+	for _, definition := range definitions {
+		if definition.Name != StartArtifact {
+			continue
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Enum        []string `json:"enum"`
+				Description string   `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(definition.InputSchema, &schema); err != nil {
+			t.Fatal(err)
+		}
+		field := schema.Properties["template"]
+		if strings.Join(field.Enum, ",") != "one-pager,status-report,free" || !strings.Contains(field.Description, "one-pager (One-pager): Use for proposals; status-report (Status report).") {
+			t.Fatal(field)
+		}
+	}
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{{"one-pager", true}, {"free", true}, {"auto", true}, {strings.Repeat("a", 41), false}} {
+		raw, _ := json.Marshal(ArtifactRequest{Title: "Title", Brief: "Brief", Template: tc.value})
+		got, err := ParseArtifact(raw)
+		if (err == nil) != tc.valid || err == nil && got.Template != tc.value {
+			t.Fatal(got, err)
+		}
+	}
+	for _, definition := range ReservedDefinitions() {
+		if definition.Name == StartArtifact && strings.Contains(string(definition.InputSchema), `"template"`) {
+			t.Fatal("changed default schema")
+		}
+	}
+}

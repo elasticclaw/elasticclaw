@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Workspace design system</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;display=swap">
+<style data-ds>
+:root { --ds-ink: #19352d; --ds-paper: #f4f7f1; --ds-accent: #176b52; --ds-line: #cbd7cc; }
+.ds-page { font: 16px/1.5 Inter, sans-serif; color: var(--ds-ink); background: var(--ds-paper); padding: 2rem; }
+.ds-card { background: white; border: 1px solid var(--ds-line); border-radius: 12px; padding: 1.5rem; }
+.ds-btn { display: inline-block; background: var(--ds-accent); color: white; border: 0; border-radius: 8px; padding: .6rem 1rem; }
+.ds-stat { font-size: 2rem; font-weight: 600; }
+.ds-badge { border-radius: 20px; background: #dbf3e8; padding: .2rem .6rem; }
+.ds-table { width: 100%; border-collapse: collapse; }
+.ds-table td, .ds-table th { text-align: left; border-bottom: 1px solid var(--ds-line); padding: .6rem; }
+</style>
+<style>.docs-chrome { max-width: 900px; margin: auto; } .docs-chrome > section { margin: 2rem 0; }</style>
+</head><body class="ds-page docs-chrome"><h1>Workspace components</h1>
+<section class="ds-card" data-ds-component="card" data-ds-usage="Use for grouped content."><h2>Card title</h2><p>A short explanation.</p></section>
+<button class="ds-btn" data-ds-component="button" data-ds-usage="Use for the primary local interaction.">Show details</button>
+<section data-ds-component="stat" data-ds-usage="Show a sourced key number with its label."><strong class="ds-stat">42</strong><p>Active projects</p></section>
+<span class="ds-badge" data-ds-component="badge" data-ds-usage="Use for a short status label.">On track</span>
+<table class="ds-table" data-ds-component="table" data-ds-usage="Compare structured facts."><thead><tr><th>Project</th><th>Status</th></tr></thead><tbody><tr><td>Sample</td><td>Ready</td></tr></tbody></table>
+</body></html>

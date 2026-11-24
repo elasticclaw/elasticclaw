@@ -150,7 +150,11 @@ func historyContent(m Message) string {
 						continue
 					}
 					if b.State == "created" {
-						parts = append(parts, fmt.Sprintf("[Artifact %s v%d created: /artifacts/%s; artifactId: %s]", card.Title, card.Version, card.Slug, card.ArtifactID))
+						suffix := ""
+						if ref := historyTemplateRef(card.Template); ref != "" {
+							suffix = "; template: " + ref
+						}
+						parts = append(parts, fmt.Sprintf("[Artifact %s v%d created: /artifacts/%s; artifactId: %s%s]", card.Title, card.Version, card.Slug, card.ArtifactID, suffix))
 					} else if b.State == "failed" {
 						parts = append(parts, "[Artifact failed: "+card.Error+"]")
 					}
