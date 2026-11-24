@@ -406,6 +406,9 @@ type clawConn struct {
 	turnBoundarySeen       bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
 	subagentsActiveAt      time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
 	subagentActiveCount    int             // subagent sessions with a run in flight per that heartbeat
+	subagentsActiveSince   time.Time       // first report of the current unbroken run of active-subagent heartbeats (zero = none running; see agentIdleResumeSubagentCeiling)
+	subagentsLastSeenAt    time.Time       // last heartbeat that reported active subagents; unlike subagentsActiveAt it survives a zero report, so the idle clock restarts when spawned work ends
+	subagentsEndedAt       time.Time       // when a heartbeat explicitly reported zero active subagents after some were seen; only this, not a stale report, proves they finished
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -529,11 +532,24 @@ func (cc *clawConn) applySubagentHeartbeatLocked(active *bool, count *int) {
 		return
 	}
 	if !*active {
+		if cc.subagentsActiveAt.After(cc.subagentsLastSeenAt) {
+			cc.subagentsLastSeenAt = cc.subagentsActiveAt
+		}
+		if !cc.subagentsLastSeenAt.IsZero() && !cc.subagentsEndedAt.After(cc.subagentsLastSeenAt) {
+			cc.subagentsEndedAt = time.Now()
+		}
 		cc.subagentsActiveAt = time.Time{}
+		cc.subagentsActiveSince = time.Time{}
 		cc.subagentActiveCount = 0
 		return
 	}
-	cc.subagentsActiveAt = time.Now()
+	now := time.Now()
+	if cc.subagentsActiveAt.IsZero() || now.Sub(cc.subagentsActiveAt) >= subagentsActiveFreshFor {
+		// A new run of activity, not a renewal of the current one.
+		cc.subagentsActiveSince = now
+	}
+	cc.subagentsActiveAt = now
+	cc.subagentsLastSeenAt = now
 	// The bridge always sends the count alongside the flag; the fallback of 1
 	// just keeps "active" internally consistent should they ever split.
 	cc.subagentActiveCount = 1
