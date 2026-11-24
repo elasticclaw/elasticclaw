@@ -78,11 +78,13 @@ func TestGatewaySessionClearsTurnMessageIDAfterSuccess(t *testing.T) {
 			t.Errorf("read sessions.send: %s, %v", req.Method, err)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true}); err != nil {
+		// Background: the test cancels ctx as soon as SendMessage returns, and a
+		// cancel racing the tail of an already-delivered write fails that write.
+		if err := wsjson.Write(context.Background(), conn, gwFrame{Type: "res", ID: req.ID, OK: true}); err != nil {
 			t.Error(err)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
+		if err := wsjson.Write(context.Background(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
 			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "end"},
 		})}); err != nil {
 			t.Error(err)
