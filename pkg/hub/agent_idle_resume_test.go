@@ -335,7 +335,7 @@ func TestCheckClawStatusAutoResumesStalledClaw(t *testing.T) {
 // work that never reported, and recover from the workspace instead of
 // starting over.
 func TestAgentIdleResumeMessageContent(t *testing.T) {
-	msg := agentIdleResumeMessage(12 * time.Minute)
+	msg := agentIdleResumeMessage(12*time.Minute, agentIdleResumeReasonIdle, 0)
 	for _, want := range []string{"12 minutes", "background or spawned work", "degradation path", "git log --oneline -15", "Do not start over"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("resume message missing %q: %s", want, msg)
