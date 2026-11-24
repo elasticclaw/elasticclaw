@@ -12,6 +12,16 @@ var OpenClawPackageJSON []byte
 //go:embed openclaw/package-lock.json
 var OpenClawPackageLock []byte
 
+// CodexPluginPackageJSON and CodexPluginPackageLock pin the dependency tree of
+// @openclaw/codex. OpenClaw installs the plugin from the registry into its own
+// managed npm root; bootstrap checks that root's lock against this one.
+//
+//go:embed openclaw-codex-plugin/package.json
+var CodexPluginPackageJSON []byte
+
+//go:embed openclaw-codex-plugin/package-lock.json
+var CodexPluginPackageLock []byte
+
 // OpenClawInstallMarker is written next to the OpenClaw runtime's
 // package-lock.json only after `npm ci` succeeds. It holds OpenClawLockSHA256,
 // so a partial install or one made without the embedded lock is never reused.
