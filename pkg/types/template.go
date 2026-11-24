@@ -831,13 +831,21 @@ type LivenessConfig struct {
 	// ever delivered one was a human typing "continue".
 	IdleResume *bool `yaml:"idle_resume,omitempty" json:"idleResume,omitempty"`
 	// IdleResumeAfter is how long an eligible claw must sit with no turn
-	// running before the hub injects the resume prompt. The agent_idle alert
-	// waits for the resume and fires only if it did not help.
+	// running before the hub injects the resume prompt. No ordering against
+	// the agent_idle alert's idle_after is required: while the resume can
+	// still help, the alert waits for it and fires only once the stretch
+	// outlives idle_resume_after + idle_after (see
+	// agentIdleAlertDeferredToResume in pkg/hub).
 	//
 	// Running subagents count as activity: a claw parked on sessions_yield is
 	// not idle while the bridge reports spawned work in flight, and the clock
-	// restarts when that work ends. Subagents still running after 45 minutes
-	// stop holding the resume off.
+	// restarts at the last report that saw them. The hold has a fixed,
+	// non-configurable ceiling of 45 minutes (agentIdleResumeSubagentCeiling):
+	// past it, subagents still reported running are presumed hung and the
+	// parent is resumed once its own idle time passes this threshold, with a
+	// prompt to check whether they are still making progress rather than to
+	// abandon them. A factory whose subagents legitimately run longer gets
+	// one such prompt per stretch, which spends one resume attempt.
 	//
 	// Otherwise, set it ABOVE the longest legitimate wait between turns for
 	// the factory it applies to. The hub cannot distinguish "stalled in a tool

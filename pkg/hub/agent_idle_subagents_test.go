@@ -65,8 +65,8 @@ func TestAgentIdleSuppressedWhileSubagentsActive(t *testing.T) {
 }
 
 // A heartbeat reporting zero active subagents is positive evidence that the
-// spawned work is gone: it clears the suppression and the alert fires on the
-// next tick like it always did.
+// spawned work is gone: it clears the suppression, and the alert fires once
+// the parent has then sat idle for idle_after.
 func TestAgentIdleZeroSubagentHeartbeatClearsSuppression(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
@@ -95,9 +95,15 @@ func TestAgentIdleZeroSubagentHeartbeatClearsSuppression(t *testing.T) {
 		t.Fatalf("zero-subagents heartbeat did not clear state: at=%v count=%d", cc.subagentsActiveAt, cc.subagentActiveCount)
 	}
 
+	// The idle clock restarts when the subagents end, so the alert gives the
+	// parent idle_after to pick up their results before it fires.
 	s.checkAgentIdle(time.Now(), clawID, cc)
+	if got := clawIdleSince(t, db, clawID); got != 0 {
+		t.Fatalf("alert fired the tick the subagents ended (idle_since=%d), want it to wait idle_after", got)
+	}
+	s.checkAgentIdle(time.Now().Add(lifecycleDefaultIdleAfter), clawID, cc)
 	if clawIdleSince(t, db, clawID) == 0 {
-		t.Fatal("alert did not fire after subagent state was cleared")
+		t.Fatal("alert did not fire idle_after past the end of the subagents")
 	}
 	s.lifecycleClawPass(d)
 	if fake.count() != 1 {

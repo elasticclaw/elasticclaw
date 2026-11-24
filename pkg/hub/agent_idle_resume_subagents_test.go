@@ -130,4 +130,33 @@ func TestApplySubagentHeartbeatTracksActivityRun(t *testing.T) {
 	if !cc.subagentsLastSeenAt.Equal(lastSeen) {
 		t.Fatal("zero report forgot when subagents were last seen")
 	}
+	if !cc.subagentsEndedAt.After(lastSeen) {
+		t.Fatal("zero report did not record that the subagents finished")
+	}
+	endedAt := cc.subagentsEndedAt
+	cc.applySubagentHeartbeatLocked(&inactive, &zero)
+	if !cc.subagentsEndedAt.Equal(endedAt) {
+		t.Fatal("a repeated zero report moved the end of the activity run")
+	}
+}
+
+// A report that went stale without the bridge ever saying "zero" (its poll
+// started failing, or it died) is no proof the subagents finished: the resume
+// still fires, but with the generic prompt rather than "collect their results".
+func TestAgentIdleResumeStaleSubagentReportUsesGenericPrompt(t *testing.T) {
+	s, db := newIdleResumeTestServer(t, nil)
+	const clawID = "resume-subagents-stale"
+	cc := subagentResumeTestClaw(t, db, clawID, 30*time.Minute)
+	cc.subagentsActiveAt = time.Now().Add(-subagentsActiveFreshFor - time.Second)
+	cc.subagentsActiveSince = time.Now().Add(-20 * time.Minute)
+	cc.subagentsLastSeenAt = cc.subagentsActiveAt
+
+	s.checkAgentIdleResume(time.Now().Add(defaultIdleResumeAfter), clawID, cc)
+	if got := idleResumeMessages(t, db, clawID); got != 1 {
+		t.Fatalf("injected %d resume messages after the report went stale, want 1", got)
+	}
+	msg := lastIdleResumeMessage(t, db, clawID)
+	if strings.Contains(msg, "subagents finished") || !strings.Contains(msg, "background or spawned work") {
+		t.Fatalf("stale report got the wrong prompt: %s", msg)
+	}
 }

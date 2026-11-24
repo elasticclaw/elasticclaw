@@ -190,9 +190,10 @@ type agentIdleSnapshot struct {
 	// so the thresholds count from here. The stretch identity (latches, event
 	// keys) stays on stretchStartAt.
 	idleFrom time.Time
-	// subagentsEnded is true when subagents ran during this stretch and have
-	// since stopped, which is the sessions_yield shape where the completion
-	// never woke the parent.
+	// subagentsEnded is true when subagents ran during this stretch and the
+	// bridge has since explicitly reported none running: the sessions_yield
+	// shape where the completion never woke the parent. A report that merely
+	// went stale (poll failing, bridge gone) proves nothing and leaves it false.
 	subagentsEnded bool
 }
 
@@ -239,7 +240,7 @@ func agentIdleSnapshotOf(cc *clawConn) agentIdleSnapshot {
 	}
 	if lastSeen.After(start) {
 		snap.idleFrom = lastSeen
-		snap.subagentsEnded = !snap.subagentsActive
+		snap.subagentsEnded = !snap.subagentsActive && cc.subagentsEndedAt.After(lastSeen)
 	}
 	if snap.subagentsActive {
 		snap.subagentsActiveSince = cc.subagentsActiveSince
