@@ -5164,7 +5164,8 @@ exit 1`
 
 const daytonaUninstallGlobalOpenClawCommand = `NPM="/usr/local/share/nvm/current/bin/npm"
 PREFIX="$("$NPM" config get prefix)"
-sudo "$NPM" uninstall -g openclaw --prefix "$PREFIX" 2>&1 || true
+# Remove the files directly; an npm uninstall walks the whole tree and can exceed the step timeout.
+sudo rm -rf "$PREFIX/lib/node_modules/openclaw" "$PREFIX/bin/openclaw"
 hash -r
 echo uninstalled`
 

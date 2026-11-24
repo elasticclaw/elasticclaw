@@ -86,3 +86,18 @@ func writeFakeFile(t *testing.T, path, content string, mode os.FileMode) {
 		t.Fatal(err)
 	}
 }
+
+func TestDaytonaUninstallGlobalOpenClawRemovesFilesDirectly(t *testing.T) {
+	cmd := daytonaUninstallGlobalOpenClawCommand
+	if strings.Contains(cmd, "\" uninstall") {
+		t.Fatalf("uninstall command must not walk the npm tree:\n%s", cmd)
+	}
+	for _, want := range []string{`"$PREFIX/lib/node_modules/openclaw"`, `"$PREFIX/bin/openclaw"`} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("uninstall command missing %s:\n%s", want, cmd)
+		}
+	}
+	if out, err := exec.Command("bash", "-n", "-c", cmd).CombinedOutput(); err != nil {
+		t.Fatalf("bash -n: %v: %s", err, out)
+	}
+}
