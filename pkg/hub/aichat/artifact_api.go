@@ -177,7 +177,8 @@ func (a *api) runAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if len(body.Template) > 64 || body.Kind == "ticket" && body.Template != "" {
+	body.Template = normalizeTemplateRef(body.Template)
+	if body.Kind == "ticket" && body.Template != "" {
 		http.Error(w, "invalid action", 400)
 		return
 	}

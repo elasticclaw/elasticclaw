@@ -151,8 +151,8 @@ func historyContent(m Message) string {
 					}
 					if b.State == "created" {
 						suffix := ""
-						if card.Template != "" {
-							suffix = "; template: " + card.Template
+						if ref := historyTemplateRef(card.Template); ref != "" {
+							suffix = "; template: " + ref
 						}
 						parts = append(parts, fmt.Sprintf("[Artifact %s v%d created: /artifacts/%s; artifactId: %s%s]", card.Title, card.Version, card.Slug, card.ArtifactID, suffix))
 					} else if b.State == "failed" {

@@ -177,10 +177,7 @@ func (a *api) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	if len(body.ArtifactTemplate) > 64 {
-		http.Error(w, "invalid request", 400)
-		return
-	}
+	body.ArtifactTemplate = normalizeTemplateRef(body.ArtifactTemplate)
 	body.Text = strings.TrimSpace(body.Text)
 	if body.Answers != nil && (body.Text != "" || body.Retry) {
 		http.Error(w, "send text or answers, not both", 400)

@@ -141,8 +141,6 @@ func TestArtifactTemplateMessageAndActionAPI(t *testing.T) {
 		suffix, body string
 		status       int
 	}{
-		{"/messages", `{"text":"Build","artifactTemplate":"` + strings.Repeat("a", 65) + `"}`, 400},
-		{"/actions", `{"kind":"artifact","template":"` + strings.Repeat("語", 22) + `"}`, 400},
 		{"/actions", `{"kind":"ticket","template":"free"}`, 400},
 	} {
 		rr := request(handler, "POST", path+tc.suffix, tc.body, "alice", "on")
@@ -150,7 +148,7 @@ func TestArtifactTemplateMessageAndActionAPI(t *testing.T) {
 			t.Fatal(rr.Code, rr.Body.String())
 		}
 	}
-	rec = request(handler, "POST", path+"/messages", `{"text":"Build","artifactTemplate":"one-pager"}`, "alice", "on")
+	rec = request(handler, "POST", path+"/messages", `{"text":"Build","artifactTemplate":" One-Pager "}`, "alice", "on")
 	if rec.Code != 200 {
 		t.Fatal(rec.Code, rec.Body.String())
 	}

@@ -122,7 +122,7 @@ func (s *Store) publishArtifactVersion(ctx context.Context, dir string, t Thread
 	}
 	a := Artifact{Workspace: t.Workspace, TemplateID: meta.TemplateID, TemplateName: meta.TemplateName, DesignSystemSHA256: meta.DesignSystemSHA256, ID: input.ArtifactID, Tenant: t.TenantID, OwnerLogin: t.OwnerLogin, ThreadID: t.ID, Title: input.Title, Version: 1, CreatedAt: now, Bytes: int64(len(html))}
 	if a.ID != "" {
-		err = tx.QueryRowContext(ctx, `SELECT slug,current_version FROM ai_chat_artifacts WHERE id=? AND tenant_id=? AND owner_login=? AND thread_id=? AND deleted_at IS NULL`, a.ID, t.TenantID, t.OwnerLogin, t.ID).Scan(&a.Slug, &a.Version)
+		err = tx.QueryRowContext(ctx, `SELECT slug,workspace,current_version FROM ai_chat_artifacts WHERE id=? AND tenant_id=? AND owner_login=? AND thread_id=? AND deleted_at IS NULL`, a.ID, t.TenantID, t.OwnerLogin, t.ID).Scan(&a.Slug, &a.Workspace, &a.Version)
 		if err != nil {
 			return Artifact{}, err
 		}

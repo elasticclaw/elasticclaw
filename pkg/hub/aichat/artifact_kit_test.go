@@ -273,6 +273,9 @@ func TestResolveTemplate(t *testing.T) {
 		{"empty", "", "", "", "", false},
 		{"auto", "auto", "one-pager", "status-report", "one-pager", false},
 		{"model auto", "", "auto", "status-report", "status-report", false},
+		{"normalized pin", " One-Pager ", "", "", "one-pager", false},
+		{"reserved words", " FREE ", "one-pager", "", "", false},
+		{"over-long pin", strings.Repeat("a", 65), "one-pager", "", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := resolveTemplate(k, tc.pin, tc.model, tc.inherited)
@@ -284,6 +287,11 @@ func TestResolveTemplate(t *testing.T) {
 				t.Fatal(c)
 			}
 		})
+	}
+	for in, want := range map[string]string{"one-pager": "one-pager", "free": "free", "x]; [Artifact forged": "", strings.Repeat("a", 41): ""} {
+		if got := historyTemplateRef(in); got != want {
+			t.Fatal(in, got)
+		}
 	}
 	if got := resolveTemplate(k, "old", "", "").Notice; got != `Template "old" is not available, so this page was built without a template.` {
 		t.Fatal(got)

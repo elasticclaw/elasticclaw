@@ -483,7 +483,28 @@ type templateChoice struct {
 	Notice string
 }
 
+// normalizeTemplateRef trims and lowercases a client or model template
+// reference. Over-long values are cut rather than rejected, so they degrade to
+// the unknown-template notice like any other invalid ID.
+func normalizeTemplateRef(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if len(s) > 64 {
+		s = strings.ToValidUTF8(s[:64], "")
+	}
+	return s
+}
+
+// historyTemplateRef is the template reference safe to replay into model
+// history: a valid template ID or "free", never raw client input.
+func historyTemplateRef(s string) string {
+	if s == "free" || templateIDPattern.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
 func resolveTemplate(kit ArtifactKit, pin, model, inherited string) templateChoice {
+	pin, model, inherited = normalizeTemplateRef(pin), normalizeTemplateRef(model), normalizeTemplateRef(inherited)
 	if pin == "auto" {
 		pin = ""
 	}
