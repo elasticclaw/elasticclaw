@@ -13,7 +13,7 @@ import (
 
 // TestLinearCLI_NoAPIKey verifies the CLI exits with error when LINEAR_API_KEY is missing.
 func TestLinearCLI_NoAPIKey(t *testing.T) {
-	os.Unsetenv("LINEAR_API_KEY")
+	t.Setenv("LINEAR_API_KEY", "")
 	if got := runLinearCLI([]string{"teams"}); got != 1 {
 		t.Fatalf("expected exit 1 without LINEAR_API_KEY, got %d", got)
 	}
@@ -40,8 +40,7 @@ func TestLinearCLI_Teams(t *testing.T) {
 	defer func() { linearAPIURL = oldURL }()
 	linearAPIURL = ts.URL + "/graphql"
 
-	os.Setenv("LINEAR_API_KEY", "test-key")
-	defer os.Unsetenv("LINEAR_API_KEY")
+	t.Setenv("LINEAR_API_KEY", "test-key")
 
 	// Capture stdout
 	oldStdout := os.Stdout
@@ -94,8 +93,7 @@ func TestLinearCLI_IssueGet(t *testing.T) {
 	defer func() { linearAPIURL = oldURL }()
 	linearAPIURL = ts.URL + "/graphql"
 
-	os.Setenv("LINEAR_API_KEY", "test-key")
-	defer os.Unsetenv("LINEAR_API_KEY")
+	t.Setenv("LINEAR_API_KEY", "test-key")
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -147,8 +145,7 @@ func TestLinearCLI_IssueUpdate_MutationSuccessFalse(t *testing.T) {
 	defer func() { linearAPIURL = oldURL }()
 	linearAPIURL = ts.URL + "/graphql"
 
-	os.Setenv("LINEAR_API_KEY", "test-key")
-	defer os.Unsetenv("LINEAR_API_KEY")
+	t.Setenv("LINEAR_API_KEY", "test-key")
 
 	got := runLinearCLI([]string{"issue", "update", "CAN-61", "--state=Done"})
 	if got != 1 {
@@ -179,8 +176,7 @@ func TestLinearCLI_IssueSearch_MultiWord(t *testing.T) {
 	defer func() { linearAPIURL = oldURL }()
 	linearAPIURL = ts.URL + "/graphql"
 
-	os.Setenv("LINEAR_API_KEY", "test-key")
-	defer os.Unsetenv("LINEAR_API_KEY")
+	t.Setenv("LINEAR_API_KEY", "test-key")
 
 	got := runLinearCLI([]string{"issue", "search", "fix", "the", "login", "bug"})
 	if got != 0 {
