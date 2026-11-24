@@ -4635,48 +4635,10 @@ openclaw plugins deps --repair 2>&1 || echo "plugin deps staging completed with 
 		log.Printf("[daytona] warning: plugin deps staging failed: %v", err)
 	}
 
-	// Step 2c: Configure gateway bind/port and start it.
+	// Step 2c: Configure gateway bind/port and start it under a supervisor:
+	// on Daytona no claw-bridge bootstrap restarts a dead gateway.
 	// Use token auth (what onboard sets up) — don't override auth mode.
-	gatewaySetup := `
-python3 - <<'PYEOF'
-import json, os
-path = os.path.expanduser('~/.openclaw/openclaw.json')
-with open(path) as f: cfg = json.load(f)
-cfg.setdefault('gateway', {})['bind'] = 'loopback'
-cfg['gateway']['port'] = 18789
-# Keep token auth that onboard generated - don't change auth mode
-with open(path, 'w') as f: json.dump(cfg, f, indent=2)
-print('gateway config updated')
-PYEOF
-export NVM_DIR="/usr/local/share/nvm"; [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
-export NVM_DIR=/usr/local/share/nvm; export PATH=$NVM_DIR/current/bin:$PATH; setsid nohup openclaw gateway run >> ~/.openclaw/gateway.log 2>&1 </dev/null &
-# Phase 1: wait for HTTP server to be listening (quick)
-for i in $(seq 1 30); do
-  curl -sf http://localhost:18789/healthz >/dev/null && echo 'gateway listening' && break
-  sleep 1
-done
-curl -sf http://localhost:18789/healthz >/dev/null || { echo 'gateway failed to listen'; tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true; exit 1; }
-# Phase 2: wait for gateway startup to complete. Do not use openclaw health
-# here: it pairs the CLI device with read-only scopes before claw-bridge can
-# connect, then claw-bridge is rejected as a scope-upgrade.
-for i in $(seq 1 30); do
-  if grep -q 'gateway ready' ~/.openclaw/gateway.log 2>/dev/null; then
-    echo "gateway ready"
-    exit 0
-  fi
-  curl -sf http://localhost:18789/healthz >/dev/null || break
-  sleep 1
-done
-# Fallback: if the readiness log line is unavailable but the gateway is still
-# listening and healthy, don't fail the bootstrap.
-if curl -sf http://localhost:18789/healthz >/dev/null; then
-  echo "gateway ready (healthz)"
-  exit 0
-fi
-echo 'gateway not ready'
-tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
-exit 1`
-	gatewaySetup = withDaytonaLLMKeyEnv(llmKeyEnvDaytona, gatewaySetup)
+	gatewaySetup := withDaytonaLLMKeyEnv(llmKeyEnvDaytona, daytonaStartGatewayCommand())
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
 		return err
 	}

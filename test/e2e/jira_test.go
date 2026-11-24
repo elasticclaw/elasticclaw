@@ -82,6 +82,8 @@ func runJiraWorkflowE2E(t *testing.T, sandboxProvider string) {
 		}
 		_ = hub.deleteWorkspace(cleanupCtx, workspaceName)
 	})
+	// Registered last so it runs first, while the sandbox still exists.
+	t.Cleanup(func() { collectDaytonaDiagnosticsOnFailure(t, env, hub, agentID) })
 
 	runCLI(ctx, t, root, env, "workspace", "push", workspaceName)
 	runCLI(ctx, t, root, env, "github-app", "create", "e2e",
