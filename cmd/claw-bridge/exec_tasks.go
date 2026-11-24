@@ -47,7 +47,7 @@ func bridgeWorkspaceCommand(command string) string {
 // snapshot version, so a late completion cannot satisfy a newer assignment.
 func (s *controlSupervisor) startCommandTask(ctx context.Context, binding workflowControlBinding,
 	assignment typesv2.ControlEnvelope) {
-	go s.executeCommandTask(ctx, binding, assignment)
+	s.goTask(func() { s.executeCommandTask(ctx, binding, assignment) })
 }
 
 func (s *controlSupervisor) executeCommandTask(ctx context.Context, binding workflowControlBinding,

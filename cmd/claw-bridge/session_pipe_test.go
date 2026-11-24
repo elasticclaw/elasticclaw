@@ -56,6 +56,20 @@ func dialPipeGateway(t *testing.T, handler http.Handler) *websocket.Conn {
 	return conn
 }
 
+// writeTestFrame writes a frame from a fake gateway or hub handler and reports
+// whether it was written. It writes with a background context: cancelling a
+// request or test context in the tail of a write fails that write even though
+// the peer already received the frame. A failed write only fails the test
+// while it is still running; afterwards the connection is being torn down.
+func writeTestFrame(t *testing.T, conn *websocket.Conn, frame any) bool {
+	t.Helper()
+	err := wsjson.Write(context.Background(), conn, frame)
+	if err != nil && t.Context().Err() == nil {
+		t.Errorf("fake peer write: %v", err)
+	}
+	return err == nil
+}
+
 func TestGatewaySessionClearsTurnMessageIDAfterSuccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	// Wait for the fake gateway to return before the pipe is torn down, so its
@@ -78,15 +92,12 @@ func TestGatewaySessionClearsTurnMessageIDAfterSuccess(t *testing.T) {
 			t.Errorf("read sessions.send: %s, %v", req.Method, err)
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true}); err != nil {
-			t.Error(err)
+		if !writeTestFrame(t, conn, gwFrame{Type: "res", ID: req.ID, OK: true}) {
 			return
 		}
-		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
+		writeTestFrame(t, conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]any{
 			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "end"},
-		})}); err != nil {
-			t.Error(err)
-		}
+		})})
 		<-ctx.Done()
 	}))
 	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
@@ -126,9 +137,7 @@ func TestSessionCacheTokensRetriesFailedPollWithinThrottle(t *testing.T) {
 			if ok {
 				res.Error, res.Payload = nil, mustJSON(map[string]any{"sessions": []any{map[string]any{"key": "s", "usage": map[string]int{"cacheRead": 2000, "cacheWrite": 100}}}})
 			}
-			// Background: cancel() at teardown must not race the last write.
-			if err := wsjson.Write(context.Background(), conn, res); err != nil {
-				t.Error(err)
+			if !writeTestFrame(t, conn, res) {
 				return
 			}
 		}

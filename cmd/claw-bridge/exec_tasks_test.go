@@ -29,7 +29,7 @@ func TestBridgeExecRunCommandEmitsCompleted(t *testing.T) {
 	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec", AttemptID: "attempt-exec"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	reporter := &branchReporter{wake: make(chan struct{}, 1)}
 	supervisor.setGatewaySession(&gatewaySession{branches: reporter})
 	supervisor.binding = &binding
@@ -101,7 +101,7 @@ func TestBridgeCommandCompletionUsesAssignmentStateVersion(t *testing.T) {
 	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec-version", AttemptID: "attempt-exec-version"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 1}
 
@@ -148,7 +148,7 @@ func TestBridgeLateCommandCompletionKeepsItsAssignmentVersion(t *testing.T) {
 	home := setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec-order", AttemptID: "attempt-exec-order"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: 1}
 
@@ -211,7 +211,7 @@ func TestBridgeExecRunFailureEmitsFailed(t *testing.T) {
 	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec-fail", AttemptID: "attempt-exec-fail"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	version := uint64(1)
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: version}
@@ -258,7 +258,7 @@ func TestBridgeExecRunTimeoutReportsExitCode124(t *testing.T) {
 	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec-timeout", AttemptID: "attempt-exec-timeout"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	version := uint64(1)
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: version}
@@ -311,7 +311,7 @@ func TestBridgeExecRunDuplicateAssignmentIsRejected(t *testing.T) {
 	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec-dup", AttemptID: "attempt-exec-dup"}
-	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+	supervisor := newTestControlSupervisor(t, store)
 	supervisor.binding = &binding
 	version := uint64(1)
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: version}
@@ -417,7 +417,7 @@ func TestCommandTaskCompletionReportsBranches(t *testing.T) {
 			setBridgeTestWorkspaceHome(t)
 			store := openTestBridgeControlStore(t)
 			binding := workflowControlBinding{RunID: "run", AttemptID: "attempt"}
-			supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
+			supervisor := newTestControlSupervisor(t, store)
 			reporter := &branchReporter{wake: make(chan struct{}, 1)}
 			supervisor.setGatewaySession(&gatewaySession{branches: reporter})
 			envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "assign", Kind: tc.kind, RunID: binding.RunID, AttemptID: binding.AttemptID, TaskID: "task", Payload: json.RawMessage(tc.payload)}
