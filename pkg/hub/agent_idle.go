@@ -261,6 +261,12 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 	snap := agentIdleSnapshotOf(cc)
 	lastTurn, noProgressPaused, notifiedAt := snap.lastTurn, snap.noProgressPaused, snap.notifiedAt
 
+	if s.stageCommandRunning(clawID) {
+		// The hub is executing the stage's on_enter command (an Android build
+		// can take 90 minutes) and the agent is waiting on it by design. Leave
+		// the latches alone and re-decide once the command reports back.
+		return
+	}
 	if snap.busy {
 		// A running turn ends the idle stretch.
 		s.clearAgentIdleLatch(clawID, cc)
@@ -519,6 +525,9 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	if !cfg.idleResumeEnabled || !ok {
 		return
 	}
+	if s.stageCommandRunning(clawID) {
+		return // the agent is waiting on the hub's stage command, not stalled
+	}
 	snap := agentIdleSnapshotOf(cc)
 	// snap.subagentsActive is deliberately NOT consulted here: the auto-resume
 	// still fires for a claw parked on sessions_yield with spawned work
@@ -666,6 +675,13 @@ func agentIdleAlertDeferredToResume(liveness livenessSettings, snap agentIdleSna
 		return false
 	}
 	return idleFor < liveness.idleResumeAfter+idleAfter
+}
+
+// stageCommandRunning reports whether the hub is executing a stage on_enter
+// command for the claw right now.
+func (s *Server) stageCommandRunning(clawID string) bool {
+	_, running := s.stageCommandsRunning.Load(clawID)
+	return running
 }
 
 // agentIdleEligible is the exclusion rule: an idle agent only alerts when it

@@ -76,3 +76,35 @@ func TestAgentIdleAlertDoesNotDeferWhenResumeCannotHelp(t *testing.T) {
 		})
 	}
 }
+
+// While the hub runs a stage's on_enter command the agent is waiting on the
+// hub by design: neither the alert nor the resume may fire.
+func TestAgentIdleSkipsClawRunningStageCommand(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	const clawID = "idle-stage-cmd"
+	insertSlackTestClaw(t, db, clawID, "connected", 0, "", oldEnough)
+	setClawPipelineStage(t, db, clawID, "android_validation")
+	seedIdleTestBaseline(t, s)
+	backdateAgentIdleBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	cc := deferTestConn(clawID, 30*time.Minute)
+
+	s.stageCommandsRunning.Store(clawID, struct{}{})
+	s.checkAgentIdle(time.Now(), clawID, cc)
+	s.checkAgentIdleResume(time.Now(), clawID, cc)
+	s.lifecycleClawPass(testLifecycleDelivery(t, s))
+	if got := clawIdleSince(t, db, clawID); got != 0 || fake.count() != 0 {
+		t.Fatalf("alert during stage command: idle_since=%d sent=%d", got, fake.count())
+	}
+	if got := idleResumeMessages(t, db, clawID); got != 0 {
+		t.Fatalf("resumed %d times during stage command, want 0", got)
+	}
+
+	s.stageCommandsRunning.Delete(clawID)
+	s.checkAgentIdle(time.Now(), clawID, cc)
+	s.lifecycleClawPass(testLifecycleDelivery(t, s))
+	if fake.count() != 1 {
+		t.Fatalf("after the command ended sent %d messages, want 1", fake.count())
+	}
+}
