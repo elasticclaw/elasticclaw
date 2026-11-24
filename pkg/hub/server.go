@@ -5278,7 +5278,7 @@ export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
 export PATH="$HOME/.local/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
 plugin_state() {
-  openclaw plugins info codex --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const p = JSON.parse(s).plugin || {}; console.log((p.version || "") + " " + (p.origin || "")) })'
+  openclaw plugins info codex --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const j = JSON.parse(s); const p = j.plugin || j; console.log((p.version || "") + " " + (p.origin || "")) })'
 }
 if STATE="$(plugin_state 2>/dev/null)" && [ "$STATE" = %s" global" ]; then
   echo "Codex plugin already installed"

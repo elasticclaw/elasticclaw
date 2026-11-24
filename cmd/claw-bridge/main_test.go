@@ -4882,3 +4882,26 @@ func TestInstalledCodexPluginIncludesStderr(t *testing.T) {
 		t.Fatalf("installedCodexPlugin error = %v, want stderr included", err)
 	}
 }
+
+func TestInstalledCodexPluginReadsNestedAndFlatOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake")
+	}
+	for name, output := range map[string]string{
+		"nested": `{"plugin":{"id":"codex","version":"1.2.3","origin":"global"}}`,
+		"flat":   `{"id":"codex","version":"1.2.3","origin":"global"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			script := "#!/bin/sh\nprintf '%s\\n' '" + output + "'\n"
+			if err := os.WriteFile(filepath.Join(fakeBin, "openclaw"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			version, origin, err := installedCodexPlugin()
+			if err != nil || version != "1.2.3" || origin != "global" {
+				t.Fatalf("installedCodexPlugin() = %q, %q, %v", version, origin, err)
+			}
+		})
+	}
+}

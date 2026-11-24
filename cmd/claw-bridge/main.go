@@ -4122,16 +4122,22 @@ func installedCodexPlugin() (string, string, error) {
 		}
 		return "", "", fmt.Errorf("openclaw plugins info codex: %w", err)
 	}
+	type pluginRecord struct {
+		Version string `json:"version"`
+		Origin  string `json:"origin"`
+	}
 	var info struct {
-		Plugin struct {
-			Version string `json:"version"`
-			Origin  string `json:"origin"`
-		} `json:"plugin"`
+		pluginRecord
+		Plugin *pluginRecord `json:"plugin"`
 	}
 	if err := json.Unmarshal(out, &info); err != nil {
 		return "", "", err
 	}
-	return info.Plugin.Version, info.Plugin.Origin, nil
+	// Current OpenClaw nests the record under "plugin"; older output is flat.
+	if info.Plugin != nil {
+		return info.Plugin.Version, info.Plugin.Origin, nil
+	}
+	return info.Version, info.Origin, nil
 }
 
 func installSelectedModelPlugin() error {
