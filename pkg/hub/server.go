@@ -5265,28 +5265,72 @@ hash -r
 %s --version 2>&1 || true`, shellQuote(packageSpec), binary)
 }
 
+// daytonaCodexPluginDepsVerifier is a node script run as
+// `node - <embedded lock> <plugin rootDir>`. It checks the managed npm root
+// OpenClaw installed the plugin into against the embedded lock: every locked
+// package must be in the root's package-lock.json with the same version and
+// integrity, and installed at that version. Optional packages for other
+// platforms may be absent. Mirrors verifyCodexPluginDeps in claw-bridge.
+const daytonaCodexPluginDepsVerifier = `const fs = require("fs");
+const path = require("path");
+const [lockPath, pluginRoot] = process.argv.slice(2);
+const fail = (message) => { console.log(message); process.exit(1); };
+const suffix = "/node_modules/@openclaw/codex";
+if (!pluginRoot || !pluginRoot.endsWith(suffix)) fail("Codex plugin root " + JSON.stringify(pluginRoot) + " is not inside an npm root");
+const root = pluginRoot.slice(0, -suffix.length);
+const want = JSON.parse(fs.readFileSync(lockPath, "utf8")).packages;
+const got = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8")).packages || {};
+for (const name of Object.keys(want).filter(Boolean).sort()) {
+  const w = want[name];
+  const g = got[name];
+  if (!g) fail("Codex plugin dependency " + name + " missing from " + root);
+  if (g.version !== w.version || g.integrity !== w.integrity) {
+    fail("Codex plugin dependency " + name + " locked as " + g.version + " (" + g.integrity + "), want " + w.version + " (" + w.integrity + ")");
+  }
+  const manifest = path.join(root, name, "package.json");
+  if (!fs.existsSync(manifest)) {
+    if (w.optional) continue;
+    fail("Codex plugin dependency " + name + " not installed");
+  }
+  const installed = JSON.parse(fs.readFileSync(manifest, "utf8")).version;
+  if (installed !== w.version) fail("Codex plugin dependency " + name + " installed as " + JSON.stringify(installed) + ", want " + w.version);
+}`
+
 // daytonaInstallModelPluginCommand installs the pinned Codex plugin from the
 // registry. Only origin "global" may register the Codex agent harness and the
 // reserved /codex command, so a linked (origin "config") install is rejected.
+// A new or reused install must also match the embedded dependency lock.
 func daytonaInstallModelPluginCommand(provider string) string {
 	if provider != "codex" {
 		return ""
 	}
+	const lockDir = "/home/daytona/.local/lib/openclaw-codex-plugin"
 	version := shellQuote(cliversion.CodexPluginVersion)
 	return fmt.Sprintf(`set -euo pipefail
 export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
 export PATH="$HOME/.local/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
+%s
+# Prints "<version> <origin> <rootDir>"; older OpenClaw output is flat.
 plugin_state() {
-  openclaw plugins info codex --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const j = JSON.parse(s); const p = j.plugin || j; console.log((p.version || "") + " " + (p.origin || "")) })'
+  openclaw plugins info codex --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const j = JSON.parse(s); const p = j.plugin && j.plugin.version ? j.plugin : j; console.log([p.version || "", p.origin || "", p.rootDir || ""].join(" ")) })'
 }
-if STATE="$(plugin_state 2>/dev/null)" && [ "$STATE" = %s" global" ]; then
+verify_deps() {
+  node - %s "$1" <<'ELASTICCLAW_VERIFY_CODEX_DEPS'
+%s
+ELASTICCLAW_VERIFY_CODEX_DEPS
+}
+if read -r VERSION ORIGIN ROOT_DIR < <(plugin_state 2>/dev/null) && [ "$VERSION $ORIGIN" = %s" global" ]; then
+  verify_deps "$ROOT_DIR"
   echo "Codex plugin already installed"
 else
   openclaw plugins install %s --pin --force
-fi
-STATE="$(plugin_state)"
-[ "$STATE" = %s" global" ] || { echo "unexpected Codex plugin version/origin: $STATE"; exit 1; }`,
+  read -r VERSION ORIGIN ROOT_DIR < <(plugin_state)
+  [ "$VERSION $ORIGIN" = %s" global" ] || { echo "unexpected Codex plugin version/origin: $VERSION $ORIGIN"; exit 1; }
+  verify_deps "$ROOT_DIR"
+fi`,
+		remoteWriteFileCommand(lockDir, "package-lock.json", string(cliversion.CodexPluginPackageLock)),
+		shellQuote(lockDir+"/package-lock.json"), daytonaCodexPluginDepsVerifier,
 		version, shellQuote("npm:@openclaw/codex@"+cliversion.CodexPluginVersion), version)
 }
 

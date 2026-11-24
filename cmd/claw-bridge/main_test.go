@@ -1322,7 +1322,7 @@ if [ "$*" = "plugins info codex --json" ]; then
     exit 1
   fi
   read -r version origin < "$CODEX_PLUGIN_STATE"
-  printf '{"plugin":{"id":"codex","version":"%s","origin":"%s"}}\n' "$version" "$origin"
+  printf '{"plugin":{"id":"codex","version":"%s","origin":"%s","rootDir":"%s/node_modules/@openclaw/codex"}}\n' "$version" "$origin" "$CODEX_MANAGED_ROOT"
   exit 0
 fi
 printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
@@ -1338,7 +1338,142 @@ printf '%s\n' "$FAKE_INSTALL_STATE" > "$CODEX_PLUGIN_STATE"
 	t.Setenv("CODEX_PLUGIN_STATE", state)
 	t.Setenv("OPENCLAW_INVOCATIONS", invocations)
 	t.Setenv("FAKE_INSTALL_STATE", codexPluginVersion+" global")
+	t.Setenv("CODEX_MANAGED_ROOT", writeCodexManagedRoot(t))
 	return state, invocations
+}
+
+// writeCodexManagedRoot lays out an npm root matching the embedded Codex
+// plugin lock: its package-lock.json plus a package.json per non-optional
+// package, as npm leaves it on a platform without the optional binaries.
+func writeCodexManagedRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), cliversion.CodexPluginPackageLock, 0644); err != nil {
+		t.Fatal(err)
+	}
+	var lock struct {
+		Packages map[string]struct {
+			Version  string `json:"version"`
+			Optional bool   `json:"optional"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal(cliversion.CodexPluginPackageLock, &lock); err != nil {
+		t.Fatal(err)
+	}
+	for name, entry := range lock.Packages {
+		if name == "" || entry.Optional {
+			continue
+		}
+		dir := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"version":"`+entry.Version+`"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// editJSONFile rewrites a JSON file through edit.
+func editJSONFile(t *testing.T, path string, edit func(map[string]any)) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	edit(doc)
+	if data, err = json.Marshal(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyCodexPluginDeps(t *testing.T) {
+	lockPackages := func(doc map[string]any) map[string]any { return doc["packages"].(map[string]any) }
+	for _, tc := range []struct {
+		name      string
+		tamper    func(t *testing.T, root string)
+		wantError string
+	}{
+		{name: "matching lock"},
+		{name: "tampered integrity", wantError: "node_modules/semver locked as", tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "package-lock.json"), func(doc map[string]any) {
+				lockPackages(doc)["node_modules/semver"].(map[string]any)["integrity"] = "sha512-tampered"
+			})
+		}},
+		{name: "wrong locked version", wantError: "node_modules/zod locked as 4.0.0", tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "package-lock.json"), func(doc map[string]any) {
+				lockPackages(doc)["node_modules/zod"].(map[string]any)["version"] = "4.0.0"
+			})
+		}},
+		{name: "package missing from lock", wantError: "node_modules/ws missing from", tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "package-lock.json"), func(doc map[string]any) {
+				delete(lockPackages(doc), "node_modules/ws")
+			})
+		}},
+		{name: "wrong installed version", wantError: `node_modules/typebox installed as "0.0.1"`, tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "node_modules", "typebox", "package.json"), func(doc map[string]any) {
+				doc["version"] = "0.0.1"
+			})
+		}},
+		{name: "required package not installed", wantError: "node_modules/smol-toml not installed", tamper: func(t *testing.T, root string) {
+			if err := os.RemoveAll(filepath.Join(root, "node_modules", "smol-toml")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "extra unrelated package", tamper: func(t *testing.T, root string) {
+			editJSONFile(t, filepath.Join(root, "package-lock.json"), func(doc map[string]any) {
+				lockPackages(doc)["node_modules/unrelated"] = map[string]any{"version": "1.0.0"}
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeCodexManagedRoot(t)
+			if tc.tamper != nil {
+				tc.tamper(t, root)
+			}
+			err := verifyCodexPluginDeps(filepath.Join(root, "node_modules", "@openclaw", "codex"))
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("verifyCodexPluginDeps: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("verifyCodexPluginDeps error = %v, want %s", err, tc.wantError)
+			}
+		})
+	}
+	if err := verifyCodexPluginDeps(t.TempDir()); err == nil || !strings.Contains(err.Error(), "not inside an npm root") {
+		t.Fatalf("plugin outside an npm root: %v", err)
+	}
+}
+
+func TestInstallSelectedModelPluginVerifiesReusedInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake executables use POSIX shell")
+	}
+	state, invocations := writeFakeCodexPluginOpenClaw(t)
+	if err := os.WriteFile(state, []byte(codexPluginVersion+" global\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	editJSONFile(t, filepath.Join(os.Getenv("CODEX_MANAGED_ROOT"), "package-lock.json"), func(doc map[string]any) {
+		doc["packages"].(map[string]any)["node_modules/semver"].(map[string]any)["integrity"] = "sha512-tampered"
+	})
+	err := installSelectedModelPlugin()
+	if err == nil || !strings.Contains(err.Error(), "verify installed Codex plugin") || !strings.Contains(err.Error(), "node_modules/semver") {
+		t.Fatalf("installSelectedModelPlugin error = %v, want reused install rejected", err)
+	}
+	if _, err := os.Stat(invocations); !os.IsNotExist(err) {
+		t.Fatalf("tampered reused install must not be reinstalled silently: %v", err)
+	}
 }
 
 func TestInstallSelectedModelPluginInstallsPinnedCodexPluginOnce(t *testing.T) {
@@ -1386,14 +1521,21 @@ func TestInstallSelectedModelPluginFailsClosed(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, installExit, installState, infoExit, wantError string
+		tamperLock                                           bool
 	}{
 		{name: "install failure", installExit: "1", wantError: "registry unreachable"},
 		{name: "linked origin after install", installState: codexPluginVersion + " config", wantError: `origin "config"`},
 		{name: "wrong version after install", installState: "2026.1.0 global", wantError: `version "2026.1.0"`},
 		{name: "info failure after install", infoExit: "1", wantError: "Plugin not found: codex"},
+		{name: "lock mismatch after install", tamperLock: true, wantError: "node_modules/ws locked as"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			writeFakeCodexPluginOpenClaw(t)
+			if tc.tamperLock {
+				editJSONFile(t, filepath.Join(os.Getenv("CODEX_MANAGED_ROOT"), "package-lock.json"), func(doc map[string]any) {
+					doc["packages"].(map[string]any)["node_modules/ws"].(map[string]any)["integrity"] = "sha512-tampered"
+				})
+			}
 			if tc.installExit != "" {
 				t.Setenv("FAKE_INSTALL_EXIT", tc.installExit)
 			}
@@ -4877,7 +5019,7 @@ func TestInstalledCodexPluginIncludesStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	_, _, err := installedCodexPlugin()
+	_, err := installedCodexPlugin()
 	if err == nil || !strings.Contains(err.Error(), "plugin codex not found") {
 		t.Fatalf("installedCodexPlugin error = %v, want stderr included", err)
 	}
@@ -4888,8 +5030,9 @@ func TestInstalledCodexPluginReadsNestedAndFlatOutput(t *testing.T) {
 		t.Skip("shell script fake")
 	}
 	for name, output := range map[string]string{
-		"nested": `{"plugin":{"id":"codex","version":"1.2.3","origin":"global"}}`,
-		"flat":   `{"id":"codex","version":"1.2.3","origin":"global"}`,
+		"nested":                 `{"plugin":{"id":"codex","version":"1.2.3","origin":"global","rootDir":"/r"}}`,
+		"flat":                   `{"id":"codex","version":"1.2.3","origin":"global","rootDir":"/r"}`,
+		"nested without version": `{"plugin":{"id":"codex","origin":"config"},"version":"1.2.3","origin":"global","rootDir":"/r"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			fakeBin := t.TempDir()
@@ -4898,9 +5041,9 @@ func TestInstalledCodexPluginReadsNestedAndFlatOutput(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			version, origin, err := installedCodexPlugin()
-			if err != nil || version != "1.2.3" || origin != "global" {
-				t.Fatalf("installedCodexPlugin() = %q, %q, %v", version, origin, err)
+			info, err := installedCodexPlugin()
+			if err != nil || info != (codexPluginInfo{Version: "1.2.3", Origin: "global", RootDir: "/r"}) {
+				t.Fatalf("installedCodexPlugin() = %+v, %v", info, err)
 			}
 		})
 	}

@@ -156,6 +156,8 @@ func TestDaytonaInstallModelPluginCommandPinsCodexPlugin(t *testing.T) {
 
 	assertContains(t, cmd, "plugins info codex --json", "checks for an existing Codex plugin")
 	assertContains(t, cmd, "plugins install 'npm:@openclaw/codex@"+cliversion.CodexPluginVersion+"' --pin --force", "installs the pinned Codex plugin from the registry")
+	assertContains(t, cmd, base64.StdEncoding.EncodeToString(cliversion.CodexPluginPackageLock), "ships the embedded dependency lock")
+	assertContains(t, cmd, daytonaCodexPluginDepsVerifier, "verifies the managed root against the lock")
 	for _, forbidden := range []string{"plugins install -l", "deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
 		assertNotContains(t, cmd, forbidden, "installs only the registry-owned plugin")
 	}
@@ -176,6 +178,41 @@ func TestDaytonaInstallModelPluginCommandPinsCodexPlugin(t *testing.T) {
 	}
 }
 
+// writeDaytonaCodexManagedRoot lays out an npm root matching the embedded
+// Codex plugin lock, as npm leaves it on a platform without the optional
+// binaries. tamper, if set, edits the decoded lock before it is written.
+func writeDaytonaCodexManagedRoot(t *testing.T, root string, tamper func(packages map[string]any)) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(cliversion.CodexPluginPackageLock, &doc); err != nil {
+		t.Fatal(err)
+	}
+	packages := doc["packages"].(map[string]any)
+	for name, raw := range packages {
+		entry := raw.(map[string]any)
+		if name == "" || entry["optional"] == true {
+			continue
+		}
+		dir := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"version":"`+entry["version"].(string)+`"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tamper != nil {
+		tamper(packages)
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDaytonaCodexPluginRegistryInstall(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not in PATH")
@@ -185,18 +222,31 @@ func TestDaytonaCodexPluginRegistryInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	pinned := cliversion.CodexPluginVersion
+	tamperIntegrity := func(packages map[string]any) {
+		packages["node_modules/semver"].(map[string]any)["integrity"] = "sha512-tampered"
+	}
+	tamperVersion := func(packages map[string]any) { packages["node_modules/zod"].(map[string]any)["version"] = "4.0.0" }
+	dropPackage := func(packages map[string]any) { delete(packages, "node_modules/ws") }
 	for _, tc := range []struct {
 		name, initial, installState, installExit, infoExit string
+		flat                                               bool
+		tamper                                             func(map[string]any)
 		wantInstall, wantError                             bool
+		wantOutput                                         string
 	}{
 		{name: "missing", wantInstall: true},
 		{name: "outdated", initial: "2026.1.0 global", wantInstall: true},
 		{name: "linked", initial: pinned + " config", wantInstall: true},
 		{name: "installed", initial: pinned + " global"},
+		{name: "installed flat output", initial: pinned + " global", flat: true},
 		{name: "install failure", installExit: "1", wantInstall: true, wantError: true},
 		{name: "linked origin after install", installState: pinned + " config", wantInstall: true, wantError: true},
 		{name: "wrong version after install", installState: "2026.1.0 global", wantInstall: true, wantError: true},
 		{name: "info failure", initial: pinned + " global", infoExit: "1", wantInstall: true, wantError: true},
+		{name: "tampered integrity after install", tamper: tamperIntegrity, wantInstall: true, wantError: true, wantOutput: "node_modules/semver locked as"},
+		{name: "wrong locked version after install", tamper: tamperVersion, wantInstall: true, wantError: true, wantOutput: "node_modules/zod locked as 4.0.0"},
+		{name: "package missing after install", tamper: dropPackage, wantInstall: true, wantError: true, wantOutput: "node_modules/ws missing from"},
+		{name: "tampered reused install", initial: pinned + " global", tamper: tamperIntegrity, wantError: true, wantOutput: "node_modules/semver locked as"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home, err := filepath.EvalSymlinks(t.TempDir())
@@ -216,6 +266,7 @@ func TestDaytonaCodexPluginRegistryInstall(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			writeDaytonaCodexManagedRoot(t, filepath.Join(home, "managed"), tc.tamper)
 			if tc.initial != "" {
 				write(filepath.Join(home, "plugin-state"), tc.initial+"\n", 0600)
 			}
@@ -229,12 +280,16 @@ func TestDaytonaCodexPluginRegistryInstall(t *testing.T) {
 				}
 				return v
 			}
+			infoFormat := `{"plugin":{"version":"%s","origin":"%s","rootDir":"%s"}}`
+			if tc.flat {
+				infoFormat = `{"version":"%s","origin":"%s","rootDir":"%s"}`
+			}
 			write(filepath.Join(bin, "openclaw"), `#!/bin/sh
 set -eu
 if [ "$*" = "plugins info codex --json" ]; then
   [ `+or0(tc.infoExit)+` = 0 ] && [ -f "$HOME/plugin-state" ] || { echo 'Plugin not found: codex' >&2; exit 1; }
   read -r version origin < "$HOME/plugin-state"
-  printf '{"plugin":{"version":"%s","origin":"%s"}}\n' "$version" "$origin"
+  printf '`+infoFormat+`\n' "$version" "$origin" "$HOME/managed/node_modules/@openclaw/codex"
   exit 0
 fi
 printf '%s\n' "$*" >> "$HOME/install-args"
@@ -249,6 +304,9 @@ printf '%s\n' '`+installState+`' > "$HOME/plugin-state"
 				out, err := exec.Command("bash", "-c", script).CombinedOutput()
 				if (err != nil) != tc.wantError {
 					t.Fatalf("install: %v: %s", err, out)
+				}
+				if !strings.Contains(string(out), tc.wantOutput) {
+					t.Fatalf("install output = %s, want %q", out, tc.wantOutput)
 				}
 				if tc.wantError {
 					break

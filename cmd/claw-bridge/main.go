@@ -4110,34 +4110,99 @@ func installSelectedCodingModelCLI() error {
 	}
 }
 
-// installedCodexPlugin returns the version and origin OpenClaw reports for the
-// codex plugin. Only origin "global" (a registry install) may register the
-// Codex agent harness and the reserved /codex command.
-func installedCodexPlugin() (string, string, error) {
+// codexPluginInfo is what OpenClaw reports for the installed codex plugin.
+// Only origin "global" (a registry install) may register the Codex agent
+// harness and the reserved /codex command.
+type codexPluginInfo struct {
+	Version string `json:"version"`
+	Origin  string `json:"origin"`
+	RootDir string `json:"rootDir"`
+}
+
+func installedCodexPlugin() (codexPluginInfo, error) {
 	out, err := exec.Command("openclaw", "plugins", "info", "codex", "--json").Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			return "", "", fmt.Errorf("openclaw plugins info codex: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+			return codexPluginInfo{}, fmt.Errorf("openclaw plugins info codex: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return "", "", fmt.Errorf("openclaw plugins info codex: %w", err)
-	}
-	type pluginRecord struct {
-		Version string `json:"version"`
-		Origin  string `json:"origin"`
+		return codexPluginInfo{}, fmt.Errorf("openclaw plugins info codex: %w", err)
 	}
 	var info struct {
-		pluginRecord
-		Plugin *pluginRecord `json:"plugin"`
+		codexPluginInfo
+		Plugin codexPluginInfo `json:"plugin"`
 	}
 	if err := json.Unmarshal(out, &info); err != nil {
-		return "", "", err
+		return codexPluginInfo{}, err
 	}
 	// Current OpenClaw nests the record under "plugin"; older output is flat.
-	if info.Plugin != nil {
-		return info.Plugin.Version, info.Plugin.Origin, nil
+	if info.Plugin.Version != "" {
+		return info.Plugin, nil
 	}
-	return info.Version, info.Origin, nil
+	return info.codexPluginInfo, nil
+}
+
+// verifyCodexPluginDeps checks the managed npm root OpenClaw installed the
+// plugin into against the embedded lock: every locked package must be in the
+// root's package-lock.json with the same version and integrity, and installed
+// at that version. Optional packages for other platforms may be absent.
+func verifyCodexPluginDeps(pluginRootDir string) error {
+	const pluginSuffix = "/node_modules/@openclaw/codex"
+	rootDir := filepath.ToSlash(filepath.Clean(pluginRootDir))
+	if !strings.HasSuffix(rootDir, pluginSuffix) {
+		return fmt.Errorf("Codex plugin root %q is not inside an npm root", pluginRootDir)
+	}
+	root := filepath.FromSlash(strings.TrimSuffix(rootDir, pluginSuffix))
+	type lockEntry struct {
+		Version   string `json:"version"`
+		Integrity string `json:"integrity"`
+		Optional  bool   `json:"optional"`
+	}
+	type lockFile struct {
+		Packages map[string]lockEntry `json:"packages"`
+	}
+	var want, got lockFile
+	if err := json.Unmarshal(cliversion.CodexPluginPackageLock, &want); err != nil {
+		return fmt.Errorf("parse embedded Codex plugin lock: %w", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "package-lock.json"))
+	if err != nil {
+		return fmt.Errorf("read Codex plugin lock: %w", err)
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		return fmt.Errorf("parse Codex plugin lock %s: %w", filepath.Join(root, "package-lock.json"), err)
+	}
+	names := make([]string, 0, len(want.Packages))
+	for name := range want.Packages {
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		w := want.Packages[name]
+		g, ok := got.Packages[name]
+		if !ok {
+			return fmt.Errorf("Codex plugin dependency %s missing from %s", name, root)
+		}
+		if g.Version != w.Version || g.Integrity != w.Integrity {
+			return fmt.Errorf("Codex plugin dependency %s locked as %s (%s), want %s (%s)", name, g.Version, g.Integrity, w.Version, w.Integrity)
+		}
+		manifest, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name), "package.json"))
+		if os.IsNotExist(err) && w.Optional {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("Codex plugin dependency %s not installed: %w", name, err)
+		}
+		var installed struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(manifest, &installed); err != nil || installed.Version != w.Version {
+			return fmt.Errorf("Codex plugin dependency %s installed as %q, want %s", name, installed.Version, w.Version)
+		}
+	}
+	return nil
 }
 
 func installSelectedModelPlugin() error {
@@ -4148,7 +4213,10 @@ func installSelectedModelPlugin() error {
 	if strings.TrimSpace(version) == "" {
 		return fmt.Errorf("empty version for @openclaw/codex")
 	}
-	if installed, origin, err := installedCodexPlugin(); err == nil && installed == version && origin == "global" {
+	if info, err := installedCodexPlugin(); err == nil && info.Version == version && info.Origin == "global" {
+		if err := verifyCodexPluginDeps(info.RootDir); err != nil {
+			return fmt.Errorf("verify installed Codex plugin: %w", err)
+		}
 		log.Printf("[bootstrap] Codex plugin already installed: %s", version)
 		return nil
 	}
@@ -4158,12 +4226,15 @@ func installSelectedModelPlugin() error {
 	if out, err := exec.Command("openclaw", "plugins", "install", spec, "--pin", "--force").CombinedOutput(); err != nil {
 		return fmt.Errorf("install %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
 	}
-	installed, origin, err := installedCodexPlugin()
+	info, err := installedCodexPlugin()
 	if err != nil {
 		return fmt.Errorf("verify Codex plugin install: %w", err)
 	}
-	if installed != version || origin != "global" {
-		return fmt.Errorf("verify Codex plugin install: got version %q origin %q, want %s from the registry (origin global)", installed, origin, version)
+	if info.Version != version || info.Origin != "global" {
+		return fmt.Errorf("verify Codex plugin install: got version %q origin %q, want %s from the registry (origin global)", info.Version, info.Origin, version)
+	}
+	if err := verifyCodexPluginDeps(info.RootDir); err != nil {
+		return fmt.Errorf("verify Codex plugin install: %w", err)
 	}
 	log.Printf("[bootstrap] Codex plugin: %s", version)
 	return nil
