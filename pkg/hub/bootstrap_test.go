@@ -155,13 +155,9 @@ func TestDaytonaInstallModelPluginCommandPinsCodexPlugin(t *testing.T) {
 	cmd := daytonaInstallModelPluginCommand("codex")
 
 	assertContains(t, cmd, "plugins info codex --json", "checks for an existing Codex plugin")
-	assertContains(t, cmd, shellQuote(cliversion.CodexPluginVersion), "pins the Codex plugin version")
-	assertContains(t, cmd, "npm ci --ignore-scripts --no-audit --no-fund", "installs locked dependencies without scripts")
-	assertContains(t, cmd, "plugins install -l '/home/daytona/.local/lib/openclaw-codex-plugin/node_modules/@openclaw/codex' --force", "links the staged local plugin")
-	assertContains(t, cmd, base64.StdEncoding.EncodeToString(cliversion.CodexPluginPackageJSON), "embeds the pinned manifest")
-	assertContains(t, cmd, base64.StdEncoding.EncodeToString(cliversion.CodexPluginPackageLock), "embeds the integrity lock")
-	for _, forbidden := range []string{"npm:@openclaw/codex", "deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
-		assertNotContains(t, cmd, forbidden, "does not resolve dependencies through OpenClaw")
+	assertContains(t, cmd, "plugins install 'npm:@openclaw/codex@"+cliversion.CodexPluginVersion+"' --pin --force", "installs the pinned Codex plugin from the registry")
+	for _, forbidden := range []string{"plugins install -l", "deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
+		assertNotContains(t, cmd, forbidden, "installs only the registry-owned plugin")
 	}
 	check := exec.Command("bash", "-n")
 	check.Stdin = strings.NewReader(cmd)
@@ -172,16 +168,15 @@ func TestDaytonaInstallModelPluginCommandPinsCodexPlugin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"npm:@openclaw/codex", "deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
+	for _, forbidden := range []string{"deps --repair", "OPENCLAW_EAGER_BUNDLED_PLUGIN_DEPS"} {
 		assertNotContains(t, string(server), forbidden, "bootstrap does not use removed dependency staging")
 	}
-	assertContains(t, cmd, "plugins install", "installs the missing Codex plugin")
 	if got := daytonaInstallModelPluginCommand("openai"); got != "" {
 		t.Fatalf("OpenAI plugin install command = %q, want empty", got)
 	}
 }
 
-func TestDaytonaCodexPluginLockedInstall(t *testing.T) {
+func TestDaytonaCodexPluginRegistryInstall(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not in PATH")
 	}
@@ -189,16 +184,19 @@ func TestDaytonaCodexPluginLockedInstall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pinned := cliversion.CodexPluginVersion
 	for _, tc := range []struct {
-		name, initial, npmExit, linkedVersion, infoExit string
-		wantError                                       bool
+		name, initial, installState, installExit, infoExit string
+		wantInstall, wantError                             bool
 	}{
-		{name: "missing"},
-		{name: "outdated", initial: "2026.1.0"},
-		{name: "installed", initial: cliversion.CodexPluginVersion},
-		{name: "npm failure", npmExit: "1", wantError: true},
-		{name: "incorrect linked version", linkedVersion: "2026.1.0", wantError: true},
-		{name: "info failure", initial: cliversion.CodexPluginVersion, infoExit: "1", wantError: true},
+		{name: "missing", wantInstall: true},
+		{name: "outdated", initial: "2026.1.0 global", wantInstall: true},
+		{name: "linked", initial: pinned + " config", wantInstall: true},
+		{name: "installed", initial: pinned + " global"},
+		{name: "install failure", installExit: "1", wantInstall: true, wantError: true},
+		{name: "linked origin after install", installState: pinned + " config", wantInstall: true, wantError: true},
+		{name: "wrong version after install", installState: "2026.1.0 global", wantInstall: true, wantError: true},
+		{name: "info failure", initial: pinned + " global", infoExit: "1", wantInstall: true, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home, err := filepath.EvalSymlinks(t.TempDir())
@@ -206,7 +204,6 @@ func TestDaytonaCodexPluginLockedInstall(t *testing.T) {
 				t.Fatal(err)
 			}
 			bin := filepath.Join(home, "nvm", "current", "bin")
-			runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-codex-plugin")
 			if err := os.MkdirAll(bin, 0755); err != nil {
 				t.Fatal(err)
 			}
@@ -220,36 +217,29 @@ func TestDaytonaCodexPluginLockedInstall(t *testing.T) {
 				}
 			}
 			if tc.initial != "" {
-				write(filepath.Join(home, "plugin-version"), tc.initial, 0600)
+				write(filepath.Join(home, "plugin-state"), tc.initial+"\n", 0600)
 			}
-			linkedVersion := tc.linkedVersion
-			if linkedVersion == "" {
-				linkedVersion = cliversion.CodexPluginVersion
+			installState := tc.installState
+			if installState == "" {
+				installState = pinned + " global"
 			}
-			infoExit := tc.infoExit
-			if infoExit == "" {
-				infoExit = "0"
+			or0 := func(v string) string {
+				if v == "" {
+					return "0"
+				}
+				return v
 			}
 			write(filepath.Join(bin, "openclaw"), `#!/bin/sh
 set -eu
 if [ "$*" = "plugins info codex --json" ]; then
-  version="$(cat "$HOME/plugin-version")"
-  printf '{"plugin":{"version":"%s"}}\n' "$version"
-  exit `+infoExit+`
-else
-  test -f "$HOME/npm-args"
-  printf '%s\n' "$*" >> "$HOME/link-args"
-  printf '%s' '`+linkedVersion+`' > "$HOME/plugin-version"
+  [ `+or0(tc.infoExit)+` = 0 ] && [ -f "$HOME/plugin-state" ] || { echo 'Plugin not found: codex' >&2; exit 1; }
+  read -r version origin < "$HOME/plugin-state"
+  printf '{"plugin":{"version":"%s","origin":"%s"}}\n' "$version" "$origin"
+  exit 0
 fi
-`, 0755)
-			npmExit := tc.npmExit
-			if npmExit == "" {
-				npmExit = "0"
-			}
-			write(filepath.Join(bin, "npm"), `#!/bin/sh
-set -eu
-printf '%s\n' "$*" "$PWD" >> "$HOME/npm-args"
-exit `+npmExit+`
+printf '%s\n' "$*" >> "$HOME/install-args"
+[ `+or0(tc.installExit)+` = 0 ] || exit 1
+printf '%s\n' '`+installState+`' > "$HOME/plugin-state"
 `, 0755)
 			script := strings.NewReplacer(
 				"/home/daytona", home,
@@ -264,31 +254,15 @@ exit `+npmExit+`
 					break
 				}
 			}
-			args, err := os.ReadFile(filepath.Join(home, "npm-args"))
-			if tc.initial == cliversion.CodexPluginVersion && tc.infoExit == "" {
+			args, err := os.ReadFile(filepath.Join(home, "install-args"))
+			if !tc.wantInstall {
 				if !os.IsNotExist(err) {
-					t.Fatalf("installed plugin must skip npm: %s, %v", args, err)
+					t.Fatalf("installed plugin must skip install: %q, %v", args, err)
 				}
 				return
 			}
-			if err != nil || string(args) != "ci --ignore-scripts --no-audit --no-fund\n"+runtimeDir+"\n" {
-				t.Fatalf("npm invocation: %q, %v", args, err)
-			}
-			link, err := os.ReadFile(filepath.Join(home, "link-args"))
-			if tc.npmExit != "" {
-				if !os.IsNotExist(err) {
-					t.Fatalf("failed npm must prevent link: %s, %v", link, err)
-				}
-				return
-			}
-			if err != nil || string(link) != "plugins install -l "+runtimeDir+"/node_modules/@openclaw/codex --force\n" {
-				t.Fatalf("link invocation: %q, %v", link, err)
-			}
-			for name, want := range map[string][]byte{"package.json": cliversion.CodexPluginPackageJSON, "package-lock.json": cliversion.CodexPluginPackageLock} {
-				got, err := os.ReadFile(filepath.Join(runtimeDir, name))
-				if err != nil || string(got) != string(want) {
-					t.Fatalf("%s differs from embedded file: %v", name, err)
-				}
+			if err != nil || string(args) != "plugins install npm:@openclaw/codex@"+pinned+" --pin --force\n" {
+				t.Fatalf("install invocation: %q, %v", args, err)
 			}
 		})
 	}

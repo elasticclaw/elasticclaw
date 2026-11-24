@@ -4107,28 +4107,28 @@ func installSelectedCodingModelCLI() error {
 	}
 }
 
-func installedCodexPluginVersion() (string, error) {
+// installedCodexPlugin returns the version and origin OpenClaw reports for the
+// codex plugin. Only origin "global" (a registry install) may register the
+// Codex agent harness and the reserved /codex command.
+func installedCodexPlugin() (string, string, error) {
 	out, err := exec.Command("openclaw", "plugins", "info", "codex", "--json").Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			return "", fmt.Errorf("openclaw plugins info codex: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+			return "", "", fmt.Errorf("openclaw plugins info codex: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return "", fmt.Errorf("openclaw plugins info codex: %w", err)
+		return "", "", fmt.Errorf("openclaw plugins info codex: %w", err)
 	}
 	var info struct {
-		Version string `json:"version"`
-		Plugin  struct {
+		Plugin struct {
 			Version string `json:"version"`
+			Origin  string `json:"origin"`
 		} `json:"plugin"`
 	}
 	if err := json.Unmarshal(out, &info); err != nil {
-		return "", err
+		return "", "", err
 	}
-	if info.Plugin.Version != "" {
-		return info.Plugin.Version, nil
-	}
-	return info.Version, nil
+	return info.Plugin.Version, info.Plugin.Origin, nil
 }
 
 func installSelectedModelPlugin() error {
@@ -4139,42 +4139,22 @@ func installSelectedModelPlugin() error {
 	if strings.TrimSpace(version) == "" {
 		return fmt.Errorf("empty version for @openclaw/codex")
 	}
-	if installed, err := installedCodexPluginVersion(); err == nil && installed == version {
+	if installed, origin, err := installedCodexPlugin(); err == nil && installed == version && origin == "global" {
 		log.Printf("[bootstrap] Codex plugin already installed: %s", version)
 		return nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
+	spec := "npm:@openclaw/codex@" + version
+	log.Printf("[bootstrap] installing %s...", spec)
+	// --force replaces an installed plugin of another version.
+	if out, err := exec.Command("openclaw", "plugins", "install", spec, "--pin", "--force").CombinedOutput(); err != nil {
+		return fmt.Errorf("install %s: %w: %s", spec, err, strings.TrimSpace(string(out)))
 	}
-	runtimeDir := filepath.Join(home, ".local", "lib", "openclaw-codex-plugin")
-	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
-		return fmt.Errorf("prepare Codex plugin runtime: %w", err)
-	}
-	for name, data := range map[string][]byte{
-		"package.json":      cliversion.CodexPluginPackageJSON,
-		"package-lock.json": cliversion.CodexPluginPackageLock,
-	} {
-		if err := os.WriteFile(filepath.Join(runtimeDir, name), data, 0644); err != nil {
-			return fmt.Errorf("write Codex plugin %s: %w", name, err)
-		}
-	}
-	log.Printf("[bootstrap] installing @openclaw/codex@%s...", version)
-	cmd := exec.Command("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")
-	cmd.Dir = runtimeDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("npm ci Codex plugin: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	pluginDir := filepath.Join(runtimeDir, "node_modules", "@openclaw", "codex")
-	if out, err := exec.Command("openclaw", "plugins", "install", "-l", pluginDir, "--force").CombinedOutput(); err != nil {
-		return fmt.Errorf("link Codex plugin: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	installed, err := installedCodexPluginVersion()
+	installed, origin, err := installedCodexPlugin()
 	if err != nil {
 		return fmt.Errorf("verify Codex plugin install: %w", err)
 	}
-	if installed != version {
-		return fmt.Errorf("verify Codex plugin install: got %q, want %s", installed, version)
+	if installed != version || origin != "global" {
+		return fmt.Errorf("verify Codex plugin install: got version %q origin %q, want %s from the registry (origin global)", installed, origin, version)
 	}
 	log.Printf("[bootstrap] Codex plugin: %s", version)
 	return nil

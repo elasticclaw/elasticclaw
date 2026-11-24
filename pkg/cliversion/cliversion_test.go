@@ -115,10 +115,6 @@ func TestOpenClawLock(t *testing.T) {
 	testRuntimeLock(t, OpenClawPackageJSON, OpenClawPackageLock, "openclaw", OpenClawVersion)
 }
 
-func TestCodexPluginLock(t *testing.T) {
-	testRuntimeLock(t, CodexPluginPackageJSON, CodexPluginPackageLock, "@openclaw/codex", CodexPluginVersion)
-}
-
 func testRuntimeLock(t *testing.T, manifestJSON, lockJSON []byte, packageName, version string) {
 	t.Helper()
 	var manifest struct {

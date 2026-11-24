@@ -23,12 +23,6 @@ func OpenClawLockSHA256() string {
 	return hex.EncodeToString(sum[:])
 }
 
-//go:embed openclaw-codex-plugin/package.json
-var CodexPluginPackageJSON []byte
-
-//go:embed openclaw-codex-plugin/package-lock.json
-var CodexPluginPackageLock []byte
-
 const (
 	OrasVersion          = "1.2.2"
 	OrasLinuxAMD64SHA256 = "bff970346470e5ef888e9f2c0bf7f8ee47283f5a45207d6e7a037da1fb0eae0d"

@@ -5256,33 +5256,29 @@ hash -r
 %s --version 2>&1 || true`, shellQuote(packageSpec), binary)
 }
 
+// daytonaInstallModelPluginCommand installs the pinned Codex plugin from the
+// registry. Only origin "global" may register the Codex agent harness and the
+// reserved /codex command, so a linked (origin "config") install is rejected.
 func daytonaInstallModelPluginCommand(provider string) string {
 	if provider != "codex" {
 		return ""
 	}
-	const runtimeDir = "/home/daytona/.local/lib/openclaw-codex-plugin"
+	version := shellQuote(cliversion.CodexPluginVersion)
 	return fmt.Sprintf(`set -euo pipefail
 export HOME=/home/daytona
 export NVM_DIR=/usr/local/share/nvm
 export PATH="$HOME/.local/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-plugin_version() {
-  openclaw plugins info codex --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const p = JSON.parse(s); console.log(p.plugin?.version || p.version) })'
+plugin_state() {
+  openclaw plugins info codex --json | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const p = JSON.parse(s).plugin || {}; console.log((p.version || "") + " " + (p.origin || "")) })'
 }
-if INSTALLED_VERSION="$(plugin_version 2>/dev/null)" && [ "$INSTALLED_VERSION" = %s ]; then
+if STATE="$(plugin_state 2>/dev/null)" && [ "$STATE" = %s" global" ]; then
   echo "Codex plugin already installed"
 else
-%s
-%s
-  cd %s
-  npm ci --ignore-scripts --no-audit --no-fund
-  openclaw plugins install -l %s --force
+  openclaw plugins install %s --pin --force
 fi
-INSTALLED_VERSION="$(plugin_version)"
-[ "$INSTALLED_VERSION" = %s ]`, shellQuote(cliversion.CodexPluginVersion),
-		remoteWriteFileCommand(runtimeDir, "package.json", string(cliversion.CodexPluginPackageJSON)),
-		remoteWriteFileCommand(runtimeDir, "package-lock.json", string(cliversion.CodexPluginPackageLock)),
-		shellQuote(runtimeDir), shellQuote(path.Join(runtimeDir, "node_modules/@openclaw/codex")),
-		shellQuote(cliversion.CodexPluginVersion))
+STATE="$(plugin_state)"
+[ "$STATE" = %s" global" ] || { echo "unexpected Codex plugin version/origin: $STATE"; exit 1; }`,
+		version, shellQuote("npm:@openclaw/codex@"+cliversion.CodexPluginVersion), version)
 }
 
 func daytonaOpenClawInstallStatusCommand() string {
