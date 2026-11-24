@@ -33,6 +33,7 @@ func newClawRetryTestServer(t *testing.T, status string) (*Server, *sql.DB, stri
 		t.Fatalf("insert claw: %v", err)
 	}
 	s := &Server{db: db, hubCfg: &types.HubConfig{}, claws: map[string]*clawConn{}, users: map[string]*userConn{}}
+	stopBackgroundOnCleanup(t, s)
 	runID, _, err := s.ensureTaskRunForClaw("retry-claw", TaskRunStart{
 		RunKind: taskRunKindPRTask, OwnerType: taskRunOwnerFactory, AnalyticsEnabled: true, RequiresPR: true, Tags: []string{"retry-test"},
 	})
@@ -59,6 +60,7 @@ func newFileClawRetryTestServer(t *testing.T, status string) (*Server, *sql.DB, 
 		t.Fatalf("insert claw: %v", err)
 	}
 	s := &Server{db: db, hubCfg: &types.HubConfig{}, claws: map[string]*clawConn{}, users: map[string]*userConn{}}
+	stopBackgroundOnCleanup(t, s)
 	runID, _, err := s.ensureTaskRunForClaw("retry-claw", TaskRunStart{
 		RunKind: taskRunKindPRTask, OwnerType: taskRunOwnerFactory, AnalyticsEnabled: true, RequiresPR: true, Tags: []string{"retry-test"},
 	})

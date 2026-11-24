@@ -28,7 +28,9 @@ func newReaperTestServer(t *testing.T, cfg *types.HubConfig) (*Server, *sql.DB) 
 	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant','Tenant','token','claw-token',?)`, now()); err != nil {
 		t.Fatal(err)
 	}
-	return &Server{db: db, hubCfg: cfg, claws: make(map[string]*clawConn), users: make(map[string]*userConn), reaperFirstSeen: make(map[string]time.Time)}, db
+	s := &Server{db: db, hubCfg: cfg, claws: make(map[string]*clawConn), users: make(map[string]*userConn), reaperFirstSeen: make(map[string]time.Time)}
+	stopBackgroundOnCleanup(t, s)
+	return s, db
 }
 
 func TestReconcileOnBootRepairsStrandedRecords(t *testing.T) {

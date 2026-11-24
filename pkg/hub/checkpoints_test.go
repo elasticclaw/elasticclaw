@@ -50,12 +50,14 @@ func newCheckpointCompletionTestServer(t *testing.T) *Server {
 		"tenant", "tenant", "token", "claw-token", now())
 	_, _ = db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
 		"claw", "tenant", "claw", "template", "connected", now())
-	return &Server{
+	s := &Server{
 		db:                db,
 		hubCfg:            &types.HubConfig{},
 		claws:             map[string]*clawConn{},
 		checkpointWaiters: map[string]chan error{},
 	}
+	stopBackgroundOnCleanup(t, s)
+	return s
 }
 
 func seedCheckpointCompletionState(t *testing.T, s *Server) {
