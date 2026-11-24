@@ -163,36 +163,63 @@ jobs:
             echo "ngrok reserved domain create did not return an id"
             exit 1
           fi
-          sleep 5
-          echo "Starting ngrok tunnel https://$NGROK_HOST for localhost:8080"
           printf 'version: "3"\nagent:\n  web_addr: "%s"\n' "$NGROK_API_ADDR" > ngrok.yml
-          ngrok http 8080 --url "https://$NGROK_HOST" --authtoken "$NGROK_AUTHTOKEN" --config ngrok.yml --log stdout > ngrok.log 2>&1 &
-          echo "$!" > ngrok.pid
-          for i in $(seq 1 120); do
-            if ! kill -0 "$(cat ngrok.pid)" >/dev/null 2>&1; then
-              echo "ngrok exited before the local API became ready"
-              cat ngrok.log
-              exit 1
-            fi
-            if ! curl -fsS --connect-timeout 2 --max-time 5 "http://$NGROK_API_ADDR/api/tunnels" > ngrok-tunnels.json 2>/dev/null; then
+
+          # Waits for the tunnel to come up. Returns 1 when ngrok exits early and 2
+          # when it never becomes ready; refusing the shared domain is fatal.
+          wait_for_tunnel() {
+            for _ in $(seq 1 120); do
+              if ! kill -0 "$(cat ngrok.pid)" >/dev/null 2>&1; then
+                return 1
+              fi
+              if ! curl -fsS --connect-timeout 2 --max-time 5 "http://$NGROK_API_ADDR/api/tunnels" > ngrok-tunnels.json 2>/dev/null; then
+                sleep 1
+                continue
+              fi
+              url="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' < ngrok-tunnels.json 2>/dev/null || true)"
+              if [ -n "$url" ]; then
+                case "$url" in
+                  *://elasticclaw.ngrok.app*)
+                    echo "Refusing shared ngrok domain: $url"
+                    exit 1
+                    ;;
+                esac
+                echo "ELASTICCLAW_E2E_PUBLIC_URL=$url" >> "$GITHUB_ENV"
+                return 0
+              fi
               sleep 1
-              continue
-            fi
-            url="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((t["public_url"] for t in data.get("tunnels", []) if t.get("proto") == "https"), ""))' < ngrok-tunnels.json 2>/dev/null || true)"
-            if [ -n "$url" ]; then
-              case "$url" in
-                *://elasticclaw.ngrok.app*)
-                  echo "Refusing shared ngrok domain: $url"
-                  exit 1
-                  ;;
-              esac
-              echo "ELASTICCLAW_E2E_PUBLIC_URL=$url" >> "$GITHUB_ENV"
+            done
+            return 2
+          }
+
+          # A freshly reserved domain can take a while to propagate: ngrok then
+          # exits with ERR_NGROK_319 ("must reserve a custom hostname"), so only
+          # that failure is retried, with backoff.
+          max_attempts=5
+          backoff=5
+          for attempt in $(seq 1 "$max_attempts"); do
+            sleep "$backoff"
+            echo "Starting ngrok tunnel https://$NGROK_HOST for localhost:8080 (attempt $attempt/$max_attempts)"
+            ngrok http 8080 --url "https://$NGROK_HOST" --authtoken "$NGROK_AUTHTOKEN" --config ngrok.yml --log stdout > ngrok.log 2>&1 &
+            echo "$!" > ngrok.pid
+            rc=0
+            wait_for_tunnel || rc=$?
+            if [ "$rc" -eq 0 ]; then
               exit 0
             fi
-            sleep 1
+            cat ngrok.log
+            if [ "$rc" -eq 2 ]; then
+              echo "ngrok tunnel did not become ready"
+              exit 1
+            fi
+            if ! grep -q ERR_NGROK_319 ngrok.log; then
+              echo "ngrok exited before the local API became ready"
+              exit 1
+            fi
+            echo "Reserved domain not active yet (ERR_NGROK_319)"
+            backoff=$((backoff * 2))
           done
-          echo "ngrok tunnel did not become ready"
-          cat ngrok.log
+          echo "ngrok kept rejecting the reserved domain after $max_attempts attempts"
           exit 1
 
       - name: Run ${{ matrix.provider_name }} ${{ matrix.tracker_name }} E2E
