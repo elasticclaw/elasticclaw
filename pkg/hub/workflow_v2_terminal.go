@@ -209,7 +209,7 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	}
 	s.syncWorkflowVolumes(clawID)
 	// The writable lease kept this claw's slot until the sync released it.
-	go s.promotePendingClaws()
+	s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 	if s.cronScheduler != nil {
 		s.cronScheduler.releaseClawWorkflowSlot(clawID)
 	}

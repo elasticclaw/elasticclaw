@@ -103,7 +103,7 @@ func (s *Server) handleModelAuthLogin(w http.ResponseWriter, r *http.Request) {
 	snapshot := snapshotModelAuthLoginJob(job)
 	s.modelAuthJobsMu.Unlock()
 
-	go s.runModelAuthLoginJob(job)
+	s.goBG("runModelAuthLoginJob", func() { s.runModelAuthLoginJob(job) })
 	jsonOK(w, snapshot)
 }
 

@@ -907,13 +907,13 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	if isPending {
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return nil
 	}
 
 	// Provision asynchronously
 	provCfg, _ := s.hubCfg.Providers[provider]
-	go func() {
+	s.goBG("provision github issue claw", func() {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
@@ -943,7 +943,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 			return
 		}
 		log.Printf("[factory] claw %s provisioned successfully", clawID[:8])
-	}()
+	})
 
 	return nil
 }
@@ -995,7 +995,7 @@ func (s *Server) terminateClawForGitHubIssue(issueID string) {
 		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
 	})
 	// Promote any pending claws now that a slot is free
-	go s.promotePendingClaws()
+	s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 }
 
 func (s *Server) resolveGitHubIssuesTokenForFactory(factory *types.FactoryConfig) string {

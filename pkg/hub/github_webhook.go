@@ -1319,13 +1319,13 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	})
 
 	if isPending {
-		go s.promotePendingClaws()
+		s.goBG("promotePendingClaws", func() { s.promotePendingClaws() })
 		return nil
 	}
 
 	// Provision asynchronously
 	provCfg, _ := s.hubCfg.Providers[provider]
-	go func() {
+	s.goBG("provision github PR claw", func() {
 		var currentStatus string
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		if currentStatus == "deleted" {
@@ -1352,7 +1352,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
-	}()
+	})
 
 	return nil
 }
