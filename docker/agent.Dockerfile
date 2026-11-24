@@ -34,8 +34,10 @@ RUN set -eu; key=$(mktemp) \
 RUN node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); process.exit((major === 24 && (minor > 22 || (minor === 22 && patch >= 1))) || major > 26 || (major === 26 && (minor > 12 || (minor === 12 && patch >= 1))) ? 0 : 1)'
 
 # Pre-install OpenClaw from the same embedded lockfile the bridge uses, and
-# write the install marker (sha256 of the lock) so bootstrap reuses it. Do not
-# use --ignore-scripts: since 2026.9.x the package lifecycle scripts must run.
+# write the install marker (sha256 of the lock) so bootstrap reuses it. No
+# --ignore-scripts: npm 11 runs the lifecycle scripts, npm 12 blocks them unless
+# allowScripts covers them, and the install works either way (the scripts only
+# prune stale dist files on upgrades and build addons that ship prebuilds).
 COPY pkg/cliversion/openclaw/package.json pkg/cliversion/openclaw/package-lock.json /usr/local/lib/openclaw-runtime/
 RUN cd /usr/local/lib/openclaw-runtime \
     && npm ci --no-audit --no-fund \

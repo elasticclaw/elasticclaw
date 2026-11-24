@@ -3899,7 +3899,10 @@ func installOpenClaw() error {
 			return fmt.Errorf("write openclaw %s: %w", name, err)
 		}
 	}
-	// Lifecycle scripts must run to complete OpenClaw's package setup.
+	// No --ignore-scripts: npm 11 runs the lifecycle scripts, while npm 12
+	// blocks them unless allowScripts covers them. The install works either
+	// way: the scripts only prune stale dist files on upgrades and build native
+	// addons that already ship prebuilds.
 	if err := runShell("cd " + shellQuote(runtimeDir) + " && npm ci --no-audit --no-fund"); err != nil {
 		return fmt.Errorf("npm ci openclaw: %w", err)
 	}
