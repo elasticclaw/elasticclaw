@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/harness/openclaw"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -161,5 +162,26 @@ func TestHarnessRunTurnWrapsError(t *testing.T) {
 	var turnErr *TurnError
 	if !errors.As(err, &turnErr) || turnErr.Class != types.TurnErrorTransient || turnErr.Error() != cause {
 		t.Fatalf("RunTurn error = %#v, want transient with original text", err)
+	}
+}
+
+func TestTurnErrorClassPrefersHarnessClass(t *testing.T) {
+	limit := errors.New("You have hit your usage limit. Try again at 5:00 PM.")
+	for _, tc := range []struct {
+		name     string
+		err      error
+		definite bool
+		want     types.TurnErrorClass
+	}{
+		{"harness class wins over text", &TurnError{Class: types.TurnErrorSessionLost, Err: errors.New("gateway disconnected")}, true, types.TurnErrorSessionLost},
+		{"harness class kept on replay", &TurnError{Class: types.TurnErrorTransient, Err: errors.New("boom")}, false, types.TurnErrorTransient},
+		{"quota is definite only", &TurnError{Class: types.TurnErrorQuota, Err: limit}, false, openclaw.ClassifyErrorText(limit.Error(), false)},
+		{"quota kept when definite", &TurnError{Class: types.TurnErrorQuota, Err: limit}, true, types.TurnErrorQuota},
+		{"plain error falls back to text", errors.New("gateway disconnected"), true, openclaw.ClassifyErrorText("gateway disconnected", true)},
+		{"empty class falls back to text", &TurnError{Err: errors.New("gateway disconnected")}, false, openclaw.ClassifyErrorText("gateway disconnected", false)},
+	} {
+		if got := turnErrorClass(tc.err, tc.definite); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

@@ -5654,7 +5654,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			if agentErr != nil {
 				if !reportSessionRecovery(agentErr, messageID, &reply, h, writeActivity, writeHub, queue) {
 					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
-					errorClass = openclaw.ClassifyErrorText(agentErr.Error(), false)
+					errorClass = turnErrorClass(agentErr, false)
 				}
 			}
 			if writeErr := deliverError("claw", reply, errorClass); writeErr != nil {
@@ -5818,7 +5818,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
 					if !reportSessionRecovery(agentErr, id, &reply, h, writeActivity, writeHub, queue) {
 						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
-						errorClass = openclaw.ClassifyErrorText(agentErr.Error(), true)
+						errorClass = turnErrorClass(agentErr, true)
 					}
 				} else {
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
